@@ -59,7 +59,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: multiple games/regions behind one port (via `dst` / `sni` /
   `first-bytes`; game-protocol sniffing once plugins land).
 
-## Phase 4 – External routing logic (week 11–12) 🔜
+## Phase 4 – External routing logic (week 11–12) ✅ (sticky_key deferred)
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
   `Resolver` trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest)
   in `gsp`; `pool` results; `on_error: reject | fallback_route`.
@@ -68,8 +68,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `max_entries` LRU (`lru` crate), `on_error: stale_ok`.
 - ✅ **Slice 3**: gRPC transport (`tonic` + `prost`, `proto/resolver.proto` +
   `build.rs`; CI installs `protoc`).
-- ⬜ **Slice 4**: `target` (fixed instance, pool-less connect) + `sticky_key`
-  (per-listener sticky table so repeat clients skip the resolver).
+- ✅ **Slice 4**: `Resolution.target` (fixed instance, pool-less connect path in
+  `proxy.rs` / `listener_udp.rs` — no health / cap / guard). ⬜ `sticky_key`
+  deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity;
+  needs its own design).
 - **Result**: matchmaker integration, token→instance routing.
 
 ## Phase 5 – Operations & zero-downtime (week 13–14)

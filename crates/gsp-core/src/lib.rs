@@ -22,7 +22,9 @@ pub mod snapshot;
 pub mod sniff;
 mod util;
 
-pub use resolver::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
+pub use resolver::{
+    CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers, Routed,
+};
 pub use route_hint::RouteHints;
 pub use runtime::{Runtime, RuntimeHandle};
 pub use snapshot::Snapshot;

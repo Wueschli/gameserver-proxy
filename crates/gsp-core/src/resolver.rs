@@ -6,10 +6,12 @@
 //! actually speak to the service live in the `gsp` binary (keeps `gsp-core`
 //! HTTP-free) and are injected at startup as `Arc<dyn Resolver>`.
 //!
-//! Done: HTTP transport (in `gsp`), `pool` results, `on_error`
-//! (`reject` / `fallback_route` / `stale_ok`), and the [`CachedResolver`] TTL'd
-//! LRU cache. Pending: gRPC transport (slice 3), `Resolution::target` /
-//! `sticky_key` (slice 4).
+//! Done: HTTP + gRPC transports (in `gsp`), `pool` **and `target`** results,
+//! `on_error` (`reject` / `fallback_route` / `stale_ok`), and the
+//! [`CachedResolver`] TTL'd LRU cache. Pending: `Resolution::sticky_key` (a
+//! resolver-chosen affinity key — overlaps the request-keyed cache, the
+//! `route_hint` table and UDP affinity; needs its own design for how a later
+//! request recovers the key without re-calling the resolver).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -38,13 +40,15 @@ pub struct ResolveRequest {
 /// A resolver's answer.
 #[derive(Debug, Clone, Default)]
 pub struct Resolution {
-    /// Route to this pool (normal LB). Slice 1 uses only this.
+    /// Route to this pool (normal LB).
     pub pool: Option<String>,
-    /// Route straight to this instance, bypassing pools (slice 4).
+    /// Or route straight to this instance, bypassing pools — no health check,
+    /// no per-backend cap. Takes precedence over `pool`.
     pub target: Option<SocketAddr>,
-    /// Affinity key to remember the decision by (slice 4).
+    /// Affinity key to remember the decision by. **Not yet used** (see the
+    /// module docs).
     pub sticky_key: Option<String>,
-    /// Positive cache TTL from the service (slice 2).
+    /// Positive cache TTL hint (overrides the resolver's `positive_ttl_sec`).
     pub ttl_sec: Option<u64>,
 }
 
@@ -66,16 +70,23 @@ pub trait Resolver: Send + Sync {
 /// Name → resolver, built once from config and shared across listeners.
 pub type Resolvers = HashMap<String, Arc<dyn Resolver>>;
 
-/// Walk the listener's matching routes and return the chosen pool name, or
-/// `None` to drop. `Pool` actions end the walk; a `Resolver` action calls the
-/// service and, on failure, either drops (`reject` / `stale_ok` w/o a cache) or
-/// continues to the next matching route (`fallback_route`).
-pub async fn resolve_pool(
+/// The outcome of routing: a pool (normal LB) or a fixed instance (`target`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Routed {
+    Pool(String),
+    Target(SocketAddr),
+}
+
+/// Walk the listener's matching routes and return the route, or `None` to drop.
+/// `Pool` actions end the walk; a `Resolver` action calls the service and, on
+/// failure, either drops (`reject` / `stale_ok` w/o a stale entry) or continues
+/// to the next matching route (`fallback_route`).
+pub async fn resolve_route(
     cfg: &ListenerConfig,
     resolvers: &Resolvers,
     mctx: &MatchContext<'_>,
     first: &[u8],
-) -> Option<String> {
+) -> Option<Routed> {
     // Collect the matching actions first so we do not hold the route iterator
     // (which borrows `mctx`) across an `.await`.
     let actions: Vec<Action> = cfg
@@ -85,7 +96,7 @@ pub async fn resolve_pool(
 
     for action in actions {
         match action {
-            Action::Pool(p) => return Some(p),
+            Action::Pool(p) => return Some(Routed::Pool(p)),
             Action::Resolver(name) => {
                 let Some(resolver) = resolvers.get(&name) else {
                     // validate() guarantees the name exists; be defensive.
@@ -101,12 +112,15 @@ pub async fn resolve_pool(
                     routing_key: mctx.sniff.and_then(|h| h.key.clone()),
                 };
                 match resolver.resolve(req).await {
-                    Ok(res) if res.pool.is_some() => {
+                    Ok(res) if res.target.is_some() || res.pool.is_some() => {
                         metrics::counter!(
                             m::RESOLVER_REQUESTS, "resolver" => name.clone(), "result" => "ok",
                         )
                         .increment(1);
-                        return res.pool;
+                        return Some(match res.target {
+                            Some(addr) => Routed::Target(addr),
+                            None => Routed::Pool(res.pool.unwrap()),
+                        });
                     }
                     Ok(_) => {
                         // Recognised nothing (empty resolution). Treat like an
@@ -309,10 +323,26 @@ impl Resolver for CachedResolver {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy)]
     enum Mode {
         Pool(&'static str),
+        Target(&'static str),
         Empty,
         Err,
+    }
+    fn mode_result(mode: Mode) -> Result<Resolution, ResolveError> {
+        match mode {
+            Mode::Pool(p) => Ok(Resolution {
+                pool: Some(p.into()),
+                ..Default::default()
+            }),
+            Mode::Target(a) => Ok(Resolution {
+                target: Some(a.parse().unwrap()),
+                ..Default::default()
+            }),
+            Mode::Empty => Ok(Resolution::default()),
+            Mode::Err => Err(ResolveError::Failed("boom".into())),
+        }
     }
     struct Stub {
         mode: Mode,
@@ -327,14 +357,7 @@ mod tests {
             self.on_error
         }
         async fn resolve(&self, _req: ResolveRequest) -> Result<Resolution, ResolveError> {
-            match self.mode {
-                Mode::Pool(p) => Ok(Resolution {
-                    pool: Some(p.into()),
-                    ..Default::default()
-                }),
-                Mode::Empty => Ok(Resolution::default()),
-                Mode::Err => Err(ResolveError::Failed("boom".into())),
-            }
+            mode_result(self.mode)
         }
     }
 
@@ -357,7 +380,7 @@ listeners:
         cfg.listeners.into_iter().next().unwrap()
     }
 
-    async fn run(mode: Mode, on_error: OnError) -> Option<String> {
+    async fn run(mode: Mode, on_error: OnError) -> Option<Routed> {
         let lc = listener_with_resolver();
         let mut resolvers = Resolvers::new();
         resolvers.insert(
@@ -370,14 +393,22 @@ listeners:
             first_bytes: &[],
             sniff: None,
         };
-        resolve_pool(&lc, &resolvers, &mctx, &[]).await
+        resolve_route(&lc, &resolvers, &mctx, &[]).await
     }
 
     #[tokio::test]
     async fn resolver_pool_result_is_used() {
         assert_eq!(
-            run(Mode::Pool("prod"), OnError::Reject).await.as_deref(),
-            Some("prod")
+            run(Mode::Pool("prod"), OnError::Reject).await,
+            Some(Routed::Pool("prod".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_target_result_is_used() {
+        assert_eq!(
+            run(Mode::Target("10.2.0.5:7777"), OnError::Reject).await,
+            Some(Routed::Target("10.2.0.5:7777".parse().unwrap()))
         );
     }
 
@@ -385,19 +416,19 @@ listeners:
     async fn on_error_reject_drops() {
         assert_eq!(run(Mode::Err, OnError::Reject).await, None);
         assert_eq!(run(Mode::Empty, OnError::Reject).await, None);
-        // stale_ok has no cache yet -> behaves like reject
+        // stale_ok with no stale entry -> behaves like reject
         assert_eq!(run(Mode::Err, OnError::StaleOk).await, None);
     }
 
     #[tokio::test]
     async fn on_error_fallback_route_continues_to_next_match() {
         assert_eq!(
-            run(Mode::Err, OnError::FallbackRoute).await.as_deref(),
-            Some("fallback")
+            run(Mode::Err, OnError::FallbackRoute).await,
+            Some(Routed::Pool("fallback".into()))
         );
         assert_eq!(
-            run(Mode::Empty, OnError::FallbackRoute).await.as_deref(),
-            Some("fallback")
+            run(Mode::Empty, OnError::FallbackRoute).await,
+            Some(Routed::Pool("fallback".into()))
         );
     }
 
@@ -471,6 +502,77 @@ listeners:
         runtime.shutdown().await;
     }
 
+    /// End to end: a resolver `target` routes a real connection straight to an
+    /// address that is in no pool.
+    #[tokio::test]
+    async fn resolver_target_routes_a_live_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let one_off = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut s, _)) = l.accept().await {
+                    let _ = s.write_all(b"T").await;
+                    let mut b = [0u8; 8];
+                    let _ = s.read(&mut b).await;
+                }
+            });
+            addr
+        };
+        let fb = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = l.accept().await {
+                    let _ = s.write_all(b"F").await;
+                }
+            });
+            addr
+        };
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let yaml = format!(
+            r#"
+pools:
+  - {{ name: fallback, targets: ["{fb}"] }}
+resolvers:
+  - {{ name: mm, endpoint: "http://unused" }}
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - {{ match: {{ type: always }}, action: {{ resolver: mm }} }}
+      - {{ match: {{ type: always }}, action: {{ pool: fallback }} }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let mut resolvers = Resolvers::new();
+        let target_str: &'static str = Box::leak(one_off.to_string().into_boxed_str());
+        resolvers.insert(
+            "mm".to_string(),
+            Arc::new(Stub {
+                mode: Mode::Target(target_str),
+                on_error: OnError::Reject,
+            }) as Arc<dyn Resolver>,
+        );
+        let runtime =
+            crate::Runtime::start(crate::Snapshot::from_config(&cfg), Arc::new(resolvers), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mut c = TcpStream::connect(proxy).await.unwrap();
+        let mut m = [0u8; 1];
+        c.read_exact(&mut m).await.unwrap();
+        assert_eq!(m[0], b'T', "connected straight to the resolver target");
+
+        runtime.shutdown().await;
+    }
+
     // ---- cache ----
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -490,14 +592,7 @@ listeners:
         }
         async fn resolve(&self, _req: ResolveRequest) -> Result<Resolution, ResolveError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            match self.mode {
-                Mode::Pool(p) => Ok(Resolution {
-                    pool: Some(p.into()),
-                    ..Default::default()
-                }),
-                Mode::Empty => Ok(Resolution::default()),
-                Mode::Err => Err(ResolveError::Failed("boom".into())),
-            }
+            mode_result(self.mode)
         }
     }
 

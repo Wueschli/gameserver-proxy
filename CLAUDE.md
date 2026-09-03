@@ -175,7 +175,7 @@ client from `crates/gsp/proto/resolver.proto`.
 
 ## Roadmap position
 
-Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordered
+Phase 3 (routing intelligence) shipped: a priority-ordered
 `routes:` list with `always` / `client_cidr` / `dst` / `port` / `first_bytes`
 (`prefix` + `length`) / `sni` matchers, the `consistent_hash` balancer
 (rendezvous hash, pool `hash_on`), the UDP `prefix:` listener (one wildcard
@@ -184,8 +184,11 @@ Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordere
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Phase 4 (external resolver) in progress** — slices 1–3 (HTTP + gRPC
-transports, `pool` results, `on_error`, TTL'd LRU cache) landed; slice 4 is
-`target`/`sticky_key`. Then phase 5 (operability — connection draining, runtime
-listener/backend CRUD, `draining` / `disabled` states). See `HANDOVER.md` and
-`docs/08`. Don't half-land a slice.
+**Phases 0–4 done.** Phase 4 (external resolver): HTTP + gRPC transports,
+`pool` + `target` results, `on_error` (`reject`/`fallback_route`/`stale_ok`),
+TTL'd LRU cache. Deferred: `Resolution.sticky_key`.
+
+**Next: phase 5 — operability**: tracked connection draining with a grace
+period on shutdown; runtime listener add/remove/rebind; `draining` / `disabled`
+backend states; full CRUD admin API. See `HANDOVER.md` and `docs/08`. Don't
+half-land a slice.

@@ -49,7 +49,7 @@ use gsp_config::{HashOn, ListenerConfig};
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_udp;
 use crate::pool::BackendGuard;
-use crate::resolver::{resolve_pool, Resolvers};
+use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::util::now_ms;
@@ -71,7 +71,8 @@ struct Session {
     backend: SocketAddr,
     /// Idle-eviction threshold, read once from the routed pool at creation.
     idle_ms: u64,
-    _guard: BackendGuard,
+    /// `None` for a resolver `target` (no pool slot to hold).
+    _guard: Option<BackendGuard>,
     reply_task: JoinHandle<()>,
 }
 
@@ -334,33 +335,47 @@ async fn open_session(
     if hinted.is_some() {
         metrics::counter!(m::ROUTE_HINTS_APPLIED, "listener" => cfg.name.clone()).increment(1);
     }
-    let pool_name = match hinted {
-        Some(p) => p,
-        None => resolve_pool(cfg, resolvers, &mctx, first)
+    let routed = match hinted {
+        Some(p) => Routed::Pool(p),
+        None => resolve_route(cfg, resolvers, &mctx, first)
             .await
             .ok_or("no_route")?,
     };
-    let pool = snap.pool(&pool_name).ok_or("no_route")?;
-    let idle_ms = pool.idle_timeout.as_millis() as u64;
 
+    // Resolve the route to a concrete backend address, plus (for a pool) a
+    // `BackendGuard` holding the session slot. A `target` has neither pool nor
+    // guard: no health check, no cap.
     let skey = sticky_key(cfg.affinity, client, dst);
-    let guard = match skey
-        .as_ref()
-        .and_then(|k| sticky.get(k))
-        .and_then(|&addr| pool.acquire_addr(addr))
-    {
-        Some(g) => g,
-        None => pool.acquire_for(Some(client)).map_err(|e| {
-            tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
-            "no_backend"
-        })?,
+    let (backend, guard, idle_ms) = match routed {
+        Routed::Target(addr) => (
+            addr,
+            None,
+            crate::proxy::TARGET_IDLE_TIMEOUT.as_millis() as u64,
+        ),
+        Routed::Pool(name) => {
+            let pool = snap.pool(&name).ok_or("no_route")?;
+            let g = match skey
+                .as_ref()
+                .and_then(|k| sticky.get(k))
+                .and_then(|&addr| pool.acquire_addr(addr))
+            {
+                Some(g) => g,
+                None => pool.acquire_for(Some(client)).map_err(|e| {
+                    tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
+                    "no_backend"
+                })?,
+            };
+            let addr = g.addr();
+            (addr, Some(g), pool.idle_timeout.as_millis() as u64)
+        }
     };
-    let backend = guard.addr();
 
     let upstream = match connect_upstream(backend).await {
         Ok(u) => Arc::new(u),
         Err(e) => {
-            guard.observe(false);
+            if let Some(g) = &guard {
+                g.observe(false);
+            }
             tracing::warn!(
                 listener = %cfg.name, %backend, error = %e, "udp upstream socket failed"
             );
@@ -368,17 +383,23 @@ async fn open_session(
         }
     };
     if let Err(e) = upstream.send(first).await {
-        guard.observe(false);
+        if let Some(g) = &guard {
+            g.observe(false);
+        }
         tracing::warn!(listener = %cfg.name, %backend, error = %e, "udp first datagram failed");
         return Err("upstream_send");
     }
-    guard.observe(true);
+    if let Some(g) = &guard {
+        g.observe(true);
+    }
 
-    if let Some(k) = skey {
-        if sticky.len() >= STICKY_MAX {
-            sticky.clear();
+    if guard.is_some() {
+        if let Some(k) = skey {
+            if sticky.len() >= STICKY_MAX {
+                sticky.clear();
+            }
+            sticky.insert(k, backend);
         }
-        sticky.insert(k, backend);
     }
 
     let last_ms = Arc::new(AtomicU64::new(now_ms()));

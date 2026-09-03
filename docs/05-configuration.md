@@ -41,20 +41,22 @@
 > `validate()`. The sniffer loader is Phase 9; regex-over-first-bytes is a Phase
 > 9 plugin concern, not a `first_bytes` sub-form.
 >
-> **External resolver** (phase 4 slices 1–3): a top-level `resolvers:` list of
+> **External resolver** (phase 4, slices 1–4): a top-level `resolvers:` list of
 > `{ name, type: http|grpc, endpoint, timeout_ms, on_error: reject|fallback_route|stale_ok,
 > cache? }` and a route `action: { resolver: <name> }` (exactly one of `pool` /
 > `resolver` per action). The proxy `POST`s `{listener, src, dst, sni?,
 > first_bytes_b64, routing_key?}` and expects `{pool?, target?, sticky_key?,
-> ttl_sec?}`; slices 1–2 use `pool`. `fallback_route` continues the route list
-> on failure; `reject` drops; `stale_ok` serves the last (expired) cached answer
-> if there is one, else drops. Optional `cache: { key: [<part>, ...],
-> positive_ttl_sec, negative_ttl_sec, max_entries }` — a TTL'd LRU keyed by the
-> joined parts (`src_ip` / `src_ip_port` / `sni` / `routing_key` /
-> `first_bytes:a:b`); a response `ttl_sec` overrides `positive_ttl_sec`; a
-> request missing a key part bypasses the cache. For `type: grpc` the `endpoint`
-> is an `http://host:port` URI and the contract is `proto/resolver.proto`
-> (`gsp.resolver.v1.Resolver/Resolve`). Only `target` / `sticky_key` remain.
+> ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects straight to
+> that instance (no pool / health / cap); `sticky_key` is not yet used.
+> `fallback_route` continues the route list on failure; `reject` drops;
+> `stale_ok` serves the last (expired) cached answer if there is one, else
+> drops. Optional `cache: { key: [<part>, ...], positive_ttl_sec,
+> negative_ttl_sec, max_entries }` — a TTL'd LRU keyed by the joined parts
+> (`src_ip` / `src_ip_port` / `sni` / `routing_key` / `first_bytes:a:b`); a
+> response `ttl_sec` overrides `positive_ttl_sec`; a request missing a key part
+> bypasses the cache. For `type: grpc` the `endpoint` is an `http://host:port`
+> URI and the contract is `proto/resolver.proto`
+> (`gsp.resolver.v1.Resolver/Resolve`).
 >
 > **Push resolver:** `POST /route-hint` (admin API) with
 > `{ "src_ip": "...", "pool": "...", "ttl_sec": 30 }` records a short-lived

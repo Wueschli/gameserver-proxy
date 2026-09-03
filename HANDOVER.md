@@ -1,9 +1,9 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phase 3 complete**; **phase 4 slices 1–3** landed —
-external resolver: HTTP + gRPC transports, TTL'd LRU cache. `target` /
-`sticky_key` = slice 4).
+Last updated: 2026-09-03 (**phases 3 & 4 complete**; phase 4 = external resolver
+— HTTP + gRPC, TTL'd LRU cache, `pool` + `target`. `Resolution.sticky_key` is
+the one deferred bit).
 
 ---
 
@@ -15,21 +15,24 @@ external resolver: HTTP + gRPC transports, TTL'd LRU cache. `target` /
   (slices 1–9): per-listener route rule list; `first_bytes` `prefix` + `length`;
   `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
   listener + TCP `freebind:`; the sniffer API **seam** + `sniffer` matcher (no
-  built-in sniffers); the `POST /route-hint` push resolver. **Phase 4 slices
-  1–3**: `resolvers:` config + `action: { resolver: <name> }`; a `Resolver`
-  trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest) **and
-  `GrpcResolver` (tonic)** in `gsp`; `pool` results; `on_error: reject |
-  fallback_route | stale_ok`; a `CachedResolver` TTL'd LRU result cache with a
-  configurable key. The proxy forwards **TCP and
+  built-in sniffers); the `POST /route-hint` push resolver. **Phase 4**:
+  `resolvers:` config + `action: { resolver: <name> }`; a `Resolver` trait +
+  async `resolve_route` in `gsp-core`; `HttpResolver` (reqwest) **and
+  `GrpcResolver` (tonic)** in `gsp`; `Routed::Pool` **and `Routed::Target`** (a
+  pool-less connect — `proxy::handle_tcp_target` / a guard-less UDP session);
+  `on_error: reject | fallback_route | stale_ok`; a `CachedResolver` TTL'd LRU
+  result cache with a configurable key. The proxy forwards **TCP and
   UDP** end to end with health checks (`tcp_connect` + `udp_probe`), three
   balancers, per-backend caps, worker-local UDP session tables with `src_ip`
   affinity, hot reload, and address / first-bytes / SNI / push-hint / external
   routing — including one wildcard `IP_PKTINFO` socket serving a whole routed
   UDP prefix.
-- **Next**: phase 4 slice 4 (`Resolution.target` — a pool-less connect path in
-  `proxy.rs` / `listener_udp.rs` — + `sticky_key` table), then phase 5
-  (operability). The **sniffer plugin loader is Phase 9** (separate WASM repo).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 73 tests). Needs
+- **Next**: **phase 5 — operability**: tracked connection draining with a grace
+  period on shutdown (today in-flight connections are detached); runtime
+  listener add/remove/rebind; `draining` / `disabled` backend states; full CRUD
+  admin API. Also deferred: resolver `sticky_key`; the sniffer plugin loader
+  (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 75 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -129,7 +132,7 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (73, all green)
+### Tests (75, all green)
 
 - `gsp-config` (38): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
@@ -157,20 +160,21 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   transport, empty endpoint); `cache:` parse (`key` parts incl.
   `first_bytes:a:b`, TTLs, `max_entries`) + bad-cache rejections (empty key,
   unknown part, `a>b`, `b>PEEK_MAX`, `max_entries: 0`).
-- `gsp-core` unit (21): round-robin cycling, least-conn preference, capacity
+- `gsp-core` unit (23): round-robin cycling, least-conn preference, capacity
   rejection, unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds,
   reload health carry-over; `consistent_hash` stability + spread (`src_ip`
   ignores port), and "only the lost backend's share moves"; **sniff seam**:
   registry has no built-ins but knows the `#[cfg(test)]` `test-host` sniffer,
   `test-host` extraction, end-to-end `sniffer`-matcher routing driven by that
   test sniffer; **route hints**: `RouteHints` set / lookup / replace / expiry +
-  prune-on-write; **resolver** (`resolver.rs`): `resolve_pool` with a stub
-  resolver — `ok` → pool, `empty`/`error` under `reject` → drop, under
-  `fallback_route` → next matching route, plus an end-to-end live connection
-  through `Runtime` routed by the stub; **cache** (`CachedResolver` + a
-  call-counting stub): repeats served from cache & keyed by `src_ip`, negative
-  caching absorbs retries, `stale_ok` serves an expired positive, an
-  uncacheable request (missing SNI key part) always calls through.
+  prune-on-write; **resolver** (`resolver.rs`): `resolve_route` with a stub —
+  `pool` / `target` results used, `empty`/`error` under `reject` → drop, under
+  `fallback_route` → next matching route; two end-to-end live connections
+  through `Runtime` (one routed to a pool, one straight to a `target` address in
+  no pool); **cache** (`CachedResolver` + a call-counting stub): repeats served
+  from cache & keyed by `src_ip`, negative caching absorbs retries, `stale_ok`
+  serves an expired positive, an uncacheable request (missing SNI key part)
+  always calls through.
 - `gsp` unit (3): local base64 encoder known vectors; **gRPC** round trip — an
   in-process `tonic` `Resolver` server echoes the request SNI into the pool
   name, `GrpcResolver::new` + `resolve` against it.
@@ -233,8 +237,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | More sniffers (`quic`, `wireguard`, …); `RouteHint.reject` currently only makes a `sniffer` route *not match* (no hard drop) | phase 3+ |
 | Per-listener multiple distinct sniffers (only one name allowed today) | polish |
 | TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
-| External resolver: **HTTP + gRPC + `pool` + `on_error` + TTL LRU cache + `stale_ok`** | **done** (phase 4 slices 1–3) |
-| External resolver: `target` / `sticky_key` (slice 4) | phase 4 |
+| **Phase 4 — done**: external resolver HTTP + gRPC, `pool` + `target`, `on_error`, TTL LRU cache + `stale_ok` | **done** |
+| Resolver `sticky_key` — resolver-chosen affinity key; deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity; needs a design for how a later request recovers the key) | later |
+| `target` connections use fixed 300 ms connect / 90 s idle timeouts (`proxy::TARGET_*`) — no pool to read them from; a per-resolver knob could come later | polish |
 | Build now needs `protoc` (gRPC codegen in `crates/gsp/build.rs`); CI installs `protobuf-compiler` | — |
 | Resolver cache uses `std::sync::Mutex<LruCache>` — a brief lock on the routing path (not held across `.await`); like `Backend::observe`, deliberate | — |
 | Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
@@ -300,12 +305,14 @@ tiny and rarely written (one admin `POST` per session). Listeners without the
 flag pay nothing.
 
 **External resolver**: a route with a matching `resolver` action does one
-`.await`-ed HTTP round-trip (`timeout_ms`, default 40 ms) on the per-connection
-routing path, plus a `Vec<Action>` of the matching routes and a `first.to_vec()`
-for the request body. It runs in the spawned per-conn task (TCP) / `open_session`
-(UDP) — never on the accept loop. Listeners with no `resolver` route pay nothing
-(the loop is just `matching_routes` → `Pool`). The cache (slice 2) will cut the
-round-trip to a map lookup for repeat keys.
+`.await`-ed HTTP/gRPC round-trip (`timeout_ms`, default 40 ms) on the
+per-connection routing path, plus a `Vec<Action>` of the matching routes and a
+`first.to_vec()` for the request body. It runs in the spawned per-conn task
+(TCP) / `open_session` (UDP) — never on the accept loop. With `cache:` set a
+repeat key is a `Mutex<LruCache>` get instead. Listeners with no `resolver`
+route pay nothing (the loop is just `matching_routes` → `Pool`). A `target`
+connection skips the `Pool::acquire_for` (no LB sort, no atomic, no
+`BackendGuard`) — strictly cheaper than a pooled one.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -493,6 +500,18 @@ result cache (configurable key `src_ip` / `sni` / `routing_key` /
 `listener_udp.rs`) + `sticky_key` (a per-listener sticky table so repeat clients
 skip the resolver).
 
+### Slice 4 — `Resolution.target` (done)
+
+`resolve_pool` → `resolve_route` returning `Routed { Pool(String) |
+Target(SocketAddr) }`. A `Resolver` action with `res.target` set →
+`Routed::Target` (wins over `pool`). `proxy.rs` split: `connect_backend` +
+`pump` shared; `handle_tcp` (pool, keeps `BackendGuard::observe`) and
+`handle_tcp_target(stream, addr, TARGET_CONNECT_TIMEOUT, TARGET_IDLE_TIMEOUT)`
+(no guard). `listener_udp::open_session` builds `(backend, Option<BackendGuard>,
+idle_ms)` from the `Routed`; `Session._guard` is now `Option<BackendGuard>`;
+the sticky table is only written for pool sessions. `sticky_key` from the
+response is **not** consumed yet.
+
 ### Slice 3 — gRPC transport (done)
 
 `crates/gsp/proto/resolver.proto` (`gsp.resolver.v1.Resolver/Resolve`, messages
@@ -570,7 +589,7 @@ Resolver config is startup-only (not rebuilt on reload).
 | `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
 | `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers(&Config)`, a local base64 encoder. |
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
-| `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |
+| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints`; `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`). |
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |

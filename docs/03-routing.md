@@ -37,11 +37,14 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > a listener with `route_hint: true` checks a short-lived `src_ip → pool` table
 > before its route list (`gsp_route_hints_applied_total{listener}` counts hits).
 > The **external resolver** (`action: { resolver: <name> }`, `resolvers:`
-> section) is implemented — **phase 4 slices 1–3**: HTTP **and gRPC** transports
-> (`type: http | grpc`), `pool` results, `on_error: reject | fallback_route |
-> stale_ok`, and a TTL'd LRU result cache (`cache: { key, positive_ttl_sec,
-> negative_ttl_sec, max_entries }`; key parts `src_ip` / `src_ip_port` / `sni` /
-> `routing_key` / `first_bytes:a:b`). Pending: `target` / `sticky_key` (slice 4).
+> section) is implemented — **phase 4 slices 1–4**: HTTP **and gRPC** transports
+> (`type: http | grpc`), `pool` **and `target`** results (`target` = connect
+> straight to a resolver-named instance, no pool / health / cap), `on_error:
+> reject | fallback_route | stale_ok`, and a TTL'd LRU result cache (`cache: {
+> key, positive_ttl_sec, negative_ttl_sec, max_entries }`; key parts `src_ip` /
+> `src_ip_port` / `sni` / `routing_key` / `first_bytes:a:b`). Only
+> `Resolution.sticky_key` is unused (deferred — it overlaps the request-keyed
+> cache and the existing affinity mechanisms).
 > Still pending elsewhere: the TCP side of prefix binding beyond `freebind`, the
 > sniffer loader, and the `weighted` / `first_available` balancers.
 > Regex-over-first-bytes is folded into the Phase 9 plugin layer, not a

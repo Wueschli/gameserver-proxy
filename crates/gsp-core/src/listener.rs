@@ -11,7 +11,7 @@ use gsp_config::ListenerConfig;
 
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
-use crate::resolver::{resolve_pool, Resolvers};
+use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 
@@ -103,11 +103,11 @@ pub async fn run_tcp_listener(
                             m::ROUTE_HINTS_APPLIED, "listener" => listener_name.clone(),
                         ).increment(1);
                     }
-                    let pool_name = match hinted {
-                        Some(p) => Some(p),
-                        None => resolve_pool(&cfg, &resolvers, &mctx, first).await,
+                    let routed = match hinted {
+                        Some(p) => Some(Routed::Pool(p)),
+                        None => resolve_route(&cfg, &resolvers, &mctx, first).await,
                     };
-                    let Some(pool_name) = pool_name else {
+                    let Some(routed) = routed else {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,
                             "listener" => listener_name.clone(),
@@ -119,23 +119,42 @@ pub async fn run_tcp_listener(
                         );
                         return;
                     };
-                    let Some(pool) = snap.pool(&pool_name) else {
-                        metrics::counter!(
-                            m::LISTENER_CONNECTIONS,
-                            "listener" => listener_name.clone(),
-                            "result" => "no_route",
-                        ).increment(1);
-                        tracing::error!(
-                            listener = %listener_name, pool = %pool_name,
-                            "routed pool missing from snapshot; dropping connection"
-                        );
-                        return;
+
+                    // For a pool route, resolve it against the live snapshot now.
+                    let pool = match &routed {
+                        Routed::Target(_) => None,
+                        Routed::Pool(name) => match snap.pool(name) {
+                            Some(p) => Some(p),
+                            None => {
+                                metrics::counter!(
+                                    m::LISTENER_CONNECTIONS,
+                                    "listener" => listener_name.clone(),
+                                    "result" => "no_route",
+                                ).increment(1);
+                                tracing::error!(
+                                    listener = %listener_name, pool = %name,
+                                    "routed pool missing from snapshot; dropping connection"
+                                );
+                                return;
+                            }
+                        },
                     };
 
                     metrics::gauge!(m::ACTIVE_CONNECTIONS, "listener" => listener_name.clone())
                         .increment(1.0);
                     let started = std::time::Instant::now();
-                    match crate::proxy::handle_tcp(stream, peer, &pool).await {
+                    let result = match (&routed, &pool) {
+                        (Routed::Target(addr), _) => crate::proxy::handle_tcp_target(
+                            stream,
+                            *addr,
+                            crate::proxy::TARGET_CONNECT_TIMEOUT,
+                            crate::proxy::TARGET_IDLE_TIMEOUT,
+                        )
+                        .await,
+                        (_, Some(pool)) => crate::proxy::handle_tcp(stream, peer, pool).await,
+                        _ => unreachable!("pool route always resolves a pool above"),
+                    };
+                    match result {
                         Ok(out) => {
                             metrics::counter!(
                                 m::BYTES, "listener" => listener_name.clone(), "dir" => "c2s",

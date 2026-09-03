@@ -14,6 +14,10 @@ use tokio::time::timeout;
 use crate::metrics_defs as m;
 use crate::pool::Pool;
 
+/// Connect / idle timeouts for a resolver `target` (no pool to read them from).
+pub const TARGET_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+pub const TARGET_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// What a finished connection carries back to the caller for logging/metrics.
 pub struct ConnOutcome {
     pub bytes_c2s: u64,
@@ -35,44 +39,62 @@ pub async fn handle_tcp(
     let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
 
-    let backend = match timeout(pool.connect_timeout, TcpStream::connect(backend_addr)).await {
-        Ok(Ok(s)) => {
+    let backend = match connect_backend(backend_addr, pool.connect_timeout).await {
+        Ok(s) => {
             guard.observe(true);
             s
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             guard.observe(false);
-            metrics::counter!(
-                m::BACKEND_CONNECT_ERRORS,
-                "backend" => backend_addr.to_string(),
-                "kind" => "refused",
-            )
-            .increment(1);
-            return Err(anyhow::anyhow!(
-                "connect to backend {backend_addr} failed: {e}"
-            ));
-        }
-        Err(_) => {
-            guard.observe(false);
-            metrics::counter!(
-                m::BACKEND_CONNECT_ERRORS,
-                "backend" => backend_addr.to_string(),
-                "kind" => "timeout",
-            )
-            .increment(1);
-            return Err(anyhow::anyhow!(
-                "connect to backend {backend_addr} timed out"
-            ));
+            return Err(e);
         }
     };
+    Ok(pump(client, backend, backend_addr, pool.idle_timeout).await)
+}
 
+/// Like [`handle_tcp`], but to a resolver-supplied fixed instance — no pool, so
+/// no health check, no per-backend cap, no [`BackendGuard`].
+pub async fn handle_tcp_target(
+    client: TcpStream,
+    target: SocketAddr,
+    connect_timeout: Duration,
+    idle_timeout: Duration,
+) -> anyhow::Result<ConnOutcome> {
+    let backend = connect_backend(target, connect_timeout).await?;
+    Ok(pump(client, backend, target, idle_timeout).await)
+}
+
+async fn connect_backend(addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
+    match timeout(connect_timeout, TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => Ok(s),
+        Ok(Err(e)) => {
+            metrics::counter!(
+                m::BACKEND_CONNECT_ERRORS, "backend" => addr.to_string(), "kind" => "refused",
+            )
+            .increment(1);
+            Err(anyhow::anyhow!("connect to backend {addr} failed: {e}"))
+        }
+        Err(_) => {
+            metrics::counter!(
+                m::BACKEND_CONNECT_ERRORS, "backend" => addr.to_string(), "kind" => "timeout",
+            )
+            .increment(1);
+            Err(anyhow::anyhow!("connect to backend {addr} timed out"))
+        }
+    }
+}
+
+async fn pump(
+    client: TcpStream,
+    backend: TcpStream,
+    backend_addr: SocketAddr,
+    idle: Duration,
+) -> ConnOutcome {
     let _ = client.set_nodelay(true);
     let _ = backend.set_nodelay(true);
 
     let (mut client_rd, mut client_wr) = client.into_split();
     let (mut backend_rd, mut backend_wr) = backend.into_split();
-
-    let idle = pool.idle_timeout;
 
     let c2s = async {
         let n = copy_with_idle(&mut client_rd, &mut backend_wr, idle).await;
@@ -87,11 +109,11 @@ pub async fn handle_tcp(
 
     let (c2s_res, s2c_res) = tokio::join!(c2s, s2c);
 
-    Ok(ConnOutcome {
+    ConnOutcome {
         bytes_c2s: c2s_res.unwrap_or(0),
         bytes_s2c: s2c_res.unwrap_or(0),
         backend: backend_addr,
-    })
+    }
 }
 
 /// Copy from `r` to `w` until EOF. Returns the number of bytes copied, or an
