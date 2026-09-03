@@ -1,7 +1,8 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–4).
+Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–5;
+slice 5 = `first_bytes` `length`, `regex` still pending).
 
 ---
 
@@ -10,15 +11,15 @@ Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–4).
 - **Planning docs** (`docs/00`–`09`) are complete and in English. They are the design
   source of truth.
 - **Code**: Cargo workspace, roadmap **phases 0–2 complete**, **phase 3 slices
-  1–4 landed** (per-listener route rule list + `first_bytes` prefix matcher +
-  `consistent_hash` balancer + `sni` matcher). The proxy forwards **TCP and
-  UDP** end to end with health checks (`tcp_connect` + `udp_probe`), three
-  balancers, per-backend caps, worker-local UDP session tables with `src_ip`
-  affinity, hot reload, and address / first-bytes / SNI routing.
-- **Next**: phase 3 continued — `first_bytes` `regex` / `length` variants, then
-  `dst` matcher + `IP_PKTINFO` prefix listener, sniffer plugins. See `docs/03`
-  and `docs/08`. Note below.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 42 tests, all green).
+  1–5 landed** (per-listener route rule list; `first_bytes` `prefix` + `length`;
+  `consistent_hash` balancer; `sni` matcher). The proxy forwards **TCP and UDP**
+  end to end with health checks (`tcp_connect` + `udp_probe`), three balancers,
+  per-backend caps, worker-local UDP session tables with `src_ip` affinity, hot
+  reload, and address / first-bytes / SNI routing.
+- **Next**: phase 3 continued — `first_bytes` `regex` variant (needs the `regex`
+  dep decision), then `dst` matcher + `IP_PKTINFO` prefix listener, sniffer
+  plugins. See `docs/03` and `docs/08`. Note below.
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 44 tests, all green).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -43,8 +44,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Per-listener route rule list** (`listeners[].routes`, priority-ordered, first
   match wins; `action: { pool }`). Matchers: `always`; `client_cidr` (source IP,
   hand-rolled CIDR in `gsp-config` — no `ipnet` dep); `port` (destination port
-  from the accepting socket, single or `"lo-hi"` range); `first_bytes` (prefix
-  of the first bytes, `hex:` / `ascii:`, ≤ `FIRST_BYTES_PREFIX_MAX` = 512 B);
+  from the accepting socket, single or `"lo-hi"` range); `first_bytes` (a
+  `prefix`, `hex:` / `ascii:`, ≤ `FIRST_BYTES_PREFIX_MAX` = 512 B, **and/or** a
+  `length: { min, max }` byte-count window — `Matcher::FirstBytes { prefix, len
+  }`, at least one present; on TCP `length` sees only what one peek returned);
   `sni` (host from the peeked TLS ClientHello — `gsp_config::extract_sni`, a
   hand-rolled ClientHello reader; `host` patterns exact / `*.suffix` / `.suffix`;
   rejected on UDP listeners). A bare `pool:` is normalised to one `always`
@@ -89,9 +92,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (42, all green)
+### Tests (44, all green)
 
-- `gsp-config` (25): schema parsing + validation rejections, incl. UDP listener +
+- `gsp-config` (26): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
   without `send_hex` rejection, `consistent_hash` parsing + default/explicit
   `hash_on`, `hash_on`-without-`consistent_hash` rejection; **routing**: bare
@@ -99,7 +102,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `always`), `pool`+`routes` rejection, unknown-pool-in-route rejection,
   `always`-with-fields rejection, bad-CIDR / reversed-range / empty-`cidrs`
   rejection, `Cidr::contains` v4 + v6, `first_bytes` prefix match + `peek_len()`,
-  bad `first_bytes` specs; `extract_sni` from a crafted ClientHello (+ truncated
+  `first_bytes` `length` bound + `prefix`+`length` combined + `peek_len` from the
+  bound, bad `first_bytes` specs (incl. `min > max`, `length` on a non-first_bytes
+  matcher); `extract_sni` from a crafted ClientHello (+ truncated
   / non-handshake → `None`), `sni` exact + `*.suffix` matching (`*.foo` ≠ apex),
   bad `sni` config (on UDP, empty `host`, `a*b`, wrong field).
 - `gsp-core` unit (9): round-robin cycling, least-conn preference, capacity
@@ -111,9 +116,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
   a client to one backend"; "sni matcher routes by ClientHello" (crafted
   ClientHello sent raw, `*.eu.example.com` vs. fall-through).
-- `gsp-core/tests/udp_forward.rs` (3): end-to-end UDP datagram forwarding + session
+- `gsp-core/tests/udp_forward.rs` (4): end-to-end UDP datagram forwarding + session
   reuse / affinity (same client → same backend); idle-timeout eviction frees the
-  per-backend slot; `first_bytes` prefix routes to its pool vs. `always`.
+  per-backend slot; `first_bytes` prefix routes to its pool vs. `always`;
+  `first_bytes` `length` routes short vs. long datagrams.
 
 ---
 
@@ -152,8 +158,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Full CRUD admin API (add/remove backend, set `draining`/`disabled` state) | phase 5 |
 | `draining` / `disabled` backend states (only `healthy`/`unhealthy` exist) | phase 5 |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
-| Routing matchers `always` / `client_cidr` / `port` / `first_bytes` (prefix) / `sni`; `consistent_hash` balancer | **done** (phase 3 slices 1–4) |
-| `first_bytes` `regex` / `length` / `sniffer` variants | phase 3 |
+| Routing matchers `always` / `client_cidr` / `port` / `first_bytes` (`prefix` + `length`) / `sni`; `consistent_hash` balancer | **done** (phase 3 slices 1–5) |
+| `first_bytes` `regex` / `sniffer` variants | phase 3 |
 | Routing matchers `dst`, `external` | phase 3–4 |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
@@ -179,9 +185,10 @@ path: one `HashMap` lookup by client `SocketAddr`, one relaxed atomic store
 Phase 3 routing adds, per new TCP connection / new UDP session only: one
 `stream.local_addr()` (TCP) or cached `down.local_addr()` (UDP) syscall and a
 linear scan of the (small, fixed) route list — bit-compare per `client_cidr`
-entry, `u16` range check per `port` entry, `starts_with` per `first_bytes`
-entry, and for an `sni` entry one pass of `extract_sni` over the peek buffer
-(bounded walk of the ClientHello, no alloc except the returned host `String`).
+entry, `u16` range check per `port` entry, `starts_with` + a `len()` range check
+per `first_bytes` entry, and for an `sni` entry one pass of `extract_sni` over
+the peek buffer (bounded walk of the ClientHello, no alloc except the returned
+host `String`).
 When (and only when) a route uses `first_bytes` or `sni`, the TCP path also does
 one `MSG_PEEK` (into a `peek_len()`-sized `Vec` — up to `PEEK_MAX` = 4096 for an
 `sni` route) with a 250 ms timeout, and clones the listener's
@@ -240,18 +247,21 @@ serde-+-thiserror-only rule), `Matcher`, `Route`, `MatchContext`,
 `cfg.route_for(&ctx)` then `snap.pool(name)`. The UDP idle timeout is now read
 from the **routed** pool per session (was a single startup read of `cfg.pool`).
 
-### Slice 2 — `first_bytes` prefix matcher (done)
+### Slice 2 + 5 — `first_bytes` matcher (`prefix` + `length`) (done)
 
-`match: { type: first_bytes, prefix: "hex:ffffffff" | "ascii:GET " }` — a
-non-empty prefix (≤ `FIRST_BYTES_PREFIX_MAX` = 512 B) of the connection's first
-bytes.
-`Matcher::FirstBytes(Vec<u8>)`, matched with `starts_with`. `MatchContext`
-carries `first_bytes: &[u8]` (empty when nothing was peeked / sent).
-`ListenerConfig::peek_len()` = max prefix length over the route list, 0 when no
-byte matcher — the TCP path skips the peek entirely in that case. TCP peek:
-`TcpStream::peek` in the per-conn task, `PEEK_TIMEOUT` = 250 ms; a silent client
-routes as if it sent nothing. UDP: routes on the first datagram, already in hand
-in `open_session`. `parse_byte_spec` handles the `hex:` / `ascii:` tags.
+`match: { type: first_bytes, prefix: "hex:ff.." | "ascii:GET ", length: { min, max } }`
+— `Matcher::FirstBytes { prefix: Vec<u8>, len: Option<RangeInclusive<usize>> }`.
+At least one of `prefix` (≤ `FIRST_BYTES_PREFIX_MAX` = 512 B) / `length` must be
+present; when both, both must hold. `prefix` matched with `starts_with`;
+`length` against `ctx.first_bytes.len()` — on TCP that is only what one peek
+returned (coarse), on UDP the exact datagram length. `MatchContext` carries
+`first_bytes: &[u8]` (empty when nothing was peeked / sent).
+`ListenerConfig::peek_len()` = max over the route list of (`prefix.len()`,
+`length.max + 1` clamped to `PEEK_MAX`), 0 when no byte matcher — the TCP path
+skips the peek entirely in that case. TCP peek: `TcpStream::peek` in the
+per-conn task, `PEEK_TIMEOUT` = 250 ms; a silent client routes as if it sent
+nothing. UDP: routes on the first datagram, already in hand in `open_session`.
+`parse_byte_spec` handles the `hex:` / `ascii:` tags.
 
 ### Slice 3 — `consistent_hash` balancer (done)
 
@@ -293,11 +303,11 @@ for an `sni` route, so the TCP peek buffer covers a normal ClientHello. Single
 `PEEK_MAX` was bumped 512 → 4096 (peek buffer cap); `first_bytes` prefixes keep
 their own 512 B cap as `FIRST_BYTES_PREFIX_MAX`.
 
-### Slice 5 — next
+### Slice 6 — next
 
-`first_bytes` `regex` (precompiled, bounded `N`; needs the `regex` crate — the
-dep decision was deferred, ideally taken with the sniffer-plugin API) and
-`length` (datagram-length range, UDP-centric) variants. Then the `dst` matcher +
+`first_bytes` `regex` (precompiled, bounded `N`; **needs the `regex` crate** —
+the dep decision is still open, ideally taken together with the sniffer-plugin
+API since `docs/03` puts regex parsers in that layer). Then the `dst` matcher +
 `IP_PKTINFO` / `IPV6_RECVPKTINFO` prefix listener (see `docs/03` "routing without
 a protocol hint" and `docs/04`), and the in-process sniffer plugin API (`sni`,
 `minecraft`, `a2s`). Keep the agnostic core: sniffers/regex parsers are optional

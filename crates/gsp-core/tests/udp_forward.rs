@@ -175,3 +175,49 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn first_bytes_length_routes_short_vs_long_datagrams() {
+    let short = echo_backend(b'S').await;
+    let long = echo_backend(b'L').await;
+    let proxy_addr = free_udp_addr();
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: short
+    targets: ["{short}"]
+  - name: long
+    targets: ["{long}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    routes:
+      - match: {{ type: first_bytes, length: {{ min: 0, max: 15 }} }}
+        action: {{ pool: short }}
+      - match: {{ type: always }}
+        action: {{ pool: long }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let tag = |bytes: Vec<u8>| async move {
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(proxy_addr).await.unwrap();
+        c.send(&bytes).await.unwrap();
+        let mut buf = [0u8; 64];
+        tokio::time::timeout(Duration::from_millis(500), c.recv(&mut buf))
+            .await
+            .expect("reply timed out")
+            .unwrap();
+        buf[0]
+    };
+
+    assert_eq!(tag(vec![1, 2, 3, 4]).await, b'S');
+    assert_eq!(tag(vec![0u8; 40]).await, b'L');
+
+    runtime.shutdown().await;
+}

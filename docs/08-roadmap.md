@@ -40,8 +40,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
-- ✅ `first-bytes` matcher — prefix (`hex:` / `ascii:`, ≤ 512 B); TCP peek /
-  first UDP datagram. ⬜ `regex` / `length` / `sniffer` variants.
+- ✅ `first-bytes` matcher — `prefix` (`hex:` / `ascii:`, ≤ 512 B) and/or
+  `length: { min, max }`; TCP peek / first UDP datagram. ⬜ `regex` / `sniffer`
+  variants.
 - ✅ `consistent_hash` balancer (rendezvous/HRW hash, pool `hash_on: src_ip |
   src_ip_port`) — session affinity without a sticky table.
 - ✅ SNI peek matcher (`sni`, `host` exact / `*.suffix` / `.suffix`; ClientHello

@@ -55,9 +55,11 @@ listeners:
 
   # ... or with a priority-ordered `routes` list; the first matching rule wins.
   # Matchers: `always`; `client_cidr` (source-IP prefixes); `port` (destination
-  # port, bare int or "lo-hi" range); `first_bytes` (prefix of the first bytes —
-  # TCP peek / first UDP datagram — as `hex:...` or `ascii:...`, <= 512 bytes);
-  # `sni` (host from the peeked TLS ClientHello — TCP only, not terminated;
+  # port, bare int or "lo-hi" range); `first_bytes` (of the first bytes — TCP
+  # peek / first UDP datagram — a `prefix:` "hex:.."/"ascii:.." (<= 512 B) and/or
+  # a `length: { min, max }` byte-count window; on TCP the length is only what a
+  # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
+  # only, not terminated;
   # `host` patterns: exact, `*.suffix` or `.suffix`).
   # `pool` and `routes` are mutually exclusive.
   - name: public-tcp
@@ -77,6 +79,9 @@ listeners:
     routes:
       # Valve A2S query packets start with the 0xFFFFFFFF connectionless header.
       - match: { type: first_bytes, prefix: "hex:ffffffff" }
+        action: { pool: realtime }
+      # Tiny datagrams are keep-alives / pings, not gameplay.
+      - match: { type: first_bytes, length: { min: 0, max: 8 } }
         action: { pool: realtime }
       - match: { type: always }
         action: { pool: realtime }

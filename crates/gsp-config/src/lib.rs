@@ -199,9 +199,19 @@ struct RawMatch {
     /// `first_bytes` only: `"hex:ffffffff"` or `"ascii:hello"`.
     #[serde(default)]
     prefix: Option<String>,
+    /// `first_bytes` only: observed first-bytes length must fall in this range.
+    #[serde(default)]
+    length: Option<RawLen>,
     /// `sni` only: host patterns — exact, `*.suffix` or `.suffix`.
     #[serde(default)]
     host: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLen {
+    min: usize,
+    max: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,9 +361,15 @@ pub enum Matcher {
     ClientCidr(Vec<Cidr>),
     /// Destination port (from the accepting socket) within any of these ranges.
     DstPort(Vec<RangeInclusive<u16>>),
-    /// The connection's first bytes (TCP peek / first UDP datagram) start with
-    /// this non-empty prefix. `regex` / `length` / `sniffer` variants come later.
-    FirstBytes(Vec<u8>),
+    /// The connection's first bytes (TCP peek / first UDP datagram): start with
+    /// `prefix` (when non-empty) **and** have an observed length within `len`
+    /// (when set). At least one condition is present. On TCP `len` sees only
+    /// what one peek returned (coarse); on UDP it is the exact datagram length.
+    /// `regex` / `sniffer` variants come later.
+    FirstBytes {
+        prefix: Vec<u8>,
+        len: Option<RangeInclusive<usize>>,
+    },
     /// The TLS ClientHello's SNI host matches one of these patterns (TCP only;
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
@@ -380,7 +396,11 @@ impl Matcher {
             Matcher::Always => true,
             Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(ctx.src.ip())),
             Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&ctx.local.port())),
-            Matcher::FirstBytes(prefix) => ctx.first_bytes.starts_with(prefix),
+            Matcher::FirstBytes { prefix, len } => {
+                let b = ctx.first_bytes;
+                (prefix.is_empty() || b.starts_with(prefix.as_slice()))
+                    && len.as_ref().is_none_or(|r| r.contains(&b.len()))
+            }
             Matcher::Sni(pats) => match extract_sni(ctx.first_bytes) {
                 Some(host) => pats.iter().any(|p| p.matches(&host)),
                 None => false,
@@ -391,7 +411,12 @@ impl Matcher {
     /// Leading bytes this matcher needs to see (0 for address-only matchers).
     fn peek_len(&self) -> usize {
         match self {
-            Matcher::FirstBytes(prefix) => prefix.len(),
+            // For a length bound, one byte past the upper end is enough to tell
+            // "within range" from "above range".
+            Matcher::FirstBytes { prefix, len } => prefix.len().max(
+                len.as_ref()
+                    .map_or(0, |r| r.end().saturating_add(1).min(PEEK_MAX)),
+            ),
             Matcher::Sni(_) => PEEK_MAX,
             _ => 0,
         }
@@ -833,6 +858,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
     allow("cidrs", m.cidrs.is_some(), m.kind == "client_cidr")?;
     allow("ports", m.ports.is_some(), m.kind == "port")?;
     allow("prefix", m.prefix.is_some(), m.kind == "first_bytes")?;
+    allow("length", m.length.is_some(), m.kind == "first_bytes")?;
     allow("host", m.host.is_some(), m.kind == "sni")?;
 
     match m.kind.as_str() {
@@ -860,21 +886,34 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             Ok(Matcher::DstPort(ranges))
         }
         "first_bytes" => {
-            let spec = m
-                .prefix
-                .as_ref()
-                .ok_or_else(|| at("match type `first_bytes` needs a `prefix`".into()))?;
-            let bytes = parse_byte_spec(spec).map_err(&at)?;
-            if bytes.is_empty() {
-                return Err(at("`first_bytes` prefix must not be empty".into()));
-            }
-            if bytes.len() > FIRST_BYTES_PREFIX_MAX {
+            let prefix = match &m.prefix {
+                Some(s) => parse_byte_spec(s).map_err(&at)?,
+                None => Vec::new(),
+            };
+            if prefix.len() > FIRST_BYTES_PREFIX_MAX {
                 return Err(at(format!(
                     "`first_bytes` prefix is {} bytes, over the {FIRST_BYTES_PREFIX_MAX}-byte limit",
-                    bytes.len()
+                    prefix.len()
                 )));
             }
-            Ok(Matcher::FirstBytes(bytes))
+            let len = match &m.length {
+                Some(l) => {
+                    if l.min > l.max {
+                        return Err(at(format!(
+                            "`first_bytes` length min {} is greater than max {}",
+                            l.min, l.max
+                        )));
+                    }
+                    Some(l.min..=l.max)
+                }
+                None => None,
+            };
+            if prefix.is_empty() && len.is_none() {
+                return Err(at(
+                    "match type `first_bytes` needs a `prefix` and/or a `length`".into(),
+                ));
+            }
+            Ok(Matcher::FirstBytes { prefix, len })
         }
         "sni" => {
             let raw = m
@@ -1312,12 +1351,46 @@ listeners:
     }
 
     #[test]
+    fn first_bytes_length_bound_matches_and_combines_with_prefix() {
+        let yaml = r#"
+pools:
+  - name: q
+    targets: ["127.0.0.1:1"]
+  - name: g
+    targets: ["127.0.0.1:2"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:27015"
+    protocol: udp
+    routes:
+      - match: { type: first_bytes, prefix: "hex:ffff", length: { min: 4, max: 8 } }
+        action: { pool: q }
+      - match: { type: first_bytes, length: { min: 0, max: 15 } }
+        action: { pool: q }
+      - match: { type: always }
+        action: { pool: g }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.peek_len(), 16); // max(prefix 2, rule1 8+1, rule2 15+1)
+        let route = |b: &[u8]| l.route_for(&ctx("1.2.3.4:5", "9.9.9.9:27015", b));
+        // rule 1: prefix ffff AND length 4..=8
+        assert_eq!(route(&[0xff, 0xff, 0x01, 0x02, 0x03]), Some("q"));
+        // prefix ok but length 2 out of 4..=8 -> rule 1 skipped, rule 2 (len<=15) hits
+        assert_eq!(route(&[0xff, 0xff]), Some("q"));
+        // length 20 > 15 and no ffff prefix -> nothing but `always`
+        assert_eq!(route(&[0u8; 20]), Some("g"));
+    }
+
+    #[test]
     fn rejects_bad_first_bytes_specs() {
         for bad in [
             r#"routes: [{ match: { type: first_bytes, prefix: "ffff" }, action: { pool: p } }]"#,
             r#"routes: [{ match: { type: first_bytes }, action: { pool: p } }]"#,
             r#"routes: [{ match: { type: first_bytes, prefix: "hex:" }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: first_bytes, length: { min: 9, max: 4 } }, action: { pool: p } }]"#,
             r#"routes: [{ match: { type: always, prefix: "hex:ff" }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: port, length: { min: 0, max: 4 } }, action: { pool: p } }]"#,
         ] {
             let yaml = format!(
                 "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"

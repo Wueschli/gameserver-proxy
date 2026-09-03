@@ -7,7 +7,9 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > priority-ordered `[{ match, action }]` list, first match wins, with
 > `action: { pool: <name> }`. Implemented matchers: `always`, `client_cidr`
 > (source IP), `port` (destination port from the accepting socket), `first-bytes`
-> — **prefix only** (`prefix: "hex:..." | "ascii:..."`, ≤ 512 B), and `sni`
+> (a `prefix` — `"hex:..." | "ascii:..."`, ≤ 512 B — and/or a
+> `length: { min, max }` byte-count window; on TCP `length` sees only what one
+> peek returned, on UDP the exact datagram length), and `sni`
 > (`host` patterns: exact, `*.suffix`, `.suffix` — matched against `server_name`
 > from the peeked, non-terminated TLS ClientHello; TCP listeners only). The TCP
 > path `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
@@ -16,8 +18,8 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > the `sni` route.
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
-> healthy backends). Still pending: `first-bytes` `regex` / `length` / `sniffer`
-> variants, `dst`, the `external` resolver, and the `weighted` /
+> healthy backends). Still pending: `first-bytes` `regex` / `sniffer` variants,
+> `dst`, the `external` resolver, and the `weighted` /
 > `first_available` balancers. A listener with a bare `pool:` is normalised to
 > one `always` route.
 
