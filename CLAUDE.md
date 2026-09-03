@@ -45,6 +45,7 @@ crates/
     listener_udp.rs         UDP recv loop + worker-local session table + reply pump
     proxy.rs                per-connection byte pump
     sniff.rs                sniffer API seam (trait + registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
+    resolver.rs             external resolver seam: trait Resolver + resolve_pool (the async route walk); transports live in gsp
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
     runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
@@ -54,6 +55,7 @@ crates/
   gsp/                       binary
     main.rs                 CLI, tracing, runtime bring-up, shutdown
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools, POST /route-hint
+    resolver.rs             HttpResolver (reqwest) + build_resolvers(&Config)
     reload.rs               SIGHUP + file-watch → rebuild snapshot → atomic swap
 ```
 
@@ -108,7 +110,9 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
 7. **Crate boundaries:** `gsp-config` depends only on `serde` + `thiserror`.
-   `gsp-core` has no HTTP / CLI / `axum` dependency — that belongs to `gsp`.
+   `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
+   `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`
+   trait lives in `gsp-core`, the HTTP/gRPC clients in `gsp`.
 8. **Commit only when the user asks.** If not on a feature branch, branch off `main`
    first. End commit messages with the `Co-Authored-By:` and `Claude-Session:`
    trailers. **Do not `git push`** — credentials are not available in this environment
@@ -177,6 +181,8 @@ Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordere
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Next: phase 4** (external resolver — gRPC/HTTP callback + cache) **or phase 5**
-(operability — connection draining, runtime listener/backend CRUD, `draining` /
-`disabled` states). See `HANDOVER.md` and `docs/08`. Don't half-land a slice.
+**Phase 4 (external resolver) started** — slice 1 (HTTP transport, `pool`
+results, `on_error`) landed; slices 2–4 are the cache, gRPC, and
+`target`/`sticky_key`. Then phase 5 (operability — connection draining, runtime
+listener/backend CRUD, `draining` / `disabled` states). See `HANDOVER.md` and
+`docs/08`. Don't half-land a slice.

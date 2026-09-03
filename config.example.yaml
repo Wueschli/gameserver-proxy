@@ -43,6 +43,16 @@ pools:
       rise: 2
       fall: 3
 
+# External routing resolvers. A route `action: { resolver: <name> }` asks the
+# service (per connection / UDP session) which pool to use. Slice 1: HTTP only,
+# `pool` results only.
+resolvers:
+  - name: matchmaker
+    type: http                     # http (grpc lands in a later slice)
+    endpoint: "http://127.0.0.1:8099/resolve"
+    timeout_ms: 40
+    on_error: fallback_route       # reject | fallback_route | stale_ok (stale_ok needs the cache, later)
+
 listeners:
   # A listener maps to a pool either with the `pool:` shorthand (one implicit
   # `always` route) ...
@@ -78,6 +88,9 @@ listeners:
         action: { pool: local }
       - match: { type: port, ports: [7777, "8000-8100"] }
         action: { pool: local }
+      # Ask the matchmaker; on any error fall through to the `always` rule below.
+      - match: { type: always }
+        action: { resolver: matchmaker }
       - match: { type: always }
         action: { pool: local }
 

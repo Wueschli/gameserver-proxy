@@ -36,10 +36,14 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > repo) is Phase 9. The **push resolver** (`POST /route-hint`) is implemented:
 > a listener with `route_hint: true` checks a short-lived `src_ip → pool` table
 > before its route list (`gsp_route_hints_applied_total{listener}` counts hits).
-> Still pending: the TCP side of prefix binding beyond `freebind`, the sniffer
-> loader, the `external` resolver, and the `weighted` / `first_available`
-> balancers. Regex-over-first-bytes is folded into the Phase 9 plugin layer, not
-> a `first-bytes` sub-form. A listener with a bare `pool:` is normalised to one
+> The **external resolver** (`action: { resolver: <name> }`, `resolvers:`
+> section) is partly implemented — **phase 4 slice 1**: HTTP transport, `pool`
+> results, `on_error: reject | fallback_route`. Pending there: the cache +
+> `stale_ok` (slice 2), gRPC (slice 3), `target` / `sticky_key` (slice 4).
+> Still pending elsewhere: the TCP side of prefix binding beyond `freebind`, the
+> sniffer loader, and the `weighted` / `first_available` balancers.
+> Regex-over-first-bytes is folded into the Phase 9 plugin layer, not a
+> `first-bytes` sub-form. A listener with a bare `pool:` is normalised to one
 > `always` route.
 
 ## Evaluation order

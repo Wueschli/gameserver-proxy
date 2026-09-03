@@ -28,7 +28,8 @@
   routing for a connection / UDP session
 
 ### Resolver
-- `gsp_resolver_requests_total{resolver,result}` – `ok|error|timeout`
+- `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`
+  (implemented, phase 4 slice 1)
 - `gsp_resolver_latency_seconds{resolver}` (histogram)
 - `gsp_resolver_cache{resolver,state}` – hits/misses/entries/evictions
 

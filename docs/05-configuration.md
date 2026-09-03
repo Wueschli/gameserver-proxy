@@ -38,9 +38,17 @@
 > `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (one sniffer
 > per listener) but matches nothing until a sniffer plugin is loaded — no
 > sniffers are built in; the name is checked at listener start, not by
-> `validate()`. The sniffer loader (Phase 9) and the `external` resolver are
-> still to come; regex-over-first-bytes is a Phase 9 plugin concern, not a
-> `first_bytes` sub-form.
+> `validate()`. The sniffer loader is Phase 9; regex-over-first-bytes is a Phase
+> 9 plugin concern, not a `first_bytes` sub-form.
+>
+> **External resolver** (phase 4 slice 1): a top-level `resolvers:` list of
+> `{ name, type: http, endpoint, timeout_ms, on_error: reject|fallback_route|stale_ok }`
+> and a route `action: { resolver: <name> }` (exactly one of `pool` / `resolver`
+> per action). The proxy `POST`s `{listener, src, dst, sni?, first_bytes_b64,
+> routing_key?}` and expects `{pool?, target?, sticky_key?, ttl_sec?}`; slice 1
+> uses `pool` only. `fallback_route` continues the route list on failure;
+> `reject` (and `stale_ok`, until the cache lands) drops. gRPC transport,
+> caching and `target` are later slices.
 >
 > **Push resolver:** `POST /route-hint` (admin API) with
 > `{ "src_ip": "...", "pool": "...", "ttl_sec": 30 }` records a short-lived

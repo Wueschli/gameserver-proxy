@@ -52,7 +52,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -99,7 +99,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let roundtrip = |src_port_marker: &'static [u8]| async move {
@@ -155,7 +155,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let recv_tag = |payload: &'static [u8]| async move {
@@ -201,7 +201,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let tag = |bytes: Vec<u8>| async move {
@@ -251,7 +251,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The client `connect`s to the sub-address, so it only accepts a reply whose

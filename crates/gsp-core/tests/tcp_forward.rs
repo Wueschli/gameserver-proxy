@@ -47,7 +47,7 @@ async fn forwards_tcp_bytes_end_to_end() {
     );
     let cfg = parse_str(&yaml).unwrap();
     let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
-    let runtime = Runtime::start(snapshot, 1);
+    let runtime = Runtime::start(snapshot, Default::default(), 1);
 
     // Let the listener bind.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -106,7 +106,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut successes = 0;
@@ -195,7 +195,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut c1 = TcpStream::connect(p1).await.unwrap();
@@ -235,7 +235,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Same source IP (127.0.0.1), different ephemeral ports each connection.
@@ -313,7 +313,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hit_mark = |host: &'static str| async move {
@@ -353,7 +353,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hit = || async {

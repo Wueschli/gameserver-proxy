@@ -143,7 +143,8 @@ listeners:
 "#
         );
         let cfg = gsp_config::parse_str(&yaml).unwrap();
-        let runtime = crate::Runtime::start(crate::Snapshot::from_config(&cfg), 1);
+        let runtime =
+            crate::Runtime::start(crate::Snapshot::from_config(&cfg), Default::default(), 1);
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let mark = |host: &'static str| async move {

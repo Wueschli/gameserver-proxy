@@ -11,6 +11,7 @@ use gsp_config::ListenerConfig;
 
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
+use crate::resolver::{resolve_pool, Resolvers};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 
@@ -23,6 +24,7 @@ pub async fn run_tcp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
+    resolvers: Arc<Resolvers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -63,6 +65,7 @@ pub async fn run_tcp_listener(
                 let snap = snapshot.load_full();
                 let cfg = cfg.clone();
                 let hints = hints.clone();
+                let resolvers = resolvers.clone();
 
                 tokio::spawn(async move {
                     let local = stream.local_addr().unwrap_or(cfg.bind);
@@ -100,10 +103,11 @@ pub async fn run_tcp_listener(
                             m::ROUTE_HINTS_APPLIED, "listener" => listener_name.clone(),
                         ).increment(1);
                     }
-                    let Some(pool_name) = hinted
-                        .as_deref()
-                        .or_else(|| cfg.route_for(&mctx))
-                    else {
+                    let pool_name = match hinted {
+                        Some(p) => Some(p),
+                        None => resolve_pool(&cfg, &resolvers, &mctx, first).await,
+                    };
+                    let Some(pool_name) = pool_name else {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,
                             "listener" => listener_name.clone(),
@@ -115,7 +119,7 @@ pub async fn run_tcp_listener(
                         );
                         return;
                     };
-                    let Some(pool) = snap.pool(pool_name) else {
+                    let Some(pool) = snap.pool(&pool_name) else {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,
                             "listener" => listener_name.clone(),

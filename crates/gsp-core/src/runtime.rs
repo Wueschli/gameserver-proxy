@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 
@@ -55,7 +56,9 @@ impl RuntimeHandle {
 impl Runtime {
     /// Spawn `workers` accept tasks per listener (one `SO_REUSEPORT` socket
     /// each) plus the health checker. `workers == 0` means one per CPU core.
-    pub fn start(initial: Arc<Snapshot>, workers: usize) -> Self {
+    /// `resolvers` are the external routing resolvers, built from config by the
+    /// caller (empty map = none).
+    pub fn start(initial: Arc<Snapshot>, resolvers: Arc<Resolvers>, workers: usize) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
         let hints = RouteHints::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -73,6 +76,7 @@ impl Runtime {
             for worker_id in 0..worker_count {
                 let snap = snapshot.clone();
                 let hints = hints.clone();
+                let resolvers = resolvers.clone();
                 let lc = lc.clone();
                 let mut sd = shutdown_rx.clone();
                 tasks.push(tokio::spawn(async move {
@@ -82,6 +86,7 @@ impl Runtime {
                                 lc.clone(),
                                 snap,
                                 hints,
+                                resolvers,
                                 worker_id,
                                 &mut sd,
                             )
@@ -92,6 +97,7 @@ impl Runtime {
                                 lc.clone(),
                                 snap,
                                 hints,
+                                resolvers,
                                 worker_id,
                                 &mut sd,
                             )

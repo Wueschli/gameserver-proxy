@@ -1,9 +1,9 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phase 3 complete** — slices 1–9; slice 9 =
-`POST /route-hint` push resolver + per-listener `route_hint:`. Sniffer *loader*
-and `regex` are Phase 9; `first_bytes` `regex` is folded into that).
+Last updated: 2026-09-03 (**phase 3 complete**; **phase 4 slice 1** landed —
+HTTP external resolver: `resolvers:` config, `action: { resolver: <name> }`,
+`pool` results, `on_error`. Cache / gRPC / `target` are slices 2–4).
 
 ---
 
@@ -15,18 +15,20 @@ and `regex` are Phase 9; `first_bytes` `regex` is folded into that).
   (slices 1–9): per-listener route rule list; `first_bytes` `prefix` + `length`;
   `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
   listener + TCP `freebind:`; the sniffer API **seam** + `sniffer` matcher (no
-  built-in sniffers); the `POST /route-hint` push resolver. The proxy forwards
-  **TCP and UDP** end to end with health checks (`tcp_connect` + `udp_probe`),
-  three balancers, per-backend caps, worker-local UDP session tables with
-  `src_ip` affinity, hot reload, and address / first-bytes / SNI / push-hint
+  built-in sniffers); the `POST /route-hint` push resolver. **Phase 4 slice 1**:
+  `resolvers:` config + `action: { resolver: <name> }`; a `Resolver` trait +
+  async routing loop in `gsp-core`; `HttpResolver` (reqwest) in `gsp`; `pool`
+  results; `on_error: reject | fallback_route`. The proxy forwards **TCP and
+  UDP** end to end with health checks (`tcp_connect` + `udp_probe`), three
+  balancers, per-backend caps, worker-local UDP session tables with `src_ip`
+  affinity, hot reload, and address / first-bytes / SNI / push-hint / external
   routing — including one wildcard `IP_PKTINFO` socket serving a whole routed
   UDP prefix.
-- **Next**: phase 4 (external resolver — gRPC/HTTP callback + cache +
-  `on_error`) or phase 5 (operability — connection draining, runtime listener /
-  backend CRUD, `draining` / `disabled` states). The **sniffer plugin loader is
-  Phase 9** — a separate community repo of sandboxed (WASM) sniffers; a generic
-  `first_bytes` `regex` matcher would ship as one of those plugins.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 58 tests, all green).
+- **Next**: phase 4 slices 2–4 (resolver **cache** + `stale_ok`; **gRPC**
+  transport; `target` / `sticky_key`), then phase 5 (operability — connection
+  draining, runtime listener / backend CRUD, `draining` / `disabled` states).
+  The **sniffer plugin loader is Phase 9** (separate WASM repo).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 65 tests, all green).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -125,9 +127,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (58, all green)
+### Tests (65, all green)
 
-- `gsp-config` (34): schema parsing + validation rejections, incl. UDP listener +
+- `gsp-config` (36): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
   without `send_hex` rejection, `consistent_hash` parsing + default/explicit
   `hash_on`, `hash_on`-without-`consistent_hash` rejection; **routing**: bare
@@ -147,15 +149,22 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `sniffer` matcher parse + `ListenerConfig::sniffer`, `Matcher::Sniffer` match
   (exact / suffix / empty-host / `reject` / no-hint), bad `sniffer` config
   (missing name, wrong field, two sniffers on one listener); `route_hint: true`
-  listener flag parse.
-- `gsp-core` unit (13): round-robin cycling, least-conn preference, capacity
+  listener flag parse; **resolver**: `resolvers:` + `Action::Resolver` parse +
+  resolver route forces `peek_len == PEEK_MAX`, bad-resolver / bad-action
+  rejections (unknown resolver, both `pool`+`resolver`, neither, unknown
+  transport, empty endpoint).
+- `gsp-core` unit (17): round-robin cycling, least-conn preference, capacity
   rejection, unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds,
   reload health carry-over; `consistent_hash` stability + spread (`src_ip`
   ignores port), and "only the lost backend's share moves"; **sniff seam**:
   registry has no built-ins but knows the `#[cfg(test)]` `test-host` sniffer,
   `test-host` extraction, end-to-end `sniffer`-matcher routing driven by that
   test sniffer; **route hints**: `RouteHints` set / lookup / replace / expiry +
-  prune-on-write.
+  prune-on-write; **resolver** (`resolver.rs`): `resolve_pool` with a stub
+  resolver — `ok` → pool, `empty`/`error` under `reject` → drop, under
+  `fallback_route` → next matching route, plus an end-to-end live connection
+  through `Runtime` routed by the stub.
+- `gsp` unit (1): local base64 encoder known vectors.
 - `gsp-core/tests/tcp_forward.rs` (6): end-to-end client→proxy→backend byte
   forwarding; "routes around a dead backend"; "first matching route selects the
   pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
@@ -187,7 +196,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | TPROXY, PROXY protocol, discovery adapters, sniffers, external resolver | **designed in `docs/`, not yet built.** |
-| Deps kept out of `gsp-core` | `axum`, `clap`, `notify` live in the `gsp` binary only. (`nix` is now used in `gsp-core` for `IP_PKTINFO`.) |
+| External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
+| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` and `async-trait` for `Resolver`.) |
 
 ---
 
@@ -214,7 +224,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | More sniffers (`quic`, `wireguard`, …); `RouteHint.reject` currently only makes a `sniffer` route *not match* (no hard drop) | phase 3+ |
 | Per-listener multiple distinct sniffers (only one name allowed today) | polish |
 | TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
-| Routing `external` resolver (pull; gRPC/HTTP callback + cache) | phase 4 |
+| External resolver: **HTTP + `pool` + `on_error`** | **done** (phase 4 slice 1) |
+| External resolver: cache + `stale_ok` (slice 2), gRPC (slice 3), `target` / `sticky_key` (slice 4) | phase 4 |
+| Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
@@ -275,6 +287,14 @@ exact `recv_from` / `send_to` path.
 (lock-free read), plus one `String` clone when a hint is present. The table is
 tiny and rarely written (one admin `POST` per session). Listeners without the
 flag pay nothing.
+
+**External resolver**: a route with a matching `resolver` action does one
+`.await`-ed HTTP round-trip (`timeout_ms`, default 40 ms) on the per-connection
+routing path, plus a `Vec<Action>` of the matching routes and a `first.to_vec()`
+for the request body. It runs in the spawned per-conn task (TCP) / `open_session`
+(UDP) — never on the accept loop. Listeners with no `resolver` route pay nothing
+(the loop is just `matching_routes` → `Pool`). The cache (slice 2) will cut the
+round-trip to a map lookup for repeat keys.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -452,6 +472,41 @@ pulls in `serde`.
 `external` resolver = phase 4; sniffer loader + `first_bytes` `regex` (as a
 plugin) = phase 9; `weighted` / `first_available` balancers = later.
 
+## Phase 4 — external routing logic
+
+Plan: **slice 1** HTTP resolver + `pool` + `on_error` (done); **slice 2** the
+result cache (configurable key `src_ip` / `sni` / `routing_key` /
+`first_bytes:a:b`, positive/negative TTL, `max_entries` LRU, `on_error: stale_ok`);
+**slice 3** gRPC transport (`tonic` + `prost` + `resolver.proto` + `build.rs`);
+**slice 4** `Resolution.target` (a pool-less connect path in `proxy.rs` /
+`listener_udp.rs`) + `sticky_key` (a per-listener sticky table so repeat clients
+skip the resolver).
+
+### Slice 1 — HTTP resolver (done)
+
+`gsp-config`: top-level `resolvers: [{ name, type: http, endpoint, timeout_ms,
+on_error }]` → `Config::resolvers: Vec<ResolverConfig>`; `Route.pool: String`
+became `Route.action: Action { Pool(String) | Resolver(String) }` (exactly one
+of `pool` / `resolver` per action); `OnError { Reject, FallbackRoute, StaleOk }`;
+`ListenerConfig::matching_routes(ctx)` (the runtime walks this) and `route_for`
+kept as a pool-only convenience; a resolver route forces `peek_len == PEEK_MAX`.
+
+`gsp-core::resolver`: `#[async_trait] trait Resolver { name(); on_error();
+resolve(ResolveRequest) -> Result<Resolution, ResolveError> }`,
+`ResolveRequest { listener, src, dst, sni, first_bytes, routing_key }`,
+`Resolution { pool, target, sticky_key, ttl_sec }`, `type Resolvers =
+HashMap<String, Arc<dyn Resolver>>`. `resolve_pool(cfg, resolvers, mctx, first)`
+walks `matching_routes`: `Pool` → done; `Resolver` → call, use `pool`, on
+error/empty either drop (`reject` / `stale_ok`) or continue (`fallback_route`);
+bumps `gsp_resolver_requests_total{resolver,result}`. `Resolvers` is threaded
+`Runtime::start(snapshot, resolvers, workers)` → both listeners (like `hints`).
+
+`gsp/src/resolver.rs`: `HttpResolver` (`reqwest`, JSON, `timeout`), a local
+base64 encoder, `build_resolvers(&Config)` (called from `main.rs`; `grpc` →
+`bail!`). New deps: `async-trait`, `serde_json` in the workspace; `reqwest`
+(rustls) + `serde_json` + `async-trait` in `gsp`; `async-trait` in `gsp-core`.
+Resolver config is startup-only (not rebuilt on reload).
+
 ### Do NOT
 
 - Add QUIC connection-ID awareness (later stage).
@@ -465,16 +520,18 @@ plugin) = phase 9; `weighted` / `first_available` balancers = later.
 
 | File | Responsibility |
 |------|----------------|
-| `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`HealthCheck`; routing (`Matcher`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`). All schema rules here. |
+| `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`ResolverConfig`/`HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`). All schema rules here. |
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr`, `hrw_score`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — the `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`). Lock-free read. |
+| `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk). Transports live in `gsp`. |
+| `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `build_resolvers(&Config)`, a local base64 encoder. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
-| `crates/gsp-core/src/runtime.rs` | `Runtime::start` spawns listener + health tasks, owns the `RouteHints`; `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`). |
+| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints`; `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`). |
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |

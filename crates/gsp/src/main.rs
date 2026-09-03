@@ -6,6 +6,7 @@
 
 mod admin;
 mod reload;
+mod resolver;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,7 +68,11 @@ async fn run(cfg: gsp_config::Config, config_path: PathBuf) -> anyhow::Result<()
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
     let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
-    let runtime = Runtime::start(snapshot, cfg.workers);
+    let resolvers = Arc::new(resolver::build_resolvers(&cfg)?);
+    if !resolvers.is_empty() {
+        tracing::info!(count = resolvers.len(), "external resolvers ready");
+    }
+    let runtime = Runtime::start(snapshot, resolvers, cfg.workers);
     let handle = runtime.handle();
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 

@@ -49,6 +49,7 @@ use gsp_config::{HashOn, ListenerConfig};
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_udp;
 use crate::pool::BackendGuard;
+use crate::resolver::{resolve_pool, Resolvers};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::util::now_ms;
@@ -108,6 +109,7 @@ pub async fn run_udp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
+    resolvers: Arc<Resolvers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -201,7 +203,7 @@ pub async fn run_udp_listener(
                 }
 
                 // New session.
-                match open_session(&cfg, &snapshot, &hints, &sock, &mut sticky, client, dst, &buf[..n]).await {
+                match open_session(&cfg, &snapshot, &hints, &resolvers, &sock, &mut sticky, client, dst, &buf[..n]).await {
                     Ok(session) => {
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -301,6 +303,7 @@ async fn open_session(
     cfg: &ListenerConfig,
     snapshot: &Arc<ArcSwap<Snapshot>>,
     hints: &Arc<RouteHints>,
+    resolvers: &Arc<Resolvers>,
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
     client: SocketAddr,
@@ -331,11 +334,13 @@ async fn open_session(
     if hinted.is_some() {
         metrics::counter!(m::ROUTE_HINTS_APPLIED, "listener" => cfg.name.clone()).increment(1);
     }
-    let pool_name = hinted
-        .as_deref()
-        .or_else(|| cfg.route_for(&mctx))
-        .ok_or("no_route")?;
-    let pool = snap.pool(pool_name).ok_or("no_route")?;
+    let pool_name = match hinted {
+        Some(p) => p,
+        None => resolve_pool(cfg, resolvers, &mctx, first)
+            .await
+            .ok_or("no_route")?,
+    };
+    let pool = snap.pool(&pool_name).ok_or("no_route")?;
     let idle_ms = pool.idle_timeout.as_millis() as u64;
 
     let skey = sticky_key(cfg.affinity, client, dst);

@@ -15,12 +15,14 @@ pub mod metrics_defs;
 pub mod net;
 pub mod pool;
 pub mod proxy;
+pub mod resolver;
 pub mod route_hint;
 pub mod runtime;
 pub mod snapshot;
 pub mod sniff;
 mod util;
 
+pub use resolver::{Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
 pub use route_hint::RouteHints;
 pub use runtime::{Runtime, RuntimeHandle};
 pub use snapshot::Snapshot;

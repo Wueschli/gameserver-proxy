@@ -42,6 +42,8 @@ struct RawConfig {
     #[serde(default)]
     pools: Vec<RawPool>,
     #[serde(default)]
+    resolvers: Vec<RawResolver>,
+    #[serde(default)]
     listeners: Vec<RawListener>,
 }
 
@@ -239,10 +241,34 @@ enum RawPort {
     Range(String),
 }
 
+/// A route action: exactly one of `pool` (fixed) or `resolver` (external lookup).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAction {
-    pool: String,
+    #[serde(default)]
+    pool: Option<String>,
+    #[serde(default)]
+    resolver: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResolver {
+    name: String,
+    #[serde(rename = "type", default = "default_resolver_type")]
+    kind: String,
+    endpoint: String,
+    #[serde(default = "default_resolver_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default)]
+    on_error: OnError,
+}
+
+fn default_resolver_type() -> String {
+    "http".to_string()
+}
+fn default_resolver_timeout_ms() -> u64 {
+    40
 }
 
 #[derive(Debug, Deserialize)]
@@ -570,11 +596,51 @@ pub fn extract_sni(buf: &[u8]) -> Option<String> {
     None
 }
 
+/// What a matched route does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Route to this pool (normal load balancing).
+    Pool(String),
+    /// Ask this named [`ResolverConfig`] which pool / target to use.
+    Resolver(String),
+}
+
 /// One rule in a listener's ordered route list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub matcher: Matcher,
-    pub pool: String,
+    pub action: Action,
+}
+
+/// What to do when an external resolver call fails or times out.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnError {
+    /// Drop the connection / datagram.
+    #[default]
+    Reject,
+    /// Treat the resolver route as "did not match" and continue the route list.
+    FallbackRoute,
+    /// Serve the last successful (now-expired) cached answer if there is one,
+    /// else `reject`. (Needs the resolver cache — phase 4 slice 2.)
+    StaleOk,
+}
+
+/// Transport for an external resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverKind {
+    Http,
+    Grpc,
+}
+
+/// An external routing resolver (`resolvers:` entry).
+#[derive(Debug, Clone)]
+pub struct ResolverConfig {
+    pub name: String,
+    pub kind: ResolverKind,
+    pub endpoint: String,
+    pub timeout: Duration,
+    pub on_error: OnError,
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +653,7 @@ pub struct Config {
     pub workers: usize,
     pub admin_listen: SocketAddr,
     pub pools: Vec<PoolConfig>,
+    pub resolvers: Vec<ResolverConfig>,
     pub listeners: Vec<ListenerConfig>,
 }
 
@@ -639,23 +706,36 @@ pub struct ListenerConfig {
 }
 
 impl ListenerConfig {
-    /// The pool name for a connection/session described by `ctx`, or `None` when
-    /// no route matches.
+    /// The routes whose matcher fires for `ctx`, in priority order. The runtime
+    /// walks this: a `Pool` action ends the walk; a `Resolver` action may
+    /// continue it (`on_error: fallback_route`).
+    pub fn matching_routes<'a>(
+        &'a self,
+        ctx: &'a MatchContext<'a>,
+    ) -> impl Iterator<Item = &'a Route> {
+        self.routes.iter().filter(move |r| r.matcher.matches(ctx))
+    }
+
+    /// Convenience for the common case / tests: the first matching route's pool,
+    /// or `None` if nothing matches or the first match is a `Resolver` action.
     pub fn route_for(&self, ctx: &MatchContext) -> Option<&str> {
-        self.routes
-            .iter()
-            .find(|r| r.matcher.matches(ctx))
-            .map(|r| r.pool.as_str())
+        match &self.routes.iter().find(|r| r.matcher.matches(ctx))?.action {
+            Action::Pool(p) => Some(p.as_str()),
+            Action::Resolver(_) => None,
+        }
     }
 
     /// How many leading bytes to `MSG_PEEK` before routing (0 = no byte
-    /// matcher, skip the peek entirely).
+    /// matcher / resolver, skip the peek entirely).
     pub fn peek_len(&self) -> usize {
-        self.routes
+        let from_matchers = self.routes.iter().map(|r| r.matcher.peek_len()).max();
+        let needs_resolver = self
+            .routes
             .iter()
-            .map(|r| r.matcher.peek_len())
-            .max()
+            .any(|r| matches!(r.action, Action::Resolver(_)));
+        from_matchers
             .unwrap_or(0)
+            .max(if needs_resolver { PEEK_MAX } else { 0 })
     }
 }
 
@@ -818,6 +898,40 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         });
     }
 
+    let mut resolver_names = BTreeSet::new();
+    let mut resolvers = Vec::with_capacity(raw.resolvers.len());
+    for r in raw.resolvers {
+        if !resolver_names.insert(r.name.clone()) {
+            return Err(Invalid(format!("duplicate resolver name: {}", r.name)));
+        }
+        let kind = match r.kind.as_str() {
+            "http" => ResolverKind::Http,
+            "grpc" => ResolverKind::Grpc,
+            other => {
+                return Err(Invalid(format!(
+                    "resolver {}: type {other:?} is not supported (http | grpc)",
+                    r.name
+                )))
+            }
+        };
+        if r.endpoint.trim().is_empty() {
+            return Err(Invalid(format!("resolver {}: endpoint is empty", r.name)));
+        }
+        if r.timeout_ms == 0 {
+            return Err(Invalid(format!(
+                "resolver {}: timeout_ms must be > 0",
+                r.name
+            )));
+        }
+        resolvers.push(ResolverConfig {
+            name: r.name,
+            kind,
+            endpoint: r.endpoint,
+            timeout: Duration::from_millis(r.timeout_ms),
+            on_error: r.on_error,
+        });
+    }
+
     let mut listener_names = BTreeSet::new();
     let mut binds = BTreeSet::new();
     let mut listeners = Vec::with_capacity(raw.listeners.len());
@@ -847,16 +961,33 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             let mut rs = Vec::with_capacity(l.routes.len());
             for (i, r) in l.routes.iter().enumerate() {
                 let matcher = parse_matcher(&l.name, i, &r.r#match)?;
-                if !pool_names.contains(&r.action.pool) {
-                    return Err(Invalid(format!(
-                        "listener {}: route {i}: unknown pool {}",
-                        l.name, r.action.pool
-                    )));
-                }
-                rs.push(Route {
-                    matcher,
-                    pool: r.action.pool.clone(),
-                });
+                let action = match (&r.action.pool, &r.action.resolver) {
+                    (Some(p), None) => {
+                        if !pool_names.contains(p) {
+                            return Err(Invalid(format!(
+                                "listener {}: route {i}: unknown pool {p}",
+                                l.name
+                            )));
+                        }
+                        Action::Pool(p.clone())
+                    }
+                    (None, Some(rn)) => {
+                        if !resolver_names.contains(rn) {
+                            return Err(Invalid(format!(
+                                "listener {}: route {i}: unknown resolver {rn}",
+                                l.name
+                            )));
+                        }
+                        Action::Resolver(rn.clone())
+                    }
+                    _ => {
+                        return Err(Invalid(format!(
+                        "listener {}: route {i}: action needs exactly one of `pool` / `resolver`",
+                        l.name
+                    )))
+                    }
+                };
+                rs.push(Route { matcher, action });
             }
             rs
         } else {
@@ -871,7 +1002,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             }
             vec![Route {
                 matcher: Matcher::Always,
-                pool,
+                action: Action::Pool(pool),
             }]
         };
         if l.protocol == Protocol::Udp
@@ -956,6 +1087,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         workers: raw.settings.workers,
         admin_listen,
         pools,
+        resolvers,
         listeners,
     })
 }
@@ -1422,7 +1554,10 @@ listeners:
         let cfg = parse_str(MINIMAL).unwrap();
         assert_eq!(cfg.listeners[0].routes.len(), 1);
         assert_eq!(cfg.listeners[0].routes[0].matcher, Matcher::Always);
-        assert_eq!(cfg.listeners[0].routes[0].pool, "local");
+        assert_eq!(
+            cfg.listeners[0].routes[0].action,
+            Action::Pool("local".into())
+        );
     }
 
     #[test]
@@ -1853,6 +1988,59 @@ listeners:
     pool: p
 "#;
         assert!(parse_str(yaml).unwrap().listeners[0].route_hint);
+    }
+
+    #[test]
+    fn parses_resolver_and_resolver_route_action() {
+        let yaml = r#"
+pools:
+  - name: lobby
+    targets: ["127.0.0.1:1"]
+resolvers:
+  - name: matchmaker
+    type: http
+    endpoint: "https://mm.internal:8443/resolve"
+    timeout_ms: 25
+    on_error: fallback_route
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - match: { type: always }
+        action: { resolver: matchmaker }
+      - match: { type: always }
+        action: { pool: lobby }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(cfg.resolvers.len(), 1);
+        assert_eq!(cfg.resolvers[0].kind, ResolverKind::Http);
+        assert_eq!(cfg.resolvers[0].timeout.as_millis(), 25);
+        assert_eq!(cfg.resolvers[0].on_error, OnError::FallbackRoute);
+        assert_eq!(
+            cfg.listeners[0].routes[0].action,
+            Action::Resolver("matchmaker".into())
+        );
+        // a resolver route forces a full peek so the resolver can see the bytes
+        assert_eq!(cfg.listeners[0].peek_len(), PEEK_MAX);
+    }
+
+    #[test]
+    fn rejects_bad_resolver_and_actions() {
+        for bad in [
+            // route references an undefined resolver
+            "resolvers: []\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    routes: [{ match: { type: always }, action: { resolver: nope } }]",
+            // action with both pool and resolver
+            "resolvers:\n  - { name: r, endpoint: \"http://x\" }\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    routes: [{ match: { type: always }, action: { pool: p, resolver: r } }]",
+            // action with neither
+            "listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    routes: [{ match: { type: always }, action: {} }]",
+            // unknown transport
+            "resolvers:\n  - { name: r, type: smoke, endpoint: \"http://x\" }\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p",
+            // empty endpoint
+            "resolvers:\n  - { name: r, endpoint: \"\" }\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p",
+        ] {
+            let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n{bad}\n");
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]
