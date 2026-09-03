@@ -343,6 +343,11 @@ struct RawResolver {
     on_error: OnError,
     #[serde(default)]
     cache: Option<RawCache>,
+    /// PROXY protocol header to prepend when this resolver returns a `target`
+    /// (a pool-less connect, so there is no pool setting to read). A
+    /// resolver-chosen *pool* uses that pool's own `proxy_protocol`.
+    #[serde(default)]
+    proxy_protocol: ProxyProtocol,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1039,6 +1044,9 @@ pub struct ResolverConfig {
     pub on_error: OnError,
     /// `Some` if `cache:` is set with a non-empty `key`.
     pub cache: Option<CacheConfig>,
+    /// PROXY protocol header for a `target` result (pool-less connect). `None`
+    /// for a resolver-chosen pool, which carries its own `proxy_protocol`.
+    pub proxy_protocol: ProxyProtocol,
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,6 +1418,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             timeout: Duration::from_millis(r.timeout_ms),
             on_error: r.on_error,
             cache,
+            proxy_protocol: r.proxy_protocol,
         });
     }
 
@@ -1748,6 +1757,42 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 "pool {}: proxy_protocol {} is used by a UDP listener (use v2-udp)",
                 p.name,
                 p.proxy_protocol.label()
+            )));
+        }
+    }
+
+    // Same transport check for a resolver's `target` PROXY protocol form:
+    // v1/v2 are TCP-only, v2-udp is UDP-only. A resolver reached from listeners
+    // of both transports (or the wrong one) is rejected.
+    for r in &resolvers {
+        if r.proxy_protocol == ProxyProtocol::None {
+            continue;
+        }
+        let (mut on_tcp, mut on_udp) = (false, false);
+        for l in &listeners {
+            let uses = l
+                .routes
+                .iter()
+                .any(|rt| matches!(&rt.action, Action::Resolver(n) if n == &r.name));
+            if uses {
+                match l.protocol {
+                    Protocol::Tcp => on_tcp = true,
+                    Protocol::Udp => on_udp = true,
+                }
+            }
+        }
+        let want_udp = r.proxy_protocol == ProxyProtocol::V2Udp;
+        if want_udp && on_tcp {
+            return Err(Invalid(format!(
+                "resolver {}: proxy_protocol v2-udp is used by a TCP listener",
+                r.name
+            )));
+        }
+        if !want_udp && on_udp {
+            return Err(Invalid(format!(
+                "resolver {}: proxy_protocol {} is used by a UDP listener (use v2-udp)",
+                r.name,
+                r.proxy_protocol.label()
             )));
         }
     }
@@ -3118,6 +3163,66 @@ listeners:
         );
         // a resolver route forces a full peek so the resolver can see the bytes
         assert_eq!(cfg.listeners[0].peek_len(), PEEK_MAX);
+        // default: no PROXY header for a target
+        assert_eq!(cfg.resolvers[0].proxy_protocol, ProxyProtocol::None);
+    }
+
+    #[test]
+    fn parses_resolver_target_proxy_protocol() {
+        let yaml = r#"
+pools: [{ name: p, targets: ["127.0.0.1:1"] }]
+resolvers:
+  - name: mm
+    endpoint: "http://x"
+    proxy_protocol: v2
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - { match: { type: always }, action: { resolver: mm } }
+      - { match: { type: always }, action: { pool: p } }
+"#;
+        assert_eq!(
+            parse_str(yaml).unwrap().resolvers[0].proxy_protocol,
+            ProxyProtocol::V2
+        );
+    }
+
+    #[test]
+    fn rejects_v2_udp_resolver_on_a_tcp_listener() {
+        let yaml = r#"
+pools: [{ name: p, targets: ["127.0.0.1:1"] }]
+resolvers:
+  - name: mm
+    endpoint: "http://x"
+    proxy_protocol: v2-udp
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - { match: { type: always }, action: { resolver: mm } }
+      - { match: { type: always }, action: { pool: p } }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_tcp_proxy_protocol_resolver_on_a_udp_listener() {
+        let yaml = r#"
+pools: [{ name: p, targets: ["127.0.0.1:1"] }]
+resolvers:
+  - name: mm
+    endpoint: "http://x"
+    proxy_protocol: v2
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    routes:
+      - { match: { type: always }, action: { resolver: mm } }
+      - { match: { type: always }, action: { pool: p } }
+"#;
+        assert!(parse_str(yaml).is_err());
     }
 
     #[test]

@@ -477,12 +477,15 @@ async fn open_session(
     // guard: no health check, no cap.
     let skey = sticky_key(cfg.affinity, client, dst);
     let (backend, guard, idle_ms, proxy_protocol, pool_label) = match routed {
-        Routed::Target(addr) => (
+        Routed::Target {
+            addr,
+            proxy_protocol,
+        } => (
             addr,
             None,
             crate::proxy::TARGET_IDLE_TIMEOUT.as_millis() as u64,
-            gsp_config::ProxyProtocol::None,
-            String::new(),
+            proxy_protocol,
+            "(resolver target)".to_string(),
         ),
         Routed::Pool(name) => {
             let pool = snap.pool(&name).ok_or("no_route")?;

@@ -100,7 +100,8 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   header to the backend right after connect, before the pump; failure ⇒ passive
   unhealthy + error. `gsp_proxy_protocol_headers_total{pool,version}`. `listener.rs`
   passes `local`. Live across reload (pool rebuild). `target` connections
-  (resolver) have no pool ⇒ no header.
+  (resolver) read the form from `resolvers[].proxy_protocol` instead of a pool
+  (pre-phase-8 cleanup — see below).
 - **Phase 6 slices 3–4 done — phase 6 complete**: TPROXY transparent mode, TCP
   and UDP. `gsp-config` `listeners[].transparent: bool` (default false) →
   `ListenerConfig::transparent`; `validate()` rejects `transparent` + `prefix`
@@ -129,9 +130,11 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   (`V2` → STREAM byte `0x11`, `V2Udp` → DGRAM byte `0x12`); the `stream` param is
   gone. `validate()` cross-checks each non-`none` pool against the transports of
   the listeners that statically route to it (via `Action::Pool`): v1/v2 reject a
-  UDP listener, v2-udp rejects a TCP listener, both-transports rejects. Resolver
-  `target` / resolver-chosen pools are not checked (runtime falls back to no
-  header on a mismatch — TCP path guards on `V1|V2`, UDP path on `V2Udp`).
+  UDP listener, v2-udp rejects a TCP listener, both-transports rejects.
+  Resolver-chosen pools are not checked (target pool unknown until runtime —
+  runtime falls back to no header: TCP path guards on `V1|V2`, UDP on `V2Udp`).
+  (A resolver's own `proxy_protocol` for `target` results *is* transport-checked
+  — pre-phase-8 cleanup.)
   `listener_udp::open_session` threads `pool.proxy_protocol` + the pool name out
   of the route match and, for `V2Udp`, prepends `header(V2Udp, client, local)`
   to the first datagram only (one `Cow::Owned` alloc; later datagrams untouched).
@@ -288,8 +291,24 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   guard itself stays on the `Session`); `Session.health` / `spawn_reply`'s
   `health` param carry it. Resolver `target` sessions have no backend ⇒ no-op.
   Test: `udp_forward::icmp_port_unreachable_marks_the_backend_unhealthy`.
-- **Next**: phase 8 (discovery & scaling). `proxy_protocol` on a resolver
-  `target` (pool-less TCP) is still unaddressed; per-source cap LRU eviction and
+- **Pre-phase-8 cleanup (done)**: client-IP preservation on resolver `target`
+  connections. New `resolvers[].proxy_protocol: none | v1 | v2 | v2-udp`
+  (`RawResolver` → `ResolverConfig::proxy_protocol`); `validate()` cross-checks
+  it against the transport of the listeners with a `resolver` route to it, same
+  rule as pools (v1/v2 ⇒ TCP-only, v2-udp ⇒ UDP-only). `Routed::Target` went
+  `Target(SocketAddr)` → `Target { addr, proxy_protocol }`; `Resolver` trait
+  gained `fn proxy_protocol(&self) -> ProxyProtocol` (default `None`, forwarded
+  by `CachedResolver`, set from config by `HttpResolver` / `GrpcResolver`).
+  `resolve_route` stamps `resolver.proxy_protocol()` onto the `Target`.
+  `proxy::handle_tcp_target` now takes `client_addr` / `client_local` /
+  `proxy_protocol` and writes a v1/v2 header before the pump, exactly like
+  `handle_tcp`; `listener_udp::open_session` uses the carried form for its
+  existing v2-udp first-datagram path. Metric label
+  `gsp_proxy_protocol_headers_total{pool="(resolver target)",version}`. Push-hint
+  targets and direct-config targets carry `ProxyProtocol::None` ⇒ no header (as
+  before). Tests: `resolver::resolver_target_gets_a_proxy_protocol_header`
+  (e2e), gsp-config parse + two transport-mismatch rejections.
+- **Next**: phase 8 (discovery & scaling). Per-source cap LRU eviction and
   `GET /sessions` are polish items.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
@@ -369,7 +388,8 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   the real `(client, proxy-local)` addresses; `v2-udp` prepends the v2 binary
   header to the first datagram of each UDP session (later datagrams untouched).
   `none` by default; the form is validated against the listener transport.
-  Resolver `target` connections get no header (no pool). Alternatively, a TCP or
+  Resolver `target` connections take the form from `resolvers[].proxy_protocol`.
+  Alternatively, a TCP or
   UDP listener with `transparent: true` (Linux TPROXY) makes every upstream
   connection / datagram source from the real client `ip:port`, and (UDP) replies
   come from the original destination address — no protocol change, needs
@@ -659,8 +679,9 @@ one extra `write_all` to the backend per new TCP connection, before the pump.
 `v2-udp`: on the **first** datagram of a UDP session only, one `Cow::Owned`
 (header + payload, ≤ 28 B + datagram) and it replaces the plain `send(first)` —
 no extra syscall. Steady-state datagrams are byte-for-byte unchanged. Only when
-the pool opts in; `none` pools and resolver `target` connections pay nothing. No
-lock, no task, nothing per byte.
+the pool (or, for a resolver `target`, `resolvers[].proxy_protocol`) opts in;
+`none` pays nothing. A `target` header costs the same as a pooled one — one
+`Vec` + one `write_all` before the pump. No lock, no task, nothing per byte.
 
 **Filter chain — CIDR allow/deny** (`allow` / `deny` on a listener): per new TCP
 connection / new UDP session only, a bounded bit-walk of the `deny` radix trie
@@ -1121,7 +1142,9 @@ client_local, pool)` writes the header to the backend immediately after
 `connect_backend`, before `pump`; a write error is a passive-unhealthy + `Err`.
 `listener.rs` passes `local` (already computed for routing).
 `gsp_proxy_protocol_headers_total{pool,version}`. Live across reload.
-Resolver `target` connections have no pool ⇒ never get a header (open item).
+Resolver `target` connections read the header form from
+`resolvers[].proxy_protocol` (pre-phase-8 cleanup); a push-hint / direct-config
+target is `ProxyProtocol::None`.
 
 ### Slice 3 — TCP transparent mode (done)
 
@@ -1192,7 +1215,7 @@ first datagram only (`Cow::Owned`); the plain `send(first)` becomes
 | `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
 | `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers(&Config)`, a local base64 encoder. |
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
-| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool; writes the pool's PROXY protocol header before the pump) / `handle_tcp_target` (resolver `target`, no guard, no header) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
+| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool; writes the pool's PROXY protocol header before the pump) / `handle_tcp_target` (resolver `target`, no guard; writes the resolver's `proxy_protocol` header) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
 | `crates/gsp-core/src/proxy_protocol.rs` | `header(mode, src, dst)` — PROXY protocol v1 (text) / v2 (binary, STREAM or DGRAM) encoder. Write-only; parsing is the backend's job. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` builds the `ListenerManager` (`start_all`) + spawns the health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `reload_requested`; `shutdown_with_grace` = `listeners.stop_all` + health await + `wait_idle` + `abort_all`. `RuntimeHandle`: `store` / `ready` / `route_hints` / `backend_overlay` / `request_reload` / `reconcile_listeners` / `active_conns` / `set_draining` / `is_draining`. |

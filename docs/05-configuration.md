@@ -48,11 +48,16 @@
 >
 > **External resolver** (phase 4, slices 1–4): a top-level `resolvers:` list of
 > `{ name, type: http|grpc, endpoint, timeout_ms, on_error: reject|fallback_route|stale_ok,
-> cache? }` and a route `action: { resolver: <name> }` (exactly one of `pool` /
-> `resolver` per action). The proxy `POST`s `{listener, src, dst, sni?,
-> first_bytes_b64, routing_key?}` and expects `{pool?, target?, sticky_key?,
-> ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects straight to
-> that instance (no pool / health / cap); `sticky_key` is not yet used.
+> proxy_protocol?, cache? }` and a route `action: { resolver: <name> }` (exactly
+> one of `pool` / `resolver` per action). The proxy `POST`s `{listener, src, dst,
+> sni?, first_bytes_b64, routing_key?}` and expects `{pool?, target?,
+> sticky_key?, ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
+> straight to that instance (no pool / health / cap); `sticky_key` is not yet
+> used. `proxy_protocol: none | v1 | v2 | v2-udp` (default `none`) is the PROXY
+> protocol header to prepend to a `target` connection — there is no pool to read
+> it from — so the backend still sees the real client IP; a resolver-chosen
+> *pool* uses that pool's own `proxy_protocol`. Same transport rule as pools:
+> v1/v2 need TCP listeners on that resolver's routes, v2-udp needs UDP.
 > `fallback_route` continues the route list on failure; `reject` drops;
 > `stale_ok` serves the last (expired) cached answer if there is one, else
 > drops. Optional `cache: { key: [<part>, ...], positive_ttl_sec,
@@ -218,6 +223,7 @@ resolvers:
     type: grpc                 # grpc | http
     endpoint: "https://matchmaker.internal:8443"
     timeout_ms: 40
+    proxy_protocol: "none"     # none | v1 | v2 | v2-udp — header for a `target` result
     cache:
       key: ["first_bytes:0:16"]     # e.g. a session-token prefix
       positive_ttl_sec: 30
@@ -304,7 +310,8 @@ listeners:
 - Every `action.pool` / `action.resolver` must exist.
 - Every listener needs at least one route; the last route should be `always`
   (otherwise a "no default" warning).
-- `proxy_protocol: v2-udp` only together with `protocol: udp`.
+- `proxy_protocol: v2-udp` only together with `protocol: udp` (for a pool, and
+  for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
 - `transparent: true` (TCP or UDP) may not be combined with `prefix`.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with

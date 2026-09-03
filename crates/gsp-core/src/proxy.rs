@@ -83,14 +83,43 @@ pub async fn handle_tcp(
 
 /// Like [`handle_tcp`], but to a resolver-supplied fixed instance — no pool, so
 /// no health check, no per-backend cap, no [`BackendGuard`].
+///
+/// `proxy_protocol` comes from the choosing resolver's `proxy_protocol:` (there
+/// is no pool to read it from); a v1/v2 header is written before any client
+/// bytes, exactly as for a pooled connection. `v2-udp` / `none` write nothing.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_tcp_target(
     client: TcpStream,
+    client_addr: SocketAddr,
+    client_local: SocketAddr,
     target: SocketAddr,
     connect_timeout: Duration,
     idle_timeout: Duration,
     transparent_source: Option<SocketAddr>,
+    proxy_protocol: gsp_config::ProxyProtocol,
 ) -> anyhow::Result<ConnOutcome> {
-    let backend = connect_backend(target, connect_timeout, transparent_source).await?;
+    let mut backend = connect_backend(target, connect_timeout, transparent_source).await?;
+
+    let hdr = match proxy_protocol {
+        gsp_config::ProxyProtocol::V1 | gsp_config::ProxyProtocol::V2 => {
+            crate::proxy_protocol::header(proxy_protocol, client_addr, client_local)
+        }
+        _ => Vec::new(),
+    };
+    if !hdr.is_empty() {
+        if let Err(e) = backend.write_all(&hdr).await {
+            return Err(anyhow::anyhow!(
+                "write PROXY header to target {target} failed: {e}"
+            ));
+        }
+        metrics::counter!(
+            m::PROXY_PROTOCOL_HEADERS,
+            "pool" => "(resolver target)",
+            "version" => proxy_protocol.label(),
+        )
+        .increment(1);
+    }
+
     Ok(pump(client, backend, target, idle_timeout).await)
 }
 

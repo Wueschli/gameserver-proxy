@@ -29,7 +29,9 @@
   routing for a connection / UDP session
 - `gsp_proxy_protocol_headers_total{pool,version}` – `version` = `v1|v2|v2-udp`; a
   PROXY protocol header was prepended to an upstream connection (TCP) or the first
-  datagram of a session (UDP `v2-udp`)
+  datagram of a session (UDP `v2-udp`). `pool="(resolver target)"` for a pool-less
+  resolver `target` connection (the header form comes from the resolver's
+  `proxy_protocol:`)
 
 ### Security / filter chain
 - `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl` | `geo` |

@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use gsp_config::{Action, CacheConfig, CacheKeyPart, ListenerConfig, MatchContext, OnError};
+use gsp_config::{
+    Action, CacheConfig, CacheKeyPart, ListenerConfig, MatchContext, OnError, ProxyProtocol,
+};
 use lru::LruCache;
 
 use crate::metrics_defs as m;
@@ -64,6 +66,12 @@ pub enum ResolveError {
 pub trait Resolver: Send + Sync {
     fn name(&self) -> &str;
     fn on_error(&self) -> OnError;
+    /// PROXY protocol header to prepend when this resolver returns a `target`
+    /// (a pool-less connect). Defaults to none; the transport clients override
+    /// it from `ResolverConfig::proxy_protocol`.
+    fn proxy_protocol(&self) -> ProxyProtocol {
+        ProxyProtocol::None
+    }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError>;
 }
 
@@ -74,7 +82,13 @@ pub type Resolvers = HashMap<String, Arc<dyn Resolver>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Routed {
     Pool(String),
-    Target(SocketAddr),
+    /// A pool-less connect to a fixed instance. `proxy_protocol` is the header
+    /// form the choosing resolver configured (`ProxyProtocol::None` for a
+    /// push-hint or a direct-config target).
+    Target {
+        addr: SocketAddr,
+        proxy_protocol: ProxyProtocol,
+    },
 }
 
 /// Walk the listener's matching routes and return the route, or `None` to drop.
@@ -118,7 +132,10 @@ pub async fn resolve_route(
                         )
                         .increment(1);
                         return Some(match res.target {
-                            Some(addr) => Routed::Target(addr),
+                            Some(addr) => Routed::Target {
+                                addr,
+                                proxy_protocol: resolver.proxy_protocol(),
+                            },
                             None => Routed::Pool(res.pool.unwrap()),
                         });
                     }
@@ -229,6 +246,9 @@ impl Resolver for CachedResolver {
     }
     fn on_error(&self) -> OnError {
         self.inner.on_error()
+    }
+    fn proxy_protocol(&self) -> ProxyProtocol {
+        self.inner.proxy_protocol()
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let name = self.inner.name().to_string();
@@ -408,7 +428,10 @@ listeners:
     async fn resolver_target_result_is_used() {
         assert_eq!(
             run(Mode::Target("10.2.0.5:7777"), OnError::Reject).await,
-            Some(Routed::Target("10.2.0.5:7777".parse().unwrap()))
+            Some(Routed::Target {
+                addr: "10.2.0.5:7777".parse().unwrap(),
+                proxy_protocol: ProxyProtocol::None,
+            })
         );
     }
 
@@ -571,6 +594,97 @@ listeners:
         let mut m = [0u8; 1];
         c.read_exact(&mut m).await.unwrap();
         assert_eq!(m[0], b'T', "connected straight to the resolver target");
+
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    /// A resolver with `proxy_protocol: v1` gets a PROXY protocol header written
+    /// to its `target` connection before any client bytes — the pool-less path
+    /// now carries the client IP too.
+    #[tokio::test]
+    async fn resolver_target_gets_a_proxy_protocol_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        struct PpStub(std::net::SocketAddr);
+        #[async_trait]
+        impl Resolver for PpStub {
+            fn name(&self) -> &str {
+                "pp"
+            }
+            fn on_error(&self) -> OnError {
+                OnError::Reject
+            }
+            fn proxy_protocol(&self) -> ProxyProtocol {
+                ProxyProtocol::V1
+            }
+            async fn resolve(&self, _r: ResolveRequest) -> Result<Resolution, ResolveError> {
+                Ok(Resolution {
+                    target: Some(self.0),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+        let backend = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 128];
+                let n = s.read(&mut buf).await.unwrap();
+                buf.truncate(n);
+                let _ = tx.send(buf);
+            });
+            addr
+        };
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let yaml = format!(
+            r#"
+pools:
+  - {{ name: fb, targets: ["127.0.0.1:1"] }}
+resolvers:
+  - {{ name: pp, endpoint: "http://unused" }}
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - {{ match: {{ type: always }}, action: {{ resolver: pp }} }}
+      - {{ match: {{ type: always }}, action: {{ pool: fb }} }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let mut resolvers = Resolvers::new();
+        resolvers.insert(
+            "pp".to_string(),
+            Arc::new(PpStub(backend)) as Arc<dyn Resolver>,
+        );
+        let runtime =
+            crate::Runtime::start(crate::Snapshot::from_config(&cfg), Arc::new(resolvers), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mut c = TcpStream::connect(proxy).await.unwrap();
+        let client_local = c.local_addr().unwrap();
+        c.write_all(b"hello").await.unwrap();
+
+        let got = tokio::time::timeout(std::time::Duration::from_millis(500), rx)
+            .await
+            .expect("backend never received bytes")
+            .unwrap();
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.starts_with("PROXY TCP4 "), "got {text:?}");
+        assert!(
+            text.contains(&format!(" {} ", client_local.port())),
+            "header should carry the real client port; got {text:?}"
+        );
+        assert!(text.contains("\r\nhello"), "client bytes follow the header");
 
         runtime
             .shutdown_with_grace(std::time::Duration::from_millis(100))

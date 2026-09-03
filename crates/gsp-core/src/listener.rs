@@ -216,7 +216,7 @@ pub async fn run_tcp_listener(
 
                     // For a pool route, resolve it against the live snapshot now.
                     let pool = match &routed {
-                        Routed::Target(_) => None,
+                        Routed::Target { .. } => None,
                         Routed::Pool(name) => match snap.pool(name) {
                             Some(p) => Some(p),
                             None => {
@@ -241,12 +241,21 @@ pub async fn run_tcp_listener(
                     // upstream source so the backend sees the client IP.
                     let tsrc = cfg.transparent.then_some(peer);
                     let result = match (&routed, &pool) {
-                        (Routed::Target(addr), _) => crate::proxy::handle_tcp_target(
+                        (
+                            Routed::Target {
+                                addr,
+                                proxy_protocol,
+                            },
+                            _,
+                        ) => crate::proxy::handle_tcp_target(
                             stream,
+                            peer,
+                            local,
                             *addr,
                             crate::proxy::TARGET_CONNECT_TIMEOUT,
                             crate::proxy::TARGET_IDLE_TIMEOUT,
                             tsrc,
+                            *proxy_protocol,
                         )
                         .await,
                         (_, Some(pool)) => {

@@ -72,6 +72,10 @@ resolvers:
     endpoint: "http://127.0.0.1:8099/resolve"
     timeout_ms: 40
     on_error: stale_ok             # reject | fallback_route | stale_ok
+    proxy_protocol: none           # none | v1 | v2 | v2-udp — header for a `target`
+                                   #   result (pool-less connect); a resolver-chosen
+                                   #   pool uses that pool's own proxy_protocol.
+                                   #   v1/v2 need a TCP listener, v2-udp a UDP one.
     cache:                         # optional; omit for no caching
       key: ["src_ip", "first_bytes:0:16"]   # src_ip | src_ip_port | sni | routing_key | first_bytes:a:b
       positive_ttl_sec: 30         # a resolver response `ttl_sec` overrides this

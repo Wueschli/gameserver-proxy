@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use gsp_config::{Config, OnError, ResolverConfig, ResolverKind};
+use gsp_config::{Config, OnError, ProxyProtocol, ResolverConfig, ResolverKind};
 use gsp_core::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +65,7 @@ pub struct HttpResolver {
     name: String,
     endpoint: String,
     on_error: OnError,
+    proxy_protocol: ProxyProtocol,
     client: reqwest::Client,
 }
 
@@ -78,6 +79,7 @@ impl HttpResolver {
             name: cfg.name.clone(),
             endpoint: cfg.endpoint.clone(),
             on_error: cfg.on_error,
+            proxy_protocol: cfg.proxy_protocol,
             client,
         })
     }
@@ -90,6 +92,9 @@ impl Resolver for HttpResolver {
     }
     fn on_error(&self) -> OnError {
         self.on_error
+    }
+    fn proxy_protocol(&self) -> ProxyProtocol {
+        self.proxy_protocol
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let body = WireRequest {
@@ -143,6 +148,7 @@ impl Resolver for HttpResolver {
 pub struct GrpcResolver {
     name: String,
     on_error: OnError,
+    proxy_protocol: ProxyProtocol,
     channel: tonic::transport::Channel,
 }
 
@@ -155,6 +161,7 @@ impl GrpcResolver {
         Ok(Self {
             name: cfg.name.clone(),
             on_error: cfg.on_error,
+            proxy_protocol: cfg.proxy_protocol,
             channel,
         })
     }
@@ -171,6 +178,9 @@ impl Resolver for GrpcResolver {
     }
     fn on_error(&self) -> OnError {
         self.on_error
+    }
+    fn proxy_protocol(&self) -> ProxyProtocol {
+        self.proxy_protocol
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let mut client = pb::resolver_client::ResolverClient::new(self.channel.clone());
@@ -286,6 +296,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(2),
             on_error: gsp_config::OnError::Reject,
             cache: None,
+            proxy_protocol: gsp_config::ProxyProtocol::None,
         };
         let r = GrpcResolver::new(&rc).unwrap();
         assert_eq!(r.name(), "mm");
