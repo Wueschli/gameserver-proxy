@@ -43,14 +43,10 @@ Requires a stable Rust toolchain (`rustup` — the repo pins `stable` via
 `rust-toolchain.toml`).
 
 ```sh
-cargo build
-cargo test --all
+make check                 # fmt check + clippy (-D warnings) + tests
+make run                   # run against config.example.yaml
 
-# validate a config
-cargo run -p gsp -- --config config.example.yaml --check
-
-# run it (Ctrl-C / SIGTERM to stop)
-cargo run -p gsp -- --config config.example.yaml
+cargo run -p gsp -- --config config.example.yaml --check   # validate only
 ```
 
 Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
@@ -63,3 +59,14 @@ Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
 | `crates/gsp-config` | YAML config types, parsing, validation (the reduced v0 schema) |
 | `crates/gsp-core` | data plane: config snapshot, backend pools, TCP listener, byte pump |
 | `crates/gsp` | binary: CLI, logging, admin API, process lifecycle |
+
+## Contributing / continuing the work
+
+- [`CLAUDE.md`](CLAUDE.md) — working agreement, guardrails, "when you touch X also
+  touch Y" (written for AI agents; doubles as the contributor reference).
+- [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, deferred items, and
+  the concrete plan for the next slice (phase 2, UDP).
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
