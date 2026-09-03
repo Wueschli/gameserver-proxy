@@ -45,15 +45,28 @@ pub async fn run_tcp_listener(
                 };
 
                 let snap = snapshot.load_full();
-                let Some(pool) = snap.pool(&cfg.pool) else {
+                let local = stream.local_addr().unwrap_or(cfg.bind);
+                let Some(pool_name) = cfg.route_for(peer, local) else {
+                    metrics::counter!(
+                        m::LISTENER_CONNECTIONS,
+                        "listener" => cfg.name.clone(),
+                        "result" => "no_route",
+                    ).increment(1);
+                    tracing::debug!(
+                        listener = %cfg.name, peer = %peer,
+                        "no route matched; dropping connection"
+                    );
+                    continue;
+                };
+                let Some(pool) = snap.pool(pool_name) else {
                     metrics::counter!(
                         m::LISTENER_CONNECTIONS,
                         "listener" => cfg.name.clone(),
                         "result" => "no_route",
                     ).increment(1);
                     tracing::error!(
-                        listener = %cfg.name, pool = %cfg.pool,
-                        "pool missing from snapshot; dropping connection"
+                        listener = %cfg.name, pool = %pool_name,
+                        "routed pool missing from snapshot; dropping connection"
                     );
                     continue;
                 };

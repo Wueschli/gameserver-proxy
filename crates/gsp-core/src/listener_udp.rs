@@ -51,6 +51,8 @@ struct Session {
     upstream: Arc<UdpSocket>,
     last_ms: Arc<AtomicU64>,
     backend: SocketAddr,
+    /// Idle-eviction threshold, read once from the routed pool at creation.
+    idle_ms: u64,
     _guard: BackendGuard,
     reply_task: JoinHandle<()>,
 }
@@ -89,14 +91,6 @@ pub async fn run_udp_listener(
         "udp listener started"
     );
 
-    // The idle timeout comes from the pool config; it is read once at startup.
-    // A reload that changes it applies to sessions created afterwards.
-    let idle_ms = snapshot
-        .load()
-        .pool(&cfg.pool)
-        .map(|p| p.idle_timeout.as_millis() as u64)
-        .unwrap_or(90_000);
-
     let mut sessions: HashMap<SocketAddr, Session> = HashMap::new();
     let mut sticky: HashMap<StickyKey, SocketAddr> = HashMap::new();
     let mut buf = vec![0u8; MAX_DATAGRAM];
@@ -115,7 +109,7 @@ pub async fn run_udp_listener(
                 let now = now_ms();
                 let before = sessions.len();
                 sessions.retain(|client, s| {
-                    let alive = now.saturating_sub(s.last_ms.load(Ordering::Relaxed)) < idle_ms;
+                    let alive = now.saturating_sub(s.last_ms.load(Ordering::Relaxed)) < s.idle_ms;
                     if !alive {
                         tracing::debug!(
                             listener = %cfg.name, %client, backend = %s.backend,
@@ -189,7 +183,10 @@ async fn open_session(
     first: &[u8],
 ) -> Result<Session, &'static str> {
     let snap = snapshot.load_full();
-    let pool = snap.pool(&cfg.pool).ok_or("no_route")?;
+    let local = down.local_addr().unwrap_or(cfg.bind);
+    let pool_name = cfg.route_for(client, local).ok_or("no_route")?;
+    let pool = snap.pool(pool_name).ok_or("no_route")?;
+    let idle_ms = pool.idle_timeout.as_millis() as u64;
 
     let skey = sticky_key(cfg.affinity, client);
     let guard = match skey
@@ -243,6 +240,7 @@ async fn open_session(
         upstream,
         last_ms,
         backend,
+        idle_ms,
         _guard: guard,
         reply_task,
     })

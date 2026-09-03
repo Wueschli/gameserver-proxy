@@ -131,3 +131,85 @@ listeners:
     );
     runtime.shutdown().await;
 }
+
+/// Spawn a backend that, on each connection, writes a single identifying byte.
+async fn marker_backend(mark: u8) -> std::net::SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let _ = s.write_all(&[mark]).await;
+                let mut buf = [0u8; 64];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+async fn free_port() -> std::net::SocketAddr {
+    TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn first_matching_route_selects_the_pool() {
+    let a = marker_backend(b'A').await;
+    let b = marker_backend(b'B').await;
+
+    // Case 1: the client's /32 matches route 1 -> pool a.
+    let p1 = free_port().await;
+    // Case 2: route 1's CIDR excludes the loopback client -> falls through to b.
+    let p2 = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: a
+    targets: ["{a}"]
+  - name: b
+    targets: ["{b}"]
+listeners:
+  - name: hit
+    bind: "{p1}"
+    routes:
+      - match: {{ type: client_cidr, cidrs: ["127.0.0.1/32"] }}
+        action: {{ pool: a }}
+      - match: {{ type: always }}
+        action: {{ pool: b }}
+  - name: miss
+    bind: "{p2}"
+    routes:
+      - match: {{ type: client_cidr, cidrs: ["10.0.0.0/8"] }}
+        action: {{ pool: a }}
+      - match: {{ type: always }}
+        action: {{ pool: b }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut c1 = TcpStream::connect(p1).await.unwrap();
+    let mut m1 = [0u8; 1];
+    c1.read_exact(&mut m1).await.unwrap();
+    assert_eq!(m1[0], b'A', "loopback /32 route should reach pool a");
+
+    let mut c2 = TcpStream::connect(p2).await.unwrap();
+    let mut m2 = [0u8; 1];
+    c2.read_exact(&mut m2).await.unwrap();
+    assert_eq!(
+        m2[0], b'B',
+        "non-matching CIDR should fall through to pool b"
+    );
+
+    runtime.shutdown().await;
+}

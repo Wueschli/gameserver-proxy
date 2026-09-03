@@ -36,9 +36,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   amplification guard (no reply without an established session).
 - **Result**: covers the majority of real-time game servers.
 
-## Phase 3 – Routing intelligence (week 8–10)
-- Route rule list with priorities.
-- Matchers: `always`, `port`, `client-cidr`, `first-bytes` (prefix/regex/length).
+## Phase 3 – Routing intelligence (week 8–10) 🔜
+- ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
+  bare `pool:` normalised to one `always` route).
+- ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
+- ⬜ `first-bytes` matcher (prefix/regex/length).
 - `dst` matcher + prefix listener (one socket, `IP_PKTINFO`/`getsockname`) for games
   with no protocol hint (subdomain → its own destination IP). Optional push resolver
   (`/route-hint`).

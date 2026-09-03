@@ -7,7 +7,8 @@
 //! this crate incrementally.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::time::Duration;
 
@@ -162,10 +163,48 @@ struct RawListener {
     bind: String,
     #[serde(default)]
     protocol: Protocol,
-    pool: String,
+    /// Shorthand for a single `always` route. Mutually exclusive with `routes`.
+    #[serde(default)]
+    pool: Option<String>,
+    /// Priority-ordered route rules; the first matching rule wins.
+    #[serde(default)]
+    routes: Vec<RawRoute>,
     /// UDP only: per-client → backend stickiness across session re-creation.
     #[serde(default)]
     affinity: Option<RawAffinity>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoute {
+    r#match: RawMatch,
+    action: RawAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMatch {
+    #[serde(rename = "type")]
+    kind: String,
+    /// `client_cidr` only: source-IP prefixes.
+    #[serde(default)]
+    cidrs: Option<Vec<String>>,
+    /// `port` only: destination ports (bare int `30001` or `"lo-hi"` range).
+    #[serde(default)]
+    ports: Option<Vec<RawPort>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawPort {
+    Single(u32),
+    Range(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAction {
+    pool: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +257,88 @@ pub enum HealthCheckKind {
 }
 
 // ---------------------------------------------------------------------------
+// Routing.
+// ---------------------------------------------------------------------------
+
+/// An IPv4 or IPv6 CIDR block, parsed from `addr/prefix`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cidr {
+    base: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    /// Parse `"10.0.0.0/8"` / `"2001:db8::/32"`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let (addr, prefix) = s
+            .split_once('/')
+            .ok_or_else(|| format!("CIDR {s:?} is missing a '/prefix'"))?;
+        let base: IpAddr = addr
+            .parse()
+            .map_err(|_| format!("CIDR {s:?} has an invalid IP address"))?;
+        let prefix: u8 = prefix
+            .parse()
+            .map_err(|_| format!("CIDR {s:?} has an invalid prefix length"))?;
+        let max = if base.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err(format!("CIDR {s:?} prefix /{prefix} exceeds /{max}"));
+        }
+        Ok(Self { base, prefix })
+    }
+
+    /// Does `ip` fall within this block? (No v4-in-v6 normalisation.)
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.base, ip) {
+            (IpAddr::V4(b), IpAddr::V4(x)) => bits_match(&b.octets(), &x.octets(), self.prefix),
+            (IpAddr::V6(b), IpAddr::V6(x)) => bits_match(&b.octets(), &x.octets(), self.prefix),
+            _ => false,
+        }
+    }
+}
+
+fn bits_match(a: &[u8], b: &[u8], prefix: u8) -> bool {
+    let full = (prefix / 8) as usize;
+    if a[..full] != b[..full] {
+        return false;
+    }
+    let rem = prefix % 8;
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem);
+    (a[full] & mask) == (b[full] & mask)
+}
+
+/// A single route's match condition. Address-based only for now; `first_bytes`,
+/// `sni`, sniffer and `external` matchers arrive later in phase 3–4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Matcher {
+    /// Catch-all.
+    Always,
+    /// Source IP within any of these prefixes.
+    ClientCidr(Vec<Cidr>),
+    /// Destination port (from the accepting socket) within any of these ranges.
+    DstPort(Vec<RangeInclusive<u16>>),
+}
+
+impl Matcher {
+    pub fn matches(&self, src: SocketAddr, local: SocketAddr) -> bool {
+        match self {
+            Matcher::Always => true,
+            Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(src.ip())),
+            Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&local.port())),
+        }
+    }
+}
+
+/// One rule in a listener's ordered route list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub matcher: Matcher,
+    pub pool: String,
+}
+
+// ---------------------------------------------------------------------------
 // Validated types: parsed, resolved, ready for the runtime to consume.
 // ---------------------------------------------------------------------------
 
@@ -258,9 +379,22 @@ pub struct ListenerConfig {
     pub name: String,
     pub bind: SocketAddr,
     pub protocol: Protocol,
-    pub pool: String,
+    /// Priority-ordered; the first matching route's pool wins. A listener with a
+    /// bare `pool:` is normalised to one `always` route here.
+    pub routes: Vec<Route>,
     /// `Some` on UDP listeners (stickiness key); `None` on TCP.
     pub affinity: Option<HashOn>,
+}
+
+impl ListenerConfig {
+    /// The pool name for a connection/session from `src` accepted on `local`,
+    /// or `None` when no route matches.
+    pub fn route_for(&self, src: SocketAddr, local: SocketAddr) -> Option<&str> {
+        self.routes
+            .iter()
+            .find(|r| r.matcher.matches(src, local))
+            .map(|r| r.pool.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,12 +563,43 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
-        if !pool_names.contains(&l.pool) {
-            return Err(Invalid(format!(
-                "listener {}: unknown pool {}",
-                l.name, l.pool
-            )));
-        }
+        let routes = if !l.routes.is_empty() {
+            if l.pool.is_some() {
+                return Err(Invalid(format!(
+                    "listener {}: set either `pool` or `routes`, not both",
+                    l.name
+                )));
+            }
+            let mut rs = Vec::with_capacity(l.routes.len());
+            for (i, r) in l.routes.iter().enumerate() {
+                let matcher = parse_matcher(&l.name, i, &r.r#match)?;
+                if !pool_names.contains(&r.action.pool) {
+                    return Err(Invalid(format!(
+                        "listener {}: route {i}: unknown pool {}",
+                        l.name, r.action.pool
+                    )));
+                }
+                rs.push(Route {
+                    matcher,
+                    pool: r.action.pool.clone(),
+                });
+            }
+            rs
+        } else {
+            let pool = l.pool.clone().ok_or_else(|| {
+                Invalid(format!(
+                    "listener {}: needs a `pool` or a `routes` list",
+                    l.name
+                ))
+            })?;
+            if !pool_names.contains(&pool) {
+                return Err(Invalid(format!("listener {}: unknown pool {pool}", l.name)));
+            }
+            vec![Route {
+                matcher: Matcher::Always,
+                pool,
+            }]
+        };
         let affinity = match (l.protocol, l.affinity) {
             (Protocol::Tcp, Some(_)) => {
                 return Err(Invalid(format!(
@@ -450,7 +615,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             name: l.name,
             bind,
             protocol: l.protocol,
-            pool: l.pool,
+            routes,
             affinity,
         });
     }
@@ -461,6 +626,97 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         pools,
         listeners,
     })
+}
+
+fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigError> {
+    use ConfigError::Invalid;
+    match m.kind.as_str() {
+        "always" => {
+            if m.cidrs.is_some() || m.ports.is_some() {
+                return Err(Invalid(format!(
+                    "listener {lname}: route {i}: match type `always` takes no fields"
+                )));
+            }
+            Ok(Matcher::Always)
+        }
+        "client_cidr" => {
+            if m.ports.is_some() {
+                return Err(Invalid(format!(
+                    "listener {lname}: route {i}: match type `client_cidr` takes `cidrs`, not `ports`"
+                )));
+            }
+            let raw = m.cidrs.as_ref().filter(|c| !c.is_empty()).ok_or_else(|| {
+                Invalid(format!(
+                    "listener {lname}: route {i}: match type `client_cidr` needs a non-empty `cidrs` list"
+                ))
+            })?;
+            let mut cidrs = Vec::with_capacity(raw.len());
+            for c in raw {
+                cidrs.push(
+                    Cidr::parse(c)
+                        .map_err(|e| Invalid(format!("listener {lname}: route {i}: {e}")))?,
+                );
+            }
+            Ok(Matcher::ClientCidr(cidrs))
+        }
+        "port" => {
+            if m.cidrs.is_some() {
+                return Err(Invalid(format!(
+                    "listener {lname}: route {i}: match type `port` takes `ports`, not `cidrs`"
+                )));
+            }
+            let raw = m.ports.as_ref().filter(|p| !p.is_empty()).ok_or_else(|| {
+                Invalid(format!(
+                    "listener {lname}: route {i}: match type `port` needs a non-empty `ports` list"
+                ))
+            })?;
+            let mut ranges = Vec::with_capacity(raw.len());
+            for p in raw {
+                ranges.push(parse_port_range(lname, i, p)?);
+            }
+            Ok(Matcher::DstPort(ranges))
+        }
+        other => Err(Invalid(format!(
+            "listener {lname}: route {i}: unknown match type {other:?} (always | client_cidr | port)"
+        ))),
+    }
+}
+
+fn parse_port_range(
+    lname: &str,
+    i: usize,
+    p: &RawPort,
+) -> Result<RangeInclusive<u16>, ConfigError> {
+    let bad = |s: String| ConfigError::Invalid(format!("listener {lname}: route {i}: {s}"));
+    match p {
+        RawPort::Single(n) => {
+            let n = u16::try_from(*n).map_err(|_| bad(format!("port {n} is out of range")))?;
+            if n == 0 {
+                return Err(bad("port 0 is not valid".into()));
+            }
+            Ok(n..=n)
+        }
+        RawPort::Range(s) => {
+            let (lo, hi) = s
+                .split_once('-')
+                .ok_or_else(|| bad(format!("port range {s:?} must be `lo-hi`")))?;
+            let lo: u16 = lo
+                .trim()
+                .parse()
+                .map_err(|_| bad(format!("port range {s:?} has an invalid lower bound")))?;
+            let hi: u16 = hi
+                .trim()
+                .parse()
+                .map_err(|_| bad(format!("port range {s:?} has an invalid upper bound")))?;
+            if lo == 0 || hi == 0 {
+                return Err(bad(format!("port range {s:?} includes port 0")));
+            }
+            if lo > hi {
+                return Err(bad(format!("port range {s:?} is reversed")));
+            }
+            Ok(lo..=hi)
+        }
+    }
 }
 
 /// Parse a hex string (optional ASCII whitespace between bytes) into bytes.
@@ -660,5 +916,133 @@ listeners:
     #[test]
     fn rejects_no_listeners() {
         assert!(parse_str("pools: []").is_err());
+    }
+
+    #[test]
+    fn bare_pool_becomes_one_always_route() {
+        let cfg = parse_str(MINIMAL).unwrap();
+        assert_eq!(cfg.listeners[0].routes.len(), 1);
+        assert_eq!(cfg.listeners[0].routes[0].matcher, Matcher::Always);
+        assert_eq!(cfg.listeners[0].routes[0].pool, "local");
+    }
+
+    #[test]
+    fn parses_route_list_and_matches_first() {
+        let yaml = r#"
+pools:
+  - name: staging
+    targets: ["127.0.0.1:1"]
+  - name: prod
+    targets: ["127.0.0.1:2"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - match: { type: client_cidr, cidrs: ["10.0.0.0/8", "192.168.1.0/24"] }
+        action: { pool: staging }
+      - match: { type: port, ports: [7777, "8000-8100"] }
+        action: { pool: prod }
+      - match: { type: always }
+        action: { pool: prod }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.routes.len(), 3);
+        let on: SocketAddr = "203.0.113.1:7777".parse().unwrap();
+        assert_eq!(
+            l.route_for("10.1.2.3:5555".parse().unwrap(), on),
+            Some("staging")
+        );
+        assert_eq!(
+            l.route_for("192.168.1.9:5555".parse().unwrap(), on),
+            Some("staging")
+        );
+        // no CIDR match, but destination port 7777 does
+        assert_eq!(
+            l.route_for("203.0.113.9:5555".parse().unwrap(), on),
+            Some("prod")
+        );
+        // falls through to `always`
+        assert_eq!(
+            l.route_for(
+                "203.0.113.9:5555".parse().unwrap(),
+                "203.0.113.1:9999".parse().unwrap()
+            ),
+            Some("prod")
+        );
+    }
+
+    #[test]
+    fn rejects_pool_and_routes_together() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+    routes:
+      - match: { type: always }
+        action: { pool: p }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_route_to_unknown_pool() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - match: { type: always }
+        action: { pool: nope }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_always_matcher_with_fields() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - match: { type: always, cidrs: ["10.0.0.0/8"] }
+        action: { pool: p }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_cidr_and_reversed_port_range() {
+        for bad in [
+            r#"routes: [{ match: { type: client_cidr, cidrs: ["10.0.0.0/33"] }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: port, ports: ["9000-8000"] }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: client_cidr }, action: { pool: p } }]"#,
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn cidr_contains_v4_and_v6() {
+        let c = Cidr::parse("10.0.0.0/8").unwrap();
+        assert!(c.contains("10.255.1.1".parse().unwrap()));
+        assert!(!c.contains("11.0.0.1".parse().unwrap()));
+        let c6 = Cidr::parse("2001:db8::/32").unwrap();
+        assert!(c6.contains("2001:db8:dead:beef::1".parse().unwrap()));
+        assert!(!c6.contains("2001:db9::1".parse().unwrap()));
+        assert!(!c.contains("2001:db8::1".parse().unwrap()));
     }
 }

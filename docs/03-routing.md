@@ -3,6 +3,14 @@
 Goal: map an incoming connection/session to a **pool** (and optionally an affinity
 key) — ideally without game-protocol knowledge, with optional plugins where needed.
 
+> **Implementation status (phase 3, partial).** `listeners[].routes` is a
+> priority-ordered `[{ match, action }]` list, first match wins, with
+> `action: { pool: <name> }`. Implemented matchers: `always`, `client_cidr`
+> (source IP), `port` (destination port from the accepting socket). Still
+> pending: `dst`, `sni`, `first-bytes`, sniffer plugins, the `external`
+> resolver, and the `consistent_hash` / `weighted` / `first_available`
+> balancers. A listener with a bare `pool:` is normalised to one `always` route.
+
 ## Evaluation order
 
 1. **Early filters** (ACL, rate limit, geo) – before routing, may reject immediately.

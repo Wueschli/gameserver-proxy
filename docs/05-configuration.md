@@ -12,15 +12,24 @@
 
 ## Schema (reference)
 
-> **Implemented subset (roadmap phase 2).** `gsp-config` currently accepts a
-> reduced, flatter schema: `pools[].targets` (no `backend_sources`),
-> `balancer: round_robin | least_conn` (scalar, not an object),
-> `health_check.type: tcp_connect | udp_probe` with `send_hex` /
-> `expect_hex_prefix` for `udp_probe`, `per_backend.max_sessions`, and one
-> `pool` per listener (no `routes`). UDP listeners take
-> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting to `src_ip`); a UDP
-> session reads `idle_timeout_sec` once when it is created. See
-> `config.example.yaml`. The full schema below is the target.
+> **Implemented subset (roadmap phase 2 + phase 3 routing, partial).**
+> `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
+> (no `backend_sources`), `balancer: round_robin | least_conn` (scalar, not an
+> object), `health_check.type: tcp_connect | udp_probe` with `send_hex` /
+> `expect_hex_prefix` for `udp_probe`, and `per_backend.max_sessions`.
+>
+> A listener maps to a pool either with the `pool: <name>` shorthand or with a
+> priority-ordered `routes:` list — `[{ match, action }]`, first match wins,
+> `action: { pool: <name> }` — but not both. Implemented matchers:
+> `match: { type: always }`, `{ type: client_cidr, cidrs: [<prefix>, ...] }`
+> (source IP), `{ type: port, ports: [<int> | "lo-hi", ...] }` (destination port
+> from the accepting socket). `first_bytes`, `sni`, sniffer and `external`
+> matchers, and the `consistent_hash` balancer, are still to come.
+>
+> UDP listeners take `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
+> to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
+> when it is created. See `config.example.yaml`. The full schema below is the
+> target.
 
 ```yaml
 # global

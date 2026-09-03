@@ -40,11 +40,8 @@ pools:
       fall: 3
 
 listeners:
-  - name: public-tcp
-    bind: "0.0.0.0:7777"
-    protocol: tcp
-    pool: local
-
+  # A listener maps to a pool either with the `pool:` shorthand (one implicit
+  # `always` route) ...
   - name: public-udp
     bind: "0.0.0.0:27015"
     protocol: udp
@@ -52,8 +49,22 @@ listeners:
     affinity:
       hash_on: src_ip             # src_ip (default for udp) | src_ip_port
 
+  # ... or with a priority-ordered `routes` list; the first matching rule wins.
+  # Matchers: `always`, `client_cidr` (source-IP prefixes), `port` (destination
+  # port, bare int or "lo-hi" range). `pool` and `routes` are mutually exclusive.
+  - name: public-tcp
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    routes:
+      - match: { type: client_cidr, cidrs: ["10.0.0.0/8"] }
+        action: { pool: local }
+      - match: { type: port, ports: [7777, "8000-8100"] }
+        action: { pool: local }
+      - match: { type: always }
+        action: { pool: local }
+
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps.
-# Restart-only: listener bind / protocol / pool mapping / affinity.
+# Restart-only: listener bind / protocol / routes / affinity.
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that
 # changes it applies to sessions opened afterwards.

@@ -25,8 +25,8 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–2 complete.** TCP and UDP listener → backend pool forwarding
-with:
+**Roadmap phases 1–2 complete; phase 3 (routing) started.** TCP and UDP
+listener → backend pool forwarding with:
 
 - `round_robin` and `least_conn` balancing
 - active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
@@ -38,8 +38,11 @@ with:
 - hot reload on `SIGHUP` or config-file change (atomic snapshot swap; backend health
   carried across the swap)
 - admin/observability API and Prometheus metrics
+- per-listener route rule list (`routes:`, first match wins) with `always`,
+  `client_cidr` (source IP) and `port` (destination port) matchers
 
-Next: phase 3 — routing intelligence. See [docs/08-roadmap.md](docs/08-roadmap.md).
+Next: phase 3 continued — `first-bytes` / `dst` / `sni` matchers, sniffer plugins,
+the `consistent_hash` balancer. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 
