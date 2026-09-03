@@ -122,7 +122,9 @@ listeners:
 
     // Wait past the idle timeout + one sweep, then B should succeed.
     tokio::time::sleep(Duration::from_millis(2200)).await;
-    let c = roundtrip(b"c").await.expect("slot should be free after eviction");
+    let c = roundtrip(b"c")
+        .await
+        .expect("slot should be free after eviction");
     assert_eq!(c, vec![7, b'c']);
 
     runtime.shutdown().await;

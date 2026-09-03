@@ -211,7 +211,10 @@ pub enum HashOn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HealthCheckKind {
     TcpConnect,
-    UdpProbe { send: Vec<u8>, expect_prefix: Vec<u8> },
+    UdpProbe {
+        send: Vec<u8>,
+        expect_prefix: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +354,10 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 }
                 let expect_prefix = match &hc.expect_hex_prefix {
                     Some(s) => parse_hex(s).map_err(|e| {
-                        Invalid(format!("pool {}: health_check.expect_hex_prefix: {e}", p.name))
+                        Invalid(format!(
+                            "pool {}: health_check.expect_hex_prefix: {e}",
+                            p.name
+                        ))
                     })?,
                     None => Vec::new(),
                 };

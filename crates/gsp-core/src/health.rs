@@ -108,7 +108,11 @@ async fn probe(addr: SocketAddr, timeout: Duration, kind: &HealthCheckKind) -> b
             expect_prefix,
         } => {
             let fut = async {
-                let bind = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+                let bind = if addr.is_ipv4() {
+                    "0.0.0.0:0"
+                } else {
+                    "[::]:0"
+                };
                 let sock = UdpSocket::bind(bind).await.ok()?;
                 sock.connect(addr).await.ok()?;
                 sock.send(send).await.ok()?;
