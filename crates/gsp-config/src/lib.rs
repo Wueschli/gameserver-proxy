@@ -2,8 +2,8 @@
 //!
 //! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
 //! route rule list (`always` / `client_cidr` / `dst` / `port` / `first_bytes` /
-//! `sni` / `sniffer` matchers) onto static pools, with active health checks,
-//! round-robin /
+//! `sni` matchers; `sniffer` for future plugins) onto static pools, with active
+//! health checks, round-robin /
 //! least-connections / consistent-hash balancing, per-backend session caps, and
 //! UDP session affinity. The full target schema lives in
 //! `docs/05-configuration.md` and grows into this crate incrementally.
@@ -378,11 +378,6 @@ pub struct RouteHint {
     pub reject: bool,
 }
 
-/// Sniffer plugin names `gsp-core` knows. Kept here so `validate()` can reject
-/// an unknown name; the actual implementations live in `gsp_core::sniff` and
-/// this list must stay in sync with the registry there.
-pub const KNOWN_SNIFFERS: &[&str] = &["sni", "minecraft", "a2s"];
-
 /// A single route's match condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matcher {
@@ -410,9 +405,11 @@ pub enum Matcher {
     /// The TLS ClientHello's SNI host matches one of these patterns (TCP only;
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
-    /// The named sniffer plugin (`gsp_core::sniff`) recognised the first bytes.
-    /// With `host` patterns: also requires the hint's `host` to match one of
-    /// them; empty `host` ⇒ matches on any (non-`reject`) recognition.
+    /// The named sniffer plugin (see `gsp_core::sniff`) recognised the first
+    /// bytes. With `host` patterns: also requires the hint's `host` to match one
+    /// of them; empty `host` ⇒ matches on any (non-`reject`) recognition. The
+    /// name is not validated here — the proxy checks it against the loaded
+    /// sniffers at listener start (an unknown name simply never matches).
     Sniffer {
         name: String,
         host: Vec<HostPattern>,
@@ -1070,12 +1067,6 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| at("match type `sniffer` needs a `sniffer` name".into()))?;
-            if !KNOWN_SNIFFERS.contains(&name) {
-                return Err(at(format!(
-                    "unknown sniffer {name:?} ({})",
-                    KNOWN_SNIFFERS.join(" | ")
-                )));
-            }
             Ok(Matcher::Sniffer {
                 name: name.to_string(),
                 host: host_patterns(false)?,
@@ -1768,8 +1759,6 @@ listeners:
     #[test]
     fn rejects_bad_sniffer_matchers() {
         for bad in [
-            // unknown sniffer name
-            r#"routes: [{ match: { type: sniffer, sniffer: doom }, action: { pool: p } }]"#,
             // missing sniffer name
             r#"routes: [{ match: { type: sniffer, host: ["a.example.com"] }, action: { pool: p } }]"#,
             // sniffer field on a non-sniffer matcher

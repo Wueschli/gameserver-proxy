@@ -111,6 +111,7 @@ pub async fn run_udp_listener(
 ) -> anyhow::Result<()> {
     let pktinfo = cfg.prefix.is_some();
     let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, pktinfo)?)?);
+    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,

@@ -34,11 +34,12 @@
 > — a ≤ 512-byte prefix and/or a byte-count window on the connection's first
 > bytes (TCP `MSG_PEEK` / first UDP datagram; at least one of `prefix` / `length`),
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
-> from the peeked (not terminated) TLS ClientHello, TCP listeners only, and
-> `{ type: sniffer, sniffer: sni|minecraft|a2s, host: [...] }` — a named
-> in-process plugin recognises the first bytes and returns a hint; `host`
-> patterns (optional) match the hint's hostname; one sniffer per listener. The
-> `first_bytes` `regex` variant and the `external` resolver are still to come.
+> from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
+> `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (one sniffer
+> per listener) but matches nothing until a sniffer plugin is loaded — no
+> sniffers are built in; the name is checked at listener start, not by
+> `validate()`. The `first_bytes` `regex` variant, the sniffer loader (Phase 9)
+> and the `external` resolver are still to come.
 >
 > Listener options: `prefix: <cidr>` (UDP only) → prefix mode as above, with a
 > wildcard `bind`; `freebind: true` (TCP only) → bind with `IP_FREEBIND` /

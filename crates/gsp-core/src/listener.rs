@@ -26,6 +26,7 @@ pub async fn run_tcp_listener(
 ) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
     let listener = TcpListener::from_std(bind_reuseport_tcp(cfg.bind, 1024, cfg.freebind)?)?;
+    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,

@@ -1,198 +1,164 @@
-//! In-process, static **sniffer plugins**.
+//! Internal API seam for **sniffer plugins** — game- / protocol-specific
+//! first-bytes inspectors.
 //!
 //! A sniffer takes a read-only look at a connection's first bytes (TCP peek /
 //! first UDP datagram) and, if it recognises the protocol, returns a
-//! [`RouteHint`] — a hostname, an affinity key, or a reject flag. The `sniffer`
-//! route matcher then compares that hint. Sniffers never see later bytes and
-//! never write: game-specific parsing lives here and only here, off the
-//! forwarding path (see `docs/03`, `CLAUDE.md` "agnostic core").
+//! [`RouteHint`] (a hostname, an affinity key, a reject flag). The `sniffer`
+//! route matcher then compares that hint.
 //!
-//! The set here must stay in sync with `gsp_config::KNOWN_SNIFFERS` (which
-//! `validate()` uses to reject unknown names).
+//! **There are no built-in sniffers.** Game-specific parsing is deliberately
+//! *not* compiled into the proxy: it belongs in separately maintained plugins,
+//! loaded at runtime. That loader (sandboxed — likely WASM — with a community
+//! plugin repo) is a later roadmap phase; what lives here now is only the
+//! contract it will implement, plus the wiring that feeds a hint into routing.
+//! A `sniffer:` route therefore never matches today (it logs a warning at
+//! listener start) unless a test provides one.
+//!
+//! Sniffers are read-only: they never see later bytes and never write. See
+//! `docs/03`, `CLAUDE.md` "agnostic core".
 
-use gsp_config::{extract_sni, RouteHint};
+use gsp_config::RouteHint;
 
-/// A read-only first-bytes inspector.
+/// A read-only first-bytes inspector. Implemented by loaded plugins (future);
+/// the proxy binary ships none.
 pub trait Sniffer: Send + Sync {
     fn name(&self) -> &'static str;
     /// Inspect the (bounded) first bytes. `None` = not recognised.
     fn sniff(&self, first: &[u8]) -> Option<RouteHint>;
 }
 
-/// Look up a sniffer by its config name.
+/// Resolve a sniffer by its configured name. Returns `None` for every real
+/// name until the plugin loader lands; a `#[cfg(test)]` build also knows
+/// `"test-host"` (see the tests below) so the seam stays exercised.
 pub fn sniffer(name: &str) -> Option<&'static dyn Sniffer> {
     match name {
-        "sni" => Some(&Sni),
-        "minecraft" => Some(&Minecraft),
-        "a2s" => Some(&A2s),
+        #[cfg(test)]
+        "test-host" => Some(&tests::TestHost),
         _ => None,
     }
 }
 
-/// TLS SNI — reuses the ClientHello reader from `gsp-config`.
-struct Sni;
-impl Sniffer for Sni {
-    fn name(&self) -> &'static str {
-        "sni"
-    }
-    fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
-        extract_sni(first).map(|host| RouteHint {
-            host: Some(host),
-            ..Default::default()
-        })
-    }
-}
-
-/// Valve A2S / Source query: the connectionless `0xFFFFFFFF` header. Recognises
-/// a query packet (no host); route it to a dedicated query pool.
-struct A2s;
-impl Sniffer for A2s {
-    fn name(&self) -> &'static str {
-        "a2s"
-    }
-    fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
-        first
-            .starts_with(&[0xff, 0xff, 0xff, 0xff])
-            .then(|| RouteHint {
-                key: Some("a2s".into()),
-                ..Default::default()
-            })
-    }
-}
-
-/// Minecraft (Java) — the uncompressed pre-login Handshake packet:
-/// `len:VarInt id:VarInt(=0) proto:VarInt addr:(VarInt len + UTF-8) port:u16
-/// next_state:VarInt`. Returns the `addr` string as the host.
-struct Minecraft;
-impl Sniffer for Minecraft {
-    fn name(&self) -> &'static str {
-        "minecraft"
-    }
-    fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
-        let mut r = first;
-        let pkt_len = read_varint(&mut r)? as usize;
-        // Keep parsing within the declared packet (best effort if truncated).
-        let end = pkt_len.min(r.len());
-        let mut body = &r[..end];
-        if read_varint(&mut body)? != 0x00 {
-            return None; // not a Handshake packet
-        }
-        read_varint(&mut body)?; // protocol version
-        let host_len = read_varint(&mut body)? as usize;
-        if host_len == 0 || host_len > body.len() || host_len > 255 {
-            return None;
-        }
-        let host = std::str::from_utf8(&body[..host_len]).ok()?;
-        Some(RouteHint {
-            host: Some(host.to_ascii_lowercase()),
-            ..Default::default()
-        })
-    }
-}
-
-/// Read a Minecraft VarInt (LEB128-ish, ≤ 5 bytes) from the front of `r`,
-/// advancing it. `None` on truncation or overlong encoding.
-fn read_varint(r: &mut &[u8]) -> Option<i32> {
-    let mut result: i32 = 0;
-    for i in 0..5 {
-        let (&byte, rest) = r.split_first()?;
-        *r = rest;
-        result |= ((byte & 0x7f) as i32) << (7 * i);
-        if byte & 0x80 == 0 {
-            return Some(result);
+/// Log a warning if `listener` routes on a sniffer name that resolves to
+/// nothing — those routes can never match until the plugin is loaded.
+pub fn warn_if_missing(listener: &str, name: Option<&str>) {
+    if let Some(name) = name {
+        if sniffer(name).is_none() {
+            tracing::warn!(
+                %listener, sniffer = %name,
+                "no such sniffer loaded — `sniffer` routes on this listener will never match \
+                 (plugin loading is a later roadmap phase)"
+            );
         }
     }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a2s_recognises_the_connectionless_header() {
-        assert!(A2s.sniff(&[0xff, 0xff, 0xff, 0xff, 0x54]).is_some());
-        assert!(A2s.sniff(b"\x01\x02\x03\x04").is_none());
-    }
-
-    #[test]
-    fn sni_sniffer_extracts_the_host() {
-        // Minimal ClientHello with SNI "eu.example.com".
-        let sni = "eu.example.com";
-        let mut sn = Vec::new();
-        sn.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes());
-        sn.push(0);
-        sn.extend_from_slice(&(sni.len() as u16).to_be_bytes());
-        sn.extend_from_slice(sni.as_bytes());
-        let mut ext = Vec::new();
-        ext.extend_from_slice(&0u16.to_be_bytes());
-        ext.extend_from_slice(&(sn.len() as u16).to_be_bytes());
-        ext.extend_from_slice(&sn);
-        let mut body = vec![0x03, 0x03];
-        body.extend_from_slice(&[0u8; 32]);
-        body.push(0);
-        body.extend_from_slice(&2u16.to_be_bytes());
-        body.extend_from_slice(&[0x00, 0x2f]);
-        body.push(1);
-        body.push(0);
-        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
-        body.extend_from_slice(&ext);
-        let bl = body.len();
-        let mut hs = vec![0x01, (bl >> 16) as u8, (bl >> 8) as u8, bl as u8];
-        hs.extend_from_slice(&body);
-        let mut rec = vec![0x16, 0x03, 0x01];
-        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
-        rec.extend_from_slice(&hs);
-
-        assert_eq!(
-            Sni.sniff(&rec).unwrap().host.as_deref(),
-            Some("eu.example.com")
-        );
-        assert!(Sni.sniff(b"not tls").is_none());
-    }
-
-    /// Build a Minecraft Handshake packet for `host`.
-    fn mc_handshake(host: &str) -> Vec<u8> {
-        fn varint(mut v: u32, out: &mut Vec<u8>) {
-            loop {
-                let b = (v & 0x7f) as u8;
-                v >>= 7;
-                if v == 0 {
-                    out.push(b);
-                    break;
-                }
-                out.push(b | 0x80);
-            }
+    /// Minimal stand-in for a real plugin: `b"HOST:<name>\n..."` → that host.
+    pub(super) struct TestHost;
+    impl Sniffer for TestHost {
+        fn name(&self) -> &'static str {
+            "test-host"
         }
-        let mut body = Vec::new();
-        varint(0x00, &mut body); // packet id
-        varint(765, &mut body); // protocol version
-        varint(host.len() as u32, &mut body);
-        body.extend_from_slice(host.as_bytes());
-        body.extend_from_slice(&25565u16.to_be_bytes());
-        varint(2, &mut body); // next state = login
-        let mut pkt = Vec::new();
-        varint(body.len() as u32, &mut pkt);
-        pkt.extend_from_slice(&body);
-        pkt
-    }
-
-    #[test]
-    fn minecraft_sniffer_reads_the_handshake_host() {
-        let pkt = mc_handshake("Survival.Example.NET");
-        assert_eq!(
-            Minecraft.sniff(&pkt).unwrap().host.as_deref(),
-            Some("survival.example.net")
-        );
-        assert!(Minecraft.sniff(b"\xfe\x01").is_none()); // legacy ping
-        assert!(Minecraft.sniff(&pkt[..3]).is_none()); // truncated
-    }
-
-    #[test]
-    fn registry_maps_known_names() {
-        for n in gsp_config::KNOWN_SNIFFERS {
-            assert_eq!(sniffer(n).unwrap().name(), *n);
+        fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
+            let rest = first.strip_prefix(b"HOST:")?;
+            let end = rest.iter().position(|&b| b == b'\n')?;
+            let host = std::str::from_utf8(&rest[..end]).ok()?;
+            Some(RouteHint {
+                host: Some(host.to_ascii_lowercase()),
+                ..Default::default()
+            })
         }
+    }
+
+    #[test]
+    fn registry_has_no_builtins_but_knows_the_test_sniffer() {
+        assert!(sniffer("minecraft").is_none());
+        assert!(sniffer("sni").is_none());
         assert!(sniffer("nope").is_none());
+        assert_eq!(sniffer("test-host").unwrap().name(), "test-host");
+    }
+
+    #[test]
+    fn test_sniffer_extracts_the_host() {
+        let hint = TestHost
+            .sniff(b"HOST:Survival.Example.NET\npayload")
+            .unwrap();
+        assert_eq!(hint.host.as_deref(), Some("survival.example.net"));
+        assert!(TestHost.sniff(b"no marker").is_none());
+    }
+
+    /// End to end: listener → sniffer → `MatchContext.sniff` → route. Lives here
+    /// (not in `tests/`) so it can reach the `#[cfg(test)]` `test-host` sniffer.
+    #[tokio::test]
+    async fn sniffer_matcher_routes_a_connection_by_hint_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        // Two backends, each writing an identifying byte on connect.
+        async fn marker(tag: u8) -> std::net::SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = l.accept().await {
+                    tokio::spawn(async move {
+                        let _ = s.write_all(&[tag]).await;
+                        let mut buf = [0u8; 64];
+                        while let Ok(n) = s.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        let survival = marker(b'S').await;
+        let lobby = marker(b'L').await;
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let yaml = format!(
+            r#"
+pools:
+  - name: survival
+    targets: ["{survival}"]
+  - name: lobby
+    targets: ["{lobby}"]
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - match: {{ type: sniffer, sniffer: test-host, host: ["survival.example.net"] }}
+        action: {{ pool: survival }}
+      - match: {{ type: always }}
+        action: {{ pool: lobby }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let runtime = crate::Runtime::start(crate::Snapshot::from_config(&cfg), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mark = |host: &'static str| async move {
+            let mut c = TcpStream::connect(proxy).await.unwrap();
+            c.write_all(format!("HOST:{host}\nrest").as_bytes())
+                .await
+                .unwrap();
+            let mut m = [0u8; 1];
+            c.read_exact(&mut m).await.unwrap();
+            m[0]
+        };
+
+        assert_eq!(mark("survival.example.net").await, b'S');
+        assert_eq!(mark("creative.example.net").await, b'L');
+
+        runtime.shutdown().await;
     }
 }

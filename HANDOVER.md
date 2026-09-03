@@ -2,8 +2,8 @@
 
 State of the work, decisions already made, and how to pick it up.
 Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–8;
-slice 8 = sniffer plugin API + `sniffer` matcher; `first_bytes` `regex` and the
-`/route-hint` push resolver still pending).
+slice 8 = the sniffer API **seam** + `sniffer` matcher — no built-in sniffers,
+the loader is Phase 9; `first_bytes` `regex` and `/route-hint` still pending).
 
 ---
 
@@ -14,17 +14,18 @@ slice 8 = sniffer plugin API + `sniffer` matcher; `first_bytes` `regex` and the
 - **Code**: Cargo workspace, roadmap **phases 0–2 complete**, **phase 3 slices
   1–8 landed** (per-listener route rule list; `first_bytes` `prefix` + `length`;
   `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
-  listener + TCP `freebind:`; sniffer plugin API + `sniffer` matcher). The proxy
-  forwards **TCP and UDP** end to end with health checks (`tcp_connect` +
-  `udp_probe`), three balancers, per-backend caps, worker-local UDP session
-  tables with `src_ip` affinity, hot reload, and address / first-bytes / SNI /
-  sniffer routing — including one wildcard `IP_PKTINFO` socket serving a whole
-  routed UDP prefix.
+  listener + TCP `freebind:`; the sniffer API **seam** + `sniffer` matcher —
+  **no built-in sniffers**). The proxy forwards **TCP and UDP** end to end with
+  health checks (`tcp_connect` + `udp_probe`), three balancers, per-backend
+  caps, worker-local UDP session tables with `src_ip` affinity, hot reload, and
+  address / first-bytes / SNI routing — including one wildcard `IP_PKTINFO`
+  socket serving a whole routed UDP prefix.
 - **Next**: phase 3 wrap-up — `first_bytes` `regex` (belongs in the sniffer
   layer; needs the `regex` dep decision), the `/route-hint` push resolver
-  (scheme C). Then phase 4 (external resolver) / phase 5 (operability). See
-  `docs/03` and `docs/08`. Note below.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 57 tests, all green).
+  (scheme C). Then phase 4 (external resolver) / phase 5 (operability). The
+  **sniffer plugin loader is now Phase 9** (`docs/08`) — a separate community
+  repo of sandboxed (WASM) game-protocol sniffers. See `docs/03` and `docs/08`.
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 55 tests, all green).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -59,11 +60,13 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   }`, at least one present; on TCP `length` sees only what one peek returned);
   `sni` (host from the peeked TLS ClientHello — `gsp_config::extract_sni`, a
   hand-rolled ClientHello reader; `host` patterns exact / `*.suffix` / `.suffix`;
-  rejected on UDP listeners); `sniffer` (a named `gsp_core::sniff` plugin — `sni`
-  / `minecraft` / `a2s` — run once per conn on the peeked bytes; its `RouteHint`
+  rejected on UDP listeners); `sniffer` (a named plugin resolved via
+  `gsp_core::sniff::sniffer(name)` — **currently always `None`; no built-ins**;
+  when present it runs once per conn on the peeked bytes and its `RouteHint`
   goes into `MatchContext.sniff`; optional `host` patterns match the hint's
   host, empty ⇒ match on any non-`reject` recognition; **one sniffer name per
-  listener**, enforced in `validate()` → `ListenerConfig::sniffer`). A bare
+  listener**, enforced in `validate()` → `ListenerConfig::sniffer`; an unknown
+  name logs a warning at listener start and its routes never match). A bare
   `pool:` is normalised to one `always` route. No match → connection/datagram dropped
   (`gsp_listener_connections_total{result="no_route"}` /
   `gsp_datagrams_dropped_total{reason="no_route"}`). TCP `MSG_PEEK`s
@@ -114,7 +117,7 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (57, all green)
+### Tests (55, all green)
 
 - `gsp-config` (33): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
@@ -135,18 +138,18 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   (`prefix` on TCP / with a non-wildcard bind / unparseable, `freebind` on UDP);
   `sniffer` matcher parse + `ListenerConfig::sniffer`, `Matcher::Sniffer` match
   (exact / suffix / empty-host / `reject` / no-hint), bad `sniffer` config
-  (unknown name, missing name, wrong field, two sniffers on one listener).
-- `gsp-core` unit (13): round-robin cycling, least-conn preference, capacity
+  (missing name, wrong field, two sniffers on one listener).
+- `gsp-core` unit (12): round-robin cycling, least-conn preference, capacity
   rejection, unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds,
   reload health carry-over; `consistent_hash` stability + spread (`src_ip`
-  ignores port), and "only the lost backend's share moves"; **sniffers**: `a2s`
-  header, `sni` host extraction, `minecraft` handshake host (+ legacy-ping /
-  truncated → `None`), registry maps `KNOWN_SNIFFERS`.
-- `gsp-core/tests/tcp_forward.rs` (6): end-to-end client→proxy→backend byte
+  ignores port), and "only the lost backend's share moves"; **sniff seam**:
+  registry has no built-ins but knows the `#[cfg(test)]` `test-host` sniffer;
+  `test-host` extraction; end-to-end `sniffer`-matcher routing driven by that
+  test sniffer (lives in `sniff.rs`, not `tests/`, so it can reach it).
+- `gsp-core/tests/tcp_forward.rs` (5): end-to-end client→proxy→backend byte
   forwarding; "routes around a dead backend"; "first matching route selects the
   pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
-  a client to one backend"; "sni matcher routes by ClientHello"; "sniffer
-  minecraft routes by handshake host" (crafted handshake sent raw).
+  a client to one backend"; "sni matcher routes by ClientHello".
 - `gsp-core/tests/udp_forward.rs` (5): end-to-end UDP datagram forwarding + session
   reuse / affinity (same client → same backend); idle-timeout eviction frees the
   per-backend slot; `first_bytes` prefix routes to its pool vs. `always`;
@@ -193,7 +196,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Full CRUD admin API (add/remove backend, set `draining`/`disabled` state) | phase 5 |
 | `draining` / `disabled` backend states (only `healthy`/`unhealthy` exist) | phase 5 |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
-| Routing matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` + `length`) / `sni` / `sniffer`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:`; sniffer plugin API (`sni` / `minecraft` / `a2s`) | **done** (phase 3 slices 1–8) |
+| Routing matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` + `length`) / `sni`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:`; sniffer API seam + `sniffer` matcher (no built-in sniffers) | **done** (phase 3 slices 1–8) |
+| Sniffer plugin **loader** (separate community repo, sandboxed/WASM, runtime-loaded) | **Phase 9** |
 | `first_bytes` `regex` variant (needs `regex` dep; goes in the `gsp_core::sniff` layer, not `gsp-config`) | phase 3 |
 | More sniffers (`quic`, `wireguard`, …); `RouteHint.reject` currently only makes a `sniffer` route *not match* (no hard drop) | phase 3+ |
 | Per-listener multiple distinct sniffers (only one name allowed today) | polish |
@@ -231,13 +235,13 @@ host `String`).
 When (and only when) a route uses `first_bytes` / `sni` / `sniffer`, the TCP
 path also does one `MSG_PEEK` (into a `peek_len()`-sized `Vec` — `PEEK_MAX` =
 4096 for `sni` / `sniffer`) with a 250 ms timeout, and clones the listener's
-`Arc<ListenerConfig>` into the per-conn task. A `sniffer` route additionally
-runs the plugin once over the peeked bytes (`gsp_core::sniff` — a bounded
-read-only parse; `minecraft` walks a few VarInts, `a2s` is a 4-byte check,
-`sni` reuses `extract_sni`), yielding at most one small `RouteHint` alloc. No
-lock, no task spawn beyond the existing per-conn one, nothing on the per-byte /
-per-datagram path. TCP route resolution now happens inside the spawned task, so
-the accept loop no longer loads the snapshot.
+`Arc<ListenerConfig>` into the per-conn task. A `sniffer` route would also run
+the plugin once over the peeked bytes — but there are no plugins today, so
+`sniffer(name)` returns `None` and that cost is currently zero; the Phase 9
+loader must keep the parse bounded (time + memory) since it is on the
+per-connection path. No lock, no task spawn beyond the existing per-conn one,
+nothing on the per-byte / per-datagram path. TCP route resolution now happens
+inside the spawned task, so the accept loop no longer loads the snapshot.
 
 `consistent_hash` selection is `O(healthy)` — one `Vec<&Backend>` of the healthy
 set (already built for every balancer) plus a `sort_by_key` with one
@@ -385,29 +389,33 @@ ipi_spec_dst=src, ipi_addr=0 }` / `Ipv6PacketInfo`. Dest outside the prefix →
 drop, `gsp_datagrams_dropped_total{reason="outside_prefix"}`. All safe wrappers
 — **still zero `unsafe`**. New dep: `nix` (`socket`, `net`, `uio`) in `gsp-core`.
 
-### Slice 8 — sniffer plugin API + `sniffer` matcher (done)
+### Slice 8 — sniffer API seam + `sniffer` matcher (done)
+
+The seam a future loader (Phase 9) fills — **the proxy ships no game sniffers**;
+embedding some games and not others is exactly the inconsistency we want to
+avoid, and game-protocol code should be maintained/loaded separately, not
+forked in.
 
 `gsp_core::sniff`: `trait Sniffer { name(); sniff(&[u8]) -> Option<RouteHint> }`
-+ `fn sniffer(name) -> Option<&'static dyn Sniffer>`. Reference impls: `Sni`
-(reuses `gsp_config::extract_sni`), `A2s` (`0xFFFFFFFF` connectionless header →
-`key: "a2s"`), `Minecraft` (parses the pre-login Handshake packet's VarInts, its
-`addr` string → `host`, lowercased). `RouteHint { host, key, reject }` lives in
-`gsp-config` (plain struct, no dep) so `Matcher` can consult it via
-`MatchContext.sniff`.
++ `fn sniffer(name) -> Option<&'static dyn Sniffer>` (returns `None` for every
+real name; a `#[cfg(test)]` build knows `"test-host"`) + `warn_if_missing()`
+(logs at listener start when a `sniffer:` name resolves to nothing).
+`RouteHint { host, key, reject }` lives in `gsp-config` (plain struct, no dep)
+so `Matcher` can consult it via `MatchContext.sniff`.
 
 `gsp-config`: `Matcher::Sniffer { name, host: Vec<HostPattern> }`; `RawMatch`
-gains `sniffer`, shares `host` with `sni`. `KNOWN_SNIFFERS: &[&str]` mirrors the
-`gsp_core::sniff` registry so `validate()` rejects unknown names (kept in sync
-by a doc comment on both). `validate()` also enforces one sniffer name per
-listener → `ListenerConfig::sniffer: Option<String>`.
+gains `sniffer`, shares `host` with `sni`. **No `KNOWN_SNIFFERS`** — once
+sniffers load dynamically, `gsp-config` cannot know valid names; it only checks
+the name is non-empty. `validate()` still enforces one sniffer name per listener
+→ `ListenerConfig::sniffer: Option<String>`.
 
-`gsp-core`: `listener.rs` / `listener_udp.rs` run
+`gsp-core`: `listener.rs` / `listener_udp.rs` call `warn_if_missing` at start,
+then per conn run
 `cfg.sniffer.and_then(sniff::sniffer).and_then(|s| s.sniff(first))` and pass
 `hint.as_ref()` into `MatchContext.sniff`.
 
 Not done: `RouteHint.reject` only makes a `sniffer` route *not match* (no hard
-drop yet); `first_bytes: regex` still wants a `regex` dep decision — it belongs
-in `gsp_core::sniff`, not `gsp-config`.
+drop); the loader itself is Phase 9.
 
 ### Slice 9 — next
 
@@ -415,9 +423,9 @@ in `gsp_core::sniff`, not `gsp-config`.
 `gsp-core` — validate the pattern string in `gsp-config`, compile in
 `gsp_core::sniff`). Then the `/route-hint` push resolver (an admin endpoint
 fills a short-lived `src_ip → pool` table the router consults first). After that
-phase 3 is closed; phase 4 is the external resolver, phase 5 operability. Keep
-the agnostic core: sniffers/regex parsers are optional plugins, never in the
-forwarding path.
+phase 3 is closed; phase 4 is the external resolver, phase 5 operability,
+**phase 9 the sniffer plugin loader**. Keep the agnostic core: sniffers / regex
+parsers are optional plugins, never in the forwarding path.
 
 ### Do NOT
 
@@ -431,12 +439,12 @@ forwarding path.
 
 | File | Responsibility |
 |------|----------------|
-| `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`HealthCheck`; routing (`Matcher`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `KNOWN_SNIFFERS`, `extract_sni`). All schema rules here. |
+| `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`HealthCheck`; routing (`Matcher`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`). All schema rules here. |
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr`, `hrw_score`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
-| `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry; `Sni` / `Minecraft` / `A2s` reference impls. Game-specific parsing lives only here. |
+| `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start` spawns listener + health tasks; `RuntimeHandle` (`current`/`store`/`ready`). |

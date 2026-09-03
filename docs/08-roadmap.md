@@ -41,8 +41,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
 - ✅ `first-bytes` matcher — `prefix` (`hex:` / `ascii:`, ≤ 512 B) and/or
-  `length: { min, max }`; TCP peek / first UDP datagram. ⬜ `regex` / `sniffer`
-  variants.
+  `length: { min, max }`; TCP peek / first UDP datagram. ⬜ `regex` variant
+  (belongs in the sniffer layer).
 - ✅ `consistent_hash` balancer (rendezvous/HRW hash, pool `hash_on: src_ip |
   src_ip_port`) — session affinity without a sticky table.
 - ✅ SNI peek matcher (`sni`, `host` exact / `*.suffix` / `.suffix`; ClientHello
@@ -51,10 +51,13 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   (`prefix: <cidr>`, one wildcard `IP_PKTINFO` socket serving the whole routed
   prefix, replies from the hit address) + TCP `freebind`. ⬜ optional push
   resolver (`/route-hint`).
-- ✅ Sniffer plugin API (in-process, static; `gsp_core::sniff::Sniffer` →
-  `RouteHint`): `sni`, `minecraft`, `a2s` reference impls; `sniffer` matcher.
-  ⬜ `first-bytes` `regex` (belongs in this layer).
-- **Result**: multiple games/regions behind one port.
+- ✅ Sniffer API **seam** — `gsp_core::sniff::Sniffer` → `RouteHint`, the
+  `sniffer` matcher, and the listener wiring that feeds a hint into routing.
+  **No built-in sniffers ship** (game-specific parsing does not belong in the
+  proxy binary); a `sniffer:` route only matches once a plugin is loaded. The
+  loader is Phase 9.
+- **Result**: multiple games/regions behind one port (via `dst` / `sni` /
+  `first-bytes`; game-protocol sniffing once plugins land).
 
 ## Phase 4 – External routing logic (week 11–12)
 - Resolver client (gRPC + HTTP), request/response schema.
@@ -86,9 +89,22 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - HA docs: anycast/L4 LB in front, capacity planning, dashboards & alerts.
 - **Result**: dynamic backend fleets, horizontal scaling.
 
+## Phase 9 – Sniffer plugin loader
+- A separate community repository of game-protocol sniffers, loaded into the
+  proxy at runtime — not compiled in, not a fork.
+- Sandboxed execution (likely **WASM** via wasmtime/extism: no host syscalls
+  except a granted `sniff(&[u8]) -> RouteHint` ABI); bounded time / memory per
+  call; input capped at `peek_max_bytes`.
+- Config: a plugins directory + per-listener `sniffer:` name resolved against
+  the loaded set; reload picks up added/removed modules.
+- Supply chain: module signing / pinning; the proxy ships a small first-party
+  set (e.g. `minecraft`, `a2s`, `sni`) built the same way, no special-casing.
+- Open question: latency of the WASM boundary vs. the NFR budget — measure
+  before committing; the out-of-process external resolver (Phase 4) is the
+  fallback if the in-process boundary is too costly.
+
 ## Later / optional
 - QUIC-CID-aware sniffer & session keying.
-- WASM / out-of-process plugins.
 - Cross-instance session handover (shared state).
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).

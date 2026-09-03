@@ -140,7 +140,7 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 | Config schema | `gsp-config` raw+resolved types, `validate()`, `config.example.yaml`, `docs/05` |
 | New metric | `metrics_defs.rs`, `docs/06` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
-| New sniffer plugin | `gsp_core::sniff` registry **and** `gsp_config::KNOWN_SNIFFERS` (kept in sync by hand), `docs/03`, tests |
+| New / changed sniffer seam | `gsp_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as plugins (Phase 9), never as core code or a fork. |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
@@ -172,10 +172,10 @@ Phases 0–2 are done: TCP + UDP forwarding, round-robin + least-conn, active
 session tables with `src_ip` affinity, hot reload, metrics. **Phase 3 (routing
 intelligence) is in progress**: slices 1–8 landed a priority-ordered `routes:`
 list with `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` +
-`length`) / `sni` / `sniffer` matchers, the `consistent_hash` balancer
-(rendezvous hash, pool `hash_on`), the UDP `prefix:` listener (one wildcard
-`IP_PKTINFO` socket per routed prefix, via `nix` — still zero `unsafe`) + TCP
-`freebind:`, and the in-process sniffer plugin API (`gsp_core::sniff`: `sni` /
-`minecraft` / `a2s`). Next is `first_bytes` regex and the `/route-hint` push
-resolver, which close phase 3. See `HANDOVER.md` and `docs/03`. Don't half-land
-a slice.
+`length`) / `sni` matchers, the `consistent_hash` balancer (rendezvous hash,
+pool `hash_on`), the UDP `prefix:` listener (one wildcard `IP_PKTINFO` socket
+per routed prefix, via `nix` — still zero `unsafe`) + TCP `freebind:`, and the
+sniffer API **seam** (`gsp_core::sniff` — trait + `sniffer` matcher, **no
+built-in sniffers**; the loader is roadmap Phase 9). Next is `first_bytes` regex
+and the `/route-hint` push resolver, which close phase 3. See `HANDOVER.md` and
+`docs/03`. Don't half-land a slice.
