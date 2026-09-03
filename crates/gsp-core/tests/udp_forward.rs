@@ -221,3 +221,55 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn udp_prefix_listener_routes_by_destination_ip_and_replies_from_it() {
+    let a = echo_backend(b'A').await;
+    let b = echo_backend(b'B').await;
+    // Grab a free port, then bind the proxy on the wildcard address.
+    let port = free_udp_addr().port();
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: a
+    targets: ["{a}"]
+  - name: b
+    targets: ["{b}"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:{port}"
+    protocol: udp
+    prefix: "127.0.0.0/8"
+    routes:
+      - match: {{ type: dst, cidrs: ["127.0.0.2/32"] }}
+        action: {{ pool: a }}
+      - match: {{ type: dst, cidrs: ["127.0.0.3/32"] }}
+        action: {{ pool: b }}
+      - match: {{ type: always }}
+        action: {{ pool: a }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // The client `connect`s to the sub-address, so it only accepts a reply whose
+    // source is exactly that address — proving the sendmsg pktinfo source.
+    let hit = |dst: &'static str| async move {
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(format!("{dst}:{port}")).await.unwrap();
+        c.send(b"ping").await.unwrap();
+        let mut buf = [0u8; 32];
+        let n = tokio::time::timeout(Duration::from_millis(500), c.recv(&mut buf))
+            .await
+            .expect("no reply (wrong reply source address?)")
+            .unwrap();
+        buf[..n].to_vec()
+    };
+
+    assert_eq!(hit("127.0.0.2").await, b"Aping");
+    assert_eq!(hit("127.0.0.3").await, b"Bping");
+
+    runtime.shutdown().await;
+}

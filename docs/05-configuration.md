@@ -25,8 +25,9 @@
 > `action: { pool: <name> }` — but not both. Implemented matchers:
 > `match: { type: always }`, `{ type: client_cidr, cidrs: [<prefix>, ...] }`
 > (source IP), `{ type: dst, cidrs: [<prefix>, ...] }` (destination IP the client
-> connected to; only distinguishes addresses the host already serves separately
-> until the `IP_PKTINFO` prefix listener lands),
+> connected to; a plain listener sees only its bind IP, but a UDP listener with
+> `prefix: <cidr>` serves a whole routed prefix on one `IP_PKTINFO` socket and
+> replies from the address that was hit),
 > `{ type: port, ports: [<int> | "lo-hi", ...] }` (destination port from the
 > accepting socket),
 > `{ type: first_bytes, prefix: "hex:ff.." | "ascii:..", length: { min, max } }`
@@ -34,10 +35,13 @@
 > bytes (TCP `MSG_PEEK` / first UDP datagram; at least one of `prefix` / `length`),
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
 > from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
-> `IP_PKTINFO` prefix listener, `first_bytes` `regex` / `sniffer` variants, and
-> the `external` resolver are still to come.
+> `first_bytes` `regex` / `sniffer` variants and the `external` resolver are
+> still to come.
 >
-> UDP listeners take `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
+> Listener options: `prefix: <cidr>` (UDP only) → prefix mode as above, with a
+> wildcard `bind`; `freebind: true` (TCP only) → bind with `IP_FREEBIND` /
+> `IPV6_FREEBIND`. UDP listeners take
+> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
 > when it is created. See `config.example.yaml`. The full schema below is the
 > target.

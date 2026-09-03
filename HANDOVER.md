@@ -1,9 +1,9 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–6;
-slice 6 = `dst` matcher address form, `IP_PKTINFO` prefix listener + `regex`
-still pending).
+Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–7;
+slice 7 = UDP `prefix:` listener (`IP_PKTINFO`) + TCP `freebind:`; `first_bytes`
+`regex` and the sniffer plugin API still pending).
 
 ---
 
@@ -12,17 +12,17 @@ still pending).
 - **Planning docs** (`docs/00`–`09`) are complete and in English. They are the design
   source of truth.
 - **Code**: Cargo workspace, roadmap **phases 0–2 complete**, **phase 3 slices
-  1–6 landed** (per-listener route rule list; `first_bytes` `prefix` + `length`;
-  `consistent_hash` balancer; `sni` matcher; `dst` matcher address form). The
-  proxy forwards **TCP and UDP** end to end with health checks (`tcp_connect` +
-  `udp_probe`), three balancers, per-backend caps, worker-local UDP session
-  tables with `src_ip` affinity, hot reload, and address / first-bytes / SNI
-  routing.
-- **Next**: phase 3 continued — the `IP_PKTINFO` / wildcard-prefix listener that
-  makes `dst` useful for a whole routed prefix, `first_bytes` `regex` (needs the
-  `regex` dep decision), sniffer plugins. See `docs/03` and `docs/08`. Note
-  below.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 46 tests, all green).
+  1–7 landed** (per-listener route rule list; `first_bytes` `prefix` + `length`;
+  `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
+  listener + TCP `freebind:`). The proxy forwards **TCP and UDP** end to end
+  with health checks (`tcp_connect` + `udp_probe`), three balancers, per-backend
+  caps, worker-local UDP session tables with `src_ip` affinity, hot reload, and
+  address / first-bytes / SNI routing — including one wildcard `IP_PKTINFO`
+  socket serving a whole routed UDP prefix.
+- **Next**: phase 3 continued — `first_bytes` `regex` (needs the `regex` dep
+  decision), the in-process sniffer plugin API, optionally the `/route-hint`
+  push resolver. See `docs/03` and `docs/08`. Note below.
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 50 tests, all green).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -38,19 +38,20 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `SO_REUSEPORT` socket.
 - **UDP listeners**, one recv task per CPU core per listener, each on its own
   `SO_REUSEPORT` datagram socket. Per-worker **lock-free session table** keyed by
-  client `SocketAddr`; one upstream socket `connect(2)`-ed to the chosen backend per
-  session plus a reply-pump task; `src_ip` / `src_ip_port` **backend affinity** via a
-  per-worker sticky table; **idle-timeout eviction** (1 s sweep, `idle_timeout_sec`
-  from the pool, read once at session creation) that releases the `BackendGuard`;
-  **amplification guard** — the proxy never sends to a client without an established
+  `(client, dst)` (dst = `None` unless prefix mode); one upstream socket
+  `connect(2)`-ed to the chosen backend per session plus a reply-pump task;
+  `src_ip` / `src_ip_port` **backend affinity** via a per-worker sticky table;
+  **idle-timeout eviction** (1 s sweep, `idle_timeout_sec` from the pool, read
+  once at session creation) that releases the `BackendGuard`; **amplification
+  guard** — the proxy never sends to a client without an established
   session.
 - **Per-listener route rule list** (`listeners[].routes`, priority-ordered, first
   match wins; `action: { pool }`). Matchers: `always`; `client_cidr` (source IP,
   hand-rolled CIDR in `gsp-config` — no `ipnet` dep); `dst` (destination IP —
-  `ctx.local.ip()`, i.e. `getsockname` on TCP / the bind addr on UDP — vs the
-  same `Cidr` list; only meaningful across addresses the host serves separately
-  until the prefix listener lands); `port` (destination port from the accepting
-  socket, single or `"lo-hi"` range); `first_bytes` (a
+  `ctx.local.ip()`: `getsockname` on TCP, the bind addr on a plain UDP listener,
+  the real per-datagram destination in prefix mode — vs the same `Cidr` list);
+  `port` (destination port from the accepting socket, single or `"lo-hi"`
+  range); `first_bytes` (a
   `prefix`, `hex:` / `ascii:`, ≤ `FIRST_BYTES_PREFIX_MAX` = 512 B, **and/or** a
   `length: { min, max }` byte-count window — `Matcher::FirstBytes { prefix, len
   }`, at least one present; on TCP `length` sees only what one peek returned);
@@ -65,6 +66,15 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   per-conn task, only when a route needs bytes; UDP routes on the first datagram
   it already holds. A silent TCP client (or a ClientHello fragmented past the
   first segment) routes as if it sent nothing.
+- **UDP prefix mode** (`listeners[].prefix: <cidr>`, wildcard `bind` required):
+  one socket carries `IP_PKTINFO` / `IPV6_RECVPKTINFO`; the recv path uses
+  `recvmsg` to read the datagram's real destination, feeds it to routing
+  (`dst`), keys the session by `(client, dst)`, and the reply pump sends with
+  `sendmsg` + a pktinfo cmsg so the client sees the reply from the address it
+  hit. Destination outside the prefix →
+  `gsp_datagrams_dropped_total{reason="outside_prefix"}`. Implemented with `nix`
+  (safe wrappers — no `unsafe`; ADR 10). **TCP `freebind: true`** sets
+  `IP_FREEBIND` / `IPV6_FREEBIND` on the bind socket.
 - **Balancers**: `round_robin`, `least_conn` (counts UDP sessions too),
   `consistent_hash` (rendezvous/HRW hash of the client key — pool `hash_on:
   src_ip | src_ip_port` — over the healthy backends; `acquire()` with no client
@@ -98,9 +108,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (46, all green)
+### Tests (50, all green)
 
-- `gsp-config` (28): schema parsing + validation rejections, incl. UDP listener +
+- `gsp-config` (31): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
   without `send_hex` rejection, `consistent_hash` parsing + default/explicit
   `hash_on`, `hash_on`-without-`consistent_hash` rejection; **routing**: bare
@@ -114,7 +124,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   bound, bad `first_bytes` specs (incl. `min > max`, `length` on a non-first_bytes
   matcher); `extract_sni` from a crafted ClientHello (+ truncated
   / non-handshake → `None`), `sni` exact + `*.suffix` matching (`*.foo` ≠ apex),
-  bad `sni` config (on UDP, empty `host`, `a*b`, wrong field).
+  bad `sni` config (on UDP, empty `host`, `a*b`, wrong field); UDP `prefix`
+  listener parse + `Cidr::contains`, TCP `freebind` parse, and rejections
+  (`prefix` on TCP / with a non-wildcard bind / unparseable, `freebind` on UDP).
 - `gsp-core` unit (9): round-robin cycling, least-conn preference, capacity
   rejection, unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds,
   reload health carry-over; `consistent_hash` stability + spread (`src_ip`
@@ -124,10 +136,13 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
   a client to one backend"; "sni matcher routes by ClientHello" (crafted
   ClientHello sent raw, `*.eu.example.com` vs. fall-through).
-- `gsp-core/tests/udp_forward.rs` (4): end-to-end UDP datagram forwarding + session
+- `gsp-core/tests/udp_forward.rs` (5): end-to-end UDP datagram forwarding + session
   reuse / affinity (same client → same backend); idle-timeout eviction frees the
   per-backend slot; `first_bytes` prefix routes to its pool vs. `always`;
-  `first_bytes` `length` routes short vs. long datagrams.
+  `first_bytes` `length` routes short vs. long datagrams; **prefix listener**
+  routes `127.0.0.2` vs `127.0.0.3` (real `IP_PKTINFO` recv) and the client —
+  `connect`-ed to the sub-address — only accepts the reply if its source is that
+  address, proving the `sendmsg` pktinfo path.
 
 ---
 
@@ -144,8 +159,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | LB / health | `AtomicBool` healthy flag, `rise`/`fall` streaks under a short `Mutex`, `AtomicUsize` active count. `BackendGuard` RAII for the session slot + passive health. |
 | Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
-| UDP client-IP, TPROXY, PROXY protocol, discovery adapters, sniffers, external resolver | **designed in `docs/`, not yet built.** |
-| Deps kept out of `gsp-core` | `axum`, `clap`, `notify` live in the `gsp` binary only. |
+| UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
+| TPROXY, PROXY protocol, discovery adapters, sniffers, external resolver | **designed in `docs/`, not yet built.** |
+| Deps kept out of `gsp-core` | `axum`, `clap`, `notify` live in the `gsp` binary only. (`nix` is now used in `gsp-core` for `IP_PKTINFO`.) |
 
 ---
 
@@ -166,10 +182,10 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Full CRUD admin API (add/remove backend, set `draining`/`disabled` state) | phase 5 |
 | `draining` / `disabled` backend states (only `healthy`/`unhealthy` exist) | phase 5 |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
-| Routing matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` + `length`) / `sni`; `consistent_hash` balancer | **done** (phase 3 slices 1–6) |
+| Routing matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` + `length`) / `sni`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:` | **done** (phase 3 slices 1–7) |
 | `first_bytes` `regex` / `sniffer` variants | phase 3 |
-| `dst` prefix listener: wildcard bind over a routed prefix + `IP_PKTINFO` / `getsockname` (makes `dst` useful for many IPs on one socket) | phase 3 |
-| Routing `external` resolver | phase 3–4 |
+| TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
+| Routing `external` resolver / `/route-hint` push resolver | phase 3–4 |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
 | Rate limiting, ACLs, geo, first-packet gate | phase 7 |
@@ -212,6 +228,14 @@ set (already built for every balancer) plus a `sort_by_key` with one
 `DefaultHasher` (SipHash of client IP [+ port] and backend addr) per backend. No
 allocation beyond that `Vec`, no lock. `least_conn` already sorts the same `Vec`,
 so this is the same order of work.
+
+**UDP prefix mode** changes the per-datagram receive from `recv_from` to
+`readable().await` + `try_io(recvmsg)` (one extra `recvmsg` with a small
+`cmsg_space!(in6_pktinfo)` stack buffer, walked once for the dest address) and
+the per-reply send from `send_to` to `writable().await` + `try_io(sendmsg)` with
+a one-element pktinfo cmsg. Still no lock, no heap alloc on the steady path
+(`recvmsg`'s cmsg buffer is a fixed-size array). Non-prefix listeners keep the
+exact `recv_from` / `send_to` path.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -316,25 +340,42 @@ their own 512 B cap as `FIRST_BYTES_PREFIX_MAX`.
 ### Slice 6 — `dst` matcher, address form (done)
 
 `match: { type: dst, cidrs: [...] }` → `Matcher::DstCidr(Vec<Cidr>)`, mirrors
-`client_cidr` but tests `ctx.local.ip()`. `local` is `stream.local_addr()`
-(`getsockname`) on TCP and `down.local_addr()` (the bind addr) on UDP — so a
-plain listener only ever sees one IP and `dst` only discriminates across
-addresses the host serves separately. Shares the `cidrs` raw field with
+`client_cidr` but tests `ctx.local.ip()`. Shares the `cidrs` raw field with
 `client_cidr` (the `allow(...)` guard permits it for both); the `parse_matcher`
 arm is `"client_cidr" | "dst"`, picking the variant by `m.kind`.
 
-### Slice 7 — next
+### Slice 7 — UDP `prefix:` listener + TCP `freebind:` (done)
 
-The **`dst` prefix listener** that makes `dst` useful for a whole routed prefix:
-one wildcard socket bound over an IPv6 `/64` (or IPv4 with `IP_FREEBIND` /
-`ip_nonlocal_bind`), destination address per datagram from `IP_PKTINFO` /
-`IPV6_RECVPKTINFO` (UDP) or `getsockname()` on the accepted fd (TCP), reply
-`cmsg` with the same source. See `docs/03` "routing without a protocol hint" and
-`docs/04`. Then `first_bytes` `regex` (precompiled, bounded `N`; **needs the
-`regex` crate** — dep decision still open, best taken with the sniffer-plugin
-API) and the in-process sniffer plugin API (`sni`, `minecraft`, `a2s`). Keep the
-agnostic core: sniffers/regex parsers are optional plugins, never in the
-forwarding path.
+Config: `listeners[].prefix: <cidr>` (UDP only, resolved to
+`ListenerConfig::prefix: Option<Cidr>`; requires a wildcard `bind`) and
+`listeners[].freebind: bool` (TCP only). Both are restart-only (part of
+`ListenerConfig`).
+
+`net.rs`: `bind_reuseport_udp(addr, pktinfo)` — with `pktinfo`, `nix`
+`setsockopt(Ipv4PacketInfo | Ipv6RecvPacketInfo)`; `bind_reuseport_tcp(addr,
+backlog, freebind)` — with `freebind`, `socket2` `set_freebind[_ipv6]`.
+
+`listener_udp.rs`: `recv_one(sock, buf, pktinfo)` — plain `recv_from` when off,
+else `readable().await` + `try_io(recvmsg_pktinfo)`. `recvmsg_pktinfo` builds a
+`nix::cmsg_space!(in6_pktinfo)` buffer, `recvmsg::<SockaddrStorage>`, reads the
+client from `msg.address` (`sockaddr_to_std`) and the dest from
+`ControlMessageOwned::Ipv4PacketInfo.ipi_addr` / `Ipv6PacketInfo.ipi6_addr`
+(`.to_ne_bytes()` for the v4 `s_addr`). Session key is `(SocketAddr,
+Option<IpAddr>)`; `open_session` takes `dst`, sets `local = SocketAddr::new(dst,
+port)` in prefix mode. Reply pump calls `send_reply(down, data, client, src)` —
+`send_to` when `src` is `None`, else `writable().await` +
+`try_io(sendmsg_pktinfo)` with `ControlMessage::Ipv4PacketInfo {
+ipi_spec_dst=src, ipi_addr=0 }` / `Ipv6PacketInfo`. Dest outside the prefix →
+drop, `gsp_datagrams_dropped_total{reason="outside_prefix"}`. All safe wrappers
+— **still zero `unsafe`**. New dep: `nix` (`socket`, `net`, `uio`) in `gsp-core`.
+
+### Slice 8 — next
+
+`first_bytes` `regex` (precompiled, bounded `N`; **needs the `regex` crate** —
+dep decision still open, best taken with the sniffer-plugin API) and the
+in-process sniffer plugin API (`sni`, `minecraft`, `a2s`). Optionally the
+`/route-hint` push resolver (short-lived `src_ip → pool`). Keep the agnostic
+core: sniffers/regex parsers are optional plugins, never in the forwarding path.
 
 ### Do NOT
 
@@ -352,11 +393,11 @@ forwarding path.
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr`, `hrw_score`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
-| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. |
+| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start` spawns listener + health tasks; `RuntimeHandle` (`current`/`store`/`ready`). |
-| `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp`. |
+| `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |
 | `crates/gsp/src/admin.rs` | axum router: `/healthz` `/readyz` `/metrics` `/pools`. |
@@ -380,6 +421,11 @@ forwarding path.
   `export PATH="$HOME/.cargo/bin:$PATH"`.
 - CI: `.github/workflows/ci.yml` runs `cargo fmt --check`, `clippy --all-targets
   --all-features`, `cargo test --all` on push/PR.
+- The UDP `prefix:` e2e test (`udp_forward.rs`) needs a Linux host with
+  `IP_PKTINFO` and reachable `127.0.0.2` / `127.0.0.3` (both loopback on Linux);
+  it is not portable to macOS/Windows CI. In production, prefix mode also needs
+  the routed prefix actually routed to the box (and, for a non-local IPv4 base,
+  `IP_FREEBIND` / `net.ipv4.ip_nonlocal_bind`).
 - `git push` is not possible from this environment. To enable:
   `git remote set-url origin git@github.com:Wueschli/gameserver-proxy.git` (SSH), or
   configure a credential helper / PAT for HTTPS.

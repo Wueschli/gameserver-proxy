@@ -47,9 +47,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   src_ip_port`) — session affinity without a sticky table.
 - ✅ SNI peek matcher (`sni`, `host` exact / `*.suffix` / `.suffix`; ClientHello
   peeked, not terminated; TCP only).
-- ✅ `dst` matcher (destination IP vs `cidrs`, address form). ⬜ prefix listener
-  (one socket, `IP_PKTINFO` / `getsockname`) for games with no protocol hint
-  (subdomain → its own destination IP). ⬜ optional push resolver (`/route-hint`).
+- ✅ `dst` matcher (destination IP vs `cidrs`). ✅ UDP prefix listener
+  (`prefix: <cidr>`, one wildcard `IP_PKTINFO` socket serving the whole routed
+  prefix, replies from the hit address) + TCP `freebind`. ⬜ optional push
+  resolver (`/route-hint`).
 - Sniffer plugin API (in-process, static): `sni`, `minecraft`, `a2s` as references.
 - **Result**: multiple games/regions behind one port.
 

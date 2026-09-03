@@ -44,9 +44,12 @@ listener → backend pool forwarding with:
   `first_bytes` (prefix and/or length of the first bytes — TCP peek / first UDP
   datagram) and `sni` (host from the peeked, non-terminated TLS ClientHello)
   matchers
+- UDP `prefix:` listeners — one wildcard `IP_PKTINFO` socket serves a whole
+  routed prefix, routing by the real per-datagram destination and replying from
+  it; TCP `freebind:`
 
-Next: phase 3 continued — `IP_PKTINFO` prefix listener, `first_bytes` regex,
-sniffer plugins. See [docs/08-roadmap.md](docs/08-roadmap.md).
+Next: phase 3 continued — `first_bytes` regex, sniffer plugins. See
+[docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

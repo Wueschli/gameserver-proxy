@@ -14,7 +14,8 @@ pub const ACTIVE_UDP_SESSIONS: &str = "gsp_active_udp_sessions";
 pub const PACKETS: &str = "gsp_packets_total";
 
 /// Counter. Labels: `listener`, `reason`
-/// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send`).
+/// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send` |
+/// `outside_prefix`).
 pub const DATAGRAMS_DROPPED: &str = "gsp_datagrams_dropped_total";
 
 /// Counter. Labels: `listener`, `dir` (`c2s` | `s2c`).

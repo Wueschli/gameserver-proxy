@@ -176,6 +176,16 @@ struct RawListener {
     /// UDP only: per-client → backend stickiness across session re-creation.
     #[serde(default)]
     affinity: Option<RawAffinity>,
+    /// UDP only: serve a whole routed prefix on one wildcard socket, reading the
+    /// real destination address per datagram (`IP_PKTINFO` / `IPV6_RECVPKTINFO`)
+    /// and replying from it. `bind` must be a wildcard address. Datagrams whose
+    /// destination falls outside the prefix are dropped.
+    #[serde(default)]
+    prefix: Option<String>,
+    /// TCP only: set `IP_FREEBIND` / `IPV6_FREEBIND` so the listener can bind an
+    /// address that is not (yet) configured on an interface.
+    #[serde(default)]
+    freebind: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -573,6 +583,12 @@ pub struct ListenerConfig {
     pub routes: Vec<Route>,
     /// `Some` on UDP listeners (stickiness key); `None` on TCP.
     pub affinity: Option<HashOn>,
+    /// `Some` (UDP only) ⇒ prefix mode: wildcard-bind + `IP_PKTINFO` so one
+    /// socket serves the whole routed prefix; datagrams to a destination outside
+    /// it are dropped.
+    pub prefix: Option<Cidr>,
+    /// TCP only: bind with `IP_FREEBIND` / `IPV6_FREEBIND`.
+    pub freebind: bool,
 }
 
 impl ListenerConfig {
@@ -830,12 +846,43 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             (Protocol::Udp, None) => Some(HashOn::default()),
             (Protocol::Udp, Some(a)) => Some(a.hash_on),
         };
+
+        let prefix = match &l.prefix {
+            Some(p) => {
+                if l.protocol != Protocol::Udp {
+                    return Err(Invalid(format!(
+                        "listener {}: `prefix` mode requires a udp listener",
+                        l.name
+                    )));
+                }
+                if !bind.ip().is_unspecified() {
+                    return Err(Invalid(format!(
+                        "listener {}: `prefix` mode needs a wildcard `bind` (e.g. \"[::]:{}\")",
+                        l.name,
+                        bind.port()
+                    )));
+                }
+                let cidr = Cidr::parse(p)
+                    .map_err(|e| Invalid(format!("listener {}: prefix: {e}", l.name)))?;
+                Some(cidr)
+            }
+            None => None,
+        };
+        if l.freebind && l.protocol != Protocol::Tcp {
+            return Err(Invalid(format!(
+                "listener {}: `freebind` applies only to tcp listeners (udp uses `prefix`)",
+                l.name
+            )));
+        }
+
         listeners.push(ListenerConfig {
             name: l.name,
             bind,
             protocol: l.protocol,
             routes,
             affinity,
+            prefix,
+            freebind: l.freebind,
         });
     }
 
@@ -1562,6 +1609,65 @@ listeners:
             let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
         }
+    }
+
+    #[test]
+    fn parses_udp_prefix_listener() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "[::]:7777"
+    protocol: udp
+    prefix: "2001:db8:ace:1::/64"
+    routes:
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::1/128"] }
+        action: { pool: p }
+      - match: { type: always }
+        action: { pool: p }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        let prefix = l.prefix.as_ref().unwrap();
+        assert!(prefix.contains("2001:db8:ace:1::1".parse().unwrap()));
+        assert!(!prefix.contains("2001:db8:ace:2::1".parse().unwrap()));
+        assert!(!l.freebind);
+    }
+
+    #[test]
+    fn rejects_bad_prefix_and_freebind() {
+        for bad in [
+            // prefix on a tcp listener
+            "  - name: l\n    bind: \"[::]:7777\"\n    protocol: tcp\n    prefix: \"2001:db8::/64\"\n    pool: p",
+            // prefix with a non-wildcard bind
+            "  - name: l\n    bind: \"[2001:db8::1]:7777\"\n    protocol: udp\n    prefix: \"2001:db8::/64\"\n    pool: p",
+            // unparseable prefix
+            "  - name: l\n    bind: \"[::]:7777\"\n    protocol: udp\n    prefix: \"nonsense\"\n    pool: p",
+            // freebind on a udp listener
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    freebind: true\n    pool: p",
+        ] {
+            let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn accepts_tcp_freebind_listener() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "198.51.100.7:443"
+    freebind: true
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.listeners[0].freebind);
+        assert!(cfg.listeners[0].prefix.is_none());
     }
 
     #[test]

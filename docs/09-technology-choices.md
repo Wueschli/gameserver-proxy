@@ -35,7 +35,8 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 
 ## Key libraries (Rust, proposed)
 
-- **Sockets/syscalls**: `socket2`, `nix` (for `recvmmsg`, `IP_TRANSPARENT`, `splice`).
+- **Sockets/syscalls**: `socket2` (bind options incl. `IP_FREEBIND`), `nix` (in
+  use for `IP_PKTINFO` recv/reply; later `recvmmsg`, `IP_TRANSPARENT`, `splice`).
 - **Data structures**: `hashbrown` (session map), `slab`, `ip_network_table` / an LPM
   trie for ACLs. Consistent hashing is a hand-rolled rendezvous (HRW) hash over the
   healthy backends (`std` `DefaultHasher`) — no `hashring` dependency; the backend
@@ -73,6 +74,7 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 | 7 | Rust | GC-free latency, safe parsers | Go (GC), C++ (memory safety) |
 | 8 | UDP: a `connect(2)` socket per session | return path without a table lookup, kernel sender filtering | one socket + manual demux |
 | 9 | UDP v0: one spawned reply-pump task per session; idle expiry by a 1 s sweep; sticky table bounded by a hard cap and cleared wholesale | ships the vertical slice without `recvmmsg`/timing-wheel/LRU machinery; each is a drop-in later | building the batching + timing wheel + LRU up front |
+| 10 | `dst` prefix listener: one wildcard `IP_PKTINFO` / `IPV6_RECVPKTINFO` socket per prefix, real dest per datagram, reply source via `sendmsg` cmsg — using `nix` (safe wrappers) | keeps the zero-`unsafe` invariant; `nix` was already slated for `recvmmsg` / TPROXY / `splice` | one socket bound per address (does not scale); raw `libc` + `unsafe` cmsg walking |
 
 ## Risks & mitigations
 

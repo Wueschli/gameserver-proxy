@@ -102,8 +102,26 @@ listeners:
       - match: { type: always }
         action: { pool: local }
 
+  # Prefix mode (UDP): one wildcard socket serves a whole routed prefix. The real
+  # destination address of each datagram is read from IP_PKTINFO and matched with
+  # `dst`; replies go back out from that same address. Point DNS for each
+  # sub-domain at its own address in the prefix. Needs the prefix routed to this
+  # host (and IPv4 needs `IP_FREEBIND` / net.ipv4.ip_nonlocal_bind to bind a
+  # non-local base). Datagrams outside the prefix are dropped.
+  - name: raw-udp
+    bind: "[::]:7777"
+    protocol: udp
+    prefix: "2001:db8:ace:1::/64"
+    routes:
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::1/128"] }
+        action: { pool: realtime }
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::2/128"] }
+        action: { pool: realtime }
+      - match: { type: always }        # in-prefix but unknown address
+        action: { pool: realtime }
+
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps.
-# Restart-only: listener bind / protocol / routes / affinity.
+# Restart-only: listener bind / protocol / routes / affinity / prefix / freebind.
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that
 # changes it applies to sessions opened afterwards.

@@ -14,7 +14,8 @@
 - `gsp_bytes_total{listener,pool,dir}` – `dir` = `c2s|s2c`
 - `gsp_packets_total{listener,pool,dir}` (UDP) — v0 emits `{listener,dir}` only
 - `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
-  `no_route|no_backend|upstream_bind|upstream_send`
+  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix`
+  (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`)
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)

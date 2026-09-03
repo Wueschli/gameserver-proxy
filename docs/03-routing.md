@@ -20,13 +20,17 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > the `sni` route.
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
-> healthy backends). **`dst` caveat:** a normally-bound listener only ever sees
-> its own bind IP, so `dst` is meaningful only across addresses the host already
-> serves separately; the wildcard-prefix + `IP_PKTINFO` / `getsockname` listener
-> that makes it useful for a whole routed prefix (scheme A below) is a later
-> slice. Still pending: that prefix listener, `first-bytes` `regex` / `sniffer`
-> variants, the `external` resolver, and the `weighted` /
-> `first_available` balancers. A listener with a bare `pool:` is normalised to
+> healthy backends). **`dst` — two forms:** a normally-bound TCP/UDP listener sees
+> only its own bind IP (useful across addresses the host serves separately; TCP
+> can bind a non-local address with `freebind: true`). A UDP listener with
+> `prefix: <cidr>` runs in **prefix mode** — one wildcard socket with
+> `IP_PKTINFO` / `IPV6_RECVPKTINFO` serves the whole routed prefix (scheme A
+> below): the real per-datagram destination feeds `dst`, replies go out from
+> that address, and datagrams outside the prefix are dropped
+> (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). Still pending: the
+> TCP side of prefix binding beyond `freebind`, `first-bytes` `regex` / `sniffer`
+> variants, the `external` resolver, and the `weighted` / `first_available`
+> balancers. A listener with a bare `pool:` is normalised to
 > one `always` route.
 
 ## Evaluation order

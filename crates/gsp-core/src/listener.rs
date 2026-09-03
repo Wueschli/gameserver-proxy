@@ -25,7 +25,7 @@ pub async fn run_tcp_listener(
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
-    let listener = TcpListener::from_std(bind_reuseport_tcp(cfg.bind, 1024)?)?;
+    let listener = TcpListener::from_std(bind_reuseport_tcp(cfg.bind, 1024, cfg.freebind)?)?;
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
