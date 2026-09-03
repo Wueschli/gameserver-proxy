@@ -213,3 +213,44 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn consistent_hash_pins_a_client_to_one_backend() {
+    let a = marker_backend(b'A').await;
+    let b = marker_backend(b'B').await;
+    let c = marker_backend(b'C').await;
+    let proxy_addr = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{a}", "{b}", "{c}"]
+    balancer: consistent_hash
+    hash_on: src_ip
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Same source IP (127.0.0.1), different ephemeral ports each connection.
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..12 {
+        let mut conn = TcpStream::connect(proxy_addr).await.unwrap();
+        let mut m = [0u8; 1];
+        conn.read_exact(&mut m).await.unwrap();
+        seen.insert(m[0]);
+    }
+    assert_eq!(
+        seen.len(),
+        1,
+        "src_ip hashing must pin one client IP to a single backend, saw {seen:?}"
+    );
+
+    runtime.shutdown().await;
+}

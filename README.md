@@ -28,7 +28,8 @@ and access control.
 **Roadmap phases 1–2 complete; phase 3 (routing) started.** TCP and UDP
 listener → backend pool forwarding with:
 
-- `round_robin` and `least_conn` balancing
+- `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
+  `hash_on: src_ip | src_ip_port`) balancing
 - active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
   passive connect-failure feedback; unhealthy backends are skipped
 - UDP: worker-local (lock-free) session tables, one `connect(2)` upstream socket per
@@ -43,8 +44,7 @@ listener → backend pool forwarding with:
   (first-bytes prefix — TCP peek / first UDP datagram) matchers
 
 Next: phase 3 continued — `first_bytes` regex/length, `dst` / `sni` matchers,
-sniffer plugins, the `consistent_hash` balancer. See
-[docs/08-roadmap.md](docs/08-roadmap.md).
+sniffer plugins. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

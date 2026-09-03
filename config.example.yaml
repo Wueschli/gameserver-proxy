@@ -12,7 +12,7 @@ pools:
     targets:
       - "127.0.0.1:9001"
       - "127.0.0.1:9002"
-    balancer: round_robin        # or: least_conn
+    balancer: round_robin        # round_robin | least_conn | consistent_hash
     connect_timeout_ms: 300
     idle_timeout_sec: 90
     health_check:
@@ -28,7 +28,11 @@ pools:
     targets:
       - "127.0.0.1:27015"
       - "127.0.0.1:27016"
-    balancer: least_conn
+    # consistent_hash pins a client to one instance by a rendezvous hash of its
+    # address — session affinity without a sticky table. hash_on: src_ip (default)
+    # | src_ip_port. Only valid with balancer: consistent_hash.
+    balancer: consistent_hash
+    hash_on: src_ip
     idle_timeout_sec: 30           # UDP session idle eviction
     health_check:
       type: udp_probe             # send a payload, expect a reply datagram

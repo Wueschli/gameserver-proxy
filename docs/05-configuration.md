@@ -14,9 +14,11 @@
 
 > **Implemented subset (roadmap phase 2 + phase 3 routing, partial).**
 > `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
-> (no `backend_sources`), `balancer: round_robin | least_conn` (scalar, not an
-> object), `health_check.type: tcp_connect | udp_probe` with `send_hex` /
-> `expect_hex_prefix` for `udp_probe`, and `per_backend.max_sessions`.
+> (no `backend_sources`); `balancer: round_robin | least_conn | consistent_hash`
+> (scalar, not an object) — `consistent_hash` also reads a pool-level
+> `hash_on: src_ip | src_ip_port` (default `src_ip`), rejected on the other
+> balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
+> `expect_hex_prefix` for `udp_probe`; and `per_backend.max_sessions`.
 >
 > A listener maps to a pool either with the `pool: <name>` shorthand or with a
 > priority-ordered `routes:` list — `[{ match, action }]`, first match wins,

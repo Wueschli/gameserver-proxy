@@ -21,7 +21,8 @@
 - `gsp_backend_active_sessions{pool,backend}` (gauge)
 - `gsp_backend_connect_errors_total{pool,backend,kind}` – `kind` = `timeout|refused|unreachable`
 - `gsp_healthcheck_total{pool,backend,result}`
-- `gsp_lb_selections_total{pool,strategy,result}` – `result` = `ok|no_backend|limit_reached`
+- `gsp_lb_selections_total{pool,strategy,result}` – `strategy` =
+  `round_robin|least_conn|consistent_hash`; `result` = `ok|no_backend|at_capacity`
 
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|error|timeout`

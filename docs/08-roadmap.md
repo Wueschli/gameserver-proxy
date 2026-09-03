@@ -42,6 +42,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
 - ✅ `first-bytes` matcher — prefix (`hex:` / `ascii:`, ≤ 512 B); TCP peek /
   first UDP datagram. ⬜ `regex` / `length` / `sniffer` variants.
+- ✅ `consistent_hash` balancer (rendezvous/HRW hash, pool `hash_on: src_ip |
+  src_ip_port`) — session affinity without a sticky table.
 - `dst` matcher + prefix listener (one socket, `IP_PKTINFO`/`getsockname`) for games
   with no protocol hint (subdomain → its own destination IP). Optional push resolver
   (`/route-hint`).

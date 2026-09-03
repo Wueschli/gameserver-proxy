@@ -200,7 +200,7 @@ async fn open_session(
         .and_then(|&addr| pool.acquire_addr(addr))
     {
         Some(g) => g,
-        None => pool.acquire().map_err(|e| {
+        None => pool.acquire_for(Some(client)).map_err(|e| {
             tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
             "no_backend"
         })?,

@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–2).
+Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–3).
 
 ---
 
@@ -10,15 +10,14 @@ Last updated: 2026-09-03 (after roadmap phase 2 + phase 3 routing slices 1–2).
 - **Planning docs** (`docs/00`–`09`) are complete and in English. They are the design
   source of truth.
 - **Code**: Cargo workspace, roadmap **phases 0–2 complete**, **phase 3 slices
-  1–2 landed** (per-listener route rule list + `first_bytes` prefix matcher).
-  The proxy forwards **TCP and UDP** end to end with health checks
-  (`tcp_connect` + `udp_probe`), two balancers, per-backend caps, worker-local
-  UDP session tables with `src_ip` affinity, hot reload, and address- +
-  first-bytes routing.
-- **Next**: phase 3 continued — `first_bytes` `regex` / `length` variants and/or
-  the `consistent_hash` balancer, then `dst` / `sni` / sniffer plugins. See
-  `docs/03` and `docs/08`. Note below.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 33 tests, all green).
+  1–3 landed** (per-listener route rule list + `first_bytes` prefix matcher +
+  `consistent_hash` balancer). The proxy forwards **TCP and UDP** end to end
+  with health checks (`tcp_connect` + `udp_probe`), three balancers, per-backend
+  caps, worker-local UDP session tables with `src_ip` affinity, hot reload, and
+  address- + first-bytes routing.
+- **Next**: phase 3 continued — `first_bytes` `regex` / `length` variants, then
+  `dst` / `sni` / sniffer plugins. See `docs/03` and `docs/08`. Note below.
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 38 tests, all green).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -51,7 +50,11 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `ListenerConfig::peek_len()` bytes (250 ms budget, `PEEK_TIMEOUT`) in the
   spawned per-conn task only when a route needs them; UDP routes on the first
   datagram it already holds. A silent TCP client routes as if it sent nothing.
-- **Balancers**: `round_robin`, `least_conn` (counts UDP sessions too).
+- **Balancers**: `round_robin`, `least_conn` (counts UDP sessions too),
+  `consistent_hash` (rendezvous/HRW hash of the client key — pool `hash_on:
+  src_ip | src_ip_port` — over the healthy backends; `acquire()` with no client
+  key falls back to round-robin). TCP passes `peer`; UDP passes the client addr
+  on the non-sticky path.
 - **Per-connection pump**: buffered bidirectional copy, connect timeout, per-direction
   idle timeout, half-close propagation, `TCP_NODELAY`.
 - **Backend health**: active `tcp_connect` or `udp_probe` probes per pool
@@ -80,22 +83,26 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (33, all green)
+### Tests (38, all green)
 
-- `gsp-config` (20): schema parsing + validation rejections, incl. UDP listener +
+- `gsp-config` (22): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
-  without `send_hex` rejection; **routing**: bare `pool` → one `always` route,
-  route-list first-match (`client_cidr` / `port` / `always`), `pool`+`routes`
-  rejection, unknown-pool-in-route rejection, `always`-with-fields rejection,
-  bad-CIDR / reversed-range / empty-`cidrs` rejection, `Cidr::contains` v4 + v6,
-  `first_bytes` prefix match + `peek_len()`, bad `first_bytes` specs (no `hex:`/
-  `ascii:` tag, missing/empty prefix, prefix on `always`).
-- `gsp-core` unit (7): round-robin cycling, least-conn preference, capacity rejection,
-  unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds, reload health
-  carry-over.
-- `gsp-core/tests/tcp_forward.rs` (3): end-to-end client→proxy→backend byte
+  without `send_hex` rejection, `consistent_hash` parsing + default/explicit
+  `hash_on`, `hash_on`-without-`consistent_hash` rejection; **routing**: bare
+  `pool` → one `always` route, route-list first-match (`client_cidr` / `port` /
+  `always`), `pool`+`routes` rejection, unknown-pool-in-route rejection,
+  `always`-with-fields rejection, bad-CIDR / reversed-range / empty-`cidrs`
+  rejection, `Cidr::contains` v4 + v6, `first_bytes` prefix match + `peek_len()`,
+  bad `first_bytes` specs (no `hex:`/`ascii:` tag, missing/empty prefix, prefix
+  on `always`).
+- `gsp-core` unit (9): round-robin cycling, least-conn preference, capacity
+  rejection, unhealthy-skip, all-unhealthy error, `rise`/`fall` thresholds,
+  reload health carry-over; `consistent_hash` stability + spread (`src_ip`
+  ignores port), and "only the lost backend's share moves" when a backend fails.
+- `gsp-core/tests/tcp_forward.rs` (4): end-to-end client→proxy→backend byte
   forwarding; "routes around a dead backend"; "first matching route selects the
-  pool" (`client_cidr` hit vs. fall-through to `always`).
+  pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
+  a client to one backend".
 - `gsp-core/tests/udp_forward.rs` (3): end-to-end UDP datagram forwarding + session
   reuse / affinity (same client → same backend); idle-timeout eviction frees the
   per-backend slot; `first_bytes` prefix routes to its pool vs. `always`.
@@ -113,8 +120,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Config | Immutable `Snapshot` behind `arc_swap::ArcSwap`. `serde_yaml` (deprecated but working; revisit if it breaks). |
 | Data/control split | Data plane only reads the snapshot; `reload.rs` is the only writer. |
 | LB / health | `AtomicBool` healthy flag, `rise`/`fall` streaks under a short `Mutex`, `AtomicUsize` active count. `BackendGuard` RAII for the session slot + passive health. |
-| Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active). |
-| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel, `consistent_hash` deferred. See ADR 9. |
+| Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
+| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP client-IP, TPROXY, PROXY protocol, discovery adapters, sniffers, external resolver | **designed in `docs/`, not yet built.** |
 | Deps kept out of `gsp-core` | `axum`, `clap`, `notify` live in the `gsp` binary only. |
 
@@ -128,14 +135,16 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP `recvmmsg`/`sendmmsg` batching (plain `recv_from`/`send` now) | perf pass |
 | UDP idle expiry via a timing wheel (1 s sweep now) | perf pass |
 | UDP sticky-affinity table: LRU eviction (hard cap + wholesale clear now) | polish |
-| `consistent_hash` balancer | phase 3 (not started) |
+| `consistent_hash` balancer | **done** (phase 3 slice 3) |
+| `consistent_hash` used to retire the UDP per-worker sticky table | polish |
+| `weighted` / `first_available` balancers | later |
 | UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
 | Listener add / remove / rebind at runtime (needs restart today) | phase 5 |
 | Tracked connection drain with a grace period on shutdown | phase 5 |
 | Full CRUD admin API (add/remove backend, set `draining`/`disabled` state) | phase 5 |
 | `draining` / `disabled` backend states (only `healthy`/`unhealthy` exist) | phase 5 |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
-| Routing matchers `always` / `client_cidr` / `port` / `first_bytes` (prefix) | **done** (phase 3 slices 1–2) |
+| Routing matchers `always` / `client_cidr` / `port` / `first_bytes` (prefix); `consistent_hash` balancer | **done** (phase 3 slices 1–3) |
 | `first_bytes` `regex` / `length` / `sniffer` variants | phase 3 |
 | Routing matchers `sni`, `dst`, `external` | phase 3–4 |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
@@ -168,6 +177,12 @@ and clones the listener's `Arc<ListenerConfig>` into the per-conn task. No lock,
 no task spawn beyond the existing per-conn one, nothing on the per-byte /
 per-datagram path. TCP route resolution now happens inside the spawned task, so
 the accept loop no longer loads the snapshot.
+
+`consistent_hash` selection is `O(healthy)` — one `Vec<&Backend>` of the healthy
+set (already built for every balancer) plus a `sort_by_key` with one
+`DefaultHasher` (SipHash of client IP [+ port] and backend addr) per backend. No
+allocation beyond that `Vec`, no lock. `least_conn` already sorts the same `Vec`,
+so this is the same order of work.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -225,14 +240,34 @@ byte matcher — the TCP path skips the peek entirely in that case. TCP peek:
 routes as if it sent nothing. UDP: routes on the first datagram, already in hand
 in `open_session`. `parse_byte_spec` handles the `hex:` / `ascii:` tags.
 
-### Slice 3 — next
+### Slice 3 — `consistent_hash` balancer (done)
 
-Options, pick per `docs/03` / `docs/08`: `first_bytes` `regex` (precompiled,
-bounded `N`) and `length` (datagram-length range, UDP-centric) variants; **or**
-the `consistent_hash` balancer (hash on `src_ip` / routing key, no sticky
-table). Then `sni` peek and the in-process sniffer plugin API (`sni`,
-`minecraft`, `a2s`). Keep the agnostic core: sniffers/regex parsers are optional
-plugins, never in the forwarding path.
+`balancer: consistent_hash` + pool-level `hash_on: src_ip | src_ip_port`
+(default `src_ip`; rejected on the other balancers, resolved to
+`PoolConfig::hash_on: Option<HashOn>` / `Pool::hash_on`). Selection: rendezvous
+(HRW) — `hrw_score(hash_on, client, backend)` hashes the client IP (and port for
+`src_ip_port`) plus the backend addr with `std` `DefaultHasher`; the healthy set
+is sorted by descending score, so capacity fall-through is deterministic and
+losing a backend only moves that backend's share.
+
+`Pool::acquire()` → `acquire_for(None)` (RR/LC unchanged; `consistent_hash` with
+no key falls back to RR). `Pool::acquire_for(Some(client))` is the keyed entry:
+`proxy::handle_tcp(stream, peer, pool)` passes the TCP `peer`; `listener_udp`
+passes the client addr on the non-sticky fallback path (the sticky table still
+runs first when the listener has `affinity`, and is redundant-but-harmless with
+`consistent_hash`).
+
+`DefaultHasher` is process-stable only — fine here: a reload rebuilds pools and
+there is no cross-instance shared state. Docs/09 records the no-`hashring`
+choice.
+
+### Slice 4 — next
+
+`first_bytes` `regex` (precompiled, bounded `N`; needs the `regex` crate — the
+dep decision was deferred, ideally taken with the sniffer-plugin API) and
+`length` (datagram-length range, UDP-centric) variants. Then `sni` peek and the
+in-process sniffer plugin API (`sni`, `minecraft`, `a2s`). Keep the agnostic
+core: sniffers/regex parsers are optional plugins, never in the forwarding path.
 
 ### Do NOT
 
@@ -248,7 +283,7 @@ plugins, never in the forwarding path.
 |------|----------------|
 | `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`HealthCheck`. All schema rules here. |
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
-| `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index, `acquire` / `acquire_addr`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
+| `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr`, `hrw_score`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |

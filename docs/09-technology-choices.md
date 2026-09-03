@@ -37,7 +37,9 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 
 - **Sockets/syscalls**: `socket2`, `nix` (for `recvmmsg`, `IP_TRANSPARENT`, `splice`).
 - **Data structures**: `hashbrown` (session map), `slab`, `ip_network_table` / an LPM
-  trie for ACLs, `hashring` for consistent hashing.
+  trie for ACLs. Consistent hashing is a hand-rolled rendezvous (HRW) hash over the
+  healthy backends (`std` `DefaultHasher`) — no `hashring` dependency; the backend
+  set is tiny, so HRW's linear scan is cheaper than maintaining a ring.
 - **Config**: `serde` + `serde_yaml`, `figment` for env overlay, `notify` for file
   watch.
 - **Snapshot swap**: `arc-swap`.

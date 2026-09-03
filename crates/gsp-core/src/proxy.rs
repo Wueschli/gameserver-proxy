@@ -27,8 +27,12 @@ pub struct ConnOutcome {
 /// The [`BackendGuard`](crate::pool::BackendGuard) returned by `acquire` holds
 /// an active-session slot for the whole connection (released on drop) and
 /// carries passive connect results back into the backend's health state.
-pub async fn handle_tcp(client: TcpStream, pool: &Pool) -> anyhow::Result<ConnOutcome> {
-    let guard = pool.acquire()?;
+pub async fn handle_tcp(
+    client: TcpStream,
+    client_addr: SocketAddr,
+    pool: &Pool,
+) -> anyhow::Result<ConnOutcome> {
+    let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
 
     let backend = match timeout(pool.connect_timeout, TcpStream::connect(backend_addr)).await {

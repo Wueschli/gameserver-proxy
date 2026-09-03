@@ -80,6 +80,9 @@ struct RawPool {
     targets: Vec<String>,
     #[serde(default)]
     balancer: Balancer,
+    /// `consistent_hash` only: which part of the client address is the hash key.
+    #[serde(default)]
+    hash_on: Option<HashOn>,
     #[serde(default = "default_connect_timeout_ms")]
     connect_timeout_ms: u64,
     #[serde(default = "default_idle_timeout_sec")]
@@ -229,6 +232,11 @@ pub enum Balancer {
     #[default]
     RoundRobin,
     LeastConn,
+    /// Rendezvous (HRW) hash of a per-client key over the healthy backends: the
+    /// same key sticks to the same backend without a session table, and only
+    /// that backend's share moves when the set changes. Key selected by the
+    /// pool's `hash_on` (`src_ip` default).
+    ConsistentHash,
 }
 
 /// Listener transport.
@@ -395,6 +403,8 @@ pub struct PoolConfig {
     pub name: String,
     pub targets: Vec<SocketAddr>,
     pub balancer: Balancer,
+    /// `Some` iff `balancer == ConsistentHash`: the hash key selector.
+    pub hash_on: Option<HashOn>,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub health_check: HealthCheck,
@@ -565,10 +575,22 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             )));
         }
 
+        let hash_on = match (p.balancer, p.hash_on) {
+            (Balancer::ConsistentHash, on) => Some(on.unwrap_or(HashOn::SrcIp)),
+            (_, Some(_)) => {
+                return Err(Invalid(format!(
+                    "pool {}: hash_on applies only to balancer consistent_hash",
+                    p.name
+                )))
+            }
+            (_, None) => None,
+        };
+
         pools.push(PoolConfig {
             name: p.name,
             targets,
             balancer: p.balancer,
+            hash_on,
             connect_timeout: Duration::from_millis(p.connect_timeout_ms),
             idle_timeout: Duration::from_secs(p.idle_timeout_sec),
             health_check: HealthCheck {
@@ -850,6 +872,44 @@ listeners:
         assert_eq!(cfg.pools[0].health_check.interval.as_secs(), 1);
         assert_eq!(cfg.pools[0].health_check.fall, 1);
         assert_eq!(cfg.pools[0].max_sessions, Some(50));
+    }
+
+    #[test]
+    fn parses_consistent_hash_balancer() {
+        let yaml = r#"
+pools:
+  - name: a
+    targets: ["127.0.0.1:1"]
+    balancer: consistent_hash
+  - name: b
+    targets: ["127.0.0.1:2"]
+    balancer: consistent_hash
+    hash_on: src_ip_port
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: a
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(cfg.pools[0].balancer, Balancer::ConsistentHash);
+        assert_eq!(cfg.pools[0].hash_on, Some(HashOn::SrcIp)); // default
+        assert_eq!(cfg.pools[1].hash_on, Some(HashOn::SrcIpPort));
+    }
+
+    #[test]
+    fn rejects_hash_on_without_consistent_hash() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+    balancer: round_robin
+    hash_on: src_ip
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#;
+        assert!(parse_str(yaml).is_err());
     }
 
     #[test]

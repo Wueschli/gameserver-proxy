@@ -104,7 +104,7 @@ pub async fn run_tcp_listener(
                     metrics::gauge!(m::ACTIVE_CONNECTIONS, "listener" => listener_name.clone())
                         .increment(1.0);
                     let started = std::time::Instant::now();
-                    match crate::proxy::handle_tcp(stream, &pool).await {
+                    match crate::proxy::handle_tcp(stream, peer, &pool).await {
                         Ok(out) => {
                             metrics::counter!(
                                 m::BYTES, "listener" => listener_name.clone(), "dir" => "c2s",

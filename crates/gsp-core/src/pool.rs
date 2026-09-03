@@ -6,12 +6,13 @@
 //! driven by the active checker ([`crate::health`]) and by passive connect
 //! results reported through [`BackendGuard::observe`].
 
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gsp_config::{Balancer, HealthCheck, HealthCheckKind, PoolConfig};
+use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig};
 
 use crate::metrics_defs as m;
 
@@ -176,6 +177,8 @@ impl Drop for BackendGuard {
 pub struct Pool {
     pub name: Arc<str>,
     pub balancer: Balancer,
+    /// `Some` iff `balancer == ConsistentHash`.
+    pub hash_on: Option<HashOn>,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     backends: Vec<Arc<Backend>>,
@@ -208,6 +211,7 @@ impl Pool {
         Self {
             name,
             balancer: cfg.balancer,
+            hash_on: cfg.hash_on,
             connect_timeout: cfg.connect_timeout,
             idle_timeout: cfg.idle_timeout,
             backends,
@@ -231,7 +235,15 @@ impl Pool {
     }
 
     /// Select a healthy backend with free capacity and reserve a session slot.
+    /// Uses round-robin / least-conn ordering; `consistent_hash` pools fall back
+    /// to round-robin here (no client key). Prefer [`Pool::acquire_for`].
     pub fn acquire(&self) -> Result<BackendGuard, PickError> {
+        self.acquire_for(None)
+    }
+
+    /// Like [`Pool::acquire`], but `client` supplies the key a `consistent_hash`
+    /// pool hashes on (`hash_on`); the other balancers ignore it.
+    pub fn acquire_for(&self, client: Option<SocketAddr>) -> Result<BackendGuard, PickError> {
         let mut healthy: Vec<&Arc<Backend>> =
             self.backends.iter().filter(|b| b.is_healthy()).collect();
         if healthy.is_empty() {
@@ -245,12 +257,21 @@ impl Pool {
             return Err(PickError::NoHealthyBackend(self.name.to_string()));
         }
 
+        let round_robin = |healthy: &mut Vec<&Arc<Backend>>| {
+            let start = self.rr.fetch_add(1, Ordering::Relaxed) % healthy.len();
+            healthy.rotate_left(start);
+        };
         match self.balancer {
             Balancer::LeastConn => healthy.sort_by_key(|b| b.active()),
-            Balancer::RoundRobin => {
-                let start = self.rr.fetch_add(1, Ordering::Relaxed) % healthy.len();
-                healthy.rotate_left(start);
-            }
+            Balancer::RoundRobin => round_robin(&mut healthy),
+            Balancer::ConsistentHash => match client {
+                // Highest rendezvous score first; the rest stay ordered by
+                // descending score so capacity fall-through is deterministic.
+                Some(c) => {
+                    healthy.sort_by_key(|b| std::cmp::Reverse(hrw_score(self.hash_on, c, b.addr)))
+                }
+                None => round_robin(&mut healthy),
+            },
         }
 
         for b in healthy {
@@ -281,7 +302,23 @@ fn strategy_str(b: Balancer) -> &'static str {
     match b {
         Balancer::RoundRobin => "round_robin",
         Balancer::LeastConn => "least_conn",
+        Balancer::ConsistentHash => "consistent_hash",
     }
+}
+
+/// Rendezvous (HRW) score for `(client key, backend)`. The backend with the
+/// highest score owns the key; when a backend joins/leaves only keys whose top
+/// score was on that backend move. Uses `DefaultHasher` — stable for the life
+/// of the process, which is all consistent_hash needs (a reload rebuilds pools,
+/// and there is no cross-instance shared state).
+fn hrw_score(hash_on: Option<HashOn>, client: SocketAddr, backend: SocketAddr) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    client.ip().hash(&mut h);
+    if matches!(hash_on, Some(HashOn::SrcIpPort)) {
+        client.port().hash(&mut h);
+    }
+    backend.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
@@ -293,6 +330,7 @@ mod tests {
             name: "t".into(),
             targets: targets.iter().map(|s| s.parse().unwrap()).collect(),
             balancer,
+            hash_on: matches!(balancer, Balancer::ConsistentHash).then_some(HashOn::SrcIp),
             connect_timeout: Duration::from_millis(300),
             idle_timeout: Duration::from_secs(90),
             health_check: HealthCheck {
@@ -356,6 +394,68 @@ mod tests {
         assert!(!p.backends()[0].is_healthy());
         for _ in 0..4 {
             assert_eq!(p.acquire().unwrap().addr().port(), 2);
+        }
+    }
+
+    #[test]
+    fn consistent_hash_is_stable_and_spreads() {
+        let p = Pool::new(
+            &pcfg(
+                &["127.0.0.1:1", "127.0.0.1:2", "127.0.0.1:3", "127.0.0.1:4"],
+                Balancer::ConsistentHash,
+                None,
+            ),
+            None,
+        );
+        let pick = |ip: &str| {
+            let g = p
+                .acquire_for(Some(format!("{ip}:40000").parse().unwrap()))
+                .unwrap();
+            g.addr().port()
+        };
+        // Same client key -> same backend, every time.
+        let a = pick("203.0.113.7");
+        for _ in 0..20 {
+            assert_eq!(pick("203.0.113.7"), a);
+        }
+        // src_ip keying: the port must not matter.
+        let g = p
+            .acquire_for(Some("203.0.113.7:59999".parse().unwrap()))
+            .unwrap();
+        assert_eq!(g.addr().port(), a);
+        // Different clients don't all collapse onto one backend.
+        let spread: std::collections::BTreeSet<u16> =
+            (0..40).map(|i| pick(&format!("198.51.100.{i}"))).collect();
+        assert!(spread.len() >= 2, "hash should use more than one backend");
+    }
+
+    #[test]
+    fn consistent_hash_reassigns_only_the_lost_backend_share() {
+        let targets = ["127.0.0.1:1", "127.0.0.1:2", "127.0.0.1:3", "127.0.0.1:4"];
+        let p = Pool::new(&pcfg(&targets, Balancer::ConsistentHash, None), None);
+        let clients: Vec<std::net::SocketAddr> = (0..60)
+            .map(|i| format!("198.51.100.{i}:1000").parse().unwrap())
+            .collect();
+        let before: Vec<u16> = clients
+            .iter()
+            .map(|&c| p.acquire_for(Some(c)).unwrap().addr().port())
+            .collect();
+
+        // Take backend :1 out of service.
+        for _ in 0..3 {
+            p.backends()[0].observe(false);
+        }
+        let after: Vec<u16> = clients
+            .iter()
+            .map(|&c| p.acquire_for(Some(c)).unwrap().addr().port())
+            .collect();
+
+        for (b, a) in before.iter().zip(&after) {
+            if *b != 1 {
+                assert_eq!(b, a, "clients not on the lost backend must not move");
+            } else {
+                assert_ne!(*a, 1, "clients on the lost backend must move elsewhere");
+            }
         }
     }
 

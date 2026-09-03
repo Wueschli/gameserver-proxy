@@ -10,8 +10,10 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > `first-bytes` — **prefix only** (`prefix: "hex:..." | "ascii:..."`, ≤ 512 B).
 > The TCP path `MSG_PEEK`s that many bytes (250 ms budget) before routing only
 > when a route needs them; UDP inspects the first datagram it already holds.
-> Still pending: `first-bytes` `regex` / `length` / `sniffer` variants, `dst`,
-> `sni`, the `external` resolver, and the `consistent_hash` / `weighted` /
+> The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
+> pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
+> healthy backends). Still pending: `first-bytes` `regex` / `length` / `sniffer`
+> variants, `dst`, `sni`, the `external` resolver, and the `weighted` /
 > `first_available` balancers. A listener with a bare `pool:` is normalised to
 > one `always` route.
 
