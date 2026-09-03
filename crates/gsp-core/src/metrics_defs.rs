@@ -56,12 +56,14 @@ pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
 pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
 
 /// Counter. Labels: `listener`, `filter` (`acl` | `geo` | `rate_ip` |
-/// `rate_net` | `max_conn` | `max_udp` | `max_new_rate`). A connection / new UDP
-/// session was dropped by the pre-routing filter chain: `acl` = source IP
-/// allow/deny; `geo` = GeoIP country allow/deny (or the DB failed to load and
-/// the listener fails closed); `rate_ip` / `rate_net` = the per-listener per-IP
-/// / per-/24 (per-/64) token bucket was empty; `max_conn` / `max_udp` /
-/// `max_new_rate` = a process-wide `settings.limits` cap was hit.
+/// `rate_net` | `src_conn_ip` | `src_conn_net` | `max_conn` | `max_udp` |
+/// `max_new_rate`). A connection / new UDP session was dropped by the
+/// pre-routing filter chain: `acl` = source IP allow/deny; `geo` = GeoIP country
+/// allow/deny (or the DB failed to load and the listener fails closed);
+/// `rate_ip` / `rate_net` = the per-listener per-IP / per-/24 (per-/64) token
+/// bucket was empty; `src_conn_ip` / `src_conn_net` = the per-listener
+/// concurrent per-source connection / session cap was reached; `max_conn` /
+/// `max_udp` / `max_new_rate` = a process-wide `settings.limits` cap was hit.
 pub const FILTER_BLOCKED: &str = "gsp_filter_blocked_total";
 
 /// Counter. Labels: `result` (`ok` | `failed`).

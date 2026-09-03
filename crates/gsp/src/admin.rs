@@ -105,7 +105,7 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
     ));
     for l in &snap.listeners {
         out.push_str(&format!(
-            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}{}{}{}{}\n",
+            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}{}{}{}{}{}\n",
             l.name,
             l.bind,
             l.protocol,
@@ -134,6 +134,17 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
                         None => "-".to_string(),
                     };
                     format!("\trate_limit=ip:{},net:{}", f(rl.per_ip), f(rl.per_net))
+                }
+                None => String::new(),
+            },
+            match &l.per_source {
+                Some(ps) => {
+                    let g = |v: Option<usize>| v.map_or("-".to_string(), |n| n.to_string());
+                    format!(
+                        "\tper_source=ip:{},net:{}",
+                        g(ps.max_per_ip),
+                        g(ps.max_per_net)
+                    )
                 }
                 None => String::new(),
             },

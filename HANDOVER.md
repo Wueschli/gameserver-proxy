@@ -1,15 +1,18 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–7 done** —
-filter chain: per-listener radix-trie `allow` / `deny` CIDR lists + an optional
-MaxMind GeoIP `geo: { allow, deny }` country filter + a per-listener `rate_limit`
-token bucket (per source IP and per /24 / /64) + process-wide `settings.limits`
-caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) + a
-UDP `first_packet_gate` (session only on positive first-datagram recognition);
-blocked traffic dropped silently + `gsp_filter_blocked_total{filter=…}` /
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–9 done** — only
+NFR load tests remain. Filter chain: per-listener radix-trie `allow` / `deny`
+CIDR lists + an optional MaxMind GeoIP `geo: { allow, deny }` country filter + a
+per-listener `rate_limit` token bucket (per source IP and per /24 / /64) + a
+per-listener `per_source` concurrent connection/session cap + process-wide
+`settings.limits` caps (`max_connections` / `max_udp_sessions` /
+`max_new_sessions_per_sec`) + a UDP `first_packet_gate` (session only on positive
+first-datagram recognition); blocked traffic dropped silently +
+`gsp_filter_blocked_total{filter=…}` /
 `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Amplifier checklist
-covered by `tests/amplification.rs`).
+covered by `tests/amplification.rs`; `cargo-fuzz` harnesses in
+`crates/gsp-config/fuzz/`).
 Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
@@ -245,12 +248,28 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `rust-toolchain.toml`). New CI job `fuzz` (nightly, builds + 45 s smoke-run
   per target). Initial runs: no crashes (10.9M execs on `extract_sni`, 2.6M on
   `route_match`, ~35k on the heavier `parse_config`).
+- **Phase 7 slice 9 done**: per-source concurrent connection / session cap.
+  `gsp-config` `RawListener::per_source` → `Option<PerSourceLimit { max_per_ip,
+  max_per_net: Option<usize> }>` (`ListenerConfig::per_source`); `validate()`
+  rejects a `0` and an empty `per_source`. `gsp-core::src_conns::SourceLimiter`
+  — `Mutex<{ ips: HashMap<IpAddr,usize>, nets: HashMap<NetKey,usize> }>` (`NetKey`
+  reused from `ratelimit`, now `pub(crate)`); `acquire(ip) -> Result<SourceGuard,
+  &'static str>` checks `ip < max_ip && net < max_net`, increments both on
+  success, consumes nothing on refusal; `SourceGuard::drop` decrements (removing
+  a zeroed entry). One `Arc<SourceLimiter>` per listener built in
+  `spawn_group`, cloned to workers, rebuilt on respawn. `run_tcp_listener` /
+  `run_udp_listener` gained `src_limiter`; checked right after the `rate_limit`
+  bucket — TCP holds the guard in the per-conn task, UDP stores it on `Session`
+  (drops on eviction). `m::FILTER_BLOCKED` gains `src_conn_ip` / `src_conn_net`.
+  `GET /config` shows `per_source=ip:N,net:N`. **No LRU eviction under pressure**
+  — a full source is simply refused until the idle sweep / connection close
+  frees a slot (noted in `docs/07`).
 - **Next**: NFR N1/N2 load tests (a benchmark harness — the last phase-7 tail
   item; not a code slice). Phase 7's feature + hardening work is complete.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~137 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~142 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   `git push` works again (through slice 7); `origin/main` is current. The HTTPS
@@ -445,7 +464,7 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `tcp_forward::geo_filter_denies_unlisted_country` (a listener with
   `allow: [SE]` fails a loopback client closed, no geo admits it).
 
-(The per-file counts above predate phases 3–7; `make check` runs ~137.)
+(The per-file counts above predate phases 3–7; `make check` runs ~142.)
 
 **Fuzzing** (`crates/gsp-config/fuzz/`, not part of `make check`): `make fuzz`
 runs `extract_sni` / `route_match` / `parse_config` for `FUZZ_TIME` seconds each.
@@ -517,7 +536,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | ACL longest-prefix-match trie (`gsp_config::CidrSet`) | **done** (phase 7 slice 6) |
 | Optional GeoIP country filter (`settings.geo_db` + per-listener `geo`) | **done** (phase 7 slice 7) |
 | Parser fuzzing (`crates/gsp-config/fuzz/`, `make fuzz`, CI job) | **done** (phase 7 slice 8) |
+| Per-source concurrent connection/session cap (`per_source`) | **done** (phase 7 slice 9) |
 | NFR N1/N2 load tests | phase 7 tail (benchmark harness) |
+| Per-source cap: LRU eviction of idle sessions under pressure (refuse-when-full now) | polish |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -639,6 +660,12 @@ no task, no per-connection heap alloc (entries are reused; prune is amortised).
 UDP runs it only for datagrams that miss an established session, so the
 steady-state per-datagram path is untouched. Listeners without `rate_limit` pay a
 single `is_enabled()` bool check (`permit` short-circuits before locking).
+
+**Per-source concurrent cap** (`per_source` on a listener): per new TCP
+connection / new UDP session only — one `Mutex<HashMap>` lock (no `.await`), one
+or two `HashMap` get + entry-bump, no alloc beyond a possible bucket insert, no
+task. One `SourceGuard` created/dropped per connection / session. Unconfigured ⇒
+one `is_enabled()` check.
 
 **Global caps** (`settings.limits`): per new TCP connection / new UDP session
 only — one or two relaxed-ish atomic ops (`fetch_add` + maybe `fetch_sub`) and,

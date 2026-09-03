@@ -53,14 +53,14 @@ impl Bucket {
 }
 
 /// Network key: the leading bytes of the address (/24 for v4, /64 for v6).
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
-enum NetKey {
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub(crate) enum NetKey {
     V4([u8; 3]),
     V6([u8; 8]),
 }
 
 impl NetKey {
-    fn of(ip: IpAddr) -> Self {
+    pub(crate) fn of(ip: IpAddr) -> Self {
         match ip {
             IpAddr::V4(a) => {
                 let o = a.octets();

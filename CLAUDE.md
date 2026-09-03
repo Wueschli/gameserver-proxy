@@ -51,6 +51,7 @@ crates/
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
     ratelimit.rs            per-listener token-bucket rate limiter (src_ip + /24 / /64)
+    src_conns.rs            per-listener concurrent per-source connection / session cap
     limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)
     geo.rs                  optional MaxMind GeoIP country lookup (GeoDb) for the geo filter
     runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
@@ -229,5 +230,8 @@ filter — `settings.geo_db` + per-listener `geo: { allow, deny }` (ISO codes),
 loaded once via `Runtime::start_with_geo`), checked after the CIDR ACL, fails
 closed. Slice 8: `cargo-fuzz` harnesses in `crates/gsp-config/fuzz/`
 (`extract_sni`, `route_match`, `parse_config`) — `make fuzz` (needs nightly +
-`cargo-fuzz`), nightly CI job. Still open: NFR load tests (benchmark harness).
-Phase 7's code work is done. See `HANDOVER.md` and `docs/08`.
+`cargo-fuzz`), nightly CI job. Slice 9: per-listener `per_source:
+{ max_per_ip, max_per_net }` concurrent connection/session cap
+(`gsp_core::src_conns::SourceLimiter`, RAII `SourceGuard`), checked after
+`rate_limit`. Still open: NFR load tests (benchmark harness). Phase 7's code work
+is done. See `HANDOVER.md` and `docs/08`.

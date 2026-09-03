@@ -27,6 +27,7 @@ pub mod route_hint;
 pub mod runtime;
 pub mod snapshot;
 pub mod sniff;
+pub mod src_conns;
 mod util;
 
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
@@ -41,3 +42,4 @@ pub use resolver::{
 pub use route_hint::RouteHints;
 pub use runtime::{Runtime, RuntimeHandle};
 pub use snapshot::Snapshot;
+pub use src_conns::{SourceGuard, SourceLimiter};

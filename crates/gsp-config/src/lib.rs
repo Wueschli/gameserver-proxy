@@ -263,6 +263,10 @@ struct RawListener {
     /// Needs `settings.geo_db`. `deny` wins; a non-empty `allow` is default-deny.
     #[serde(default)]
     geo: Option<RawGeo>,
+    /// Cap on concurrent connections / UDP sessions per client IP and/or /24
+    /// (v4) / /64 (v6). Refused before allocation once reached.
+    #[serde(default)]
+    per_source: Option<RawPerSource>,
     /// Token-bucket rate limit on new connections / new UDP sessions, keyed by
     /// source IP and/or /24 (v4) / /64 (v6). Checked after the ACL, before
     /// routing. Excess is dropped silently (no reflection).
@@ -386,6 +390,17 @@ struct RawGeo {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPerSource {
+    /// Max concurrent connections / UDP sessions from one client IP.
+    #[serde(default)]
+    max_per_ip: Option<usize>,
+    /// Max concurrent connections / UDP sessions from one /24 (v4) / /64 (v6).
+    #[serde(default)]
+    max_per_net: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -728,6 +743,15 @@ pub struct TokenBucket {
 pub struct RateLimit {
     pub per_ip: Option<TokenBucket>,
     pub per_net: Option<TokenBucket>,
+}
+
+/// Per-listener cap on *concurrent* connections / UDP sessions from one source
+/// (phase 7), by client IP and/or its /24 (v4) / /64 (v6). At least one field
+/// is `Some` when this is present. The live counters live in `gsp-core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerSourceLimit {
+    pub max_per_ip: Option<usize>,
+    pub max_per_net: Option<usize>,
 }
 
 /// A host pattern for the `sni` matcher. Parsed lowercase; `*.foo` and `.foo`
@@ -1113,6 +1137,8 @@ pub struct ListenerConfig {
     pub acl: Acl,
     /// GeoIP country filter, checked after `acl`. `None` ⇒ no geo check.
     pub geo: Option<GeoAcl>,
+    /// Concurrent per-source connection / session cap. `None` ⇒ no cap.
+    pub per_source: Option<PerSourceLimit>,
     /// Token-bucket rate limit on new connections / UDP sessions. `None` ⇒ no
     /// limit. Checked after the ACL.
     pub rate_limit: Option<RateLimit>,
@@ -1588,6 +1614,33 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             }
         };
 
+        let per_source = match &l.per_source {
+            None => None,
+            Some(ps) => {
+                for (field, v) in [
+                    ("max_per_ip", ps.max_per_ip),
+                    ("max_per_net", ps.max_per_net),
+                ] {
+                    if v == Some(0) {
+                        return Err(Invalid(format!(
+                            "listener {}: per_source.{field} must be >= 1 (omit for no cap)",
+                            l.name
+                        )));
+                    }
+                }
+                if ps.max_per_ip.is_none() && ps.max_per_net.is_none() {
+                    return Err(Invalid(format!(
+                        "listener {}: `per_source` needs `max_per_ip` and/or `max_per_net`",
+                        l.name
+                    )));
+                }
+                Some(PerSourceLimit {
+                    max_per_ip: ps.max_per_ip,
+                    max_per_net: ps.max_per_net,
+                })
+            }
+        };
+
         let rate_limit = match l.rate_limit {
             None => None,
             Some(rl) => {
@@ -1655,6 +1708,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             first_packet_gate: l.first_packet_gate,
             acl,
             geo,
+            per_source,
             rate_limit,
         });
     }
@@ -2815,6 +2869,29 @@ listeners:
              geo:\n      deny: [\"GBR\"]",
         ] {
             assert!(parse_str(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn parses_per_source_cap_and_rejects_bad() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+                    per_source:\n      max_per_ip: 50\n      max_per_net: 500\n";
+        let ps = parse_str(yaml).unwrap().listeners[0].per_source.unwrap();
+        assert_eq!(ps.max_per_ip, Some(50));
+        assert_eq!(ps.max_per_net, Some(500));
+
+        for bad in [
+            // empty
+            "    per_source: {}",
+            // zero
+            "    per_source:\n      max_per_ip: 0",
+        ] {
+            let y = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                 listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n{bad}\n"
+            );
+            assert!(parse_str(&y).is_err(), "should reject: {bad}");
         }
     }
 

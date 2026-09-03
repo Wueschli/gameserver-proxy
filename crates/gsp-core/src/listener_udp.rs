@@ -56,6 +56,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::src_conns::{SourceGuard, SourceLimiter};
 use crate::util::now_ms;
 
 /// Max datagram we will relay in either direction.
@@ -81,6 +82,8 @@ struct Session {
     _conn_guard: ConnGuard,
     /// Releases the global `max_udp_sessions` slot when the session is evicted.
     _limit_guard: LimitGuard,
+    /// Releases the per-source concurrent-session slot when the session is evicted.
+    _src_guard: SourceGuard,
     /// Transparent mode: the `IP_TRANSPARENT` socket bound to the original
     /// destination address, from which replies are sent so the client sees them
     /// coming from the address it addressed. Held here to keep it alive.
@@ -128,6 +131,7 @@ pub async fn run_udp_listener(
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
     limiter: Arc<RateLimiter>,
+    src_limiter: Arc<SourceLimiter>,
     limits: Arc<GlobalLimits>,
     geo: Option<Arc<GeoDb>>,
     worker_id: usize,
@@ -280,6 +284,17 @@ pub async fn run_udp_listener(
                     ).increment(1);
                     continue;
                 }
+                // Per-source concurrent cap (per listener).
+                let src_guard = match src_limiter.acquire(client.ip()) {
+                    Ok(g) => g,
+                    Err(which) => {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => cfg.name.clone(), "filter" => which,
+                        ).increment(1);
+                        continue;
+                    }
+                };
                 // Global caps (process-wide): refuse before allocating a session.
                 let limit_guard = match limits.acquire_udp() {
                     Ok(g) => g,
@@ -291,7 +306,7 @@ pub async fn run_udp_listener(
                         continue;
                     }
                 };
-                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sock, &mut sticky, limit_guard, client, dst, &buf[..n]).await {
+                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sock, &mut sticky, src_guard, limit_guard, client, dst, &buf[..n]).await {
                     Ok(session) => {
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -410,6 +425,7 @@ async fn open_session(
     resolvers: &Arc<Resolvers>,
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
+    src_guard: SourceGuard,
     limit_guard: LimitGuard,
     client: SocketAddr,
     dst: Option<SocketAddr>,
@@ -584,6 +600,7 @@ async fn open_session(
         _guard: guard,
         _conn_guard: conns.track(),
         _limit_guard: limit_guard,
+        _src_guard: src_guard,
         _reply_sock: reply_sock,
         reply_task,
     })

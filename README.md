@@ -70,8 +70,9 @@ listener → backend pool forwarding with:
 - security hardening (phase 7): a filter chain checked before routing —
   per-listener `allow` / `deny` CIDR lists (radix-trie matched; `deny` wins,
   non-empty `allow` is default-deny), an optional MaxMind GeoIP country filter
-  (`settings.geo_db` + per-listener `geo: { allow, deny }`), and a `rate_limit`
-  token bucket per source IP and per /24 (v4) / /64 (v6) — plus process-wide
+  (`settings.geo_db` + per-listener `geo: { allow, deny }`), a `rate_limit`
+  token bucket per source IP and per /24 (v4) / /64 (v6), and a `per_source`
+  concurrent connection/session cap per IP / /24 / /64 — plus process-wide
   `settings.limits` caps (`max_connections`, `max_udp_sessions`,
   `max_new_sessions_per_sec`); blocked traffic is dropped silently and counted by
   `gsp_filter_blocked_total`. UDP listeners can also set `first_packet_gate: true`

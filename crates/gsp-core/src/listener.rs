@@ -18,6 +18,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::src_conns::SourceLimiter;
 
 /// How long to wait for a client's first bytes when a route needs to peek them.
 /// A client that connects but stays silent past this routes as if nothing was
@@ -35,6 +36,7 @@ pub async fn run_tcp_listener(
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
     limiter: Arc<RateLimiter>,
+    src_limiter: Arc<SourceLimiter>,
     limits: Arc<GlobalLimits>,
     geo: Option<Arc<GeoDb>>,
     worker_id: usize,
@@ -109,6 +111,21 @@ pub async fn run_tcp_listener(
                     );
                     continue;
                 }
+                // Per-source concurrent cap (per listener).
+                let src_guard = match src_limiter.acquire(peer.ip()) {
+                    Ok(g) => g,
+                    Err(which) => {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => listener_name.clone(), "filter" => which,
+                        ).increment(1);
+                        tracing::debug!(
+                            listener = %listener_name, peer = %peer, cap = which,
+                            "connection dropped by a per-source cap"
+                        );
+                        continue;
+                    }
+                };
                 // Global caps (process-wide): refuse before allocating anything.
                 let limit_guard = match limits.acquire_tcp() {
                     Ok(g) => g,
@@ -143,6 +160,8 @@ pub async fn run_tcp_listener(
                     let _conn_guard = conn_guard;
                     // Releases the global `max_connections` slot on task exit.
                     let _limit_guard = limit_guard;
+                    // Releases the per-source concurrent slot on task exit.
+                    let _src_guard = src_guard;
                     let local = stream.local_addr().unwrap_or(cfg.bind);
 
                     // Peek the first bytes only when a route needs them.

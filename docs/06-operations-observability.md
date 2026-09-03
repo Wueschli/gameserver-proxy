@@ -33,12 +33,14 @@
 
 ### Security / filter chain
 - `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl` | `geo` |
-  `rate_ip` | `rate_net` | `max_conn` | `max_udp` | `max_new_rate`; a connection /
-  new UDP session was dropped by the pre-routing filter chain — `acl` = source-IP
-  allow/deny, `geo` = GeoIP country allow/deny (or the DB failed to load and the
-  listener fails closed), `rate_ip` / `rate_net` = the per-listener per-IP /
-  per-/24 (per-/64) token bucket was empty, `max_conn` / `max_udp` /
-  `max_new_rate` = a process-wide `settings.limits` cap was hit
+  `rate_ip` | `rate_net` | `src_conn_ip` | `src_conn_net` | `max_conn` |
+  `max_udp` | `max_new_rate`; a connection / new UDP session was dropped by the
+  pre-routing filter chain — `acl` = source-IP allow/deny, `geo` = GeoIP country
+  allow/deny (or the DB failed to load and the listener fails closed), `rate_ip`
+  / `rate_net` = the per-listener per-IP / per-/24 (per-/64) token bucket was
+  empty, `src_conn_ip` / `src_conn_net` = the per-listener concurrent per-source
+  connection / session cap was reached, `max_conn` / `max_udp` / `max_new_rate` =
+  a process-wide `settings.limits` cap was hit
 
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`

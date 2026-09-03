@@ -94,6 +94,13 @@
 > `gsp_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
 > is per proxy instance (size it per node behind anycast HA).
 >
+> **Per-source concurrent cap:** `per_source: { max_per_ip, max_per_net }` (at
+> least one) bounds how many connections / UDP sessions are *live at once* from
+> one client IP / one /24 (v4) / /64 (v6) — where `rate_limit` bounds the *rate*
+> of new ones. Checked after `rate_limit`, before allocation; over the cap ⇒
+> silent drop + `gsp_filter_blocked_total{listener,filter="src_conn_ip"|"src_conn_net"}`.
+> The slot is released when the connection closes / the UDP session idles out.
+>
 > **GeoIP filter:** `geo: { allow: [CC], deny: [CC] }` on a listener (ISO 3166-1
 > alpha-2 country codes, case-insensitive) is checked on the client source IP
 > right after the CIDR ACL. Same precedence as `allow`/`deny`: `deny` wins, a
@@ -302,6 +309,8 @@ listeners:
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
   `rate >= 1`.
+- `per_source`, if present, needs at least one of `max_per_ip` / `max_per_net`,
+  each `>= 1`.
 - Every `settings.limits.*` value, if present, must be `>= 1` (0 would block all
   traffic — omit the key for no cap).
 - `first_packet_gate: true` is UDP-only and needs at least one `first_bytes`

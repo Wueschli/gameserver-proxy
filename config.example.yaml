@@ -118,6 +118,13 @@ listeners:
     rate_limit:
       per_ip:  { rate: 20, burst: 40 }
       per_net: { rate: 200, burst: 400 }
+    # Cap on *concurrent* connections / UDP sessions from one source (vs.
+    # rate_limit, which bounds the rate of new ones). By client IP and/or its
+    # /24 (v4) / /64 (v6). Over the cap => dropped before allocation +
+    # gsp_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}.
+    per_source:
+      max_per_ip: 256
+      max_per_net: 2048
     # GeoIP country filter on the client source IP, checked after the CIDR ACL.
     # ISO 3166-1 alpha-2 codes; `deny` wins, a non-empty `allow` is default-deny.
     # Needs settings.geo_db. An IP not in the DB is admitted only when `allow` is
@@ -210,7 +217,7 @@ listeners:
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
 #   protocol / routes / affinity / prefix / freebind / transparent / route_hint
-#   / allow / deny / rate_limit / first_packet_gate / geo.
+#   / allow / deny / rate_limit / per_source / first_packet_gate / geo.
 #   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
 #   survive reloads.)
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that

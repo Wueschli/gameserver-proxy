@@ -32,6 +32,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::src_conns::SourceLimiter;
 
 struct Group {
     cfg: ListenerConfig,
@@ -94,6 +95,7 @@ impl ListenerManager {
         // One limiter per listener, shared across its workers; rebuilt on every
         // respawn so it tracks the live `ListenerConfig`.
         let limiter = Arc::new(RateLimiter::new(cfg.rate_limit.as_ref()));
+        let src_limiter = SourceLimiter::new(cfg.per_source.as_ref());
         let mut tasks = Vec::with_capacity(self.workers);
         for worker_id in 0..self.workers {
             let snap = self.snapshot.clone();
@@ -101,6 +103,7 @@ impl ListenerManager {
             let conns = self.conns.clone();
             let resolvers = self.resolvers.clone();
             let limiter = limiter.clone();
+            let src_limiter = src_limiter.clone();
             let limits = self.limits.clone();
             let geo = self.geo.clone();
             let lc = cfg.clone();
@@ -115,6 +118,7 @@ impl ListenerManager {
                             conns,
                             resolvers,
                             limiter,
+                            src_limiter,
                             limits,
                             geo,
                             worker_id,
@@ -130,6 +134,7 @@ impl ListenerManager {
                             conns,
                             resolvers,
                             limiter,
+                            src_limiter,
                             limits,
                             geo,
                             worker_id,

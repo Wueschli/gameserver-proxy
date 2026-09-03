@@ -40,7 +40,9 @@ All steps run **before** buffer/session allocation.
   dropped before a backend connect happens.
 - **Min-progress watchdog**: a connection with no byte progress beyond `idle_timeout`
   → close.
-- Optional `max_connections_per_ip`.
+- Optional per-source concurrent cap: `per_source: { max_per_ip, max_per_net }`
+  (implemented — a live counter per client IP / /24 / /64, refused before
+  allocation).
 
 ## UDP hardening
 
@@ -49,8 +51,11 @@ All steps run **before** buffer/session allocation.
 - **First-packet gate** (optional, per route): the first datagram must pass a
   `first_bytes` match (a known handshake prefix / a sniffer saying "valid"), otherwise
   no session is created. Keeps generic spoof floods off the session table.
-- **Session cap** per `src_ip` / `/24` and global; LRU eviction of the oldest idle
-  sessions under pressure.
+- **Session cap** per `src_ip` / `/24` (`per_source`, implemented — a hard
+  concurrent counter, new sessions refused when full) and global
+  (`settings.limits.max_udp_sessions`). LRU eviction of the oldest idle sessions
+  under pressure is not done — the idle sweep reaps and new sessions are refused
+  until room frees.
 - **Keep the idle timeout short** where the game allows it (query pools: a few
   seconds).
 - Receive buffers large enough that legitimate bursts do not compete with flood

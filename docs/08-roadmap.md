@@ -171,6 +171,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   first-bytes buffer), `parse_config` (`parse_str` on arbitrary input). Seeds in
   `fuzz/seeds/`, `make fuzz`, and a nightly CI job. No crashes in the initial
   runs (10M+ execs on `extract_sni`).
+- ✅ **Slice 9**: per-source concurrent connection / session cap —
+  `per_source: { max_per_ip, max_per_net }` on a listener bounds how many
+  connections / UDP sessions are live at once from one client IP / /24 (v4) /
+  /64 (v6), where `rate_limit` bounds the *rate*. `gsp_core::src_conns::SourceLimiter`
+  (live counters + RAII `SourceGuard`), checked after `rate_limit`, released on
+  connection close / session eviction. `gsp_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}`.
 - Load tests against the NFRs — still open (a benchmark harness, not a code
   slice).
 - **Result**: hardened against common L4/7 abuse.
