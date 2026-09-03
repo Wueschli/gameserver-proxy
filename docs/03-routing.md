@@ -6,10 +6,14 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > **Implementation status (phase 3, partial).** `listeners[].routes` is a
 > priority-ordered `[{ match, action }]` list, first match wins, with
 > `action: { pool: <name> }`. Implemented matchers: `always`, `client_cidr`
-> (source IP), `port` (destination port from the accepting socket). Still
-> pending: `dst`, `sni`, `first-bytes`, sniffer plugins, the `external`
-> resolver, and the `consistent_hash` / `weighted` / `first_available`
-> balancers. A listener with a bare `pool:` is normalised to one `always` route.
+> (source IP), `port` (destination port from the accepting socket), and
+> `first-bytes` — **prefix only** (`prefix: "hex:..." | "ascii:..."`, ≤ 512 B).
+> The TCP path `MSG_PEEK`s that many bytes (250 ms budget) before routing only
+> when a route needs them; UDP inspects the first datagram it already holds.
+> Still pending: `first-bytes` `regex` / `length` / `sniffer` variants, `dst`,
+> `sni`, the `external` resolver, and the `consistent_hash` / `weighted` /
+> `first_available` balancers. A listener with a bare `pool:` is normalised to
+> one `always` route.
 
 ## Evaluation order
 

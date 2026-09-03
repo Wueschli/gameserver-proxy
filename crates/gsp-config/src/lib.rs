@@ -1,10 +1,11 @@
 //! Configuration types, parsing and validation for the game server proxy.
 //!
-//! This is the reduced **v0 schema** used by the walking skeleton: TCP
-//! listeners forwarding to static pools, with active health checks, a
-//! round-robin / least-connections balancer, and per-backend session caps.
-//! The full target schema lives in `docs/05-configuration.md` and grows into
-//! this crate incrementally.
+//! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
+//! route rule list (`always` / `client_cidr` / `port` / `first_bytes` matchers)
+//! onto static pools, with active health checks, round-robin / least-connections
+//! balancing, per-backend session caps, and UDP session affinity. The full
+//! target schema lives in `docs/05-configuration.md` and grows into this crate
+//! incrementally.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
@@ -192,6 +193,9 @@ struct RawMatch {
     /// `port` only: destination ports (bare int `30001` or `"lo-hi"` range).
     #[serde(default)]
     ports: Option<Vec<RawPort>>,
+    /// `first_bytes` only: `"hex:ffffffff"` or `"ascii:hello"`.
+    #[serde(default)]
+    prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,14 +323,38 @@ pub enum Matcher {
     ClientCidr(Vec<Cidr>),
     /// Destination port (from the accepting socket) within any of these ranges.
     DstPort(Vec<RangeInclusive<u16>>),
+    /// The connection's first bytes (TCP peek / first UDP datagram) start with
+    /// this non-empty prefix. `regex` / `length` / `sniffer` variants come later.
+    FirstBytes(Vec<u8>),
+}
+
+/// Hard cap on how many leading bytes a `first_bytes` prefix may match, and thus
+/// how far the TCP path will `MSG_PEEK`.
+pub const PEEK_MAX: usize = 512;
+
+/// Everything a [`Matcher`] can look at. `first_bytes` is empty when the listener
+/// has no byte matcher (so nothing was peeked) or the peer sent nothing yet.
+pub struct MatchContext<'a> {
+    pub src: SocketAddr,
+    pub local: SocketAddr,
+    pub first_bytes: &'a [u8],
 }
 
 impl Matcher {
-    pub fn matches(&self, src: SocketAddr, local: SocketAddr) -> bool {
+    pub fn matches(&self, ctx: &MatchContext) -> bool {
         match self {
             Matcher::Always => true,
-            Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(src.ip())),
-            Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&local.port())),
+            Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(ctx.src.ip())),
+            Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&ctx.local.port())),
+            Matcher::FirstBytes(prefix) => ctx.first_bytes.starts_with(prefix),
+        }
+    }
+
+    /// Leading bytes this matcher needs to see (0 for address-only matchers).
+    fn peek_len(&self) -> usize {
+        match self {
+            Matcher::FirstBytes(prefix) => prefix.len(),
+            _ => 0,
         }
     }
 }
@@ -387,13 +415,23 @@ pub struct ListenerConfig {
 }
 
 impl ListenerConfig {
-    /// The pool name for a connection/session from `src` accepted on `local`,
-    /// or `None` when no route matches.
-    pub fn route_for(&self, src: SocketAddr, local: SocketAddr) -> Option<&str> {
+    /// The pool name for a connection/session described by `ctx`, or `None` when
+    /// no route matches.
+    pub fn route_for(&self, ctx: &MatchContext) -> Option<&str> {
         self.routes
             .iter()
-            .find(|r| r.matcher.matches(src, local))
+            .find(|r| r.matcher.matches(ctx))
             .map(|r| r.pool.as_str())
+    }
+
+    /// How many leading bytes to `MSG_PEEK` before routing (0 = no byte
+    /// matcher, skip the peek entirely).
+    pub fn peek_len(&self) -> usize {
+        self.routes
+            .iter()
+            .map(|r| r.matcher.peek_len())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -630,55 +668,78 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
 
 fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigError> {
     use ConfigError::Invalid;
-    match m.kind.as_str() {
-        "always" => {
-            if m.cidrs.is_some() || m.ports.is_some() {
-                return Err(Invalid(format!(
-                    "listener {lname}: route {i}: match type `always` takes no fields"
-                )));
-            }
-            Ok(Matcher::Always)
+    let at = |s: String| Invalid(format!("listener {lname}: route {i}: {s}"));
+
+    // Reject fields that do not belong to this match type.
+    let allow = |field: &str, present: bool, allowed: bool| {
+        if present && !allowed {
+            Err(at(format!(
+                "match type `{}` does not take `{field}`",
+                m.kind
+            )))
+        } else {
+            Ok(())
         }
+    };
+    allow("cidrs", m.cidrs.is_some(), m.kind == "client_cidr")?;
+    allow("ports", m.ports.is_some(), m.kind == "port")?;
+    allow("prefix", m.prefix.is_some(), m.kind == "first_bytes")?;
+
+    match m.kind.as_str() {
+        "always" => Ok(Matcher::Always),
         "client_cidr" => {
-            if m.ports.is_some() {
-                return Err(Invalid(format!(
-                    "listener {lname}: route {i}: match type `client_cidr` takes `cidrs`, not `ports`"
-                )));
-            }
             let raw = m.cidrs.as_ref().filter(|c| !c.is_empty()).ok_or_else(|| {
-                Invalid(format!(
-                    "listener {lname}: route {i}: match type `client_cidr` needs a non-empty `cidrs` list"
-                ))
+                at("match type `client_cidr` needs a non-empty `cidrs` list".into())
             })?;
             let mut cidrs = Vec::with_capacity(raw.len());
             for c in raw {
-                cidrs.push(
-                    Cidr::parse(c)
-                        .map_err(|e| Invalid(format!("listener {lname}: route {i}: {e}")))?,
-                );
+                cidrs.push(Cidr::parse(c).map_err(&at)?);
             }
             Ok(Matcher::ClientCidr(cidrs))
         }
         "port" => {
-            if m.cidrs.is_some() {
-                return Err(Invalid(format!(
-                    "listener {lname}: route {i}: match type `port` takes `ports`, not `cidrs`"
-                )));
-            }
-            let raw = m.ports.as_ref().filter(|p| !p.is_empty()).ok_or_else(|| {
-                Invalid(format!(
-                    "listener {lname}: route {i}: match type `port` needs a non-empty `ports` list"
-                ))
-            })?;
+            let raw = m
+                .ports
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| at("match type `port` needs a non-empty `ports` list".into()))?;
             let mut ranges = Vec::with_capacity(raw.len());
             for p in raw {
                 ranges.push(parse_port_range(lname, i, p)?);
             }
             Ok(Matcher::DstPort(ranges))
         }
-        other => Err(Invalid(format!(
-            "listener {lname}: route {i}: unknown match type {other:?} (always | client_cidr | port)"
+        "first_bytes" => {
+            let spec = m
+                .prefix
+                .as_ref()
+                .ok_or_else(|| at("match type `first_bytes` needs a `prefix`".into()))?;
+            let bytes = parse_byte_spec(spec).map_err(&at)?;
+            if bytes.is_empty() {
+                return Err(at("`first_bytes` prefix must not be empty".into()));
+            }
+            if bytes.len() > PEEK_MAX {
+                return Err(at(format!(
+                    "`first_bytes` prefix is {} bytes, over the {PEEK_MAX}-byte limit",
+                    bytes.len()
+                )));
+            }
+            Ok(Matcher::FirstBytes(bytes))
+        }
+        other => Err(at(format!(
+            "unknown match type {other:?} (always | client_cidr | port | first_bytes)"
         ))),
+    }
+}
+
+/// Parse a `first_bytes` prefix: `"hex:ffff"` or `"ascii:text"`.
+fn parse_byte_spec(s: &str) -> Result<Vec<u8>, String> {
+    if let Some(h) = s.strip_prefix("hex:") {
+        parse_hex(h)
+    } else if let Some(a) = s.strip_prefix("ascii:") {
+        Ok(a.as_bytes().to_vec())
+    } else {
+        Err(format!("prefix {s:?} must start with `hex:` or `ascii:`"))
     }
 }
 
@@ -737,6 +798,15 @@ fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a `MatchContext` from `"src" , "local"` strings and optional bytes.
+    fn ctx<'a>(src: &str, local: &str, first_bytes: &'a [u8]) -> MatchContext<'a> {
+        MatchContext {
+            src: src.parse().unwrap(),
+            local: local.parse().unwrap(),
+            first_bytes,
+        }
+    }
 
     const MINIMAL: &str = r#"
 pools:
@@ -948,28 +1018,86 @@ listeners:
         let cfg = parse_str(yaml).unwrap();
         let l = &cfg.listeners[0];
         assert_eq!(l.routes.len(), 3);
-        let on: SocketAddr = "203.0.113.1:7777".parse().unwrap();
+        assert_eq!(l.peek_len(), 0);
         assert_eq!(
-            l.route_for("10.1.2.3:5555".parse().unwrap(), on),
+            l.route_for(&ctx("10.1.2.3:5555", "203.0.113.1:7777", &[])),
             Some("staging")
         );
         assert_eq!(
-            l.route_for("192.168.1.9:5555".parse().unwrap(), on),
+            l.route_for(&ctx("192.168.1.9:5555", "203.0.113.1:7777", &[])),
             Some("staging")
         );
         // no CIDR match, but destination port 7777 does
         assert_eq!(
-            l.route_for("203.0.113.9:5555".parse().unwrap(), on),
+            l.route_for(&ctx("203.0.113.9:5555", "203.0.113.1:7777", &[])),
             Some("prod")
         );
         // falls through to `always`
         assert_eq!(
-            l.route_for(
-                "203.0.113.9:5555".parse().unwrap(),
-                "203.0.113.1:9999".parse().unwrap()
-            ),
+            l.route_for(&ctx("203.0.113.9:5555", "203.0.113.1:9999", &[])),
             Some("prod")
         );
+    }
+
+    #[test]
+    fn first_bytes_prefix_matches_and_sets_peek_len() {
+        let yaml = r#"
+pools:
+  - name: query
+    targets: ["127.0.0.1:1"]
+  - name: game
+    targets: ["127.0.0.1:2"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:27015"
+    protocol: udp
+    routes:
+      - match: { type: first_bytes, prefix: "hex:ffffffff" }
+        action: { pool: query }
+      - match: { type: first_bytes, prefix: "ascii:GET " }
+        action: { pool: query }
+      - match: { type: always }
+        action: { pool: game }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.peek_len(), 4);
+        assert_eq!(
+            l.route_for(&ctx(
+                "1.2.3.4:5",
+                "9.9.9.9:27015",
+                &[0xff, 0xff, 0xff, 0xff, 0x54]
+            )),
+            Some("query")
+        );
+        assert_eq!(
+            l.route_for(&ctx("1.2.3.4:5", "9.9.9.9:27015", b"GET /x")),
+            Some("query")
+        );
+        assert_eq!(
+            l.route_for(&ctx("1.2.3.4:5", "9.9.9.9:27015", b"\x01\x02random")),
+            Some("game")
+        );
+        // nothing peeked yet -> prefix routes cannot match, falls through
+        assert_eq!(
+            l.route_for(&ctx("1.2.3.4:5", "9.9.9.9:27015", &[])),
+            Some("game")
+        );
+    }
+
+    #[test]
+    fn rejects_bad_first_bytes_specs() {
+        for bad in [
+            r#"routes: [{ match: { type: first_bytes, prefix: "ffff" }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: first_bytes }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: first_bytes, prefix: "hex:" }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: always, prefix: "hex:ff" }, action: { pool: p } }]"#,
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]

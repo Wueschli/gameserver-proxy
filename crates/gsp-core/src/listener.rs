@@ -13,12 +13,18 @@ use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
 use crate::snapshot::Snapshot;
 
+/// How long to wait for a client's first bytes when a route needs to peek them.
+/// A client that connects but stays silent past this routes as if nothing was
+/// sent (i.e. only address / `always` routes can match).
+const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub async fn run_tcp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    let cfg = Arc::new(cfg);
     let listener = TcpListener::from_std(bind_reuseport_tcp(cfg.bind, 1024)?)?;
     tracing::info!(
         listener = %cfg.name,
@@ -44,43 +50,59 @@ pub async fn run_tcp_listener(
                     }
                 };
 
-                let snap = snapshot.load_full();
-                let local = stream.local_addr().unwrap_or(cfg.bind);
-                let Some(pool_name) = cfg.route_for(peer, local) else {
-                    metrics::counter!(
-                        m::LISTENER_CONNECTIONS,
-                        "listener" => cfg.name.clone(),
-                        "result" => "no_route",
-                    ).increment(1);
-                    tracing::debug!(
-                        listener = %cfg.name, peer = %peer,
-                        "no route matched; dropping connection"
-                    );
-                    continue;
-                };
-                let Some(pool) = snap.pool(pool_name) else {
-                    metrics::counter!(
-                        m::LISTENER_CONNECTIONS,
-                        "listener" => cfg.name.clone(),
-                        "result" => "no_route",
-                    ).increment(1);
-                    tracing::error!(
-                        listener = %cfg.name, pool = %pool_name,
-                        "routed pool missing from snapshot; dropping connection"
-                    );
-                    continue;
-                };
-
                 let listener_name = cfg.name.clone();
                 metrics::counter!(
                     m::LISTENER_CONNECTIONS,
                     "listener" => listener_name.clone(),
                     "result" => "accepted",
                 ).increment(1);
-                metrics::gauge!(m::ACTIVE_CONNECTIONS, "listener" => listener_name.clone())
-                    .increment(1.0);
+
+                let snap = snapshot.load_full();
+                let cfg = cfg.clone();
 
                 tokio::spawn(async move {
+                    let local = stream.local_addr().unwrap_or(cfg.bind);
+
+                    // Peek the first bytes only when a route needs them.
+                    let peek_n = cfg.peek_len().min(gsp_config::PEEK_MAX);
+                    let mut peek_buf = vec![0u8; peek_n];
+                    let first: &[u8] = if peek_n > 0 {
+                        match tokio::time::timeout(PEEK_TIMEOUT, stream.peek(&mut peek_buf)).await {
+                            Ok(Ok(k)) => &peek_buf[..k],
+                            _ => &[],
+                        }
+                    } else {
+                        &[]
+                    };
+
+                    let mctx = gsp_config::MatchContext { src: peer, local, first_bytes: first };
+                    let Some(pool_name) = cfg.route_for(&mctx) else {
+                        metrics::counter!(
+                            m::LISTENER_CONNECTIONS,
+                            "listener" => listener_name.clone(),
+                            "result" => "no_route",
+                        ).increment(1);
+                        tracing::debug!(
+                            listener = %listener_name, peer = %peer,
+                            "no route matched; dropping connection"
+                        );
+                        return;
+                    };
+                    let Some(pool) = snap.pool(pool_name) else {
+                        metrics::counter!(
+                            m::LISTENER_CONNECTIONS,
+                            "listener" => listener_name.clone(),
+                            "result" => "no_route",
+                        ).increment(1);
+                        tracing::error!(
+                            listener = %listener_name, pool = %pool_name,
+                            "routed pool missing from snapshot; dropping connection"
+                        );
+                        return;
+                    };
+
+                    metrics::gauge!(m::ACTIVE_CONNECTIONS, "listener" => listener_name.clone())
+                        .increment(1.0);
                     let started = std::time::Instant::now();
                     match crate::proxy::handle_tcp(stream, &pool).await {
                         Ok(out) => {

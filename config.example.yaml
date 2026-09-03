@@ -50,8 +50,10 @@ listeners:
       hash_on: src_ip             # src_ip (default for udp) | src_ip_port
 
   # ... or with a priority-ordered `routes` list; the first matching rule wins.
-  # Matchers: `always`, `client_cidr` (source-IP prefixes), `port` (destination
-  # port, bare int or "lo-hi" range). `pool` and `routes` are mutually exclusive.
+  # Matchers: `always`; `client_cidr` (source-IP prefixes); `port` (destination
+  # port, bare int or "lo-hi" range); `first_bytes` (prefix of the first bytes —
+  # TCP peek / first UDP datagram — as `hex:...` or `ascii:...`, <= 512 bytes).
+  # `pool` and `routes` are mutually exclusive.
   - name: public-tcp
     bind: "0.0.0.0:7777"
     protocol: tcp
@@ -62,6 +64,16 @@ listeners:
         action: { pool: local }
       - match: { type: always }
         action: { pool: local }
+
+  - name: query-and-game
+    bind: "0.0.0.0:27016"
+    protocol: udp
+    routes:
+      # Valve A2S query packets start with the 0xFFFFFFFF connectionless header.
+      - match: { type: first_bytes, prefix: "hex:ffffffff" }
+        action: { pool: realtime }
+      - match: { type: always }
+        action: { pool: realtime }
 
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps.

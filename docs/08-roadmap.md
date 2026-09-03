@@ -40,7 +40,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
-- ⬜ `first-bytes` matcher (prefix/regex/length).
+- ✅ `first-bytes` matcher — prefix (`hex:` / `ascii:`, ≤ 512 B); TCP peek /
+  first UDP datagram. ⬜ `regex` / `length` / `sniffer` variants.
 - `dst` matcher + prefix listener (one socket, `IP_PKTINFO`/`getsockname`) for games
   with no protocol hint (subdomain → its own destination IP). Optional push resolver
   (`/route-hint`).

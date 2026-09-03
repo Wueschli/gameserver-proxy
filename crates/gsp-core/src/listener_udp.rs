@@ -184,7 +184,12 @@ async fn open_session(
 ) -> Result<Session, &'static str> {
     let snap = snapshot.load_full();
     let local = down.local_addr().unwrap_or(cfg.bind);
-    let pool_name = cfg.route_for(client, local).ok_or("no_route")?;
+    let mctx = gsp_config::MatchContext {
+        src: client,
+        local,
+        first_bytes: first,
+    };
+    let pool_name = cfg.route_for(&mctx).ok_or("no_route")?;
     let pool = snap.pool(pool_name).ok_or("no_route")?;
     let idle_ms = pool.idle_timeout.as_millis() as u64;
 

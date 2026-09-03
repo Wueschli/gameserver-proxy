@@ -168,7 +168,7 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 Phases 0–2 are done: TCP + UDP forwarding, round-robin + least-conn, active
 `tcp_connect` / `udp_probe` health checks, per-backend caps, worker-local UDP
 session tables with `src_ip` affinity, hot reload, metrics. **Phase 3 (routing
-intelligence) is in progress**: slice 1 landed a priority-ordered `routes:` list
-with `always` / `client_cidr` / `port` matchers; next is the `first_bytes`
-matcher, then `sni` / `dst` / sniffers and the `consistent_hash` balancer. See
-`HANDOVER.md` and `docs/03`. Don't half-land a slice.
+intelligence) is in progress**: slices 1–2 landed a priority-ordered `routes:`
+list with `always` / `client_cidr` / `port` / `first_bytes` (prefix) matchers;
+next is `first_bytes` regex/length, the `consistent_hash` balancer, then `sni` /
+`dst` / sniffers. See `HANDOVER.md` and `docs/03`. Don't half-land a slice.

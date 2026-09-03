@@ -129,3 +129,49 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn first_bytes_prefix_routes_to_its_pool() {
+    let query = echo_backend(b'Q').await;
+    let game = echo_backend(b'G').await;
+    let proxy_addr = free_udp_addr();
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: query
+    targets: ["{query}"]
+  - name: game
+    targets: ["{game}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    routes:
+      - match: {{ type: first_bytes, prefix: "hex:ffffffff" }}
+        action: {{ pool: query }}
+      - match: {{ type: always }}
+        action: {{ pool: game }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let recv_tag = |payload: &'static [u8]| async move {
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(proxy_addr).await.unwrap();
+        c.send(payload).await.unwrap();
+        let mut buf = [0u8; 64];
+        tokio::time::timeout(Duration::from_millis(500), c.recv(&mut buf))
+            .await
+            .expect("reply timed out")
+            .unwrap();
+        buf[0]
+    };
+
+    assert_eq!(recv_tag(&[0xff, 0xff, 0xff, 0xff, 0x54, 0x53]).await, b'Q');
+    assert_eq!(recv_tag(b"\x01\x02plain gameplay").await, b'G');
+
+    runtime.shutdown().await;
+}
