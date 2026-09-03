@@ -177,9 +177,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   /64 (v6), where `rate_limit` bounds the *rate*. `gsp_core::src_conns::SourceLimiter`
   (live counters + RAII `SourceGuard`), checked after `rate_limit`, released on
   connection close / session eviction. `gsp_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}`.
-- Load tests against the NFRs — still open (a benchmark harness, not a code
-  slice).
-- **Result**: hardened against common L4/7 abuse.
+- ✅ **Slice 10**: `crates/gsp-bench` — a single-host latency/load harness
+  (`make bench`) that measures the proxy's *added* request→response latency
+  (p50 / p99) against **NFR N1** (`< 0.5 ms`) / **N2** (`< 2 ms`), with an
+  optional busy-connection load knob, informational single-stream throughput and
+  a loose idle-RSS-per-connection number. N3 (aggregate throughput), N4/N5
+  (500k / 1M) and N9 (HA) still need dedicated hardware + a real load generator.
+- **Result**: hardened against common L4/7 abuse; per-connection overhead
+  measurable via `make bench`.
 
 ## Phase 8 – Discovery & scaling (week 19–20)
 - `BackendSource` adapters: DNS SRV, Kubernetes Endpoints, Consul.

@@ -562,6 +562,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsp-bench"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gsp-config",
+ "gsp-core",
+ "tokio",
+]
+
+[[package]]
 name = "gsp-config"
 version = "0.0.1"
 dependencies = [

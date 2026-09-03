@@ -153,6 +153,12 @@ For a **proxy instance** restart:
 
 ## Capacity planning / alerts
 
+- **Latency budget (NFR N1/N2):** `make bench` (`crates/gsp-bench`) measures the
+  proxy's *added* p50/p99 request→response latency on a single host and reports
+  `PASS`/`MISS` vs. `< 0.5 ms` / `< 2 ms`. Run it before/after a change to catch
+  per-connection overhead regressions. Aggregate throughput (N3), 500k conns /
+  1M sessions (N4/N5) and HA (N9) need dedicated hardware and a real load
+  generator (`tcpkali`, `wrk2`, `iperf3`).
 - Alert: `gsp_worker_busy_ratio > 0.8` (5 min) → scale out.
 - Alert: `gsp_pool_backends{state="healthy"} < N_min` per pool.
 - Alert: `gsp_datagrams_dropped_total` rate > 0 (buffers too small / overload).

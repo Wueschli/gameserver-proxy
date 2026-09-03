@@ -63,9 +63,11 @@ crates/
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools, POST /route-hint
     resolver.rs             HttpResolver (reqwest) + build_resolvers(&Config)
     reload.rs               SIGHUP + file-watch → rebuild snapshot → atomic swap
+  gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
 ```
 
-Dependency direction: `gsp` → `gsp-core` → `gsp-config`. Never reverse it.
+Dependency direction: `gsp` → `gsp-core` → `gsp-config` (`gsp-bench` → `gsp-core`
+too, tools only). Never reverse it.
 
 ---
 
@@ -87,6 +89,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
+| Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |
@@ -206,7 +209,7 @@ datagram, client-`ip:port`-bound upstream socket, and (UDP) a per-session
 `IP_TRANSPARENT` reply socket bound to the original destination. `socket2` is on
 0.6. Setup docs in `docs/04`.
 
-**Phase 7 (security & hardening) — in progress.** Slice 1: per-listener
+**Phase 7 (security & hardening) — complete.** Slice 1: per-listener
 `allow` / `deny` CIDR filter chain (`gsp_config::Acl` on `ListenerConfig::acl`),
 checked on the client source IP before routing (TCP accept + UDP first datagram);
 `deny` wins, a non-empty `allow` is default-deny. Slice 2: per-listener
@@ -233,5 +236,6 @@ closed. Slice 8: `cargo-fuzz` harnesses in `crates/gsp-config/fuzz/`
 `cargo-fuzz`), nightly CI job. Slice 9: per-listener `per_source:
 { max_per_ip, max_per_net }` concurrent connection/session cap
 (`gsp_core::src_conns::SourceLimiter`, RAII `SourceGuard`), checked after
-`rate_limit`. Still open: NFR load tests (benchmark harness). Phase 7's code work
-is done. See `HANDOVER.md` and `docs/08`.
+`rate_limit`. Slice 10: `crates/gsp-bench` — a latency/load harness (`make
+bench`) that measures the proxy's *added* p50/p99 vs. NFR N1 (< 0.5 ms) / N2
+(< 2 ms). **Phase 7 is complete.** See `HANDOVER.md` and `docs/08`.

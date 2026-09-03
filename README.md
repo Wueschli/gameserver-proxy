@@ -78,10 +78,14 @@ listener → backend pool forwarding with:
   `gsp_filter_blocked_total`. UDP listeners can also set `first_packet_gate: true`
   to open a session only when the first datagram is positively recognised
   (`first_bytes` / sniffer), keeping spoof floods off the session table. The
-  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`, and
-  the peek/config parsers have `cargo-fuzz` harnesses (`make fuzz`)
+  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`, the
+  peek/config parsers have `cargo-fuzz` harnesses (`make fuzz`), and `make bench`
+  (`crates/gsp-bench`) checks the added-latency budget (NFR N1/N2)
 
-**Phases 1–6 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
+**Phases 1–7 complete** (`sticky_key` and `GET /sessions` deferred). Phase 7
+(security & hardening): the filter chain above, plus an amplifier-checklist test
+suite, `cargo-fuzz` harnesses for the peek/config parsers, and a `make bench`
+latency harness for NFR N1/N2. Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the
 instance-drain / `GET /config` admin surface, runtime backend add/remove, and
 runtime listener add/remove/rebind. External resolver: HTTP + gRPC `resolvers:`
@@ -99,6 +103,8 @@ build time — `apt install protobuf-compiler` / `brew install protobuf`).
 ```sh
 make check                 # fmt check + clippy (-D warnings) + tests
 make run                   # run against config.example.yaml
+make bench                  # latency / load harness vs. NFR N1/N2
+make fuzz                   # parser fuzz targets (needs nightly + cargo-fuzz)
 
 cargo run -p gsp -- --config config.example.yaml --check   # validate only
 ```
@@ -113,6 +119,7 @@ Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
 | `crates/gsp-config` | YAML config types, parsing, validation (the reduced v0 schema) |
 | `crates/gsp-core` | data plane: config snapshot, backend pools, TCP + UDP listeners, byte pump, UDP session tables |
 | `crates/gsp` | binary: CLI, logging, admin API, process lifecycle |
+| `crates/gsp-bench` | latency / load harness (`make bench`) — added p50/p99 vs. NFR N1/N2 |
 
 ## Contributing / continuing the work
 

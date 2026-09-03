@@ -1,8 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–9 done** — only
-NFR load tests remain. Filter chain: per-listener radix-trie `allow` / `deny`
+Last updated: 2026-09-03 (**phases 0–7 complete**). Filter chain: per-listener radix-trie `allow` / `deny`
 CIDR lists + an optional MaxMind GeoIP `geo: { allow, deny }` country filter + a
 per-listener `rate_limit` token bucket (per source IP and per /24 / /64) + a
 per-listener `per_source` concurrent connection/session cap + process-wide
@@ -12,7 +11,8 @@ first-datagram recognition); blocked traffic dropped silently +
 `gsp_filter_blocked_total{filter=…}` /
 `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Amplifier checklist
 covered by `tests/amplification.rs`; `cargo-fuzz` harnesses in
-`crates/gsp-config/fuzz/`).
+`crates/gsp-config/fuzz/`; `crates/gsp-bench` (`make bench`) measures added
+p50/p99 vs. NFR N1/N2.
 Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
@@ -34,7 +34,9 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
 
 - **Planning docs** (`docs/00`–`09`) are complete and in English. They are the design
   source of truth.
-- **Code**: Cargo workspace, roadmap **phases 0–3 complete**. Phase 3 shipped
+- **Code**: Cargo workspace, roadmap **phases 0–7 complete** (this section below
+  narrates phases 3–4 in detail; later phases are summarised at the top and in
+  `docs/08`). Phase 3 shipped
   (slices 1–9): per-listener route rule list; `first_bytes` `prefix` + `length`;
   `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
   listener + TCP `freebind:`; the sniffer API **seam** + `sniffer` matcher (no
@@ -264,9 +266,22 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `GET /config` shows `per_source=ip:N,net:N`. **No LRU eviction under pressure**
   — a full source is simply refused until the idle sweep / connection close
   frees a slot (noted in `docs/07`).
-- **Next**: NFR N1/N2 load tests (a benchmark harness — the last phase-7 tail
-  item; not a code slice). Phase 7's feature + hardening work is complete.
-  `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
+- **Phase 7 slice 10 done — phase 7 complete**: `crates/gsp-bench` (new
+  workspace member, `gsp-bench` → `gsp-core`, tool only). `make bench`
+  (`BENCH_ARGS=...`) spins up an in-process echo backend + `Runtime`, times many
+  sequential request→response round-trips direct vs. through the proxy, and
+  reports `added p50/p99 = proxy − direct` with `PASS`/`MISS` vs. NFR N1
+  (`< 0.5 ms`) / N2 (`< 2 ms`). Flags: `--protocol tcp|udp|both`,
+  `--iterations`, `--payload`, `--connections N` (N extra busy conns for
+  contention — the timed conn is separate; only meaningful at low background
+  load), `--workers`, `--strict` (exit 1 on MISS). Also prints informational
+  single-stream throughput and (with `--connections ≥ 1000`) idle RSS per
+  connection. Loopback numbers on this box: added p50 ≈ 10 µs, p99 ≈ 30 µs.
+  N3/N4/N5/N9 need real hardware + a load generator (noted in `docs/06` and the
+  crate README).
+- **Next**: phase 8 (discovery & scaling). `proxy_protocol` on a resolver
+  `target` (pool-less TCP) is still unaddressed; per-source cap LRU eviction and
+  `GET /sessions` are polish items.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
 - **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~142 tests). Needs
@@ -537,7 +552,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Optional GeoIP country filter (`settings.geo_db` + per-listener `geo`) | **done** (phase 7 slice 7) |
 | Parser fuzzing (`crates/gsp-config/fuzz/`, `make fuzz`, CI job) | **done** (phase 7 slice 8) |
 | Per-source concurrent connection/session cap (`per_source`) | **done** (phase 7 slice 9) |
-| NFR N1/N2 load tests | phase 7 tail (benchmark harness) |
+| NFR N1/N2 latency harness (`crates/gsp-bench`, `make bench`) | **done** (phase 7 slice 10) |
+| NFR N3/N4/N5/N9 (aggregate throughput, 500k/1M, HA) | need dedicated hardware + a real load generator |
 | Per-source cap: LRU eviction of idle sessions under pressure (refuse-when-full now) | polish |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 

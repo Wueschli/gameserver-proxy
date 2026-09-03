@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gsp-config", "crates/gsp-core", "crates/gsp"]
+members = ["crates/gsp-config", "crates/gsp-core", "crates/gsp", "crates/gsp-bench"]
 
 [workspace.package]
 version = "0.0.1"

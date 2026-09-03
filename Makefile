@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test build run fuzz help
+.PHONY: check fmt lint test build run fuzz bench help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -28,6 +28,11 @@ build:
 ## run: run the proxy against the example config
 run:
 	cargo run -p gsp -- --config config.example.yaml
+
+## bench: latency / load harness vs. the NFR N1/N2 targets (see crates/gsp-bench)
+BENCH_ARGS ?=
+bench:
+	cargo run --release -p gsp-bench -- $(BENCH_ARGS)
 
 ## fuzz: short pass of each gsp-config fuzz target (needs nightly + cargo-fuzz)
 FUZZ_TIME ?= 60
