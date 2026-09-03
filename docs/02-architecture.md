@@ -121,7 +121,8 @@ struct, the rest is shared).
   stays briefly (configurable), then dropped. Optionally "rehome" new datagrams to
   another backend if no affinity is required.
 - Proxy instance fails: clients reconnect; an L4 LB / anycast in front of the proxy
-  spreads them onto the remaining instances. No shared session state in v1.
+  spreads them onto the remaining instances. No shared session state (v1, and no
+  shared *session* state in v2 either — see below).
 - Overload: early rate limits + `accept` throttling + load shedding with a metric,
   before the latency of existing sessions suffers.
 
@@ -133,3 +134,30 @@ struct, the rest is shared).
 - **BackendSource** adapters (see above).
 - **Filter chain** before routing (ACL, rate limit, geo) as an ordered, configurable
   list.
+
+## Multi-instance & the distributed control plane (v2)
+
+The diagram above is **one instance**. Production runs many identical, independent
+instances across hosts / AZs / regions, fronted by anycast or an L4 LB; they share
+nothing on the data path (ADR 4).
+
+[10-distributed-control-plane.md](10-distributed-control-plane.md) plans the v2
+additions that give a fleet operator (and a management GUI) one authoritative
+config, persisted operator intent, and multi-vantage health — **without touching
+the hot path**. In brief:
+
+- **Tier 1** — a global, ordered, durable store for structural config *and*
+  operator intent (the phase-5 overlay, admin state, route hints). Instances
+  **pull** revisions and feed them through the same `validate() → Snapshot::build
+  → ArcSwap::store` path a file reload uses. Written by a new optional
+  `gsp-controller`, which also aggregates fleet reads and hosts the GUI + auth.
+- **Tier 2** — a per-failure-domain gossip fabric for observed backend
+  reachability. Advisory and rebuildable: each instance's own checks still
+  decide, with the domain quorum as weighted input.
+- **Unchanged**: the data plane, the immutable-snapshot invariant, and
+  "no shared *session* state". Rate-limit buckets and UDP session tables stay
+  purely instance-local.
+
+Maps onto the predicate the data plane already computes:
+`takes_new_sessions() == is_healthy() && admin_state() == Enabled` — Tier 2 feeds
+the left half, Tier 1 the right.

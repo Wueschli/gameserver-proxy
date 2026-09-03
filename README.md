@@ -22,6 +22,7 @@ and access control.
 | [docs/07-security-ddos.md](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
 | [docs/08-roadmap.md](docs/08-roadmap.md) | Phased implementation / milestones |
 | [docs/09-technology-choices.md](docs/09-technology-choices.md) | Language, libraries, alternatives |
+| [docs/10-distributed-control-plane.md](docs/10-distributed-control-plane.md) | *(v2, design only)* Fleet-shared config/intent + regional health, controller, GUI |
 
 ## Status
 

@@ -153,6 +153,35 @@ For a **proxy instance** restart:
    expires — the process exits. New datagrams to a draining UDP listener are
    dropped (`gsp_datagrams_dropped_total{reason="draining"}`).
 
+## Multi-instance operations (HA)
+
+Production is many identical, **independent** `gsp` instances across hosts / AZs /
+regions, fronted by **anycast or an L4 load balancer**. No shared data-plane
+state (ADR 4): lose an instance and the LB / anycast spreads its clients onto the
+rest; affected sessions reconnect.
+
+- **Config distribution** today is the operator's job — bake into the image (change
+  = rolling redeploy), or render the file from a store (ConfigMap /
+  `consul-template` / Ansible) and let file-watch pick it up in seconds. The
+  structural config is hot-reloaded; validate-before-swap keeps a bad file from
+  taking an instance down.
+- **Backend membership** should come from phase-8 discovery (DNS SRV / Consul /
+  k8s Endpoints), not per-instance file edits.
+- **Operator intent** (drain / add / remove a backend, route hints) is applied
+  per instance via each instance's admin API and is **not persisted or
+  fleet-synced today** — fan it out yourself, and re-apply after a restart.
+- **`transparent: true` needs the backend's return path through the same instance**
+  that owns the connection (per-flow-consistent ECMP / anycast). PROXY protocol
+  has no such constraint — prefer it when the fronting layer can rehash.
+- Aggregate `/metrics` and `/pools` in Prometheus; there is no built-in
+  fleet-wide view.
+
+Phase 8 adds a proper HA operations chapter (anycast vs. NLB, capacity per
+instance, the dashboard / alert set). The v2 distributed control plane
+([10-distributed-control-plane.md](10-distributed-control-plane.md)) removes the
+"fan it out yourself" / "re-apply after restart" caveats and adds a single
+fleet view + web UI.
+
 ## Capacity planning / alerts
 
 - **Latency budget (NFR N1/N2):** `make bench` (`crates/gsp-bench`) measures the

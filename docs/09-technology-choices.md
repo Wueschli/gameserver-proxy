@@ -52,6 +52,10 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
   binary only; `gsp-core` defines the `Resolver` trait. gRPC codegen via
   `tonic-build` at build time (needs `protoc`).
 - **Admin API**: `axum` (small, on an internal interface).
+- **Distributed control plane (v2, ch. 10)**: Tier-1 store — embedded Raft
+  (`openraft`) *or* an `etcd` client *or* git, decision deferred; Tier-2 health
+  gossip — `foca` (SWIM) or a hand-rolled `(instance, backend)` LWW-CRDT sync.
+  All in `gsp-controller` / the `gsp` binary, never `gsp-core`.
 - **PROXY protocol**: `ppp` or a small custom v2 implementation.
 - **Tests**: `criterion` (bench), `cargo-fuzz` (parsers), custom load tools
   (`udp-flood-gen`, `conn-storm`).
@@ -72,6 +76,7 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 | 2 | Thread-per-core + `SO_REUSEPORT`, thread-local session state | no locks on the hot path; linear scaling | a global session map with sharding locks |
 | 3 | Immutable config snapshot + atomic swap | reload without blocking the data path | an RWLock on the live config |
 | 4 | No shared session state between instances (v1) | complexity/latency; anycast reconnect is enough | Raft/Redis session store |
+| 4a | *(v2, ch. 10)* Config **and** operator intent become fleet-shared via an ordered durable store (Tier 1); backend **health** becomes shared **within a failure domain** via gossip (Tier 2). **Sessions stay unshared** — ADR 4 holds for sessions. | operators need one authoritative config, persisted intent, and multi-vantage health; sessions do not benefit enough to justify the coupling | one global store for everything (cross-region health is noise); keep everything per-instance (intent lost on restart, not fleet-consistent) |
 | 5 | Client-IP preservation optional (PROXY protocol **or** TPROXY) | different backend capabilities / network setups | forcing a single method |
 | 6 | External routing logic via a resolver callback + cache | matchmaking stays outside; the proxy understands no tokens | hard-coding routing rules in the proxy |
 | 7 | Rust | GC-free latency, safe parsers | Go (GC), C++ (memory safety) |
@@ -80,6 +85,9 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 | 10 | `dst` prefix listener: one wildcard `IP_PKTINFO` / `IPV6_RECVPKTINFO` socket per prefix, real dest per datagram, reply source via `sendmsg` cmsg — using `nix` (safe wrappers) | keeps the zero-`unsafe` invariant; `nix` was already slated for `recvmmsg` / TPROXY / `splice` | one socket bound per address (does not scale); raw `libc` + `unsafe` cmsg walking |
 | 11 | Graceful shutdown drain: a `watch<usize>` connection counter (`ConnTracker` / `ConnGuard`) + `wait_for(==0)`, bounded by `shutdown_grace_sec`; UDP recv loop enters a drain state instead of returning | no new dep; race-free wait; per-conn cost is one `send_modify` on open/close, nothing per byte | `tokio_util::task::TaskTracker` + `CancellationToken` (extra dep); a global `Mutex<HashSet<JoinHandle>>` |
 | 12 | Transparent mode (TPROXY): per-listener `transparent: bool`. TCP — `IP_TRANSPARENT` on the listen socket + a client-`ip:port`-bound `IP_TRANSPARENT` upstream `TcpSocket`. UDP — `IP_TRANSPARENT` + `IP_RECVORIGDSTADDR` on the listen socket (`recvmsg` for the original `ip:port`), a client-bound `IP_TRANSPARENT` upstream socket, and a per-session `IP_TRANSPARENT` reply socket bound to the original destination. `IP_TRANSPARENT` via `socket2` `SockRef` (bumped 0.5 → 0.6 for `set_ip_transparent_v6`), origdst cmsg via `nix` — still zero `unsafe` | one flag turns on the whole path; the reply socket restores source `ip:port` exactly (a pktinfo cmsg can only set the source IP, not the port); socket2 0.6 was already in the tree via `hyper-util` | PROXY protocol only (needs backend support); an `IPV6_TRANSPARENT` raw `libc` + `unsafe` `setsockopt`; reusing the prefix-mode `sendmsg` cmsg reply path (wrong source port) |
+| 13 | *(v2, ch. 10)* Level-triggered, **pull-based** config distribution: instances subscribe to the Tier-1 store, receive a snapshot + revision cursor + change stream, and feed each revision through the **existing** `validate() → Snapshot::build → ArcSwap::store` path. The store is one more writer; `gsp-core` is untouched, the client lives in the `gsp` binary (same seam as resolvers). | an instance offline for a while catches up from its cursor with no writer-side delivery state; a bad revision is rejected exactly like a bad file reload | push distribution (needs per-instance delivery tracking); a new data-plane config transport replacing the file |
+| 14 | *(v2, ch. 10)* A **separate** `gsp-controller`: Tier-1 writer + fleet read-aggregator + the GUI's only backend + all authn/authz/audit. Proxies never peer through it. HA = N replicas behind a leader lock for writes; its outage freezes *changes*, not traffic. | keeps consensus / auth off the data-plane nodes; one place to secure and audit | leader election among the proxy instances themselves; auth on every proxy admin API |
+| 15 | *(v2, ch. 10)* Regional health authority: local active/passive checks decide; the failure-domain gossip view is **quorum-weighted advice** — unhealthy on local `fall` **or** domain quorum-down, healthy **only** on local `rise`, Tier-1 `force-down` overrides. | one flapping instance can't poison the pool (quorum gate on "down"); one instance can't ignore a domain-wide outage (the `or`); a stale remote "up" can't revive a locally-unreachable backend | trust the shared verdict outright; share health globally (noise across reachability classes) |
 
 ## Risks & mitigations
 
@@ -91,3 +99,6 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 | sniffer parsers as an attack surface | `#![forbid(unsafe)]` in plugins, fuzzing, byte/time limits |
 | TPROXY network setup is error-prone | thorough docs + a `preflight check` command |
 | resolver latency in connection setup | cache, tight timeout, `stale_ok`, fallback route |
+| *(v2)* a bad Tier-1 revision blackholes the whole fleet | `validate()` on controller **and** instance; signed revisions; instance-side sanity bound (pool `> 0 → 0` targets ⇒ warn + keep); canary rollout; one-key rollback |
+| *(v2)* Tier-1 store / controller outage | instances serve their last local replica indefinitely; only *changes* stop |
+| *(v2)* rogue host injects "all backends down" into the health fabric | Tier-2 is advisory + locally checked (never revives on remote "up"); signed / mTLS gossip mesh |

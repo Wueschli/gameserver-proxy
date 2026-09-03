@@ -208,15 +208,77 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   before committing; the out-of-process external resolver (Phase 4) is the
   fallback if the in-process boundary is too costly.
 
+## Phase 10 – Fleet aggregation & operational Web UI
+Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
+("The admin GUI", level 1). **No new source of truth**, nothing on the data
+path.
+- A stateless aggregator (a mode of `gsp-controller`, or a small `gsp-aggregator`):
+  fan `GET /config` / `/pools` / `/metrics` / `/healthz` out to a configured or
+  discovered instance list and merge — the single fleet view.
+- Fan-out for the phase-5 intent verbs (drain / add / remove a backend,
+  `route-hint`, drain an instance) to every instance at once.
+- Web UI over that: fleet dashboard, pool / backend table, per-instance health,
+  the operational actions. Read-heavy; **no structural config editing**.
+- Auth (bearer / OIDC) on the aggregator + UI; each proxy's admin API is locked
+  to the aggregator's identity / network.
+- Not solved here: intent still evaporates on instance restart, and is not
+  guaranteed consistent across the fleet (Phase 11).
+- **Result**: one screen to watch and operate the whole fleet.
+
+## Phase 11 – Global config & intent store + controller
+Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
+(Tier 1 + "The controller"). First release with **cross-instance shared config
+and intent** — supersedes ADR 4 for config/intent (never for sessions).
+- `gsp-controller`: owns the Tier-1 ordered / versioned / durable store (backing
+  store per a new ADR — embed / etcd / git).
+- `gsp` grows `config_source: file | store | file+store` and a store
+  subscription client (in the binary, not `gsp-core` — same seam as resolvers):
+  subscribe → full snapshot + cursor → change stream → feed the **existing**
+  `validate() → Snapshot::build → ArcSwap::store` path. Invalid revision ⇒
+  reject + keep previous, like a bad file reload.
+- Operator intent (backend overlay, admin state, route hints, resolver pins)
+  moves into the store; a restarted instance recovers it. The phase-5 admin
+  verbs become "controller writes a revision"; direct per-instance admin stays
+  as break-glass.
+- Controller config API: `validate()`, revisions, history, diff, one-key
+  rollback, staged / canary rollout.
+- Web UI gains structural editing + revision history + RBAC.
+- Controller HA: N replicas, leader lock for writes; an outage freezes changes,
+  not traffic.
+- **Result**: manage the whole fleet's configuration from one place,
+  persistently, with an audit trail.
+
+## Phase 12 – Regional health fabric
+Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
+(Tier 2). Advisory, rebuildable, off the data path.
+- `failure_domain` / `region` identity per instance (`settings`, or discovered)
+  — a reachability-equivalence class, not a building.
+- A gossip / anti-entropy mesh among the instances in one domain (crate TBD —
+  `foca` / SWIM, or a hand-rolled `(instance, backend)` LWW CRDT),
+  authenticated (mTLS mesh / signed messages).
+- Each instance publishes its per-backend `up | down`; consumes the domain view.
+- Health decision becomes quorum-weighted: **unhealthy** on local `fall` **or**
+  domain quorum-down; **healthy** only on local `rise`; Tier-1 `force-down`
+  overrides.
+- Metrics: per-backend domain agreement, fabric membership, gossip rate.
+- Cold start / total partition ⇒ identical to today (own checks only).
+- **Result**: faster, multi-vantage-point backend health across a domain; one
+  bad vantage point no longer flaps a pool.
+
 ## Later / optional
 - QUIC-CID-aware sniffer & session keying.
-- Cross-instance session handover (shared state).
+- Cross-instance session handover (shared *session* state) — still out of scope;
+  the Phase 11–12 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
-- Web UI for the admin API.
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).
 - **v1.0**: + phase 3–5 (routing, resolver, zero-downtime).
 - **v1.1**: + phase 6–7 (client IP, hardening).
 - **v1.2**: + phase 8 (discovery, HA operations docs).
+- **v1.3**: + phase 9–10 (sniffer plugin loader; fleet view & operational Web
+  UI). Both additive — the data-plane contract is unchanged.
+- **v2.0**: + phase 11–12 (global config / intent control plane; regional health
+  fabric). First release with cross-instance shared state, for config and health
+  only — see [10-distributed-control-plane.md](10-distributed-control-plane.md).

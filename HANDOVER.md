@@ -312,6 +312,15 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `GET /sessions` are polish items.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
+- **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
+  v2 distributed control plane — Tier 1 global config/intent store + a
+  `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip
+  (phase 12). Design only, nothing built; the data plane and the
+  immutable-`Snapshot` invariant are explicitly untouched (every mechanism is
+  just another writer into the existing `validate → build → ArcSwap::store`
+  path, or another input to the health flag). New ADRs 4a / 13 / 14 / 15 in
+  `docs/09`; milestone cuts v1.3 (phase 9–10) and v2.0 (phase 11–12) added to
+  `docs/08`.
 - **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~142 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.

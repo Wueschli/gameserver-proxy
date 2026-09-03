@@ -37,6 +37,10 @@ in optional plugins or in external routing logic.
    errors) and connection logs across all games.
 8. **Access control** – IP allow/deny lists, geo filters, rate limiting, per-backend
    connection caps.
+9. **Fleet management** *(v2)* – one control plane + web UI to view and configure
+   many proxy instances across regions from a single authoritative place, with
+   revision history and persisted operator intent (see
+   [10-distributed-control-plane.md](10-distributed-control-plane.md)).
 
 ## Non-goals
 
@@ -48,6 +52,10 @@ in optional plugins or in external routing logic.
   TLS/DTLS wrapping is an add-on feature, not a requirement).
 - **Not a replacement for an L3 scrubbing provider** against volumetric attacks — the
   proxy complements it, it does not replace it.
+- **No cross-instance session state.** Instances are independent on the data path;
+  HA is an anycast / L4-LB concern. The v2 control plane
+  ([10](10-distributed-control-plane.md)) shares *config* and *health*, never
+  sessions — a client rehashed to another instance reconnects.
 
 ## Guiding principles
 
