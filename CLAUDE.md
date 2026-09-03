@@ -200,11 +200,15 @@ datagram, client-`ip:port`-bound upstream socket, and (UDP) a per-session
 `IP_TRANSPARENT` reply socket bound to the original destination. `socket2` is on
 0.6. Setup docs in `docs/04`.
 
-**Phase 7 (security & hardening) — in progress.** Slice 1 done: per-listener
+**Phase 7 (security & hardening) — in progress.** Slice 1: per-listener
 `allow` / `deny` CIDR filter chain (`gsp_config::Acl` on `ListenerConfig::acl`),
 checked on the client source IP before routing (TCP accept + UDP first datagram);
-`deny` wins, a non-empty `allow` is default-deny; blocked ⇒ silent drop +
-`gsp_filter_blocked_total{listener,filter="acl"}`. Still to do: rate limiting
-(src_ip + /24), global caps, UDP first-packet gate, amplifier-checklist tests,
-optional geo filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and
-`docs/08`. Don't half-land a slice.
+`deny` wins, a non-empty `allow` is default-deny. Slice 2: per-listener
+`rate_limit: { per_ip, per_net }` token bucket (`gsp_config::RateLimit` →
+`gsp_core::ratelimit::RateLimiter`, one per listener shared across workers) on
+new connections / new UDP sessions, checked after the ACL; `per_net` keyed by
+/24 (v4) / /64 (v6). Blocked ⇒ silent drop +
+`gsp_filter_blocked_total{listener,filter="acl"|"rate_ip"|"rate_net"}`. Still to
+do: global caps, UDP first-packet gate, amplifier-checklist tests, optional geo
+filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and `docs/08`. Don't
+half-land a slice.

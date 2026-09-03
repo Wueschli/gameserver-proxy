@@ -97,7 +97,7 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
     ));
     for l in &snap.listeners {
         out.push_str(&format!(
-            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}{}\n",
+            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}{}{}\n",
             l.name,
             l.bind,
             l.protocol,
@@ -109,6 +109,16 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
                 String::new()
             } else {
                 format!("\tacl=+{}/-{}", l.acl.allow.len(), l.acl.deny.len())
+            },
+            match &l.rate_limit {
+                Some(rl) => {
+                    let f = |b: Option<gsp_config::TokenBucket>| match b {
+                        Some(b) => format!("{}/{}", b.rate, b.burst),
+                        None => "-".to_string(),
+                    };
+                    format!("\trate_limit=ip:{},net:{}", f(rl.per_ip), f(rl.per_net))
+                }
+                None => String::new(),
             },
             match &l.prefix {
                 Some(p) => format!("\tprefix={p:?}"),

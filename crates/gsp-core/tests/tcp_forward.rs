@@ -720,3 +720,60 @@ async fn acl_deny_drops_the_connection_before_routing() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn rate_limit_drops_connections_past_the_burst() {
+    // Echo backend.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let proxy_addr = {
+        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        p.local_addr().unwrap()
+    };
+    // 1 permit/sec, burst 2: at most 2 of a quick run of connections get through.
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n\
+         \x20   rate_limit:\n      per_ip: {{ rate: 1, burst: 2 }}\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut forwarded = 0;
+    for _ in 0..8 {
+        let Ok(mut c) = TcpStream::connect(proxy_addr).await else {
+            continue;
+        };
+        if c.write_all(b"x").await.is_err() {
+            continue;
+        }
+        let mut b = [0u8; 1];
+        if let Ok(Ok(_)) =
+            tokio::time::timeout(Duration::from_millis(200), c.read_exact(&mut b)).await
+        {
+            forwarded += 1;
+        }
+    }
+    assert!(
+        (1..=3).contains(&forwarded),
+        "expected ~2 forwarded (burst), got {forwarded}"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

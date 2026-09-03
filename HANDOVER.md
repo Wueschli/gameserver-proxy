@@ -1,10 +1,12 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slice 1 done** —
-per-listener `allow` / `deny` CIDR filter chain, checked on the client source IP
-before routing; `deny` wins, non-empty `allow` is default-deny; blocked traffic
-dropped silently + `gsp_filter_blocked_total`). Phase 5:
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–2 done** —
+per-listener source-IP filter chain: `allow` / `deny` CIDR lists (`deny` wins,
+non-empty `allow` is default-deny) + a `rate_limit` token bucket per source IP
+and per /24 (v4) / /64 (v6) on new connections / UDP sessions; blocked traffic
+dropped silently + `gsp_filter_blocked_total{filter="acl"|"rate_ip"|"rate_net"}`).
+Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
 `POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
@@ -140,14 +142,33 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   filter="acl"}` (`m::FILTER_BLOCKED`). `GET /config` shows `acl=+N/-M`.
   `ListenerConfig` is `PartialEq` so an `allow`/`deny` change rebinds the
   listener on reload. Linear `Cidr` scan (no LPM trie yet).
-- **Next**: phase 7 slice 2+ — rate limiting on src_ip + /24, global caps
-  (`max_connections`, `max_udp_sessions`, `max_new_sessions_per_sec`), UDP
-  first-packet gate, amplifier checklist tests, optional geo filter, LPM trie for
-  the ACL, fuzzing the peek/sniffer parsers.
+- **Phase 7 slice 2 done**: per-listener rate limiting. `gsp-config`
+  `RawListener::rate_limit` → `Option<RateLimit { per_ip, per_net: Option<TokenBucket
+  { rate: u32, burst: u32 }> }>` (`ListenerConfig::rate_limit`); `burst` defaults
+  to `rate`, `validate()` rejects `rate == 0` and an empty `rate_limit` (needs
+  ≥1 bucket). `gsp-core::ratelimit::RateLimiter` — `Mutex<State { ips:
+  HashMap<IpAddr,Bucket>, nets: HashMap<NetKey,Bucket> }>`, `Bucket { tokens: f64,
+  last_ms }`, monotonic refill via `util::now_ms`; `NetKey` = /24 (v4) or /64
+  (v6). `permit(ip) -> Option<&'static str>` refills both configured buckets,
+  admits only if *both* have ≥1 token (consumes 1 from each), else returns
+  `Some("rate_ip"|"rate_net")` and consumes nothing; lazy prune of full buckets
+  past `PRUNE_AT = 100_000`. One `Arc<RateLimiter>` per listener built in
+  `ListenerManager::spawn_group`, cloned into every worker, rebuilt on respawn
+  (so a `rate_limit` edit takes effect on reload — `ListenerConfig` stays
+  `PartialEq, Eq`, `TokenBucket` is integer-valued). `run_tcp_listener` /
+  `run_udp_listener` gained a `limiter` param (now `#[allow(clippy::
+  too_many_arguments)]` with a justification — single caller). Checked right
+  after the ACL: TCP before the task spawn, UDP after the established-session
+  fast path. `m::FILTER_BLOCKED` gains `filter="rate_ip"|"rate_net"`. `GET
+  /config` shows `rate_limit=ip:R/B,net:R/B`.
+- **Next**: phase 7 slice 3+ — global caps (`max_connections`,
+  `max_udp_sessions`, `max_new_sessions_per_sec`), UDP first-packet gate,
+  amplifier checklist tests, optional geo filter, LPM trie for the ACL, fuzzing
+  the peek/sniffer parsers.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~110 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~119 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -391,7 +412,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
-| Rate limiting, geo, first-packet gate, global caps, ACL LPM trie | phase 7 |
+| Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
+| Geo filter, UDP first-packet gate, global caps, ACL LPM trie | phase 7 |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -496,6 +518,14 @@ list — bit-compare per entry, no alloc, no lock, no task. TCP runs it before t
 task spawn; UDP runs it only for datagrams that don't hit an established session,
 so the steady-state per-datagram path is unchanged. Listeners with neither list
 pay nothing (`Acl::is_empty`, but the scan over two empty `Vec`s is already ~free).
+
+**Rate limiting** (`rate_limit` on a listener): per new TCP connection / new UDP
+session only — one `Mutex<HashMap>` lock (not held across `.await`, like
+`Backend::observe`), one or two `HashMap` entry lookups, f64 refill arithmetic,
+no task, no per-connection heap alloc (entries are reused; prune is amortised).
+UDP runs it only for datagrams that miss an established session, so the
+steady-state per-datagram path is untouched. Listeners without `rate_limit` pay a
+single `is_enabled()` bool check (`permit` short-circuits before locking).
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**

@@ -229,6 +229,11 @@ struct RawListener {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+    /// Token-bucket rate limit on new connections / new UDP sessions, keyed by
+    /// source IP and/or /24 (v4) / /64 (v6). Checked after the ACL, before
+    /// routing. Excess is dropped silently (no reflection).
+    #[serde(default)]
+    rate_limit: Option<RawRateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +343,29 @@ fn default_resolver_timeout_ms() -> u64 {
 struct RawAffinity {
     #[serde(default)]
     hash_on: HashOn,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRateLimit {
+    /// Token bucket per client source IP.
+    #[serde(default)]
+    per_ip: Option<RawBucket>,
+    /// Token bucket per client /24 (IPv4) or /64 (IPv6) — catches distributed
+    /// single-IP floods.
+    #[serde(default)]
+    per_net: Option<RawBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBucket {
+    /// Sustained rate in permits per second (new connections / new UDP
+    /// sessions). Must be >= 1.
+    rate: u32,
+    /// Bucket capacity (max burst). Defaults to `rate` (one second of slack).
+    #[serde(default)]
+    burst: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +525,23 @@ impl Acl {
         }
         true
     }
+}
+
+/// One token bucket's parameters. `rate` permits/second sustained, `burst`
+/// capacity. `gsp-core` owns the live bucket state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenBucket {
+    pub rate: u32,
+    pub burst: u32,
+}
+
+/// Per-listener rate limit (phase 7). At least one of `per_ip` / `per_net` is
+/// `Some` when this is present. Keyed on the client source IP and its /24 (v4)
+/// or /64 (v6) network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub per_ip: Option<TokenBucket>,
+    pub per_net: Option<TokenBucket>,
 }
 
 /// A host pattern for the `sni` matcher. Parsed lowercase; `*.foo` and `.foo`
@@ -856,6 +901,9 @@ pub struct ListenerConfig {
     pub route_hint: bool,
     /// Source-IP filter chain, checked before routing. Empty ⇒ admit everyone.
     pub acl: Acl,
+    /// Token-bucket rate limit on new connections / UDP sessions. `None` ⇒ no
+    /// limit. Checked after the ACL.
+    pub rate_limit: Option<RateLimit>,
 }
 
 impl ListenerConfig {
@@ -1255,6 +1303,42 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             deny: parse_cidrs("deny", &l.deny)?,
         };
 
+        let rate_limit = match l.rate_limit {
+            None => None,
+            Some(rl) => {
+                let to_bucket = |b: &RawBucket, which: &str| -> Result<TokenBucket, ConfigError> {
+                    if b.rate == 0 {
+                        return Err(Invalid(format!(
+                            "listener {}: rate_limit.{which}.rate must be >= 1",
+                            l.name
+                        )));
+                    }
+                    let burst = b.burst.unwrap_or(b.rate).max(1);
+                    Ok(TokenBucket {
+                        rate: b.rate,
+                        burst,
+                    })
+                };
+                let per_ip = rl
+                    .per_ip
+                    .as_ref()
+                    .map(|b| to_bucket(b, "per_ip"))
+                    .transpose()?;
+                let per_net = rl
+                    .per_net
+                    .as_ref()
+                    .map(|b| to_bucket(b, "per_net"))
+                    .transpose()?;
+                if per_ip.is_none() && per_net.is_none() {
+                    return Err(Invalid(format!(
+                        "listener {}: rate_limit needs at least one of `per_ip` / `per_net`",
+                        l.name
+                    )));
+                }
+                Some(RateLimit { per_ip, per_net })
+            }
+        };
+
         // At most one sniffer plugin per listener (gsp-core runs one per conn).
         let mut sniffer: Option<String> = None;
         for r in &routes {
@@ -1284,6 +1368,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             sniffer,
             route_hint: l.route_hint,
             acl,
+            rate_limit,
         });
     }
 
@@ -2388,6 +2473,60 @@ listeners:
                     listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
                     deny: [\"not-a-cidr\"]\n";
         assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn parses_listener_rate_limit_with_burst_default() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+    rate_limit:
+      per_ip: { rate: 50 }
+      per_net: { rate: 500, burst: 800 }
+"#;
+        let rl = parse_str(yaml).unwrap().listeners[0].rate_limit.unwrap();
+        assert_eq!(
+            rl.per_ip.unwrap(),
+            TokenBucket {
+                rate: 50,
+                burst: 50
+            }
+        );
+        assert_eq!(
+            rl.per_net.unwrap(),
+            TokenBucket {
+                rate: 500,
+                burst: 800
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_rate_limit() {
+        for bad in [
+            // no bucket at all
+            "    rate_limit: {}",
+            // zero rate
+            "    rate_limit:\n      per_ip: { rate: 0 }",
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                 listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n{bad}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn absent_rate_limit_is_none() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        assert!(parse_str(yaml).unwrap().listeners[0].rate_limit.is_none());
     }
 
     #[test]

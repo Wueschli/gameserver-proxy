@@ -12,6 +12,7 @@ use gsp_config::ListenerConfig;
 use crate::drain::ConnTracker;
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
+use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
@@ -21,12 +22,17 @@ use crate::snapshot::Snapshot;
 /// sent (i.e. only address / `always` routes can match).
 const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+// Plumbing entry point: each argument is a distinct shared handle wired in by
+// `ListenerManager::spawn_group` (its only caller). Bundling them would just
+// move the list into a struct literal there.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tcp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
+    limiter: Arc<RateLimiter>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -72,6 +78,17 @@ pub async fn run_tcp_listener(
                         "listener" => listener_name.clone(), "filter" => "acl",
                     ).increment(1);
                     tracing::debug!(listener = %listener_name, peer = %peer, "connection blocked by acl");
+                    continue;
+                }
+                if let Some(which) = limiter.permit(peer.ip()) {
+                    metrics::counter!(
+                        m::FILTER_BLOCKED,
+                        "listener" => listener_name.clone(), "filter" => which,
+                    ).increment(1);
+                    tracing::debug!(
+                        listener = %listener_name, peer = %peer, bucket = which,
+                        "connection dropped by rate limit"
+                    );
                     continue;
                 }
 

@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use gsp_config::{ListenerConfig, Protocol};
 
 use crate::drain::ConnTracker;
+use crate::ratelimit::RateLimiter;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
@@ -81,12 +82,16 @@ impl ListenerManager {
 
     fn spawn_group(&self, cfg: &ListenerConfig) -> Group {
         let (stop_tx, stop_rx) = watch::channel(false);
+        // One limiter per listener, shared across its workers; rebuilt on every
+        // respawn so it tracks the live `ListenerConfig`.
+        let limiter = Arc::new(RateLimiter::new(cfg.rate_limit.as_ref()));
         let mut tasks = Vec::with_capacity(self.workers);
         for worker_id in 0..self.workers {
             let snap = self.snapshot.clone();
             let hints = self.hints.clone();
             let conns = self.conns.clone();
             let resolvers = self.resolvers.clone();
+            let limiter = limiter.clone();
             let lc = cfg.clone();
             let mut sd = stop_rx.clone();
             tasks.push(tokio::spawn(async move {
@@ -98,6 +103,7 @@ impl ListenerManager {
                             hints,
                             conns,
                             resolvers,
+                            limiter,
                             worker_id,
                             &mut sd,
                         )
@@ -110,6 +116,7 @@ impl ListenerManager {
                             hints,
                             conns,
                             resolvers,
+                            limiter,
                             worker_id,
                             &mut sd,
                         )

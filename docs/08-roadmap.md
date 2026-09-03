@@ -127,8 +127,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   silent drop + `gsp_filter_blocked_total{listener,filter="acl"}`. Linear scan of
   the (small) `Cidr` list — no LPM trie yet; established UDP sessions are not
   re-checked per datagram.
-- Rate limit (src_ip + /24), global caps (`max_connections`, `max_udp_sessions`,
-  `max_new_sessions_per_sec`).
+- ✅ **Slice 2**: per-listener token-bucket rate limit on new connections / new
+  UDP sessions — `rate_limit: { per_ip, per_net }` (`rate` permits/s + `burst`),
+  `per_net` keyed by /24 (v4) / /64 (v6), checked after the ACL. A permit needs
+  every configured bucket; excess dropped silently +
+  `gsp_filter_blocked_total{filter="rate_ip"|"rate_net"}`. One `Mutex<HashMap>`
+  per listener shared across workers, lazy prune of idle buckets. Established UDP
+  sessions keep a scan-free steady path.
+- Global caps (`max_connections`, `max_udp_sessions`, `max_new_sessions_per_sec`).
 - UDP first-packet gate, automated tests for the amplifier checklist.
 - Optional geo filter.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.

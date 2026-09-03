@@ -50,6 +50,7 @@ use crate::drain::{ConnGuard, ConnTracker};
 use crate::metrics_defs as m;
 use crate::net::{bind_reuseport_udp, bind_transparent_udp, UdpMode};
 use crate::pool::BackendGuard;
+use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
@@ -113,12 +114,16 @@ fn sticky_key(
     Some(StickyKey { dst, who })
 }
 
+// Plumbing entry point: each argument is a distinct shared handle wired in by
+// `ListenerManager::spawn_group` (its only caller).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_udp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
+    limiter: Arc<RateLimiter>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -237,6 +242,13 @@ pub async fn run_udp_listener(
                     metrics::counter!(
                         m::FILTER_BLOCKED,
                         "listener" => cfg.name.clone(), "filter" => "acl",
+                    ).increment(1);
+                    continue;
+                }
+                if let Some(which) = limiter.permit(client.ip()) {
+                    metrics::counter!(
+                        m::FILTER_BLOCKED,
+                        "listener" => cfg.name.clone(), "filter" => which,
                     ).increment(1);
                     continue;
                 }

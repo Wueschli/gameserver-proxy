@@ -19,6 +19,7 @@ pub mod overlay;
 pub mod pool;
 pub mod proxy;
 pub mod proxy_protocol;
+pub mod ratelimit;
 pub mod resolver;
 pub mod route_hint;
 pub mod runtime;
@@ -29,6 +30,7 @@ mod util;
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 pub use listeners::ListenerManager;
 pub use overlay::BackendOverlay;
+pub use ratelimit::RateLimiter;
 pub use resolver::{
     CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers, Routed,
 };

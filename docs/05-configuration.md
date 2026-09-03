@@ -84,6 +84,15 @@
 > `gsp_filter_blocked_total{listener,filter="acl"}`. Established UDP sessions are
 > not re-checked per datagram.
 >
+> `rate_limit: { per_ip: { rate, burst }, per_net: { rate, burst } }` (at least
+> one of `per_ip` / `per_net`) is a token bucket on *new* connections / *new* UDP
+> sessions, checked right after the ACL. `rate` is permits/second sustained,
+> `burst` the bucket capacity (defaults to `rate`). `per_net` aggregates by the
+> client's /24 (IPv4) or /64 (IPv6). A permit is taken only when every configured
+> bucket can afford it; excess is dropped silently and counted by
+> `gsp_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
+> is per proxy instance (size it per node behind anycast HA).
+>
 > UDP listeners
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
@@ -259,6 +268,8 @@ listeners:
 - `proxy_protocol: v2-udp` only together with `protocol: udp`.
 - `transparent: true` (TCP or UDP) may not be combined with `prefix`.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
+- `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
+  `rate >= 1`.
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires
