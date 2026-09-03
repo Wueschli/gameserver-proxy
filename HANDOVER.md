@@ -1,8 +1,8 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phase 3 complete**; **phase 4 slices 1–2** landed —
-HTTP external resolver + TTL'd LRU result cache. gRPC = slice 3, `target` /
+Last updated: 2026-09-03 (**phase 3 complete**; **phase 4 slices 1–3** landed —
+external resolver: HTTP + gRPC transports, TTL'd LRU cache. `target` /
 `sticky_key` = slice 4).
 
 ---
@@ -16,20 +16,21 @@ HTTP external resolver + TTL'd LRU result cache. gRPC = slice 3, `target` /
   `consistent_hash` balancer; `sni` matcher; `dst` matcher; UDP `prefix:`
   listener + TCP `freebind:`; the sniffer API **seam** + `sniffer` matcher (no
   built-in sniffers); the `POST /route-hint` push resolver. **Phase 4 slices
-  1–2**: `resolvers:` config + `action: { resolver: <name> }`; a `Resolver`
-  trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest) in `gsp`;
-  `pool` results; `on_error: reject | fallback_route | stale_ok`; a `CachedResolver`
-  TTL'd LRU result cache with a configurable key. The proxy forwards **TCP and
+  1–3**: `resolvers:` config + `action: { resolver: <name> }`; a `Resolver`
+  trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest) **and
+  `GrpcResolver` (tonic)** in `gsp`; `pool` results; `on_error: reject |
+  fallback_route | stale_ok`; a `CachedResolver` TTL'd LRU result cache with a
+  configurable key. The proxy forwards **TCP and
   UDP** end to end with health checks (`tcp_connect` + `udp_probe`), three
   balancers, per-backend caps, worker-local UDP session tables with `src_ip`
   affinity, hot reload, and address / first-bytes / SNI / push-hint / external
   routing — including one wildcard `IP_PKTINFO` socket serving a whole routed
   UDP prefix.
-- **Next**: phase 4 slice 3 (**gRPC** transport — `tonic` + `prost` +
-  `resolver.proto` + `build.rs`) and slice 4 (`Resolution.target` pool-less
-  connect + `sticky_key` table), then phase 5 (operability). The **sniffer
-  plugin loader is Phase 9** (separate WASM repo).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 71 tests, all green).
+- **Next**: phase 4 slice 4 (`Resolution.target` — a pool-less connect path in
+  `proxy.rs` / `listener_udp.rs` — + `sticky_key` table), then phase 5
+  (operability). The **sniffer plugin loader is Phase 9** (separate WASM repo).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 73 tests). Needs
+  `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
   environment (no credentials; the HTTPS credential helper points at a nonexistent
@@ -128,7 +129,7 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
   connections are detached (tracked drain with a grace period is phase 5).
 
-### Tests (71, all green)
+### Tests (73, all green)
 
 - `gsp-config` (38): schema parsing + validation rejections, incl. UDP listener +
   default affinity, affinity-on-TCP rejection, `udp_probe` parsing, `udp_probe`
@@ -170,7 +171,9 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   call-counting stub): repeats served from cache & keyed by `src_ip`, negative
   caching absorbs retries, `stale_ok` serves an expired positive, an
   uncacheable request (missing SNI key part) always calls through.
-- `gsp` unit (1): local base64 encoder known vectors.
+- `gsp` unit (3): local base64 encoder known vectors; **gRPC** round trip — an
+  in-process `tonic` `Resolver` server echoes the request SNI into the pool
+  name, `GrpcResolver::new` + `resolve` against it.
 - `gsp-core/tests/tcp_forward.rs` (6): end-to-end client→proxy→backend byte
   forwarding; "routes around a dead backend"; "first matching route selects the
   pool" (`client_cidr` hit vs. fall-through to `always`); "consistent_hash pins
@@ -230,8 +233,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | More sniffers (`quic`, `wireguard`, …); `RouteHint.reject` currently only makes a `sniffer` route *not match* (no hard drop) | phase 3+ |
 | Per-listener multiple distinct sniffers (only one name allowed today) | polish |
 | TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
-| External resolver: **HTTP + `pool` + `on_error` + TTL LRU cache + `stale_ok`** | **done** (phase 4 slices 1–2) |
-| External resolver: gRPC (slice 3), `target` / `sticky_key` (slice 4) | phase 4 |
+| External resolver: **HTTP + gRPC + `pool` + `on_error` + TTL LRU cache + `stale_ok`** | **done** (phase 4 slices 1–3) |
+| External resolver: `target` / `sticky_key` (slice 4) | phase 4 |
+| Build now needs `protoc` (gRPC codegen in `crates/gsp/build.rs`); CI installs `protobuf-compiler` | — |
 | Resolver cache uses `std::sync::Mutex<LruCache>` — a brief lock on the routing path (not held across `.await`); like `Backend::observe`, deliberate | — |
 | Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
@@ -489,6 +493,18 @@ result cache (configurable key `src_ip` / `sni` / `routing_key` /
 `listener_udp.rs`) + `sticky_key` (a per-listener sticky table so repeat clients
 skip the resolver).
 
+### Slice 3 — gRPC transport (done)
+
+`crates/gsp/proto/resolver.proto` (`gsp.resolver.v1.Resolver/Resolve`, messages
+mirror the HTTP wire types; absent optionals are `""` / `0`). `crates/gsp/build.rs`
+runs `tonic_build` (client + server; server stub is used by the crate test).
+`GrpcResolver` in `gsp/src/resolver.rs` holds a `connect_lazy` `Channel` with
+`Endpoint::timeout`, builds a `ResolverClient` per call, maps
+`Code::DeadlineExceeded → Timeout`. `build_resolvers` now handles
+`ResolverKind::Grpc`. New deps: `tonic` + `prost` (in `gsp`), `tonic-build`
+(`gsp` build-dep). `#[allow(clippy::result_large_err)]` on the generated `pb`
+module (tonic `Status` is large).
+
 ### Slice 2 — resolver result cache (done)
 
 `gsp-config`: `resolvers[].cache: { key: [<part>], positive_ttl_sec,
@@ -552,7 +568,8 @@ Resolver config is startup-only (not rebuilt on reload).
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — the `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`). Lock-free read. |
 | `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
-| `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `build_resolvers(&Config)`, a local base64 encoder. |
+| `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers(&Config)`, a local base64 encoder. |
+| `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp`: acquire backend, connect, `copy_with_idle` both ways. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints`; `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`). |
@@ -578,8 +595,11 @@ Resolver config is startup-only (not rebuilt on reload).
 
 - Toolchain installed via `rustup` (`stable` 1.98). If `cargo` isn't found:
   `export PATH="$HOME/.cargo/bin:$PATH"`.
-- CI: `.github/workflows/ci.yml` runs `cargo fmt --check`, `clippy --all-targets
-  --all-features`, `cargo test --all` on push/PR.
+- **`protoc` is a build requirement** (gRPC resolver codegen in
+  `crates/gsp/build.rs`). Present here (`/usr/bin/protoc`); CI installs
+  `protobuf-compiler`; a build box without it fails at `gsp`'s build script.
+- CI: `.github/workflows/ci.yml` installs `protoc`, then runs `cargo fmt
+  --check`, `clippy --all-targets --all-features`, `cargo test --all`.
 - The UDP `prefix:` e2e test (`udp_forward.rs`) needs a Linux host with
   `IP_PKTINFO` and reachable `127.0.0.2` / `127.0.0.3` (both loopback on Linux);
   it is not portable to macOS/Windows CI. In production, prefix mode also needs

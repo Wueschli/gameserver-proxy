@@ -48,7 +48,7 @@ pools:
 # `pool` results only.
 resolvers:
   - name: matchmaker
-    type: http                     # http (grpc lands in a later slice)
+    type: http                     # http | grpc  (grpc endpoint is "http://host:port")
     endpoint: "http://127.0.0.1:8099/resolve"
     timeout_ms: 40
     on_error: stale_ok             # reject | fallback_route | stale_ok

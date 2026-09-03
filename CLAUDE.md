@@ -71,6 +71,9 @@ The toolchain is installed via `rustup`. If `cargo` is not on `PATH`:
 export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 ```
 
+`protoc` must be on `PATH` — `crates/gsp/build.rs` generates the gRPC resolver
+client from `crates/gsp/proto/resolver.proto`.
+
 | Task | Command |
 |------|---------|
 | Everything CI runs | `make check` (fmt check + clippy `-D warnings` + tests) |
@@ -181,8 +184,8 @@ Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordere
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Phase 4 (external resolver) in progress** — slices 1–2 (HTTP transport,
-`pool` results, `on_error`, TTL'd LRU cache) landed; slice 3 is gRPC, slice 4 is
+**Phase 4 (external resolver) in progress** — slices 1–3 (HTTP + gRPC
+transports, `pool` results, `on_error`, TTL'd LRU cache) landed; slice 4 is
 `target`/`sticky_key`. Then phase 5 (operability — connection draining, runtime
 listener/backend CRUD, `draining` / `disabled` states). See `HANDOVER.md` and
 `docs/08`. Don't half-land a slice.

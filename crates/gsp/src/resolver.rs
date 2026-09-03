@@ -9,6 +9,12 @@ use gsp_config::{Config, OnError, ResolverConfig, ResolverKind};
 use gsp_core::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
 use serde::{Deserialize, Serialize};
 
+/// Generated from `proto/resolver.proto`.
+#[allow(clippy::result_large_err)] // tonic's `Status` is large; generated code
+mod pb {
+    tonic::include_proto!("gsp.resolver.v1");
+}
+
 /// Build the name → resolver map from config. Errors if a resolver cannot be
 /// constructed (bad endpoint URL, unimplemented transport).
 pub fn build_resolvers(cfg: &Config) -> anyhow::Result<Resolvers> {
@@ -16,10 +22,7 @@ pub fn build_resolvers(cfg: &Config) -> anyhow::Result<Resolvers> {
     for rc in &cfg.resolvers {
         let inner: Arc<dyn Resolver> = match rc.kind {
             ResolverKind::Http => Arc::new(HttpResolver::new(rc)?),
-            ResolverKind::Grpc => anyhow::bail!(
-                "resolver {}: grpc transport is not implemented yet (phase 4, slice 3)",
-                rc.name
-            ),
+            ResolverKind::Grpc => Arc::new(GrpcResolver::new(rc)?),
         };
         let r = match &rc.cache {
             Some(cc) => Arc::new(CachedResolver::new(inner, cc)) as Arc<dyn Resolver>,
@@ -133,6 +136,73 @@ impl Resolver for HttpResolver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// gRPC
+// ---------------------------------------------------------------------------
+
+pub struct GrpcResolver {
+    name: String,
+    on_error: OnError,
+    channel: tonic::transport::Channel,
+}
+
+impl GrpcResolver {
+    fn new(cfg: &ResolverConfig) -> anyhow::Result<Self> {
+        let channel = tonic::transport::Endpoint::from_shared(cfg.endpoint.clone())
+            .map_err(|e| anyhow::anyhow!("resolver {}: bad grpc endpoint: {e}", cfg.name))?
+            .timeout(cfg.timeout)
+            .connect_lazy();
+        Ok(Self {
+            name: cfg.name.clone(),
+            on_error: cfg.on_error,
+            channel,
+        })
+    }
+}
+
+fn opt(s: String) -> Option<String> {
+    (!s.is_empty()).then_some(s)
+}
+
+#[async_trait]
+impl Resolver for GrpcResolver {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn on_error(&self) -> OnError {
+        self.on_error
+    }
+    async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
+        let mut client = pb::resolver_client::ResolverClient::new(self.channel.clone());
+        let pb_req = pb::ResolveRequest {
+            listener: req.listener,
+            src: req.src.to_string(),
+            dst: req.dst.to_string(),
+            sni: req.sni.unwrap_or_default(),
+            first_bytes: req.first_bytes,
+            routing_key: req.routing_key.unwrap_or_default(),
+        };
+        let resp = client.resolve(pb_req).await.map_err(|s| match s.code() {
+            tonic::Code::DeadlineExceeded => ResolveError::Timeout,
+            _ => ResolveError::Failed(s.message().to_string()),
+        })?;
+        let r = resp.into_inner();
+        let target = match opt(r.target) {
+            Some(s) => Some(
+                s.parse()
+                    .map_err(|_| ResolveError::Failed(format!("bad target address {s:?}")))?,
+            ),
+            None => None,
+        };
+        Ok(Resolution {
+            pool: opt(r.pool),
+            target,
+            sticky_key: opt(r.sticky_key),
+            ttl_sec: (r.ttl_sec != 0).then_some(r.ttl_sec as u64),
+        })
+    }
+}
+
 /// Standard base64 (with `=` padding). Kept local to avoid another dependency.
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -160,7 +230,7 @@ fn base64_encode(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64_encode;
+    use super::*;
 
     #[test]
     fn base64_matches_known_vectors() {
@@ -170,5 +240,70 @@ mod tests {
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(base64_encode(&[0xff, 0xff, 0xff, 0xff]), "/////w==");
+    }
+
+    /// A tonic `Resolver` server that echoes the request's SNI into the pool
+    /// name, so the round trip is observable.
+    struct EchoSvc;
+    #[tonic::async_trait]
+    impl pb::resolver_server::Resolver for EchoSvc {
+        async fn resolve(
+            &self,
+            request: tonic::Request<pb::ResolveRequest>,
+        ) -> Result<tonic::Response<pb::Resolution>, tonic::Status> {
+            let r = request.into_inner();
+            Ok(tonic::Response::new(pb::Resolution {
+                pool: format!(
+                    "pool-for-{}",
+                    if r.sni.is_empty() { "none" } else { &r.sni }
+                ),
+                ttl_sec: 10,
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn grpc_resolver_round_trips_a_request() {
+        // A free port, then hand it to the tonic server.
+        let addr: std::net::SocketAddr = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap()
+        };
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::resolver_server::ResolverServer::new(EchoSvc))
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let rc = gsp_config::ResolverConfig {
+            name: "mm".into(),
+            kind: gsp_config::ResolverKind::Grpc,
+            endpoint: format!("http://{addr}"),
+            timeout: std::time::Duration::from_secs(2),
+            on_error: gsp_config::OnError::Reject,
+            cache: None,
+        };
+        let r = GrpcResolver::new(&rc).unwrap();
+        assert_eq!(r.name(), "mm");
+
+        let res = r
+            .resolve(ResolveRequest {
+                listener: "l".into(),
+                src: "1.2.3.4:5".parse().unwrap(),
+                dst: "9.9.9.9:7".parse().unwrap(),
+                sni: Some("eu.example.com".into()),
+                first_bytes: vec![],
+                routing_key: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.pool.as_deref(), Some("pool-for-eu.example.com"));
+        assert_eq!(res.ttl_sec, Some(10));
+
+        server.abort();
     }
 }

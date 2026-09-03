@@ -47,7 +47,9 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 - **Rate limit**: `governor` (GCRA token bucket).
 - **Metrics**: `metrics` + `metrics-exporter-prometheus`.
 - **Tracing**: `tracing` + `opentelemetry`.
-- **Resolver**: `tonic` (gRPC), `reqwest`/`hyper` (HTTP).
+- **Resolver**: `reqwest` (HTTP) + `tonic`/`prost` (gRPC), both in the `gsp`
+  binary only; `gsp-core` defines the `Resolver` trait. gRPC codegen via
+  `tonic-build` at build time (needs `protoc`).
 - **Admin API**: `axum` (small, on an internal interface).
 - **PROXY protocol**: `ppp` or a small custom v2 implementation.
 - **Tests**: `criterion` (bench), `cargo-fuzz` (parsers), custom load tools
