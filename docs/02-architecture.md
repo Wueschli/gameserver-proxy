@@ -92,7 +92,8 @@ struct, the rest is shared).
 
 ### 7. Admin API
 - `GET /config` (active snapshot, redacted), `GET /pools`, `GET /sessions?...`
-- `POST /pools/{p}/backends`, `DELETE ...`, `PATCH .../{b} {state: draining}`
+- `PATCH /pools/{p}/backends/{addr} {state: enabled|draining|disabled}` (implemented, phase 5);
+  `POST /pools/{p}/backends`, `DELETE ...` (planned)
 - `POST /route-hint` – push resolver: `{src_ip, pool|target, ttl_sec}` for games with
   no protocol hint, set by launcher/matchmaker (scheme C in [03](03-routing.md))
 - `POST /reload`, `GET /healthz`, `GET /readyz`, `GET /metrics`

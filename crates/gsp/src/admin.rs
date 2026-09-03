@@ -4,15 +4,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Deserialize;
 
+use gsp_core::pool::AdminState as BackendState;
 use gsp_core::RuntimeHandle;
 
 #[derive(Clone)]
@@ -27,6 +28,7 @@ pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: Prometh
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/pools", get(pools))
+        .route("/pools/{pool}/backends/{addr}", patch(patch_backend))
         .route("/route-hint", post(route_hint))
         .with_state(AdminState {
             runtime,
@@ -109,16 +111,54 @@ async fn pools(State(s): State<AdminState>) -> impl IntoResponse {
         out.push_str(&format!("{name}\tbalancer={:?}\n", pool.balancer));
         for b in pool.backends() {
             out.push_str(&format!(
-                "  {}\t{}\tactive={}\n",
+                "  {}\t{}\tstate={}\tactive={}\n",
                 b.addr,
                 if b.is_healthy() {
                     "healthy"
                 } else {
                     "unhealthy"
                 },
+                b.admin_state().as_str(),
                 b.active(),
             ));
         }
     }
     out
+}
+
+/// `PATCH /pools/{pool}/backends/{addr}` `{ "state": "enabled"|"draining"|"disabled" }`
+/// — set an operator backend state. `draining` / `disabled` stop new-session
+/// selection while existing sessions keep running.
+#[derive(Deserialize)]
+struct BackendPatch {
+    state: String,
+}
+
+async fn patch_backend(
+    State(s): State<AdminState>,
+    Path((pool, addr)): Path<(String, String)>,
+    Json(req): Json<BackendPatch>,
+) -> (StatusCode, String) {
+    let Some(state) = BackendState::parse(&req.state) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "state must be one of: enabled, draining, disabled\n".into(),
+        );
+    };
+    let Ok(addr) = addr.parse::<SocketAddr>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "backend address is not a valid ip:port\n".into(),
+        );
+    };
+    let snap = s.runtime.snapshot();
+    let Some(pool) = snap.pool(&pool) else {
+        return (StatusCode::NOT_FOUND, "unknown pool\n".into());
+    };
+    let Some(backend) = pool.backend(addr) else {
+        return (StatusCode::NOT_FOUND, "unknown backend in pool\n".into());
+    };
+    backend.set_admin_state(state);
+    tracing::info!(pool = %pool.name, %addr, state = state.as_str(), "backend admin state changed");
+    (StatusCode::OK, format!("{addr} -> {}\n", state.as_str()))
 }

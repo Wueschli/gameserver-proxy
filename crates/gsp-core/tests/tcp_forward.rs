@@ -215,6 +215,48 @@ listeners:
 }
 
 #[tokio::test]
+async fn draining_a_backend_diverts_new_connections() {
+    let a = marker_backend(b'A').await;
+    let b = marker_backend(b'B').await;
+    let proxy = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{a}", "{b}"]
+    balancer: round_robin
+listeners:
+  - name: l
+    bind: "{proxy}"
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Drain backend A: every new connection must now land on B.
+    runtime
+        .handle()
+        .snapshot()
+        .pool("p")
+        .unwrap()
+        .backend(a)
+        .unwrap()
+        .set_admin_state(gsp_core::pool::AdminState::Draining);
+
+    for _ in 0..8 {
+        let mut c = TcpStream::connect(proxy).await.unwrap();
+        let mut m = [0u8; 1];
+        c.read_exact(&mut m).await.unwrap();
+        assert_eq!(m[0], b'B', "drained backend A must get no new connections");
+    }
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn consistent_hash_pins_a_client_to_one_backend() {
     let a = marker_backend(b'A').await;
     let b = marker_backend(b'B').await;

@@ -8,7 +8,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,6 +24,55 @@ pub enum PickError {
     AllAtCapacity(String),
 }
 
+/// Operator-controlled backend state, set through the admin API and orthogonal
+/// to the active/passive *health* flag. `Enabled` is the default; `Draining`
+/// and `Disabled` both take the backend out of new-session selection while
+/// existing [`BackendGuard`]s keep running (drain). `Disabled` additionally
+/// signals "administratively down" for observability — the data path treats the
+/// two identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminState {
+    Enabled,
+    Draining,
+    Disabled,
+}
+
+impl AdminState {
+    fn to_u8(self) -> u8 {
+        match self {
+            AdminState::Enabled => 0,
+            AdminState::Draining => 1,
+            AdminState::Disabled => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => AdminState::Draining,
+            2 => AdminState::Disabled,
+            _ => AdminState::Enabled,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdminState::Enabled => "enabled",
+            AdminState::Draining => "draining",
+            AdminState::Disabled => "disabled",
+        }
+    }
+
+    /// Parse the wire form accepted by `PATCH /pools/{p}/backends/{addr}`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "enabled" => Some(AdminState::Enabled),
+            "draining" => Some(AdminState::Draining),
+            "disabled" => Some(AdminState::Disabled),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Streaks {
     ok: u32,
@@ -35,6 +84,7 @@ pub struct Backend {
     pub addr: SocketAddr,
     pool: Arc<str>,
     healthy: AtomicBool,
+    admin_state: AtomicU8,
     active: AtomicUsize,
     last_check_ms: AtomicU64,
     streaks: Mutex<Streaks>,
@@ -53,11 +103,13 @@ impl Backend {
         hc: &HealthCheck,
         max_sessions: Option<usize>,
         initially_healthy: bool,
+        initial_state: AdminState,
     ) -> Arc<Self> {
         Arc::new(Self {
             addr,
             pool,
             healthy: AtomicBool::new(initially_healthy),
+            admin_state: AtomicU8::new(initial_state.to_u8()),
             active: AtomicUsize::new(0),
             last_check_ms: AtomicU64::new(0),
             streaks: Mutex::new(Streaks::default()),
@@ -72,6 +124,20 @@ impl Backend {
 
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
+    }
+
+    pub fn admin_state(&self) -> AdminState {
+        AdminState::from_u8(self.admin_state.load(Ordering::Acquire))
+    }
+
+    pub fn set_admin_state(&self, state: AdminState) {
+        self.admin_state.store(state.to_u8(), Ordering::Release);
+    }
+
+    /// Eligible to receive *new* sessions: passing health checks and not
+    /// draining / disabled by an operator.
+    pub fn takes_new_sessions(&self) -> bool {
+        self.is_healthy() && self.admin_state() == AdminState::Enabled
     }
 
     pub fn active(&self) -> usize {
@@ -195,16 +261,18 @@ impl Pool {
             .targets
             .iter()
             .map(|&addr| {
-                let carried_healthy = prev
-                    .and_then(|p| p.backends.iter().find(|b| b.addr == addr))
-                    .map(|b| b.is_healthy())
-                    .unwrap_or(true);
+                let prev_backend = prev.and_then(|p| p.backends.iter().find(|b| b.addr == addr));
+                let carried_healthy = prev_backend.map(|b| b.is_healthy()).unwrap_or(true);
+                let carried_state = prev_backend
+                    .map(|b| b.admin_state())
+                    .unwrap_or(AdminState::Enabled);
                 Backend::new(
                     addr,
                     name.clone(),
                     &cfg.health_check,
                     cfg.max_sessions,
                     carried_healthy,
+                    carried_state,
                 )
             })
             .collect();
@@ -223,12 +291,17 @@ impl Pool {
         &self.backends
     }
 
+    /// Look up a backend by address (admin API: state changes, introspection).
+    pub fn backend(&self, addr: SocketAddr) -> Option<&Arc<Backend>> {
+        self.backends.iter().find(|b| b.addr == addr)
+    }
+
     /// Reserve a slot on the backend at `want` specifically (UDP session
     /// affinity). Returns `None` if that backend is gone, unhealthy, or full;
     /// the caller then falls back to [`Pool::acquire`].
     pub fn acquire_addr(&self, want: SocketAddr) -> Option<BackendGuard> {
         let b = self.backends.iter().find(|b| b.addr == want)?;
-        if !b.is_healthy() {
+        if !b.takes_new_sessions() {
             return None;
         }
         b.try_acquire()
@@ -244,8 +317,11 @@ impl Pool {
     /// Like [`Pool::acquire`], but `client` supplies the key a `consistent_hash`
     /// pool hashes on (`hash_on`); the other balancers ignore it.
     pub fn acquire_for(&self, client: Option<SocketAddr>) -> Result<BackendGuard, PickError> {
-        let mut healthy: Vec<&Arc<Backend>> =
-            self.backends.iter().filter(|b| b.is_healthy()).collect();
+        let mut healthy: Vec<&Arc<Backend>> = self
+            .backends
+            .iter()
+            .filter(|b| b.takes_new_sessions())
+            .collect();
         if healthy.is_empty() {
             metrics::counter!(
                 m::LB_SELECTIONS,
@@ -469,6 +545,49 @@ mod tests {
             p.acquire().unwrap_err(),
             PickError::NoHealthyBackend(_)
         ));
+    }
+
+    #[test]
+    fn draining_backend_gets_no_new_sessions_but_keeps_existing_ones() {
+        let p = Pool::new(
+            &pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::RoundRobin, None),
+            None,
+        );
+        // Open a session on :1, then drain it.
+        let held = p.acquire_addr("127.0.0.1:1".parse().unwrap()).unwrap();
+        p.backend("127.0.0.1:1".parse().unwrap())
+            .unwrap()
+            .set_admin_state(AdminState::Draining);
+
+        // New selection avoids the draining backend entirely.
+        for _ in 0..6 {
+            assert_eq!(p.acquire().unwrap().addr().port(), 2);
+        }
+        // Affinity to the draining backend is refused (caller falls back).
+        assert!(p.acquire_addr("127.0.0.1:1".parse().unwrap()).is_none());
+        // The pre-existing guard is untouched.
+        assert_eq!(held.addr().port(), 1);
+        assert_eq!(p.backend("127.0.0.1:1".parse().unwrap()).unwrap().active(), 1);
+    }
+
+    #[test]
+    fn disabled_leaves_only_error_when_it_is_the_last_backend() {
+        let p = Pool::new(&pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None), None);
+        p.backends()[0].set_admin_state(AdminState::Disabled);
+        assert!(matches!(
+            p.acquire().unwrap_err(),
+            PickError::NoHealthyBackend(_)
+        ));
+    }
+
+    #[test]
+    fn admin_state_survives_a_reload() {
+        let cfg = pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::RoundRobin, None);
+        let s1 = Pool::new(&cfg, None);
+        s1.backends()[0].set_admin_state(AdminState::Draining);
+        let s2 = Pool::new(&cfg, Some(&Arc::new(s1)));
+        assert_eq!(s2.backends()[0].admin_state(), AdminState::Draining);
+        assert_eq!(s2.backends()[1].admin_state(), AdminState::Enabled);
     }
 
     #[test]

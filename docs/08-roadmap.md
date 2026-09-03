@@ -74,11 +74,18 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   needs its own design).
 - **Result**: matchmaker integration, token→instance routing.
 
-## Phase 5 – Operations & zero-downtime (week 13–14)
-- Hot reload (SIGHUP + file watch), atomic snapshot swap.
-- Admin API: backends CRUD, `draining`, read snapshot, `drain`/`readyz`.
-- Graceful draining (backend & proxy instance), `SIGTERM` flow.
-- Passive health signals from the data path.
+## Phase 5 – Operations & zero-downtime (week 13–14) 🔜
+- ✅ Hot reload (SIGHUP + file watch), atomic snapshot swap. *(phase 1)*
+- ✅ **Slice 1**: `enabled` / `draining` / `disabled` backend states —
+  `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
+  affinity) while existing sessions drain; carried across reload by address;
+  `PATCH /pools/{p}/backends/{addr}`; `gsp_pool_backends{state=draining|disabled}`.
+- ⬜ Admin API: backends CRUD (`POST` / `DELETE` a backend), read snapshot
+  (`GET /config`), `POST /admin/drain` (flip `readyz`).
+- ⬜ Graceful draining of the **proxy instance**: tracked in-flight connections +
+  `shutdown_grace` on `SIGTERM` (today they are detached).
+- ⬜ Runtime listener add / remove / rebind (needs a restart today).
+- ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.
 
 ## Phase 6 – Client-IP preservation (week 15–16)

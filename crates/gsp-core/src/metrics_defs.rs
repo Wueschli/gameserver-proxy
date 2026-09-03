@@ -27,7 +27,7 @@ pub const CONNECTION_DURATION: &str = "gsp_connection_duration_seconds";
 /// Counter. Labels: `backend`, `kind` (`timeout` | `refused` | `unreachable`).
 pub const BACKEND_CONNECT_ERRORS: &str = "gsp_backend_connect_errors_total";
 
-/// Gauge. Labels: `pool`, `state` (`healthy` | `unhealthy`).
+/// Gauge. Labels: `pool`, `state` (`healthy` | `unhealthy` | `draining` | `disabled`).
 pub const POOL_BACKENDS: &str = "gsp_pool_backends";
 
 /// Gauge. Labels: `pool`, `backend`.

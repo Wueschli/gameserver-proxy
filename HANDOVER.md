@@ -1,9 +1,9 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 3 & 4 complete**; phase 4 = external resolver
-— HTTP + gRPC, TTL'd LRU cache, `pool` + `target`. `Resolution.sticky_key` is
-the one deferred bit).
+Last updated: 2026-09-03 (**phases 3 & 4 complete**; **phase 5 in progress** —
+slice 1 landed: `enabled` / `draining` / `disabled` backend states +
+`PATCH /pools/{p}/backends/{addr}`).
 
 ---
 
@@ -27,12 +27,19 @@ the one deferred bit).
   affinity, hot reload, and address / first-bytes / SNI / push-hint / external
   routing — including one wildcard `IP_PKTINFO` socket serving a whole routed
   UDP prefix.
-- **Next**: **phase 5 — operability**: tracked connection draining with a grace
-  period on shutdown (today in-flight connections are detached); runtime
-  listener add/remove/rebind; `draining` / `disabled` backend states; full CRUD
-  admin API. Also deferred: resolver `sticky_key`; the sniffer plugin loader
-  (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 75 tests). Needs
+- **Phase 5 slice 1 done**: `AdminState` (`Enabled` / `Draining` / `Disabled`)
+  on `Backend`; `Draining` / `Disabled` are excluded from new-session selection
+  (`acquire_for` and the UDP-affinity `acquire_addr`) while live `BackendGuard`s
+  keep running; state is carried across a reload by address (like health);
+  `PATCH /pools/{pool}/backends/{addr} {state}` in `gsp/src/admin.rs`;
+  `GET /pools` shows `state=`; `gsp_pool_backends` now has
+  `state=draining|disabled` too.
+- **Next (phase 5)**: proxy-instance graceful drain — tracked in-flight
+  connections + `shutdown_grace` on `SIGTERM` (today they are detached);
+  runtime listener add/remove/rebind; backend CRUD (`POST` / `DELETE`);
+  `GET /config`; `POST /admin/drain` (flip `readyz`). Also deferred: resolver
+  `sticky_key`; the sniffer plugin loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 78 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -122,7 +129,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Admin API** (`settings.admin.listen`, default `127.0.0.1:9900`):
   `GET /healthz` `/readyz` `/metrics` (Prometheus) `/pools`; `POST /route-hint`
   `{src_ip, pool, ttl_sec}` (push resolver — validates the pool, `ttl_sec`
-  1..=3600). `gsp` now depends on `serde` for the request body.
+  1..=3600); `PATCH /pools/{pool}/backends/{addr}` `{state:
+  enabled|draining|disabled}` (operator backend state — `draining`/`disabled`
+  divert new sessions, existing ones drain; carried across reload). `gsp` now
+  depends on `serde` for the request bodies.
 - **Metrics**: see `crates/gsp-core/src/metrics_defs.rs`. Connections, bytes,
   duration, backend connect errors, `gsp_pool_backends`, `gsp_healthcheck_total`,
   `gsp_lb_selections_total`, `gsp_route_hints_applied_total{listener}`,
@@ -228,8 +238,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
 | Listener add / remove / rebind at runtime (needs restart today) | phase 5 |
 | Tracked connection drain with a grace period on shutdown | phase 5 |
-| Full CRUD admin API (add/remove backend, set `draining`/`disabled` state) | phase 5 |
-| `draining` / `disabled` backend states (only `healthy`/`unhealthy` exist) | phase 5 |
+| CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain` (`PATCH` backend state is **done**) | phase 5 |
+| `draining` / `disabled` backend states | **done** (phase 5 slice 1) |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
 | **Phase 3 — done** (slices 1–9): route rule list; matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix`+`length`) / `sni`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:`; sniffer API seam + `sniffer` matcher (no built-ins); `POST /route-hint` push resolver | **done** |
 | Sniffer plugin **loader** + a generic `first_bytes` `regex` matcher (as a plugin) — separate community repo, sandboxed/WASM, runtime-loaded | **Phase 9** |
@@ -575,13 +585,54 @@ Resolver config is startup-only (not rebuilt on reload).
 
 ---
 
+## Phase 5 — operations & zero-downtime
+
+Design reference: `docs/06-operations-observability.md` ("Graceful draining &
+deployments") and `docs/08` phase 5.
+
+### Slice 1 — backend admin states (`enabled` / `draining` / `disabled`) (done)
+
+`gsp_core::pool::AdminState { Enabled, Draining, Disabled }` — an `AtomicU8` on
+`Backend`, orthogonal to the `healthy` flag. `Backend::takes_new_sessions()` =
+`is_healthy() && admin_state() == Enabled` is now the selection predicate in
+`Pool::acquire_for` (the healthy-set filter) and `Pool::acquire_addr` (UDP
+affinity — a drained backend is refused and the caller falls back). Existing
+`BackendGuard`s are untouched, so live sessions drain naturally. `Pool::new`
+carries the state across a reload by address, next to `carried_healthy`.
+`Pool::backend(addr)` is the new lookup helper.
+
+`health.rs` state-gauge loop now emits `gsp_pool_backends{state=draining}` /
+`{state=disabled}` (a backend counts as draining/disabled regardless of its
+health flag).
+
+`gsp/src/admin.rs`: `PATCH /pools/{pool}/backends/{addr}` with
+`{ "state": "enabled" | "draining" | "disabled" }` — resolves the backend in the
+live snapshot and calls `set_admin_state`; 404 on unknown pool/backend, 400 on a
+bad state string or unparseable `addr`. `AdminState` is imported there as
+`BackendState` to dodge the local `struct AdminState` (the axum router state).
+`GET /pools` gained a `state=` column. No auth yet (bound to an internal
+interface — same as the rest of the admin API).
+
+Not done: `POST` / `DELETE` a backend (needs a snapshot rebuild path outside
+`reload.rs` — the next slice), `GET /config`, `POST /admin/drain`,
+proxy-instance connection draining, runtime listener reconfiguration.
+
+### Do NOT (phase 5)
+
+- Let anything other than `reload.rs` build a whole new `Snapshot`. Backend
+  state changes mutate atomics on the existing `Backend`; backend CRUD will need
+  a deliberate design (probably a control-plane rebuild that merges admin
+  additions with the file), not an ad-hoc swap from the admin handler.
+
+---
+
 ## Codebase map (quick reference)
 
 | File | Responsibility |
 |------|----------------|
 | `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`ResolverConfig`/`HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`). All schema rules here. |
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
-| `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr`, `hrw_score`), `Backend` (health/active/streaks/`check_kind`), `BackendGuard` (RAII slot + passive health), `PickError`. |
+| `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health/active/streaks/`check_kind` + `AdminState` — `admin_state` / `set_admin_state` / `takes_new_sessions`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
@@ -595,7 +646,7 @@ Resolver config is startup-only (not rebuilt on reload).
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |
-| `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools`, `POST /route-hint`. |
+| `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools`, `POST /route-hint`, `PATCH /pools/{pool}/backends/{addr}` (set `AdminState`). |
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch → debounce → `apply` (validate, build, store). |
 
 ---

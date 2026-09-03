@@ -86,8 +86,13 @@ carried in the PROXY v2 TLV if the backend should correlate it.
 - `GET /metrics` – Prometheus.
 - `GET /config`, `GET /pools`, `GET /sessions?listener=&src=&pool=` – introspection.
 - `POST /route-hint` `{src_ip, pool, ttl_sec}` – push-resolver hint (scheme C);
-  applied by listeners with `route_hint: true`. Implemented; `/config` &
-  `/sessions` are not yet.
+  applied by listeners with `route_hint: true`. Implemented.
+- `PATCH /pools/{pool}/backends/{addr}` `{state: enabled|draining|disabled}` –
+  set an operator backend state. Implemented (phase 5). `draining` / `disabled`
+  remove the backend from new-session selection (including UDP affinity)
+  immediately; existing sessions keep running. Carried across a config reload by
+  address. `GET /pools` shows the current `state=` per backend.
+- `/config` & `/sessions` are not yet implemented.
 
 ## Backend health checks
 

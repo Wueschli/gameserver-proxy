@@ -49,11 +49,15 @@ listener → backend pool forwarding with:
   it; TCP `freebind:`
 - push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` + per-listener
   `route_hint: true` (a short-lived `src_ip → pool` hint wins over the route list)
+- operator backend states: `PATCH /pools/{p}/backends/{addr} {state:
+  enabled|draining|disabled}` — `draining` / `disabled` divert new sessions while
+  existing ones keep running; carried across a reload
 
-**Phases 1–4 complete** (`sticky_key` deferred). External resolver: HTTP + gRPC
+**Phases 1–4 complete** (`sticky_key` deferred); **phase 5 in progress** —
+`draining` / `disabled` backend states landed. External resolver: HTTP + gRPC
 `resolvers:` + `action: { resolver: <name> }`, `pool` / `target` results,
-`on_error`, and a TTL'd LRU result cache. Next: phase 5 (operability —
-connection draining, runtime listener/backend CRUD). See
+`on_error`, and a TTL'd LRU result cache. Next in phase 5: proxy-instance
+connection draining, runtime listener/backend CRUD. See
 [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run

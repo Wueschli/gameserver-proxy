@@ -81,19 +81,23 @@ async fn sweep(snapshot: &Arc<ArcSwap<Snapshot>>) {
 
     // Refresh the per-pool state gauges once probes have settled.
     for (pool_name, pool) in &snap.pools {
-        let mut healthy = 0i64;
-        let mut unhealthy = 0i64;
+        let (mut healthy, mut unhealthy, mut draining, mut disabled) = (0i64, 0i64, 0i64, 0i64);
         for b in pool.backends() {
-            if b.is_healthy() {
-                healthy += 1;
-            } else {
-                unhealthy += 1;
+            match b.admin_state() {
+                crate::pool::AdminState::Disabled => disabled += 1,
+                crate::pool::AdminState::Draining => draining += 1,
+                crate::pool::AdminState::Enabled if b.is_healthy() => healthy += 1,
+                crate::pool::AdminState::Enabled => unhealthy += 1,
             }
         }
         metrics::gauge!(m::POOL_BACKENDS, "pool" => pool_name.clone(), "state" => "healthy")
             .set(healthy as f64);
         metrics::gauge!(m::POOL_BACKENDS, "pool" => pool_name.clone(), "state" => "unhealthy")
             .set(unhealthy as f64);
+        metrics::gauge!(m::POOL_BACKENDS, "pool" => pool_name.clone(), "state" => "draining")
+            .set(draining as f64);
+        metrics::gauge!(m::POOL_BACKENDS, "pool" => pool_name.clone(), "state" => "disabled")
+            .set(disabled as f64);
     }
 }
 
