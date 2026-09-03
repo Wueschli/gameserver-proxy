@@ -51,7 +51,7 @@ use crate::geo::GeoDb;
 use crate::limits::{GlobalLimits, LimitGuard};
 use crate::metrics_defs as m;
 use crate::net::{bind_reuseport_udp, bind_transparent_udp, UdpMode};
-use crate::pool::BackendGuard;
+use crate::pool::{Backend, BackendGuard};
 use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
@@ -78,6 +78,10 @@ struct Session {
     idle_ms: u64,
     /// `None` for a resolver `target` (no pool slot to hold).
     _guard: Option<BackendGuard>,
+    /// Backend handle for passive health: a connected UDP socket that draws an
+    /// ICMP port-unreachable reports `ConnectionRefused` on send/recv, which we
+    /// feed to the health streaks. `None` for a resolver `target`.
+    health: Option<Arc<Backend>>,
     /// Keeps this session counted for graceful-shutdown draining.
     _conn_guard: ConnGuard,
     /// Releases the global `max_udp_sessions` slot when the session is evicted.
@@ -233,6 +237,7 @@ pub async fn run_udp_listener(
                     s.last_ms.store(now_ms(), Ordering::Relaxed);
                     let up = s.upstream.clone();
                     if let Err(e) = up.send(&buf[..n]).await {
+                        note_port_unreachable(&cfg.name, &s.health, &e);
                         metrics::counter!(
                             m::DATAGRAMS_DROPPED,
                             "listener" => cfg.name.clone(), "reason" => "upstream_send",
@@ -574,12 +579,14 @@ async fn open_session(
         }
     }
 
+    let health = guard.as_ref().map(|g| g.backend());
     let last_ms = Arc::new(AtomicU64::new(now_ms()));
     let reply_task = spawn_reply(
         cfg.name.clone(),
         down.clone(),
         reply_sock.clone(),
         upstream.clone(),
+        health.clone(),
         client,
         // Prefix mode restores the source IP via a pktinfo cmsg on the shared
         // socket; transparent mode sends from `reply_sock` and needs no cmsg.
@@ -597,6 +604,7 @@ async fn open_session(
         last_ms,
         backend,
         idle_ms,
+        health,
         _guard: guard,
         _conn_guard: conns.track(),
         _limit_guard: limit_guard,
@@ -628,6 +636,25 @@ async fn connect_upstream(
     Ok(sock)
 }
 
+/// Feed a passive unhealthy observation when a connected upstream UDP socket
+/// reports `ConnectionRefused` (on Linux, the ICMP port-unreachable the backend
+/// host sends when nothing is listening). Other errors are ignored, and a
+/// resolver `target` has no backend to mark; the idle sweep reaps the session
+/// either way.
+fn note_port_unreachable(listener: &str, health: &Option<Arc<Backend>>, err: &io::Error) {
+    if err.kind() != io::ErrorKind::ConnectionRefused {
+        return;
+    }
+    if let Some(b) = health {
+        if let Some(state) = b.observe(false) {
+            tracing::info!(
+                listener = %listener, backend = %b.addr, healthy = state,
+                "backend health changed (passive, udp port-unreachable)"
+            );
+        }
+    }
+}
+
 /// Pump backend → client until the upstream socket errors (e.g. ICMP
 /// port-unreachable) or the client send fails. The idle sweep reaps the
 /// session entry afterwards.
@@ -637,11 +664,13 @@ async fn connect_upstream(
 /// - prefix mode: `reply_src` is `Some`; the reply is sent from the shared
 ///   listen socket with that IP as its source (`sendmsg` + pktinfo cmsg).
 /// - plain mode: neither is set; a plain `send_to` on the shared socket.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reply(
     listener: String,
     down: Arc<UdpSocket>,
     reply_sock: Option<Arc<UdpSocket>>,
     up: Arc<UdpSocket>,
+    health: Option<Arc<Backend>>,
     client: SocketAddr,
     reply_src: Option<IpAddr>,
     last_ms: Arc<AtomicU64>,
@@ -666,6 +695,7 @@ fn spawn_reply(
                         .increment(1);
                 }
                 Err(e) => {
+                    note_port_unreachable(&listener, &health, &e);
                     tracing::debug!(%listener, %client, error = %e, "udp upstream recv ended");
                     return;
                 }

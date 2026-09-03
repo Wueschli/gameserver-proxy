@@ -279,6 +279,15 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   connection. Loopback numbers on this box: added p50 ≈ 10 µs, p99 ≈ 30 µs.
   N3/N4/N5/N9 need real hardware + a load generator (noted in `docs/06` and the
   crate README).
+- **Pre-phase-8 cleanup (done)**: UDP passive health on ICMP port-unreachable.
+  A connected upstream UDP socket that draws an ICMP port-unreachable reports
+  `ConnectionRefused` on `send` (steady-state forward path) or `recv` (reply
+  pump); both now call `Backend::observe(false)` so a dead UDP backend is marked
+  unhealthy from the data path instead of waiting for the active `udp_probe`
+  sweep. `BackendGuard::backend()` hands the reply task an `Arc<Backend>` (the
+  guard itself stays on the `Session`); `Session.health` / `spawn_reply`'s
+  `health` param carry it. Resolver `target` sessions have no backend ⇒ no-op.
+  Test: `udp_forward::icmp_port_unreachable_marks_the_backend_unhealthy`.
 - **Next**: phase 8 (discovery & scaling). `proxy_protocol` on a resolver
   `target` (pool-less TCP) is still unaddressed; per-source cap LRU eviction and
   `GET /sessions` are polish items.
@@ -519,7 +528,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `consistent_hash` balancer | **done** (phase 3 slice 3) |
 | `consistent_hash` used to retire the UDP per-worker sticky table | polish |
 | `weighted` / `first_available` balancers | later |
-| UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
+| UDP ICMP port-unreachable as an explicit passive health signal | **done** (pre-phase-8 cleanup) |
 | Listener add / remove / rebind at runtime | **done** (phase 5 slice 5) |
 | Tracked connection drain with a grace period on shutdown | **done** (phase 5 slice 2) |
 | CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain`, `PATCH` backend state | **done** (phase 5 slices 1, 3, 4) |
@@ -694,6 +703,13 @@ byte / datagram. Uncapped ⇒ a single `is_enabled()` check.
 short linear scan of the route list for a matching `FirstBytes` matcher (only
 until routing itself runs). No lock, no alloc, no task; steady-state datagrams
 never touch it. Listeners without the flag pay nothing.
+
+**UDP passive health (ICMP port-unreachable)**: one extra `Arc<Backend>` clone
+per UDP session at `open_session` (moved into `Session` + the reply task). On a
+`send`/`recv` error only, one `io::Error::kind()` compare and — for
+`ConnectionRefused` — one `Backend::observe(false)` (the same short streak
+`Mutex` the active checker and TCP passive path already take). Nothing on the
+steady-state datagram path.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**

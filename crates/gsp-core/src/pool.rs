@@ -214,6 +214,13 @@ impl BackendGuard {
         self.backend.addr
     }
 
+    /// A handle to the underlying backend, for passive health observations made
+    /// by code that runs past the guard's own scope (e.g. the UDP reply pump,
+    /// which outlives this call but not the [`Session`](crate::listener_udp)).
+    pub fn backend(&self) -> Arc<Backend> {
+        self.backend.clone()
+    }
+
     /// Report a connect result for passive health tracking.
     pub fn observe(&self, ok: bool) {
         if let Some(new_state) = self.backend.observe(ok) {

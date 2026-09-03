@@ -468,3 +468,66 @@ listeners:
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn icmp_port_unreachable_marks_the_backend_unhealthy() {
+    // The backend port has a TCP listener (so the default `tcp_connect` active
+    // check keeps passing) but nothing on UDP: the connected upstream socket
+    // draws an ICMP port-unreachable, surfaced as `ConnectionRefused` and fed
+    // into passive health. Only the passive UDP path can flip this backend.
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = tcp.local_addr().unwrap();
+    tokio::spawn(async move { while tcp.accept().await.is_ok() {} });
+    let proxy_addr = free_udp_addr();
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{dead}"]
+    health_check: {{ interval_sec: 1, timeout_ms: 200, rise: 1, fall: 1 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let backend = runtime
+        .handle()
+        .snapshot()
+        .pool("p")
+        .unwrap()
+        .backend(dead)
+        .unwrap()
+        .clone();
+    assert!(
+        backend.is_healthy(),
+        "backend starts optimistically healthy"
+    );
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    client.send(b"hello").await.unwrap();
+
+    let mut flipped = false;
+    for _ in 0..40 {
+        if !backend.is_healthy() {
+            flipped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        flipped,
+        "port-unreachable should mark the backend unhealthy"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
