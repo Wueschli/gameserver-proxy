@@ -339,3 +339,81 @@ listeners:
         "drain should finish when the session idles out, not at the grace deadline"
     );
 }
+
+#[tokio::test]
+async fn prepends_a_v2_udp_proxy_header_to_the_first_datagram_only() {
+    // Backend: capture the first datagram raw, echo the payload of every one.
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let backend = sock.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        let mut tx = Some(tx);
+        let mut buf = [0u8; 2048];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(buf[..n].to_vec());
+                // First datagram carries the 28-byte v2 header; echo the rest.
+                let _ = sock.send_to(&buf[28..n], peer).await;
+            } else {
+                let _ = sock.send_to(&buf[..n], peer).await;
+            }
+        }
+    });
+
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    proxy_protocol: v2-udp
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    let client_addr = client.local_addr().unwrap();
+
+    client.send(b"first").await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+        .await
+        .expect("reply timed out")
+        .unwrap();
+    assert_eq!(&buf[..n], b"first");
+
+    let hdr = tokio::time::timeout(Duration::from_secs(1), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    // v2 signature + PROXY/AF_INET/DGRAM + 12-byte addr block + "first".
+    assert_eq!(
+        &hdr[..12],
+        &[0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A]
+    );
+    assert_eq!(hdr[12], 0x21);
+    assert_eq!(hdr[13], 0x12); // AF_INET + DGRAM
+    assert_eq!(&hdr[24..26], &client_addr.port().to_be_bytes());
+    assert_eq!(&hdr[26..28], &proxy_addr.port().to_be_bytes());
+    assert_eq!(&hdr[28..], b"first");
+
+    // Second datagram must NOT carry a header (backend echoes it verbatim).
+    client.send(b"second").await.unwrap();
+    let n = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+        .await
+        .expect("reply timed out")
+        .unwrap();
+    assert_eq!(&buf[..n], b"second");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

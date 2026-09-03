@@ -24,12 +24,13 @@ const V2_SIG: [u8; 12] = [
 ];
 
 /// Encode the header for `mode`. `mode == None` yields an empty vec (nothing to
-/// send). `stream` selects the transport byte in v2 (TCP vs UDP).
-pub fn header(mode: ProxyProtocol, src: SocketAddr, dst: SocketAddr, stream: bool) -> Vec<u8> {
+/// send). `V2` uses the STREAM transport byte, `V2Udp` the DGRAM one.
+pub fn header(mode: ProxyProtocol, src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
     match mode {
         ProxyProtocol::None => Vec::new(),
         ProxyProtocol::V1 => v1(src, dst).into_bytes(),
-        ProxyProtocol::V2 => v2(src, dst, stream),
+        ProxyProtocol::V2 => v2(src, dst, true),
+        ProxyProtocol::V2Udp => v2(src, dst, false),
     }
 }
 
@@ -90,13 +91,16 @@ fn v2(src: SocketAddr, dst: SocketAddr, stream: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn a(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
     #[test]
     fn v1_ipv4_text() {
         let h = header(
             ProxyProtocol::V1,
-            "192.0.2.1:56324".parse().unwrap(),
-            "198.51.100.7:443".parse().unwrap(),
-            true,
+            a("192.0.2.1:56324"),
+            a("198.51.100.7:443"),
         );
         assert_eq!(h, b"PROXY TCP4 192.0.2.1 198.51.100.7 56324 443\r\n");
     }
@@ -105,31 +109,23 @@ mod tests {
     fn v1_ipv6_text() {
         let h = header(
             ProxyProtocol::V1,
-            "[2001:db8::1]:8080".parse().unwrap(),
-            "[2001:db8::2]:9090".parse().unwrap(),
-            true,
+            a("[2001:db8::1]:8080"),
+            a("[2001:db8::2]:9090"),
         );
         assert_eq!(h, b"PROXY TCP6 2001:db8::1 2001:db8::2 8080 9090\r\n");
     }
 
     #[test]
     fn none_is_empty() {
-        assert!(header(
-            ProxyProtocol::None,
-            "192.0.2.1:1".parse().unwrap(),
-            "192.0.2.2:2".parse().unwrap(),
-            true
-        )
-        .is_empty());
+        assert!(header(ProxyProtocol::None, a("192.0.2.1:1"), a("192.0.2.2:2")).is_empty());
     }
 
     #[test]
     fn v2_ipv4_binary_layout() {
         let h = header(
             ProxyProtocol::V2,
-            "192.0.2.1:56324".parse().unwrap(),
-            "198.51.100.7:443".parse().unwrap(),
-            true,
+            a("192.0.2.1:56324"),
+            a("198.51.100.7:443"),
         );
         assert_eq!(&h[..12], &V2_SIG);
         assert_eq!(h[12], 0x21);
@@ -143,24 +139,17 @@ mod tests {
     }
 
     #[test]
-    fn v2_udp_transport_byte() {
-        let h = header(
-            ProxyProtocol::V2,
-            "192.0.2.1:1".parse().unwrap(),
-            "192.0.2.2:2".parse().unwrap(),
-            false,
-        );
+    fn v2_udp_uses_the_dgram_transport_byte() {
+        let h = header(ProxyProtocol::V2Udp, a("192.0.2.1:1"), a("192.0.2.2:2"));
+        assert_eq!(&h[..12], &V2_SIG);
+        assert_eq!(h[12], 0x21);
         assert_eq!(h[13], 0x12); // AF_INET + DGRAM
+        assert_eq!(h.len(), 28);
     }
 
     #[test]
     fn v2_mixed_family_falls_back_to_local() {
-        let h = header(
-            ProxyProtocol::V2,
-            "192.0.2.1:1".parse().unwrap(),
-            "[2001:db8::2]:2".parse().unwrap(),
-            true,
-        );
+        let h = header(ProxyProtocol::V2, a("192.0.2.1:1"), a("[2001:db8::2]:2"));
         assert_eq!(h[12], 0x20); // LOCAL
         assert_eq!(h[13], 0x00); // AF_UNSPEC
         assert_eq!(&h[14..16], &0u16.to_be_bytes());

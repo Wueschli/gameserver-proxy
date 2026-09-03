@@ -6,8 +6,9 @@ Last updated: 2026-09-03 (**phases 3, 4 & 5 complete; phase 6 started**). Phase 
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
 `POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
 add/remove/rebind. `GET /sessions` is the only deferred bit.
-Phase 6 slice 1: per-pool `proxy_protocol: none | v1 | v2` prepends a PROXY
-protocol header to the upstream TCP connection (`gsp_core::proxy_protocol`).
+Phase 6 slices 1–2: per-pool `proxy_protocol: none | v1 | v2 | v2-udp` prepends a
+PROXY protocol header to the upstream TCP connection (v1/v2) or the first
+datagram of each UDP session (v2-udp) — `gsp_core::proxy_protocol`.
 
 ---
 
@@ -80,13 +81,24 @@ protocol header to the upstream TCP connection (`gsp_core::proxy_protocol`).
   unhealthy + error. `gsp_proxy_protocol_headers_total{pool,version}`. `listener.rs`
   passes `local`. Live across reload (pool rebuild). `target` connections
   (resolver) have no pool ⇒ no header.
-- **Next**: phase 6 slice 2 — PROXY protocol **v2-UDP** (header prepended to the
-  first datagram of each UDP session; `proxy_protocol: v2-udp`, UDP-only). Then
-  slice 3 — TPROXY transparent mode (`IP_TRANSPARENT`, `CAP_NET_ADMIN`, bind the
-  client IP as the upstream source; network-setup docs). `proxy_protocol` on a
-  resolver `target` is still unaddressed. Deferred: `GET /sessions`
-  (per-session registry); resolver `sticky_key`; the sniffer plugin loader
-  (Phase 9).
+- **Phase 6 slice 2 done**: `ProxyProtocol::V2Udp` (`proxy_protocol: v2-udp`,
+  serde `rename = "v2-udp"`). `proxy_protocol::header` switches on the mode
+  (`V2` → STREAM byte `0x11`, `V2Udp` → DGRAM byte `0x12`); the `stream` param is
+  gone. `validate()` cross-checks each non-`none` pool against the transports of
+  the listeners that statically route to it (via `Action::Pool`): v1/v2 reject a
+  UDP listener, v2-udp rejects a TCP listener, both-transports rejects. Resolver
+  `target` / resolver-chosen pools are not checked (runtime falls back to no
+  header on a mismatch — TCP path guards on `V1|V2`, UDP path on `V2Udp`).
+  `listener_udp::open_session` threads `pool.proxy_protocol` + the pool name out
+  of the route match and, for `V2Udp`, prepends `header(V2Udp, client, local)`
+  to the first datagram only (one `Cow::Owned` alloc; later datagrams untouched).
+  `local` is the real per-datagram dest in prefix mode. `ProxyProtocol::label()`
+  feeds `gsp_proxy_protocol_headers_total{pool,version}` (`v1|v2|v2-udp`).
+- **Next**: phase 6 slice 3 — TPROXY transparent mode (`IP_TRANSPARENT`,
+  `CAP_NET_ADMIN`, bind the client IP as the upstream source; policy-routing /
+  nftables network-setup docs). `proxy_protocol` on a resolver `target`
+  (pool-less) is still unaddressed. Deferred: `GET /sessions` (per-session
+  registry); resolver `sticky_key`; the sniffer plugin loader (Phase 9).
 - **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~95 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
@@ -158,10 +170,12 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   on the non-sticky path.
 - **Per-connection pump**: buffered bidirectional copy, connect timeout, per-direction
   idle timeout, half-close propagation, `TCP_NODELAY`.
-- **Client-IP preservation** (TCP): a pool with `proxy_protocol: v1 | v2` gets one
+- **Client-IP preservation**: a pool with `proxy_protocol: v1 | v2` (TCP) gets one
   PROXY protocol header written to the backend before any client bytes, carrying
-  the real `(client, proxy-local)` addresses. `none` by default. Resolver
-  `target` connections get no header (no pool).
+  the real `(client, proxy-local)` addresses; `v2-udp` prepends the v2 binary
+  header to the first datagram of each UDP session (later datagrams untouched).
+  `none` by default; the form is validated against the listener transport.
+  Resolver `target` connections get no header (no pool).
 - **Backend health**: active `tcp_connect` or `udp_probe` probes per pool
   (`udp_probe` sends `send_hex`, expects a reply datagram optionally prefix-matched
   by `expect_hex_prefix`); `interval`, `timeout`, `rise`, `fall`; passive marking on
@@ -404,8 +418,11 @@ Nothing on the steady-state path.
 
 **PROXY protocol** (`proxy_protocol: v1 | v2`): one `Vec` allocation (≤ 52 B) and
 one extra `write_all` to the backend per new TCP connection, before the pump.
-Only when the pool opts in; `none` pools and resolver `target` connections pay
-nothing. No lock, no task, nothing per byte.
+`v2-udp`: on the **first** datagram of a UDP session only, one `Cow::Owned`
+(header + payload, ≤ 28 B + datagram) and it replaces the plain `send(first)` —
+no extra syscall. Steady-state datagrams are byte-for-byte unchanged. Only when
+the pool opts in; `none` pools and resolver `target` connections pay nothing. No
+lock, no task, nothing per byte.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -818,6 +835,15 @@ client_local, pool)` writes the header to the backend immediately after
 `listener.rs` passes `local` (already computed for routing).
 `gsp_proxy_protocol_headers_total{pool,version}`. Live across reload.
 Resolver `target` connections have no pool ⇒ never get a header (open item).
+
+### Slice 2 — v2-UDP variant (done)
+
+`ProxyProtocol::V2Udp` (serde `rename = "v2-udp"`). `header()` lost its `stream`
+param and switches on the mode (`V2` STREAM, `V2Udp` DGRAM). `validate()`
+cross-checks each non-`none` pool against the transport of the listeners that
+statically route to it. `listener_udp::open_session` prepends the header to the
+first datagram only (`Cow::Owned`); the plain `send(first)` becomes
+`send(&first_out)`. `ProxyProtocol::label()` → the metric `version` label.
 
 ### Do NOT (phase 6)
 

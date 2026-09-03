@@ -50,8 +50,9 @@ pub const RESOLVER_REQUESTS: &str = "gsp_resolver_requests_total";
 /// (`hit` | `hit_negative` | `miss` | `stale` | `uncacheable`).
 pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
 
-/// Counter. Labels: `pool`, `version` (`v1` | `v2`). A PROXY protocol header was
-/// prepended to an upstream connection.
+/// Counter. Labels: `pool`, `version` (`v1` | `v2` | `v2-udp`). A PROXY protocol
+/// header was prepended to an upstream connection (TCP) or the first datagram of
+/// a session (UDP `v2-udp`).
 pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
 
 /// Counter. Labels: `result` (`ok` | `failed`).

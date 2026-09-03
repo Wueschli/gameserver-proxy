@@ -21,8 +21,9 @@
 > `hash_on: src_ip | src_ip_port` (default `src_ip`), rejected on the other
 > balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
 > `expect_hex_prefix` for `udp_probe`; `per_backend.max_sessions`; and
-> `proxy_protocol: none | v1 | v2` (scalar; `v2-udp` — the UDP variant — is not
-> wired yet, roadmap phase 6 slice 2).
+> `proxy_protocol: none | v1 | v2 | v2-udp` (scalar). `v1`/`v2` are TCP-only,
+> `v2-udp` UDP-only; the form must match the transport of the listeners that
+> statically route to the pool (validated).
 >
 > A listener maps to a pool either with the `pool: <name>` shorthand or with a
 > priority-ordered `routes:` list — `[{ match, action }]`, first match wins,

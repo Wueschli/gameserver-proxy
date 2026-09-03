@@ -191,7 +191,9 @@ TTL'd LRU cache. Phase 5 (operability): connection draining with a grace period,
 runtime listener add/remove/rebind, `draining` / `disabled` backend states, full
 CRUD admin API. Deferred: `Resolution.sticky_key`, `GET /sessions`.
 
-**Phase 6 — client-IP preservation, in progress.** Slice 1 done: per-pool
-`proxy_protocol: none | v1 | v2` writes a PROXY protocol header to the upstream
-TCP connection (`gsp_core::proxy_protocol`). Next: the v2-UDP variant, then
-TPROXY transparent mode. See `HANDOVER.md` and `docs/08`. Don't half-land a slice.
+**Phase 6 — client-IP preservation, in progress.** Slices 1–2 done: per-pool
+`proxy_protocol: none | v1 | v2 | v2-udp` writes a PROXY protocol header to the
+upstream TCP connection (v1/v2) or the first datagram of each UDP session
+(v2-udp) — `gsp_core::proxy_protocol`; the form is validated against the listener
+transport. Next: TPROXY transparent mode. See `HANDOVER.md` and `docs/08`. Don't
+half-land a slice.

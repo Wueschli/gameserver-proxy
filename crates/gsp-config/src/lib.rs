@@ -371,8 +371,26 @@ pub enum HashOn {
 pub enum ProxyProtocol {
     #[default]
     None,
+    /// TCP text header. TCP listeners only.
     V1,
+    /// TCP binary header. TCP listeners only.
     V2,
+    /// Binary header prepended to the **first datagram** of a UDP session.
+    /// UDP listeners only.
+    #[serde(rename = "v2-udp")]
+    V2Udp,
+}
+
+impl ProxyProtocol {
+    /// Metrics label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProxyProtocol::None => "none",
+            ProxyProtocol::V1 => "v1",
+            ProxyProtocol::V2 => "v2",
+            ProxyProtocol::V2Udp => "v2-udp",
+        }
+    }
 }
 
 /// Health probe variant. `tcp_connect` just opens a TCP connection; `udp_probe`
@@ -1199,6 +1217,45 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         });
     }
 
+    // `proxy_protocol` form must match the transport of the listeners that use
+    // the pool: v1/v2 are TCP-only, v2-udp is UDP-only. A pool statically routed
+    // from both (or from the wrong transport) is rejected. Pools reached only
+    // through a resolver `action` are not checked here (the target pool is not
+    // known until runtime); the data path falls back to sending no header on a
+    // transport mismatch.
+    for p in &pools {
+        if p.proxy_protocol == ProxyProtocol::None {
+            continue;
+        }
+        let (mut on_tcp, mut on_udp) = (false, false);
+        for l in &listeners {
+            let uses = l
+                .routes
+                .iter()
+                .any(|r| matches!(&r.action, Action::Pool(n) if n == &p.name));
+            if uses {
+                match l.protocol {
+                    Protocol::Tcp => on_tcp = true,
+                    Protocol::Udp => on_udp = true,
+                }
+            }
+        }
+        let want_udp = p.proxy_protocol == ProxyProtocol::V2Udp;
+        if want_udp && on_tcp {
+            return Err(Invalid(format!(
+                "pool {}: proxy_protocol v2-udp is used by a TCP listener",
+                p.name
+            )));
+        }
+        if !want_udp && on_udp {
+            return Err(Invalid(format!(
+                "pool {}: proxy_protocol {} is used by a UDP listener (use v2-udp)",
+                p.name,
+                p.proxy_protocol.label()
+            )));
+        }
+    }
+
     Ok(Config {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
@@ -1515,6 +1572,61 @@ listeners:
         )
         .expect("should parse");
         assert_eq!(cfg.pools[0].proxy_protocol, ProxyProtocol::V2);
+    }
+
+    #[test]
+    fn parses_v2_udp_on_a_udp_listener() {
+        let cfg = parse_str(
+            r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+    proxy_protocol: v2-udp
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    pool: p
+"#,
+        )
+        .expect("should parse");
+        assert_eq!(cfg.pools[0].proxy_protocol, ProxyProtocol::V2Udp);
+    }
+
+    #[test]
+    fn rejects_v2_udp_on_a_tcp_listener() {
+        let err = parse_str(
+            r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+    proxy_protocol: v2-udp
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    pool: p
+"#,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn rejects_tcp_proxy_protocol_on_a_udp_listener() {
+        let err = parse_str(
+            r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+    proxy_protocol: v2
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    pool: p
+"#,
+        );
+        assert!(err.is_err());
     }
 
     #[test]

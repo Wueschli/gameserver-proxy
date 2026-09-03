@@ -105,7 +105,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 1**: PROXY protocol v1/v2 (TCP) — per-pool `proxy_protocol:
   none | v1 | v2`; one header prepended to the upstream connection before any
   client bytes (`gsp_core::proxy_protocol`), `gsp_proxy_protocol_headers_total`.
-- ⬜ **Slice 2**: v2-UDP variant (header on the first datagram of a session).
+- ✅ **Slice 2**: v2-UDP variant — `proxy_protocol: v2-udp` (UDP-only, validated)
+  prepends the v2 binary header to the **first datagram** of each session; later
+  datagrams are untouched.
 - ⬜ **Slice 3**: transparent mode (TPROXY) including docs for the
   network/routing setup.
 - **Result**: backends see the real client IP.

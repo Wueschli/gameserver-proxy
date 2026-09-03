@@ -370,11 +370,13 @@ async fn open_session(
     // `BackendGuard` holding the session slot. A `target` has neither pool nor
     // guard: no health check, no cap.
     let skey = sticky_key(cfg.affinity, client, dst);
-    let (backend, guard, idle_ms) = match routed {
+    let (backend, guard, idle_ms, proxy_protocol, pool_label) = match routed {
         Routed::Target(addr) => (
             addr,
             None,
             crate::proxy::TARGET_IDLE_TIMEOUT.as_millis() as u64,
+            gsp_config::ProxyProtocol::None,
+            String::new(),
         ),
         Routed::Pool(name) => {
             let pool = snap.pool(&name).ok_or("no_route")?;
@@ -390,7 +392,13 @@ async fn open_session(
                 })?,
             };
             let addr = g.addr();
-            (addr, Some(g), pool.idle_timeout.as_millis() as u64)
+            (
+                addr,
+                Some(g),
+                pool.idle_timeout.as_millis() as u64,
+                pool.proxy_protocol,
+                name,
+            )
         }
     };
 
@@ -406,7 +414,23 @@ async fn open_session(
             return Err("upstream_bind");
         }
     };
-    if let Err(e) = upstream.send(first).await {
+    // v2-udp: the PROXY header is prepended to the first datagram only; every
+    // later datagram of the session goes out untouched. Only `v2-udp` applies on
+    // a UDP listener (config validation rejects v1/v2 here).
+    let first_out: std::borrow::Cow<[u8]> = if proxy_protocol == gsp_config::ProxyProtocol::V2Udp {
+        let mut hdr = crate::proxy_protocol::header(proxy_protocol, client, local);
+        hdr.extend_from_slice(first);
+        metrics::counter!(
+            m::PROXY_PROTOCOL_HEADERS,
+            "pool" => pool_label,
+            "version" => proxy_protocol.label(),
+        )
+        .increment(1);
+        std::borrow::Cow::Owned(hdr)
+    } else {
+        std::borrow::Cow::Borrowed(first)
+    };
+    if let Err(e) = upstream.send(&first_out).await {
         if let Some(g) = &guard {
             g.observe(false);
         }

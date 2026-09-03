@@ -53,7 +53,16 @@ pub async fn handle_tcp(
 
     // PROXY protocol header (if the pool asks for one) goes out before any
     // client bytes so the backend can parse it as the first thing on the wire.
-    let hdr = crate::proxy_protocol::header(pool.proxy_protocol, client_addr, client_local, true);
+    // v1/v2 only on TCP; v2-udp is a UDP-listener form and never applies here
+    // (rejected at config validation for a static route; a resolver-chosen pool
+    // with the wrong form just sends no header).
+    let pp = pool.proxy_protocol;
+    let hdr = match pp {
+        gsp_config::ProxyProtocol::V1 | gsp_config::ProxyProtocol::V2 => {
+            crate::proxy_protocol::header(pp, client_addr, client_local)
+        }
+        _ => Vec::new(),
+    };
     if !hdr.is_empty() {
         if let Err(e) = backend.write_all(&hdr).await {
             guard.observe(false);
@@ -61,13 +70,8 @@ pub async fn handle_tcp(
                 "write PROXY header to backend {backend_addr} failed: {e}"
             ));
         }
-        let version = match pool.proxy_protocol {
-            gsp_config::ProxyProtocol::V1 => "v1",
-            gsp_config::ProxyProtocol::V2 => "v2",
-            gsp_config::ProxyProtocol::None => unreachable!("header() returns empty for None"),
-        };
         metrics::counter!(
-            m::PROXY_PROTOCOL_HEADERS, "pool" => pool.name.to_string(), "version" => version,
+            m::PROXY_PROTOCOL_HEADERS, "pool" => pool.name.to_string(), "version" => pp.label(),
         )
         .increment(1);
     }
