@@ -26,3 +26,26 @@ jobs:
         run: cargo clippy --all-targets --all-features
       - name: Test
         run: cargo test --all
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/gsp-config/fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build fuzz targets
+        working-directory: crates/gsp-config
+        # `+nightly` overrides the repo's stable rust-toolchain.toml, which
+        # cargo-fuzz's sanitizer flags need.
+        run: cargo +nightly fuzz build
+      - name: Smoke-run each target
+        working-directory: crates/gsp-config
+        run: |
+          for t in extract_sni route_match parse_config; do
+            mkdir -p "fuzz/corpus/$t"
+            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- -max_total_time=45
+          done

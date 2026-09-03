@@ -1,0 +1,217 @@
+# gsp — reduced v0 schema (roadmap phase 2).
+# The full target schema is documented in docs/05-configuration.md.
+
+settings:
+  # Accept-loop tasks per listener. 0 = one per CPU core.
+  workers: 0
+  # On SIGINT/SIGTERM the listeners stop accepting and the proxy waits this
+  # long for in-flight connections / UDP sessions to finish before exiting.
+  shutdown_grace_sec: 30
+  admin:
+    listen: "127.0.0.1:9900"   # /healthz /readyz /metrics /pools
+  # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
+  # reload does not change these. Hitting a cap drops the new connection /
+  # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
+  # "max_new_rate"}; established ones are untouched.
+  limits:
+    max_connections: 200000        # live proxied TCP connections
+    max_udp_sessions: 200000       # live UDP sessions
+    max_new_sessions_per_sec: 20000  # new conns + sessions/s (burst = the rate)
+  # Path to a MaxMind Country .mmdb, required if any listener has a `geo` filter.
+  # The proxy fails startup / --check if it can't be opened. Startup-only.
+  # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
+
+pools:
+  - name: local
+    targets:
+      - "127.0.0.1:9001"
+      - "127.0.0.1:9002"
+    balancer: round_robin        # round_robin | least_conn | consistent_hash
+    connect_timeout_ms: 300
+    idle_timeout_sec: 90
+    # Prepend a PROXY protocol header so the backend sees the real client
+    # address. none (default) | v1 (text, TCP) | v2 (binary, TCP) | v2-udp
+    # (binary, on the first datagram of each UDP session). The form must match
+    # the transport of the listeners that route to this pool. The backend must
+    # accept PROXY headers only from this proxy's IP.
+    proxy_protocol: none
+    health_check:
+      type: tcp_connect
+      interval_sec: 2
+      timeout_ms: 500
+      rise: 2                     # consecutive OK checks to mark healthy
+      fall: 3                     # consecutive failed checks to mark unhealthy
+    per_backend:
+      max_sessions: 500           # optional; omit for uncapped
+
+  - name: realtime
+    targets:
+      - "127.0.0.1:27015"
+      - "127.0.0.1:27016"
+    # consistent_hash pins a client to one instance by a rendezvous hash of its
+    # address — session affinity without a sticky table. hash_on: src_ip (default)
+    # | src_ip_port. Only valid with balancer: consistent_hash.
+    balancer: consistent_hash
+    hash_on: src_ip
+    idle_timeout_sec: 30           # UDP session idle eviction
+    health_check:
+      type: udp_probe             # send a payload, expect a reply datagram
+      send_hex: "ffffffff54536f7572636520456e67696e6520517565727900"
+      expect_hex_prefix: "ffffffff49"
+      interval_sec: 2
+      timeout_ms: 500
+      rise: 2
+      fall: 3
+
+# External routing resolvers. A route `action: { resolver: <name> }` asks the
+# service (per connection / UDP session) which pool to use. Slice 1: HTTP only,
+# `pool` results only.
+resolvers:
+  - name: matchmaker
+    type: http                     # http | grpc  (grpc endpoint is "http://host:port")
+    endpoint: "http://127.0.0.1:8099/resolve"
+    timeout_ms: 40
+    on_error: stale_ok             # reject | fallback_route | stale_ok
+    cache:                         # optional; omit for no caching
+      key: ["src_ip", "first_bytes:0:16"]   # src_ip | src_ip_port | sni | routing_key | first_bytes:a:b
+      positive_ttl_sec: 30         # a resolver response `ttl_sec` overrides this
+      negative_ttl_sec: 2
+      max_entries: 100000
+
+listeners:
+  # A listener maps to a pool either with the `pool:` shorthand (one implicit
+  # `always` route) ...
+  - name: public-udp
+    bind: "0.0.0.0:27015"
+    protocol: udp
+    pool: realtime
+    affinity:
+      hash_on: src_ip             # src_ip (default for udp) | src_ip_port
+    route_hint: true               # a launcher may POST /route-hint {src_ip,pool,ttl_sec}
+                                    # before the player connects; that hint then wins
+
+  # ... or with a priority-ordered `routes` list; the first matching rule wins.
+  # Matchers: `always`; `client_cidr` (source-IP prefixes); `port` (destination
+  # port, bare int or "lo-hi" range); `dst` (destination IP the client connected
+  # to, `cidrs:` prefixes — only distinguishes IPs the host already serves
+  # separately; a wildcard-prefix listener comes later); `first_bytes` (of the
+  # first bytes — TCP
+  # peek / first UDP datagram — a `prefix:` "hex:.."/"ascii:.." (<= 512 B) and/or
+  # a `length: { min, max }` byte-count window; on TCP the length is only what a
+  # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
+  # only, not terminated; `host` patterns: exact, `*.suffix` or `.suffix`).
+  # A `sniffer` matcher also exists but needs a loaded plugin (roadmap Phase 9);
+  # nothing is built in, so it is not shown here.
+  # `pool` and `routes` are mutually exclusive.
+  - name: public-tcp
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    # Filter chain (phase 7): checked on the client source IP before routing.
+    # `deny` wins; a non-empty `allow` makes the listener default-deny for
+    # anything it does not list. Blocked = silent drop + gsp_filter_blocked_total.
+    allow: ["10.0.0.0/8", "192.168.0.0/16"]
+    deny: ["10.6.6.6/32"]
+    # Token-bucket rate limit on new connections / UDP sessions, keyed by source
+    # IP and by /24 (v4) / /64 (v6). `rate` = permits/sec, `burst` = bucket cap
+    # (defaults to `rate`). Excess is dropped silently + gsp_filter_blocked_total
+    # {filter="rate_ip"|"rate_net"}. Established UDP sessions are not re-checked.
+    rate_limit:
+      per_ip:  { rate: 20, burst: 40 }
+      per_net: { rate: 200, burst: 400 }
+    # GeoIP country filter on the client source IP, checked after the CIDR ACL.
+    # ISO 3166-1 alpha-2 codes; `deny` wins, a non-empty `allow` is default-deny.
+    # Needs settings.geo_db. An IP not in the DB is admitted only when `allow` is
+    # empty. Blocked => gsp_filter_blocked_total{filter="geo"}. (Needs geo_db set
+    # above to be active; left commented so this example validates as-is.)
+    # geo:
+    #   deny: ["KP", "RU"]
+    routes:
+      - match: { type: dst, cidrs: ["198.51.100.7/32"] }
+        action: { pool: local }
+      - match: { type: client_cidr, cidrs: ["10.0.0.0/8"] }
+        action: { pool: local }
+      - match: { type: port, ports: [7777, "8000-8100"] }
+        action: { pool: local }
+      # Ask the matchmaker (results are cached; on error it serves a stale answer
+      # if it has one, else drops — see the resolver's on_error).
+      - match: { type: always }
+        action: { resolver: matchmaker }
+      - match: { type: always }
+        action: { pool: local }
+
+  - name: query-and-game
+    bind: "0.0.0.0:27016"
+    protocol: udp
+    # First-packet gate (udp): open a session only if the first datagram is
+    # positively recognised — matches a `first_bytes` route here (or a sniffer
+    # hint). Generic spoof floods never reach the session table. Drops show up
+    # as gsp_datagrams_dropped_total{reason="first_packet_gate"}. Needs at least
+    # one first_bytes route / sniffer (else it would drop everything).
+    first_packet_gate: true
+    routes:
+      # Valve A2S query packets start with the 0xFFFFFFFF connectionless header.
+      - match: { type: first_bytes, prefix: "hex:ffffffff" }
+        action: { pool: realtime }
+      # Tiny datagrams are keep-alives / pings, not gameplay.
+      - match: { type: first_bytes, length: { min: 0, max: 8 } }
+        action: { pool: realtime }
+      - match: { type: always }
+        action: { pool: realtime }
+
+  # Transparent mode (Linux TPROXY): the listen socket is bound with
+  # IP_TRANSPARENT, the original destination is read per connection / datagram,
+  # and every upstream connection binds the real client ip:port as its source, so
+  # the backend sees the client IP with no protocol change. Works for tcp and
+  # udp; mutually exclusive with `prefix`. Needs CAP_NET_ADMIN and policy routing
+  # that returns backend replies via this host — see
+  # docs/04-transport-and-client-ip.md.
+  - name: transparent-tcp
+    bind: "0.0.0.0:7778"
+    protocol: tcp
+    transparent: true
+    pool: local
+
+  - name: transparent-udp
+    bind: "0.0.0.0:7779"
+    protocol: udp
+    transparent: true
+    pool: realtime
+
+  - name: public-tls
+    bind: "0.0.0.0:443"
+    protocol: tcp
+    routes:
+      # The ClientHello is peeked (not decrypted); the byte stream is forwarded
+      # to the backend untouched, TLS terminates there.
+      - match: { type: sni, host: ["*.eu.example.com", "lobby.example.com"] }
+        action: { pool: local }
+      - match: { type: always }
+        action: { pool: local }
+
+  # Prefix mode (UDP): one wildcard socket serves a whole routed prefix. The real
+  # destination address of each datagram is read from IP_PKTINFO and matched with
+  # `dst`; replies go back out from that same address. Point DNS for each
+  # sub-domain at its own address in the prefix. Needs the prefix routed to this
+  # host (and IPv4 needs `IP_FREEBIND` / net.ipv4.ip_nonlocal_bind to bind a
+  # non-local base). Datagrams outside the prefix are dropped.
+  - name: raw-udp
+    bind: "[::]:7777"
+    protocol: udp
+    prefix: "2001:db8:ace:1::/64"
+    routes:
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::1/128"] }
+        action: { pool: realtime }
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::2/128"] }
+        action: { pool: realtime }
+      - match: { type: always }        # in-prefix but unknown address
+        action: { pool: realtime }
+
+# Reload without restart: `kill -HUP <pid>` or just edit this file.
+# Live: pool targets, balancer, health-check params, caps, proxy_protocol.
+# Reconciled by name on reload (stop + respawn if changed): listener bind /
+#   protocol / routes / affinity / prefix / freebind / transparent / route_hint
+#   / allow / deny / rate_limit / first_packet_gate / geo.
+#   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
+#   survive reloads.)
+# Note: a UDP session reads idle_timeout_sec once at creation; a reload that
+# changes it applies to sessions opened afterwards.

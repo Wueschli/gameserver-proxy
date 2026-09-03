@@ -165,7 +165,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   on the client source IP, same precedence. `gsp_config::GeoAcl` holds the
   decision; `gsp_core::geo::GeoDb` (dep: `maxminddb`) does the lookup. Fails
   closed if the DB isn't loaded. `gsp_filter_blocked_total{filter="geo"}`.
-- Fuzzing of the peek/sniffer parsers, load tests against the NFRs.
+- ✅ **Slice 8**: `cargo-fuzz` harnesses for the untrusted-input parsers
+  (`crates/gsp-config/fuzz/`): `extract_sni` (TLS ClientHello reader),
+  `route_match` (matchers + `extract_sni` + host patterns over a fuzzed
+  first-bytes buffer), `parse_config` (`parse_str` on arbitrary input). Seeds in
+  `fuzz/seeds/`, `make fuzz`, and a nightly CI job. No crashes in the initial
+  runs (10M+ execs on `extract_sni`).
+- Load tests against the NFRs — still open (a benchmark harness, not a code
+  slice).
 - **Result**: hardened against common L4/7 abuse.
 
 ## Phase 8 – Discovery & scaling (week 19–20)

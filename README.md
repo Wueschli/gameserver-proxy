@@ -77,7 +77,8 @@ listener → backend pool forwarding with:
   `gsp_filter_blocked_total`. UDP listeners can also set `first_packet_gate: true`
   to open a session only when the first datagram is positively recognised
   (`first_bytes` / sniffer), keeping spoof floods off the session table. The
-  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`
+  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`, and
+  the peek/config parsers have `cargo-fuzz` harnesses (`make fuzz`)
 
 **Phases 1–6 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the

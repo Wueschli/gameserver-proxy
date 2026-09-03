@@ -232,9 +232,21 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `geo=+N/-M`. `geo:` codes reload (respawn); `geo_db` path is startup-only.
   Test fixture: `crates/gsp-core/tests/data/GeoIP2-Country-Test.mmdb` (MaxMind's
   Apache-2.0 synthetic test DB, see the data `README.md`).
-- **Next**: phase 7 tail — parser fuzzing (`cargo fuzz` on `extract_sni` /
-  first-bytes peek), NFR N1/N2 load tests. Both are tooling tasks rather than
-  feature slices; phase 7's feature work is complete.
+- **Phase 7 slice 8 done**: `cargo-fuzz` harnesses in `crates/gsp-config/fuzz/`
+  (its own standalone workspace — `[workspace]` in the fuzz `Cargo.toml`, so the
+  sanitizer build never touches the main one). Targets: `extract_sni`
+  (`gsp_config::extract_sni` on the peek buffer), `route_match`
+  (`route_for` / `first_packet_recognised` with a fuzzed first-bytes buffer over
+  a fixed matcher set — the config is built once via `OnceLock`), `parse_config`
+  (`parse_str` on arbitrary UTF-8). Seeds in `fuzz/seeds/<target>/`
+  (a real ClientHello, `config.example.yaml`, an A2S query). `make fuzz`
+  (`FUZZ_TIME=<sec>`, needs nightly + `cargo install cargo-fuzz`; run as
+  `cargo +nightly fuzz …` — `+nightly` overrides the repo's stable
+  `rust-toolchain.toml`). New CI job `fuzz` (nightly, builds + 45 s smoke-run
+  per target). Initial runs: no crashes (10.9M execs on `extract_sni`, 2.6M on
+  `route_match`, ~35k on the heavier `parse_config`).
+- **Next**: NFR N1/N2 load tests (a benchmark harness — the last phase-7 tail
+  item; not a code slice). Phase 7's feature + hardening work is complete.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
@@ -435,6 +447,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 
 (The per-file counts above predate phases 3–7; `make check` runs ~137.)
 
+**Fuzzing** (`crates/gsp-config/fuzz/`, not part of `make check`): `make fuzz`
+runs `extract_sni` / `route_match` / `parse_config` for `FUZZ_TIME` seconds each.
+Needs nightly + `cargo-fuzz`. CI runs a 45 s smoke pass per target.
+
 ---
 
 ## Decisions already locked
@@ -500,7 +516,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Amplifier-checklist tests (`tests/amplification.rs`) | **done** (phase 7 slice 5) |
 | ACL longest-prefix-match trie (`gsp_config::CidrSet`) | **done** (phase 7 slice 6) |
 | Optional GeoIP country filter (`settings.geo_db` + per-listener `geo`) | **done** (phase 7 slice 7) |
-| Parser fuzzing, NFR load tests | phase 7 tail (tooling) |
+| Parser fuzzing (`crates/gsp-config/fuzz/`, `make fuzz`, CI job) | **done** (phase 7 slice 8) |
+| NFR N1/N2 load tests | phase 7 tail (benchmark harness) |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---

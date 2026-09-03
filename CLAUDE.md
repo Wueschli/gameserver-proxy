@@ -38,6 +38,7 @@ Makefile                    make check / test / run / fmt / lint
 docs/                       the plan (00–09) — source of truth for design
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
+    fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
   gsp-core/                 data plane
     snapshot.rs            immutable `Snapshot` (listeners + pools) behind ArcSwap
     pool.rs                 `Pool`, `Backend` (health + active count), `BackendGuard`
@@ -84,6 +85,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
+| Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |
@@ -225,5 +227,7 @@ Slice 5: automated amplifier-checklist tests
 filter — `settings.geo_db` + per-listener `geo: { allow, deny }` (ISO codes),
 `gsp_config::GeoAcl` decision + `gsp_core::geo::GeoDb` (dep `maxminddb`,
 loaded once via `Runtime::start_with_geo`), checked after the CIDR ACL, fails
-closed. Still to do: parser fuzzing, NFR load tests. See `HANDOVER.md` and
-`docs/08`. Don't half-land a slice.
+closed. Slice 8: `cargo-fuzz` harnesses in `crates/gsp-config/fuzz/`
+(`extract_sni`, `route_match`, `parse_config`) — `make fuzz` (needs nightly +
+`cargo-fuzz`), nightly CI job. Still open: NFR load tests (benchmark harness).
+Phase 7's code work is done. See `HANDOVER.md` and `docs/08`.
