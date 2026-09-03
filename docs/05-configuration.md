@@ -251,8 +251,8 @@ listeners:
 
 | Change | Behavior |
 |--------|----------|
-| Backend added/removed | immediately in the new snapshot, existing sessions untouched |
-| Backend → `draining` | no new sessions, existing ones drain |
+| Backend added/removed (file **or** `POST`/`DELETE /pools/{p}/backends`) | immediately in the new snapshot, existing sessions untouched. Admin add/remove edits are kept in a runtime overlay and re-applied on every file reload (the file can't silently undo them). |
+| Backend → `draining` / `disabled` (`PATCH .../{addr}`) | no new sessions, existing ones drain; state carried across a reload by address |
 | Pool balancer changed | applies to **new** routing decisions |
 | Route changed/added | applies to new connections/sessions |
 | Listener bind changed | the old socket is closed, the new one bound (brief gap) |

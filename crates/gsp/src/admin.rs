@@ -28,7 +28,11 @@ pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: Prometh
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/pools", get(pools))
-        .route("/pools/{pool}/backends/{addr}", patch(patch_backend))
+        .route("/pools/{pool}/backends", post(add_backend))
+        .route(
+            "/pools/{pool}/backends/{addr}",
+            patch(patch_backend).delete(delete_backend),
+        )
         .route("/config", get(config))
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
@@ -111,7 +115,13 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
     }
     out.push_str("\npools:\n");
     for (name, pool) in &snap.pools {
-        out.push_str(&format!("  {name}\tbalancer={:?}\n", pool.balancer));
+        let (added, removed) = s.runtime.backend_overlay().pending(name);
+        let ov = if added.is_empty() && removed.is_empty() {
+            String::new()
+        } else {
+            format!("\toverlay=+{}/-{}", added.len(), removed.len())
+        };
+        out.push_str(&format!("  {name}\tbalancer={:?}{ov}\n", pool.balancer));
         for b in pool.backends() {
             out.push_str(&format!(
                 "    {}\t{}\tstate={}\tactive={}\n",
@@ -230,4 +240,55 @@ async fn patch_backend(
     backend.set_admin_state(state);
     tracing::info!(pool = %pool.name, %addr, state = state.as_str(), "backend admin state changed");
     (StatusCode::OK, format!("{addr} -> {}\n", state.as_str()))
+}
+
+/// `POST /pools/{pool}/backends` `{ "addr": "10.0.0.5:7777" }` — add a backend
+/// to a pool at runtime. The edit lives in the runtime overlay (it survives a
+/// file reload); the snapshot is rebuilt so the backend joins immediately and
+/// the health checker corrects its state within one interval.
+#[derive(Deserialize)]
+struct BackendAdd {
+    addr: String,
+}
+
+async fn add_backend(
+    State(s): State<AdminState>,
+    Path(pool): Path<String>,
+    Json(req): Json<BackendAdd>,
+) -> (StatusCode, String) {
+    let Ok(addr) = req.addr.parse::<SocketAddr>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "addr is not a valid ip:port\n".into(),
+        );
+    };
+    if s.runtime.snapshot().pool(&pool).is_none() {
+        return (StatusCode::NOT_FOUND, "unknown pool\n".into());
+    }
+    s.runtime.backend_overlay().add(&pool, addr);
+    s.runtime.request_reload();
+    tracing::info!(%pool, %addr, "backend added via admin API");
+    (StatusCode::OK, format!("added {addr} to {pool}\n"))
+}
+
+/// `DELETE /pools/{pool}/backends/{addr}` — remove a backend from a pool at
+/// runtime (works whether it came from the file or a prior `POST`). Existing
+/// sessions on it keep running; it just stops being selected.
+async fn delete_backend(
+    State(s): State<AdminState>,
+    Path((pool, addr)): Path<(String, String)>,
+) -> (StatusCode, String) {
+    let Ok(addr) = addr.parse::<SocketAddr>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "backend address is not a valid ip:port\n".into(),
+        );
+    };
+    if s.runtime.snapshot().pool(&pool).is_none() {
+        return (StatusCode::NOT_FOUND, "unknown pool\n".into());
+    }
+    s.runtime.backend_overlay().remove(&pool, addr);
+    s.runtime.request_reload();
+    tracing::info!(%pool, %addr, "backend removed via admin API");
+    (StatusCode::OK, format!("removed {addr} from {pool}\n"))
 }

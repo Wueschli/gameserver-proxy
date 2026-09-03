@@ -83,8 +83,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 3**: `POST /admin/drain` / `POST /admin/undrain` (flip `readyz`
   without stopping the data path) + `GET /config` (plaintext snapshot view with
   `draining` / `active_conns`).
-- ⬜ Admin API: backends CRUD (`POST` / `DELETE` a backend — needs a
-  snapshot-rebuild path outside `reload.rs`).
+- ✅ **Slice 4**: backends CRUD — `POST /pools/{p}/backends {addr}` /
+  `DELETE /pools/{p}/backends/{addr}`; edits held in a runtime `BackendOverlay`
+  layered on the file config (survives a file reload). An edit calls
+  `request_reload()` and the existing reload path rebuilds via
+  `Snapshot::build_with_overlay`.
 - ✅ **Slice 2**: graceful draining of the **proxy instance** — a `ConnTracker`
   counts in-flight TCP connections + UDP sessions; `SIGINT`/`SIGTERM` stops the
   accept/recv loops and `Runtime::shutdown_with_grace` waits for the tracked work

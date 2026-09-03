@@ -2,9 +2,9 @@
 
 State of the work, decisions already made, and how to pick it up.
 Last updated: 2026-09-03 (**phases 3 & 4 complete**; **phase 5 in progress** —
-slices 1-3 landed: `enabled`/`draining`/`disabled` backend states +
+slices 1-4 landed: `enabled`/`draining`/`disabled` backend states +
 `PATCH /pools/{p}/backends/{addr}`; tracked connection draining with a
-`shutdown_grace_sec` on SIGINT/SIGTERM; `POST /admin/drain` + `GET /config`).
+`shutdown_grace_sec` on SIGINT/SIGTERM; `POST /admin/drain` + `GET /config`; runtime backend CRUD via an overlay).
 
 ---
 
@@ -51,11 +51,19 @@ slices 1-3 landed: `enabled`/`draining`/`disabled` backend states +
   running), `GET /config` (plaintext snapshot: listeners + pools + `draining` /
   `active_conns`). `readyz` returns `draining` (503) when drained.
   `shutdown_with_grace` also sets the flag.
-- **Next (phase 5)**: runtime listener add/remove/rebind; backend CRUD
-  (`POST` / `DELETE` a backend — needs a snapshot-rebuild design outside
-  `reload.rs`); `GET /sessions`. Also deferred: resolver `sticky_key`; the
-  sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 83 tests). Needs
+- **Phase 5 slice 4 done**: runtime backend CRUD. `gsp_core::overlay::BackendOverlay`
+  (a `Mutex<HashMap<pool, {added,removed}>>`) layered on the file config;
+  `Snapshot::build_with_overlay` runs each pool's file `targets` through it.
+  `Runtime`/`RuntimeHandle` hold the overlay + a `reload_requested` `Notify`;
+  `gsp/src/admin.rs` `POST /pools/{p}/backends {addr}` / `DELETE .../{addr}`
+  mutate the overlay then `request_reload()`. `reload.rs` selects on that Notify
+  alongside SIGHUP / file-watch and builds via `build_with_overlay`, so admin
+  edits survive a file reload and there is still exactly one snapshot writer.
+  `GET /config` shows `overlay=+N/-M` per pool.
+- **Next (phase 5)**: runtime listener add/remove/rebind (last phase-5 item);
+  `GET /sessions`. Also deferred: resolver `sticky_key`; the sniffer plugin
+  loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 87 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -148,10 +156,12 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   pool, `ttl_sec` 1..=3600); `PATCH /pools/{pool}/backends/{addr}` `{state:
   enabled|draining|disabled}` (operator backend state — `draining`/`disabled`
   divert new sessions, existing ones drain; carried across reload);
+  `POST /pools/{pool}/backends {addr}` / `DELETE /pools/{pool}/backends/{addr}`
+  (add/remove a backend at runtime — overlay-backed, survives a file reload);
   `POST /admin/drain` + `POST /admin/undrain` (flip `readyz` for the LB without
   stopping the data path). `GET /config` is a plaintext snapshot dump with
-  `draining` / `active_conns`. `gsp` now depends on `serde` for the request
-  bodies.
+  `draining` / `active_conns` and `overlay=+N/-M` per pool. `gsp` now depends on
+  `serde` for the request bodies.
 - **Metrics**: see `crates/gsp-core/src/metrics_defs.rs`. Connections, bytes,
   duration, backend connect errors, `gsp_pool_backends`, `gsp_healthcheck_total`,
   `gsp_lb_selections_total`, `gsp_route_hints_applied_total{listener}`,
@@ -261,7 +271,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
 | Listener add / remove / rebind at runtime (needs restart today) | phase 5 |
 | Tracked connection drain with a grace period on shutdown | **done** (phase 5 slice 2) |
-| CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain` (`PATCH` backend state is **done**) | phase 5 |
+| CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain`, `PATCH` backend state | **done** (phase 5 slices 1, 3, 4) |
+| `GET /sessions` introspection (needs a per-session registry) | phase 5 / later |
 | `draining` / `disabled` backend states | **done** (phase 5 slice 1) |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
 | **Phase 3 — done** (slices 1–9): route rule list; matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix`+`length`) / `sni`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:`; sniffer API seam + `sniffer` matcher (no built-ins); `POST /route-hint` push resolver | **done** |
@@ -346,6 +357,10 @@ repeat key is a `Mutex<LruCache>` get instead. Listeners with no `resolver`
 route pay nothing (the loop is just `matching_routes` → `Pool`). A `target`
 connection skips the `Pool::acquire_for` (no LB sort, no atomic, no
 `BackendGuard`) — strictly cheaper than a pooled one.
+
+**Backend overlay** (`POST`/`DELETE` backend): touched only during a snapshot
+rebuild (`effective_targets`, one `Mutex` lock + a small `Vec` per pool). Zero
+data-path cost.
 
 **Connection draining** (`ConnTracker`): one `watch::Sender::send_modify` (a
 brief internal lock, no `.await`) on connection/session open and again on close —
@@ -690,12 +705,35 @@ listeners (name, bind, proto, route count, flags) and pools (balancer, backends
 with health + admin state + active). No `serde` on the config types — plaintext,
 like `/pools`. `/sessions` still not implemented.
 
+### Slice 4 — runtime backend CRUD (done)
+
+`gsp_core::overlay::BackendOverlay` — `Mutex<HashMap<pool, PoolEdits{added,
+removed}>>`. `add`/`remove` are idempotent and cancel each other;
+`effective_targets(pool, file_targets)` = file order (minus removed) then added
+(sorted). `Snapshot::build` now delegates to `build_with_overlay(cfg, prev,
+overlay)`, which clones the `PoolConfig` and swaps `targets` only when the
+overlay changes them.
+
+`Runtime`/`RuntimeHandle` hold `Arc<BackendOverlay>` + `Arc<Notify>
+reload_requested`. `backend_overlay()`, `request_reload()` (`notify_one`),
+`reload_requested()` (for `reload.rs` to await). `gsp/src/admin.rs`:
+`POST /pools/{p}/backends {addr}` → `overlay.add` + `request_reload`;
+`DELETE /pools/{p}/backends/{addr}` → `overlay.remove` + `request_reload`.
+`reload::run` selects the Notify alongside SIGHUP / file-watch; `apply` builds
+via `build_with_overlay(&cfg, Some(&prev), handle.backend_overlay())`.
+
+**Design note (supersedes the old "only reload.rs builds a Snapshot" caveat):**
+there is still exactly one place that builds + stores a snapshot (`reload::apply`);
+admin backend edits are just another rebuild trigger, and the overlay is the
+persistence layer that keeps them from being undone by a file reload. Backend
+*state* (`PATCH`) still mutates atomics on the live `Backend` and needs no
+rebuild.
+
 ### Do NOT (phase 5)
 
-- Let anything other than `reload.rs` build a whole new `Snapshot`. Backend
-  state changes mutate atomics on the existing `Backend`; backend CRUD will need
-  a deliberate design (probably a control-plane rebuild that merges admin
-  additions with the file), not an ad-hoc swap from the admin handler.
+- Build + `store` a `Snapshot` anywhere but `reload::apply`. New runtime edits
+  get a persistence layer (like `BackendOverlay`) + a `request_reload()`, they
+  do not swap the snapshot themselves.
 
 ---
 
@@ -704,7 +742,8 @@ like `/pools`. `/sessions` still not implemented.
 | File | Responsibility |
 |------|----------------|
 | `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config`/`PoolConfig`/`ListenerConfig`/`ResolverConfig`/`HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`). All schema rules here. |
-| `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` carries health over. |
+| `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools }`; `build(cfg, prev)` / `build_with_overlay(cfg, prev, &BackendOverlay)` carry health over and apply admin backend edits. |
+| `crates/gsp-core/src/overlay.rs` | `BackendOverlay` — runtime `POST`/`DELETE` backend add/remove edits (`Mutex<HashMap<pool, {added,removed}>>`), layered on the file `targets` at rebuild via `effective_targets`. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health/active/streaks/`check_kind` + `AdminState` — `admin_state` / `set_admin_state` / `takes_new_sessions`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
@@ -721,7 +760,7 @@ like `/pools`. `/sessions` still not implemented.
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |
 | `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools` `/config`, `POST /route-hint`, `PATCH /pools/{pool}/backends/{addr}` (set `AdminState`), `POST /admin/drain` `/admin/undrain`. |
-| `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch → debounce → `apply` (validate, build, store). |
+| `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `handle.reload_requested()` (admin overlay edits) → debounce → `apply` (validate, `build_with_overlay`, store). |
 
 ---
 

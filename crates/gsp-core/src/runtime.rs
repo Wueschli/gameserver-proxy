@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+use crate::overlay::BackendOverlay;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
@@ -21,6 +22,8 @@ pub struct Runtime {
     /// an upstream LB / anycast takes this instance out of rotation while
     /// in-flight sessions keep running.
     draining: Arc<AtomicBool>,
+    overlay: Arc<BackendOverlay>,
+    reload_requested: Arc<Notify>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -34,6 +37,8 @@ pub struct RuntimeHandle {
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
     draining: Arc<AtomicBool>,
+    overlay: Arc<BackendOverlay>,
+    reload_requested: Arc<Notify>,
 }
 
 impl RuntimeHandle {
@@ -74,6 +79,23 @@ impl RuntimeHandle {
         &self.hints
     }
 
+    /// The runtime backend overlay (`POST` / `DELETE /pools/{p}/backends`).
+    /// After mutating it, call [`RuntimeHandle::request_reload`] so the snapshot
+    /// is rebuilt.
+    pub fn backend_overlay(&self) -> &Arc<BackendOverlay> {
+        &self.overlay
+    }
+
+    /// Ask the reload task to rebuild the snapshot (after an overlay edit).
+    pub fn request_reload(&self) {
+        self.reload_requested.notify_one();
+    }
+
+    /// Awaited by the reload task; woken by [`RuntimeHandle::request_reload`].
+    pub fn reload_requested(&self) -> &Arc<Notify> {
+        &self.reload_requested
+    }
+
     /// Live proxied-connection count (TCP pumps + UDP sessions).
     pub fn active_conns(&self) -> usize {
         self.conns.active()
@@ -90,6 +112,8 @@ impl Runtime {
         let hints = RouteHints::new();
         let conns = ConnTracker::new();
         let draining = Arc::new(AtomicBool::new(false));
+        let overlay = Arc::new(BackendOverlay::new());
+        let reload_requested = Arc::new(Notify::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let worker_count = if workers == 0 {
@@ -159,6 +183,8 @@ impl Runtime {
             hints,
             conns,
             draining,
+            overlay,
+            reload_requested,
             shutdown_tx,
             tasks,
         }
@@ -170,6 +196,8 @@ impl Runtime {
             hints: self.hints.clone(),
             conns: self.conns.clone(),
             draining: self.draining.clone(),
+            overlay: self.overlay.clone(),
+            reload_requested: self.reload_requested.clone(),
         }
     }
 

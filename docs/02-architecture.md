@@ -95,8 +95,10 @@ struct, the rest is shared).
   `GET /sessions?...` (`/sessions` planned)
 - `POST /admin/drain` / `POST /admin/undrain` (flip `readyz` for the LB —
   implemented, phase 5)
-- `PATCH /pools/{p}/backends/{addr} {state: enabled|draining|disabled}` (implemented, phase 5);
-  `POST /pools/{p}/backends`, `DELETE ...` (planned)
+- `PATCH /pools/{p}/backends/{addr} {state: enabled|draining|disabled}`,
+  `POST /pools/{p}/backends {addr}`, `DELETE /pools/{p}/backends/{addr}` — all
+  implemented (phase 5). Add/remove edits live in a runtime overlay layered on
+  the file config, so they survive a file reload.
 - `POST /route-hint` – push resolver: `{src_ip, pool|target, ttl_sec}` for games with
   no protocol hint, set by launcher/matchmaker (scheme C in [03](03-routing.md))
 - `POST /reload`, `GET /healthz`, `GET /readyz`, `GET /metrics`

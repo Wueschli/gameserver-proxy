@@ -31,10 +31,12 @@ pub async fn run(path: PathBuf, handle: RuntimeHandle) {
     {
         let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
             .expect("install SIGHUP handler");
+        let admin = handle.reload_requested().clone();
         loop {
             tokio::select! {
                 _ = sighup.recv() => {}
                 _ = trigger.notified() => {}
+                _ = admin.notified() => {}
             }
             tokio::time::sleep(DEBOUNCE).await;
             // Coalesce a burst: swallow any trigger that landed during the
@@ -46,8 +48,12 @@ pub async fn run(path: PathBuf, handle: RuntimeHandle) {
 
     #[cfg(not(unix))]
     {
+        let admin = handle.reload_requested().clone();
         loop {
-            trigger.notified().await;
+            tokio::select! {
+                _ = trigger.notified() => {}
+                _ = admin.notified() => {}
+            }
             tokio::time::sleep(DEBOUNCE).await;
             // Coalesce a burst: swallow any trigger that landed during the
             // debounce window so it doesn't cause a second redundant reload.
@@ -62,7 +68,11 @@ async fn apply(path: &Path, handle: &RuntimeHandle) {
         Ok(cfg) => {
             let prev = handle.current();
             let listeners_changed = cfg.listeners != prev.listeners;
-            handle.store(Snapshot::build(&cfg, Some(&prev)));
+            handle.store(Snapshot::build_with_overlay(
+                &cfg,
+                Some(&prev),
+                handle.backend_overlay(),
+            ));
             metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
             metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
             if listeners_changed {
