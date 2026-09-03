@@ -5,6 +5,17 @@ Humans: this doubles as the contributor quick-reference.
 
 ---
 
+## Start here (every session)
+
+1. Read [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, and the plan
+   for the next slice.
+2. Run `make check` once to confirm a green baseline (fmt + clippy `-D warnings` +
+   tests) before changing anything.
+3. Skim the relevant `docs/` chapter before any structural change (design is the
+   source of truth there, not the code).
+
+---
+
 ## What this is
 
 A **game-agnostic game server reverse proxy**: one entry point in front of arbitrary
