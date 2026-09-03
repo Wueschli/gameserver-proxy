@@ -1,11 +1,11 @@
 //! Configuration types, parsing and validation for the game server proxy.
 //!
 //! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
-//! route rule list (`always` / `client_cidr` / `port` / `first_bytes` matchers)
-//! onto static pools, with active health checks, round-robin / least-connections
-//! balancing, per-backend session caps, and UDP session affinity. The full
-//! target schema lives in `docs/05-configuration.md` and grows into this crate
-//! incrementally.
+//! route rule list (`always` / `client_cidr` / `port` / `first_bytes` / `sni`
+//! matchers) onto static pools, with active health checks, round-robin /
+//! least-connections / consistent-hash balancing, per-backend session caps, and
+//! UDP session affinity. The full target schema lives in
+//! `docs/05-configuration.md` and grows into this crate incrementally.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
@@ -199,6 +199,9 @@ struct RawMatch {
     /// `first_bytes` only: `"hex:ffffffff"` or `"ascii:hello"`.
     #[serde(default)]
     prefix: Option<String>,
+    /// `sni` only: host patterns — exact, `*.suffix` or `.suffix`.
+    #[serde(default)]
+    host: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,8 +324,25 @@ fn bits_match(a: &[u8], b: &[u8], prefix: u8) -> bool {
     (a[full] & mask) == (b[full] & mask)
 }
 
-/// A single route's match condition. Address-based only for now; `first_bytes`,
-/// `sni`, sniffer and `external` matchers arrive later in phase 3–4.
+/// A host pattern for the `sni` matcher. Parsed lowercase; `*.foo` and `.foo`
+/// both become `Suffix(".foo")` (a proper-subdomain match).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostPattern {
+    Exact(String),
+    /// Includes the leading `.`; matches `host.ends_with(self)`.
+    Suffix(String),
+}
+
+impl HostPattern {
+    fn matches(&self, host: &str) -> bool {
+        match self {
+            HostPattern::Exact(e) => host == e,
+            HostPattern::Suffix(s) => host.ends_with(s.as_str()),
+        }
+    }
+}
+
+/// A single route's match condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matcher {
     /// Catch-all.
@@ -334,11 +354,17 @@ pub enum Matcher {
     /// The connection's first bytes (TCP peek / first UDP datagram) start with
     /// this non-empty prefix. `regex` / `length` / `sniffer` variants come later.
     FirstBytes(Vec<u8>),
+    /// The TLS ClientHello's SNI host matches one of these patterns (TCP only;
+    /// TLS is peeked, not terminated).
+    Sni(Vec<HostPattern>),
 }
 
-/// Hard cap on how many leading bytes a `first_bytes` prefix may match, and thus
-/// how far the TCP path will `MSG_PEEK`.
-pub const PEEK_MAX: usize = 512;
+/// Hard cap on how many leading bytes the TCP path will `MSG_PEEK` (and on the
+/// size of the peek buffer). Large enough for a typical TLS ClientHello.
+pub const PEEK_MAX: usize = 4096;
+
+/// Hard cap on a `first_bytes` prefix length.
+const FIRST_BYTES_PREFIX_MAX: usize = 512;
 
 /// Everything a [`Matcher`] can look at. `first_bytes` is empty when the listener
 /// has no byte matcher (so nothing was peeked) or the peer sent nothing yet.
@@ -355,6 +381,10 @@ impl Matcher {
             Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(ctx.src.ip())),
             Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&ctx.local.port())),
             Matcher::FirstBytes(prefix) => ctx.first_bytes.starts_with(prefix),
+            Matcher::Sni(pats) => match extract_sni(ctx.first_bytes) {
+                Some(host) => pats.iter().any(|p| p.matches(&host)),
+                None => false,
+            },
         }
     }
 
@@ -362,9 +392,98 @@ impl Matcher {
     fn peek_len(&self) -> usize {
         match self {
             Matcher::FirstBytes(prefix) => prefix.len(),
+            Matcher::Sni(_) => PEEK_MAX,
             _ => 0,
         }
     }
+}
+
+/// Extract the SNI `host_name` from a TLS ClientHello at the start of `buf`.
+/// Returns `None` if `buf` is not a ClientHello, is truncated, or carries no
+/// SNI. A ClientHello fragmented across TCP segments (so only part is in the
+/// peek buffer) yields `None` — that route then just does not match.
+pub fn extract_sni(buf: &[u8]) -> Option<String> {
+    struct Reader<'a> {
+        b: &'a [u8],
+        pos: usize,
+    }
+    impl<'a> Reader<'a> {
+        fn new(b: &'a [u8]) -> Self {
+            Self { b, pos: 0 }
+        }
+        fn remaining(&self) -> usize {
+            self.b.len() - self.pos
+        }
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            let end = self.pos.checked_add(n)?;
+            let s = self.b.get(self.pos..end)?;
+            self.pos = end;
+            Some(s)
+        }
+        fn u8(&mut self) -> Option<u8> {
+            Some(self.take(1)?[0])
+        }
+        fn u16(&mut self) -> Option<usize> {
+            let x = self.take(2)?;
+            Some(u16::from_be_bytes([x[0], x[1]]) as usize)
+        }
+        fn u24(&mut self) -> Option<usize> {
+            let x = self.take(3)?;
+            Some(u32::from_be_bytes([0, x[0], x[1], x[2]]) as usize)
+        }
+    }
+
+    let mut r = Reader::new(buf);
+    if r.u8()? != 0x16 {
+        return None; // not a handshake record
+    }
+    r.take(2)?; // record version
+    let rec_len = r.u16()?;
+    let rec = r.take(rec_len)?; // first record fragment
+
+    let mut h = Reader::new(rec);
+    if h.u8()? != 0x01 {
+        return None; // not a ClientHello
+    }
+    let hs_len = h.u24()?;
+    let body = h.take(hs_len)?;
+
+    let mut c = Reader::new(body);
+    c.take(2)?; // client_version
+    c.take(32)?; // random
+    let sid_len = c.u8()? as usize;
+    c.take(sid_len)?;
+    let cs_len = c.u16()?;
+    c.take(cs_len)?;
+    let comp_len = c.u8()? as usize;
+    c.take(comp_len)?;
+    let ext_total = c.u16()?;
+    let exts = c.take(ext_total)?;
+
+    let mut e = Reader::new(exts);
+    while e.remaining() >= 4 {
+        let ext_type = e.u16()?;
+        let ext_len = e.u16()?;
+        let ext_data = e.take(ext_len)?;
+        if ext_type != 0x0000 {
+            continue; // not server_name
+        }
+        let mut s = Reader::new(ext_data);
+        let list_len = s.u16()?;
+        let list = s.take(list_len)?;
+        let mut l = Reader::new(list);
+        while l.remaining() >= 3 {
+            let name_type = l.u8()?;
+            let name_len = l.u16()?;
+            let name = l.take(name_len)?;
+            if name_type == 0x00 {
+                let host = std::str::from_utf8(name).ok()?.to_ascii_lowercase();
+                return (!host.is_empty()).then_some(host);
+            }
+        }
+        return None;
+    }
+    None
 }
 
 /// One rule in a listener's ordered route list.
@@ -660,6 +779,14 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 pool,
             }]
         };
+        if l.protocol == Protocol::Udp
+            && routes.iter().any(|r| matches!(r.matcher, Matcher::Sni(_)))
+        {
+            return Err(Invalid(format!(
+                "listener {}: the `sni` match requires a tcp listener",
+                l.name
+            )));
+        }
         let affinity = match (l.protocol, l.affinity) {
             (Protocol::Tcp, Some(_)) => {
                 return Err(Invalid(format!(
@@ -706,6 +833,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
     allow("cidrs", m.cidrs.is_some(), m.kind == "client_cidr")?;
     allow("ports", m.ports.is_some(), m.kind == "port")?;
     allow("prefix", m.prefix.is_some(), m.kind == "first_bytes")?;
+    allow("host", m.host.is_some(), m.kind == "sni")?;
 
     match m.kind.as_str() {
         "always" => Ok(Matcher::Always),
@@ -740,17 +868,55 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             if bytes.is_empty() {
                 return Err(at("`first_bytes` prefix must not be empty".into()));
             }
-            if bytes.len() > PEEK_MAX {
+            if bytes.len() > FIRST_BYTES_PREFIX_MAX {
                 return Err(at(format!(
-                    "`first_bytes` prefix is {} bytes, over the {PEEK_MAX}-byte limit",
+                    "`first_bytes` prefix is {} bytes, over the {FIRST_BYTES_PREFIX_MAX}-byte limit",
                     bytes.len()
                 )));
             }
             Ok(Matcher::FirstBytes(bytes))
         }
+        "sni" => {
+            let raw = m
+                .host
+                .as_ref()
+                .filter(|h| !h.is_empty())
+                .ok_or_else(|| at("match type `sni` needs a non-empty `host` list".into()))?;
+            let mut pats = Vec::with_capacity(raw.len());
+            for h in raw {
+                pats.push(parse_host_pattern(h).map_err(&at)?);
+            }
+            Ok(Matcher::Sni(pats))
+        }
         other => Err(at(format!(
-            "unknown match type {other:?} (always | client_cidr | port | first_bytes)"
+            "unknown match type {other:?} (always | client_cidr | port | first_bytes | sni)"
         ))),
+    }
+}
+
+/// Parse an `sni` host pattern: exact (`eu.example.com`), or a subdomain suffix
+/// written `*.eu.example.com` or `.eu.example.com`.
+fn parse_host_pattern(p: &str) -> Result<HostPattern, String> {
+    let p = p.trim().to_ascii_lowercase();
+    if p.is_empty() {
+        return Err("empty host pattern".into());
+    }
+    let body = p.strip_prefix("*.").or_else(|| p.strip_prefix('.'));
+    match body {
+        Some(rest) => {
+            if rest.is_empty() || rest.contains('*') {
+                return Err(format!("invalid host pattern {p:?}"));
+            }
+            Ok(HostPattern::Suffix(format!(".{rest}")))
+        }
+        None => {
+            if p.contains('*') {
+                return Err(format!(
+                    "invalid host pattern {p:?} (`*` only as `*.suffix`)"
+                ));
+            }
+            Ok(HostPattern::Exact(p))
+        }
     }
 }
 
@@ -1156,6 +1322,105 @@ listeners:
             let yaml = format!(
                 "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
             );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    /// A minimal TLS ClientHello record carrying `sni` in the SNI extension.
+    fn client_hello(sni: &str) -> Vec<u8> {
+        let mut sn = Vec::new();
+        sn.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes()); // list len
+        sn.push(0x00); // host_name
+        sn.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        sn.extend_from_slice(sni.as_bytes());
+
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&0u16.to_be_bytes()); // server_name
+        ext.extend_from_slice(&(sn.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&sn);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // client_version
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0x00); // session_id len
+        body.extend_from_slice(&2u16.to_be_bytes()); // cipher_suites
+        body.extend_from_slice(&[0x00, 0x2f]);
+        body.push(0x01); // compression methods
+        body.push(0x00);
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+
+        let bl = body.len();
+        let mut hs = vec![0x01, (bl >> 16) as u8, (bl >> 8) as u8, bl as u8];
+        hs.extend_from_slice(&body);
+
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    #[test]
+    fn extract_sni_reads_the_client_hello() {
+        assert_eq!(
+            extract_sni(&client_hello("EU.Example.COM")).as_deref(),
+            Some("eu.example.com")
+        );
+        assert_eq!(extract_sni(b""), None);
+        assert_eq!(extract_sni(b"\x16\x03\x01\x00\x05hello"), None); // truncated
+        assert_eq!(extract_sni(&[0u8; 200]), None); // not a handshake
+    }
+
+    #[test]
+    fn sni_matcher_exact_and_suffix() {
+        let yaml = r#"
+pools:
+  - name: eu
+    targets: ["127.0.0.1:1"]
+  - name: lobby
+    targets: ["127.0.0.1:2"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:443"
+    routes:
+      - match: { type: sni, host: ["*.eu.example.com", "special.example.net"] }
+        action: { pool: eu }
+      - match: { type: always }
+        action: { pool: lobby }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.peek_len(), PEEK_MAX);
+        let route = |sni: &str| {
+            let ch = client_hello(sni);
+            l.route_for(&ctx("9.9.9.9:5", "1.1.1.1:443", &ch))
+                .map(str::to_string)
+        };
+        assert_eq!(route("a.eu.example.com").as_deref(), Some("eu"));
+        assert_eq!(route("x.y.eu.example.com").as_deref(), Some("eu"));
+        assert_eq!(route("special.example.net").as_deref(), Some("eu"));
+        assert_eq!(route("eu.example.com").as_deref(), Some("lobby")); // suffix != apex
+        assert_eq!(route("us.example.com").as_deref(), Some("lobby"));
+        // no ClientHello at all -> sni route can't match
+        assert_eq!(
+            l.route_for(&ctx("9.9.9.9:5", "1.1.1.1:443", b"not tls")),
+            Some("lobby")
+        );
+    }
+
+    #[test]
+    fn rejects_bad_sni_matchers() {
+        for bad in [
+            // sni on a udp listener
+            "  - name: l\n    bind: \"0.0.0.0:443\"\n    protocol: udp\n    routes: [{ match: { type: sni, host: [\"a.example.com\"] }, action: { pool: p } }]",
+            // empty host list
+            "  - name: l\n    bind: \"0.0.0.0:443\"\n    routes: [{ match: { type: sni, host: [] }, action: { pool: p } }]",
+            // '*' not as a leading label
+            "  - name: l\n    bind: \"0.0.0.0:443\"\n    routes: [{ match: { type: sni, host: [\"a*b.example.com\"] }, action: { pool: p } }]",
+            // wrong field
+            "  - name: l\n    bind: \"0.0.0.0:443\"\n    routes: [{ match: { type: sni, cidrs: [\"10.0.0.0/8\"] }, action: { pool: p } }]",
+        ] {
+            let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
         }
     }

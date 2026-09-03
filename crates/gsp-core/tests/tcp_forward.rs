@@ -254,3 +254,78 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+/// A minimal TLS ClientHello record carrying `sni`.
+fn client_hello(sni: &str) -> Vec<u8> {
+    let mut sn = Vec::new();
+    sn.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes());
+    sn.push(0x00);
+    sn.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    sn.extend_from_slice(sni.as_bytes());
+
+    let mut ext = Vec::new();
+    ext.extend_from_slice(&0u16.to_be_bytes());
+    ext.extend_from_slice(&(sn.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&sn);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0x00);
+    body.extend_from_slice(&2u16.to_be_bytes());
+    body.extend_from_slice(&[0x00, 0x2f]);
+    body.push(0x01);
+    body.push(0x00);
+    body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext);
+
+    let bl = body.len();
+    let mut hs = vec![0x01, (bl >> 16) as u8, (bl >> 8) as u8, bl as u8];
+    hs.extend_from_slice(&body);
+
+    let mut rec = vec![0x16, 0x03, 0x01];
+    rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    rec.extend_from_slice(&hs);
+    rec
+}
+
+#[tokio::test]
+async fn sni_matcher_routes_by_client_hello() {
+    let eu = marker_backend(b'E').await;
+    let lobby = marker_backend(b'L').await;
+    let proxy_addr = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: eu
+    targets: ["{eu}"]
+  - name: lobby
+    targets: ["{lobby}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    routes:
+      - match: {{ type: sni, host: ["*.eu.example.com"] }}
+        action: {{ pool: eu }}
+      - match: {{ type: always }}
+        action: {{ pool: lobby }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let hit_mark = |host: &'static str| async move {
+        let mut c = TcpStream::connect(proxy_addr).await.unwrap();
+        c.write_all(&client_hello(host)).await.unwrap();
+        let mut m = [0u8; 1];
+        c.read_exact(&mut m).await.unwrap();
+        m[0]
+    };
+
+    assert_eq!(hit_mark("frankfurt.eu.example.com").await, b'E');
+    assert_eq!(hit_mark("us.example.com").await, b'L');
+
+    runtime.shutdown().await;
+}

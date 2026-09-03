@@ -25,11 +25,13 @@
 > `action: { pool: <name> }` — but not both. Implemented matchers:
 > `match: { type: always }`, `{ type: client_cidr, cidrs: [<prefix>, ...] }`
 > (source IP), `{ type: port, ports: [<int> | "lo-hi", ...] }` (destination port
-> from the accepting socket), and
+> from the accepting socket),
 > `{ type: first_bytes, prefix: "hex:ff.." | "ascii:.." }` — a ≤ 512-byte prefix
-> of the connection's first bytes (TCP `MSG_PEEK` / first UDP datagram). The
-> `first_bytes` `regex` / `length` / `sniffer` variants, `sni`, `dst`, the
-> `external` resolver and the `consistent_hash` balancer are still to come.
+> of the connection's first bytes (TCP `MSG_PEEK` / first UDP datagram), and
+> `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
+> from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
+> `first_bytes` `regex` / `length` / `sniffer` variants, `dst`, and the
+> `external` resolver are still to come.
 >
 > UDP listeners take `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
