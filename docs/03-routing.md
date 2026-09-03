@@ -6,7 +6,9 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > **Implementation status (phase 3, partial).** `listeners[].routes` is a
 > priority-ordered `[{ match, action }]` list, first match wins, with
 > `action: { pool: <name> }`. Implemented matchers: `always`, `client_cidr`
-> (source IP), `port` (destination port from the accepting socket), `first-bytes`
+> (source IP), `dst` (destination IP the client connected to, via
+> `getsockname` / the bind address, against a `cidrs` list — see the caveat
+> below), `port` (destination port from the accepting socket), `first-bytes`
 > (a `prefix` — `"hex:..." | "ascii:..."`, ≤ 512 B — and/or a
 > `length: { min, max }` byte-count window; on TCP `length` sees only what one
 > peek returned, on UDP the exact datagram length), and `sni`
@@ -18,8 +20,12 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > the `sni` route.
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
-> healthy backends). Still pending: `first-bytes` `regex` / `sniffer` variants,
-> `dst`, the `external` resolver, and the `weighted` /
+> healthy backends). **`dst` caveat:** a normally-bound listener only ever sees
+> its own bind IP, so `dst` is meaningful only across addresses the host already
+> serves separately; the wildcard-prefix + `IP_PKTINFO` / `getsockname` listener
+> that makes it useful for a whole routed prefix (scheme A below) is a later
+> slice. Still pending: that prefix listener, `first-bytes` `regex` / `sniffer`
+> variants, the `external` resolver, and the `weighted` /
 > `first_available` balancers. A listener with a bare `pool:` is normalised to
 > one `always` route.
 

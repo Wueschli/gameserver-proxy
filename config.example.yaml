@@ -55,7 +55,10 @@ listeners:
 
   # ... or with a priority-ordered `routes` list; the first matching rule wins.
   # Matchers: `always`; `client_cidr` (source-IP prefixes); `port` (destination
-  # port, bare int or "lo-hi" range); `first_bytes` (of the first bytes — TCP
+  # port, bare int or "lo-hi" range); `dst` (destination IP the client connected
+  # to, `cidrs:` prefixes — only distinguishes IPs the host already serves
+  # separately; a wildcard-prefix listener comes later); `first_bytes` (of the
+  # first bytes — TCP
   # peek / first UDP datagram — a `prefix:` "hex:.."/"ascii:.." (<= 512 B) and/or
   # a `length: { min, max }` byte-count window; on TCP the length is only what a
   # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
@@ -66,6 +69,8 @@ listeners:
     bind: "0.0.0.0:7777"
     protocol: tcp
     routes:
+      - match: { type: dst, cidrs: ["198.51.100.7/32"] }
+        action: { pool: local }
       - match: { type: client_cidr, cidrs: ["10.0.0.0/8"] }
         action: { pool: local }
       - match: { type: port, ports: [7777, "8000-8100"] }

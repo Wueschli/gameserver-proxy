@@ -24,15 +24,18 @@
 > priority-ordered `routes:` list — `[{ match, action }]`, first match wins,
 > `action: { pool: <name> }` — but not both. Implemented matchers:
 > `match: { type: always }`, `{ type: client_cidr, cidrs: [<prefix>, ...] }`
-> (source IP), `{ type: port, ports: [<int> | "lo-hi", ...] }` (destination port
-> from the accepting socket),
+> (source IP), `{ type: dst, cidrs: [<prefix>, ...] }` (destination IP the client
+> connected to; only distinguishes addresses the host already serves separately
+> until the `IP_PKTINFO` prefix listener lands),
+> `{ type: port, ports: [<int> | "lo-hi", ...] }` (destination port from the
+> accepting socket),
 > `{ type: first_bytes, prefix: "hex:ff.." | "ascii:..", length: { min, max } }`
 > — a ≤ 512-byte prefix and/or a byte-count window on the connection's first
 > bytes (TCP `MSG_PEEK` / first UDP datagram; at least one of `prefix` / `length`),
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
 > from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
-> `first_bytes` `regex` / `sniffer` variants, `dst`, and the `external` resolver
-> are still to come.
+> `IP_PKTINFO` prefix listener, `first_bytes` `regex` / `sniffer` variants, and
+> the `external` resolver are still to come.
 >
 > UDP listeners take `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once

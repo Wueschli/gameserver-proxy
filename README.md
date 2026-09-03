@@ -40,12 +40,13 @@ listener → backend pool forwarding with:
   carried across the swap)
 - admin/observability API and Prometheus metrics
 - per-listener route rule list (`routes:`, first match wins) with `always`,
-  `client_cidr` (source IP), `port` (destination port), `first_bytes`
-  (prefix and/or length of the first bytes — TCP peek / first UDP datagram) and
-  `sni` (host from the peeked, non-terminated TLS ClientHello) matchers
+  `client_cidr` (source IP), `dst` (destination IP), `port` (destination port),
+  `first_bytes` (prefix and/or length of the first bytes — TCP peek / first UDP
+  datagram) and `sni` (host from the peeked, non-terminated TLS ClientHello)
+  matchers
 
-Next: phase 3 continued — `first_bytes` regex, `dst` matcher, sniffer plugins.
-See [docs/08-roadmap.md](docs/08-roadmap.md).
+Next: phase 3 continued — `IP_PKTINFO` prefix listener, `first_bytes` regex,
+sniffer plugins. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

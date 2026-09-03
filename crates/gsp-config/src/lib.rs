@@ -1,8 +1,8 @@
 //! Configuration types, parsing and validation for the game server proxy.
 //!
 //! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
-//! route rule list (`always` / `client_cidr` / `port` / `first_bytes` / `sni`
-//! matchers) onto static pools, with active health checks, round-robin /
+//! route rule list (`always` / `client_cidr` / `dst` / `port` / `first_bytes` /
+//! `sni` matchers) onto static pools, with active health checks, round-robin /
 //! least-connections / consistent-hash balancing, per-backend session caps, and
 //! UDP session affinity. The full target schema lives in
 //! `docs/05-configuration.md` and grows into this crate incrementally.
@@ -190,7 +190,7 @@ struct RawRoute {
 struct RawMatch {
     #[serde(rename = "type")]
     kind: String,
-    /// `client_cidr` only: source-IP prefixes.
+    /// `client_cidr` (source IP) / `dst` (destination IP): prefix list.
     #[serde(default)]
     cidrs: Option<Vec<String>>,
     /// `port` only: destination ports (bare int `30001` or `"lo-hi"` range).
@@ -359,6 +359,12 @@ pub enum Matcher {
     Always,
     /// Source IP within any of these prefixes.
     ClientCidr(Vec<Cidr>),
+    /// Destination IP (the address the client connected to, from `getsockname` /
+    /// the listener's bind) within any of these prefixes. Only distinguishes
+    /// addresses the OS already delivers separately; a wildcard-prefix listener
+    /// (`IP_PKTINFO`) that makes this useful for a whole routed prefix is a
+    /// later slice.
+    DstCidr(Vec<Cidr>),
     /// Destination port (from the accepting socket) within any of these ranges.
     DstPort(Vec<RangeInclusive<u16>>),
     /// The connection's first bytes (TCP peek / first UDP datagram): start with
@@ -395,6 +401,7 @@ impl Matcher {
         match self {
             Matcher::Always => true,
             Matcher::ClientCidr(cidrs) => cidrs.iter().any(|c| c.contains(ctx.src.ip())),
+            Matcher::DstCidr(cidrs) => cidrs.iter().any(|c| c.contains(ctx.local.ip())),
             Matcher::DstPort(ranges) => ranges.iter().any(|r| r.contains(&ctx.local.port())),
             Matcher::FirstBytes { prefix, len } => {
                 let b = ctx.first_bytes;
@@ -855,7 +862,11 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             Ok(())
         }
     };
-    allow("cidrs", m.cidrs.is_some(), m.kind == "client_cidr")?;
+    allow(
+        "cidrs",
+        m.cidrs.is_some(),
+        m.kind == "client_cidr" || m.kind == "dst",
+    )?;
     allow("ports", m.ports.is_some(), m.kind == "port")?;
     allow("prefix", m.prefix.is_some(), m.kind == "first_bytes")?;
     allow("length", m.length.is_some(), m.kind == "first_bytes")?;
@@ -863,15 +874,22 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
 
     match m.kind.as_str() {
         "always" => Ok(Matcher::Always),
-        "client_cidr" => {
+        "client_cidr" | "dst" => {
             let raw = m.cidrs.as_ref().filter(|c| !c.is_empty()).ok_or_else(|| {
-                at("match type `client_cidr` needs a non-empty `cidrs` list".into())
+                at(format!(
+                    "match type `{}` needs a non-empty `cidrs` list",
+                    m.kind
+                ))
             })?;
             let mut cidrs = Vec::with_capacity(raw.len());
             for c in raw {
                 cidrs.push(Cidr::parse(c).map_err(&at)?);
             }
-            Ok(Matcher::ClientCidr(cidrs))
+            Ok(if m.kind == "dst" {
+                Matcher::DstCidr(cidrs)
+            } else {
+                Matcher::ClientCidr(cidrs)
+            })
         }
         "port" => {
             let raw = m
@@ -928,7 +946,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             Ok(Matcher::Sni(pats))
         }
         other => Err(at(format!(
-            "unknown match type {other:?} (always | client_cidr | port | first_bytes | sni)"
+            "unknown match type {other:?} (always | client_cidr | dst | port | first_bytes | sni)"
         ))),
     }
 }
@@ -1302,6 +1320,54 @@ listeners:
             l.route_for(&ctx("203.0.113.9:5555", "203.0.113.1:9999", &[])),
             Some("prod")
         );
+    }
+
+    #[test]
+    fn dst_matcher_selects_by_destination_ip() {
+        let yaml = r#"
+pools:
+  - name: survival
+    targets: ["127.0.0.1:1"]
+  - name: creative
+    targets: ["127.0.0.1:2"]
+  - name: lobby
+    targets: ["127.0.0.1:3"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    routes:
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::1/128", "198.51.100.7/32"] }
+        action: { pool: survival }
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::2/128"] }
+        action: { pool: creative }
+      - match: { type: always }
+        action: { pool: lobby }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.peek_len(), 0);
+        let on = |ip: &str| {
+            l.route_for(&ctx("203.0.113.9:5555", &format!("{ip}:7777"), &[]))
+                .map(str::to_string)
+        };
+        assert_eq!(on("198.51.100.7").as_deref(), Some("survival"));
+        assert_eq!(on("[2001:db8:ace:1::1]").as_deref(), Some("survival"));
+        assert_eq!(on("[2001:db8:ace:1::2]").as_deref(), Some("creative"));
+        assert_eq!(on("198.51.100.9").as_deref(), Some("lobby"));
+    }
+
+    #[test]
+    fn rejects_dst_without_cidrs_and_cidrs_on_wrong_type() {
+        for bad in [
+            r#"routes: [{ match: { type: dst }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: dst, cidrs: [] }, action: { pool: p } }]"#,
+            r#"routes: [{ match: { type: port, cidrs: ["10.0.0.0/8"] }, action: { pool: p } }]"#,
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]
