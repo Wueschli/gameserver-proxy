@@ -122,17 +122,24 @@ listeners:
       - match: { type: always }
         action: { pool: realtime }
 
-  # Transparent mode (Linux TPROXY, TCP): the listen socket is bound with
-  # IP_TRANSPARENT and every upstream connection binds the real client ip:port as
-  # its source, so the backend sees the client IP with no protocol change. Needs
-  # CAP_NET_ADMIN and policy routing that returns backend replies via this host —
-  # see docs/04-transport-and-client-ip.md. Mutually exclusive with nothing, but
-  # rejected on udp listeners.
+  # Transparent mode (Linux TPROXY): the listen socket is bound with
+  # IP_TRANSPARENT, the original destination is read per connection / datagram,
+  # and every upstream connection binds the real client ip:port as its source, so
+  # the backend sees the client IP with no protocol change. Works for tcp and
+  # udp; mutually exclusive with `prefix`. Needs CAP_NET_ADMIN and policy routing
+  # that returns backend replies via this host — see
+  # docs/04-transport-and-client-ip.md.
   - name: transparent-tcp
     bind: "0.0.0.0:7778"
     protocol: tcp
     transparent: true
     pool: local
+
+  - name: transparent-udp
+    bind: "0.0.0.0:7779"
+    protocol: udp
+    transparent: true
+    pool: realtime
 
   - name: public-tls
     bind: "0.0.0.0:443"

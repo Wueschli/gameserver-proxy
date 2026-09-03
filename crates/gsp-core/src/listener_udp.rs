@@ -48,7 +48,7 @@ use gsp_config::{HashOn, ListenerConfig};
 
 use crate::drain::{ConnGuard, ConnTracker};
 use crate::metrics_defs as m;
-use crate::net::bind_reuseport_udp;
+use crate::net::{bind_reuseport_udp, bind_transparent_udp, UdpMode};
 use crate::pool::BackendGuard;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
@@ -62,9 +62,9 @@ const SWEEP_PERIOD: Duration = Duration::from_secs(1);
 /// Hard cap on the per-worker stickiness table; cleared wholesale when hit.
 const STICKY_MAX: usize = 65_536;
 
-/// Session table key: the client address, plus (in prefix mode) the destination
-/// address the datagram was sent to.
-type SessionKey = (SocketAddr, Option<IpAddr>);
+/// Session table key: the client address, plus (in prefix / transparent mode)
+/// the destination address the datagram was sent to.
+type SessionKey = (SocketAddr, Option<SocketAddr>);
 
 struct Session {
     upstream: Arc<UdpSocket>,
@@ -76,6 +76,10 @@ struct Session {
     _guard: Option<BackendGuard>,
     /// Keeps this session counted for graceful-shutdown draining.
     _conn_guard: ConnGuard,
+    /// Transparent mode: the `IP_TRANSPARENT` socket bound to the original
+    /// destination address, from which replies are sent so the client sees them
+    /// coming from the address it addressed. Held here to keep it alive.
+    _reply_sock: Option<Arc<UdpSocket>>,
     reply_task: JoinHandle<()>,
 }
 
@@ -93,14 +97,14 @@ enum Who {
 
 #[derive(PartialEq, Eq, Hash)]
 struct StickyKey {
-    dst: Option<IpAddr>,
+    dst: Option<SocketAddr>,
     who: Who,
 }
 
 fn sticky_key(
     affinity: Option<HashOn>,
     client: SocketAddr,
-    dst: Option<IpAddr>,
+    dst: Option<SocketAddr>,
 ) -> Option<StickyKey> {
     let who = match affinity? {
         HashOn::SrcIp => Who::Ip(client.ip()),
@@ -118,14 +122,21 @@ pub async fn run_udp_listener(
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let pktinfo = cfg.prefix.is_some();
-    let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, pktinfo)?)?);
+    let mode = if cfg.transparent {
+        UdpMode::Transparent
+    } else if cfg.prefix.is_some() {
+        UdpMode::Prefix
+    } else {
+        UdpMode::Plain
+    };
+    let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, mode)?)?);
     crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
         bind = %cfg.bind,
         prefix = ?cfg.prefix,
+        mode = ?mode,
         "udp listener started"
     );
 
@@ -174,7 +185,7 @@ pub async fn run_udp_listener(
                         .decrement(evicted as f64);
                 }
             }
-            recv = recv_one(&sock, &mut buf, pktinfo) => {
+            recv = recv_one(&sock, &mut buf, mode) => {
                 let (n, client, dst) = match recv {
                     Ok(v) => v,
                     Err(e) => {
@@ -189,7 +200,7 @@ pub async fn run_udp_listener(
                 // (and any datagram we somehow got no destination for).
                 if let Some(prefix) = &cfg.prefix {
                     match dst {
-                        Some(ip) if prefix.contains(ip) => {}
+                        Some(d) if prefix.contains(d.ip()) => {}
                         _ => {
                             metrics::counter!(
                                 m::DATAGRAMS_DROPPED,
@@ -245,21 +256,23 @@ pub async fn run_udp_listener(
     }
 }
 
-/// Receive one datagram. In plain mode this is `recv_from`; in prefix mode it is
-/// `recvmsg` with an `IP_PKTINFO` / `IPV6_PKTINFO` control message, yielding the
-/// real destination address.
+/// Receive one datagram. In plain mode this is `recv_from`. In prefix /
+/// transparent mode it is `recvmsg` with a control message yielding the real
+/// destination address the client sent to (`IP_PKTINFO` — dest IP, listener
+/// port — for prefix; `IP_ORIGDSTADDR` — full dest `ip:port` — for transparent).
 async fn recv_one(
     sock: &UdpSocket,
     buf: &mut [u8],
-    pktinfo: bool,
-) -> io::Result<(usize, SocketAddr, Option<IpAddr>)> {
-    if !pktinfo {
+    mode: UdpMode,
+) -> io::Result<(usize, SocketAddr, Option<SocketAddr>)> {
+    if mode == UdpMode::Plain {
         let (n, from) = sock.recv_from(buf).await?;
         return Ok((n, from, None));
     }
+    let port = sock.local_addr()?.port();
     loop {
         sock.readable().await?;
-        match sock.try_io(Interest::READABLE, || recvmsg_pktinfo(sock, &mut *buf)) {
+        match sock.try_io(Interest::READABLE, || recvmsg_dst(sock, &mut *buf, port)) {
             Ok(v) => return Ok(v),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e),
@@ -267,14 +280,15 @@ async fn recv_one(
     }
 }
 
-fn recvmsg_pktinfo(
+fn recvmsg_dst(
     sock: &UdpSocket,
     buf: &mut [u8],
-) -> io::Result<(usize, SocketAddr, Option<IpAddr>)> {
+    listen_port: u16,
+) -> io::Result<(usize, SocketAddr, Option<SocketAddr>)> {
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage};
 
     let mut iov = [IoSliceMut::new(buf)];
-    let mut cmsg = nix::cmsg_space!(nix::libc::in6_pktinfo);
+    let mut cmsg = nix::cmsg_space!(nix::libc::in6_pktinfo, nix::libc::sockaddr_in6);
     let msg = recvmsg::<SockaddrStorage>(
         sock.as_raw_fd(),
         &mut iov,
@@ -291,11 +305,23 @@ fn recvmsg_pktinfo(
     let mut dst = None;
     for cm in msg.cmsgs().map_err(io::Error::from)? {
         match cm {
+            // Prefix mode: destination IP only; the port is the listener's.
             ControlMessageOwned::Ipv4PacketInfo(pi) => {
-                dst = Some(IpAddr::V4(Ipv4Addr::from(pi.ipi_addr.s_addr.to_ne_bytes())));
+                let ip = Ipv4Addr::from(pi.ipi_addr.s_addr.to_ne_bytes());
+                dst = Some(SocketAddr::new(IpAddr::V4(ip), listen_port));
             }
             ControlMessageOwned::Ipv6PacketInfo(pi) => {
-                dst = Some(IpAddr::V6(Ipv6Addr::from(pi.ipi6_addr.s6_addr)));
+                let ip = Ipv6Addr::from(pi.ipi6_addr.s6_addr);
+                dst = Some(SocketAddr::new(IpAddr::V6(ip), listen_port));
+            }
+            // Transparent mode: the original destination `ip:port`.
+            ControlMessageOwned::Ipv4OrigDstAddr(a) => {
+                let ip = Ipv4Addr::from(a.sin_addr.s_addr.to_ne_bytes());
+                dst = Some(SocketAddr::new(IpAddr::V4(ip), u16::from_be(a.sin_port)));
+            }
+            ControlMessageOwned::Ipv6OrigDstAddr(a) => {
+                let ip = Ipv6Addr::from(a.sin6_addr.s6_addr);
+                dst = Some(SocketAddr::new(IpAddr::V6(ip), u16::from_be(a.sin6_port)));
             }
             _ => {}
         }
@@ -332,14 +358,11 @@ async fn open_session(
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
     client: SocketAddr,
-    dst: Option<IpAddr>,
+    dst: Option<SocketAddr>,
     first: &[u8],
 ) -> Result<Session, &'static str> {
     let snap = snapshot.load_full();
-    let local = match dst {
-        Some(ip) => SocketAddr::new(ip, cfg.bind.port()),
-        None => down.local_addr().unwrap_or(cfg.bind),
-    };
+    let local = dst.unwrap_or_else(|| down.local_addr().unwrap_or(cfg.bind));
     let hint = cfg
         .sniffer
         .as_deref()
@@ -402,7 +425,10 @@ async fn open_session(
         }
     };
 
-    let upstream = match connect_upstream(backend).await {
+    // Transparent mode: bind the real client address as the upstream source so
+    // the backend sees the client IP.
+    let up_src = cfg.transparent.then_some(client);
+    let upstream = match connect_upstream(backend, up_src).await {
         Ok(u) => Arc::new(u),
         Err(e) => {
             if let Some(g) = &guard {
@@ -413,6 +439,26 @@ async fn open_session(
             );
             return Err("upstream_bind");
         }
+    };
+
+    // Transparent mode: replies must appear to come from the address the client
+    // originally addressed — send them from an `IP_TRANSPARENT` socket bound to
+    // that `ip:port` rather than from the shared listen socket.
+    let reply_sock = match (cfg.transparent, dst) {
+        (true, Some(orig)) => match bind_transparent_udp(orig) {
+            Ok(s) => Some(Arc::new(UdpSocket::from_std(s).map_err(|e| {
+                tracing::warn!(listener = %cfg.name, %orig, error = %e, "udp reply socket failed");
+                "reply_bind"
+            })?)),
+            Err(e) => {
+                if let Some(g) = &guard {
+                    g.observe(false);
+                }
+                tracing::warn!(listener = %cfg.name, %orig, error = %e, "udp reply socket failed");
+                return Err("reply_bind");
+            }
+        },
+        _ => None,
     };
     // v2-udp: the PROXY header is prepended to the first datagram only; every
     // later datagram of the session goes out untouched. Only `v2-udp` applies on
@@ -454,9 +500,16 @@ async fn open_session(
     let reply_task = spawn_reply(
         cfg.name.clone(),
         down.clone(),
+        reply_sock.clone(),
         upstream.clone(),
         client,
-        dst,
+        // Prefix mode restores the source IP via a pktinfo cmsg on the shared
+        // socket; transparent mode sends from `reply_sock` and needs no cmsg.
+        if reply_sock.is_some() {
+            None
+        } else {
+            dst.map(|d| d.ip())
+        },
         last_ms.clone(),
     );
 
@@ -468,11 +521,23 @@ async fn open_session(
         idle_ms,
         _guard: guard,
         _conn_guard: conns.track(),
+        _reply_sock: reply_sock,
         reply_task,
     })
 }
 
-async fn connect_upstream(backend: SocketAddr) -> std::io::Result<UdpSocket> {
+async fn connect_upstream(
+    backend: SocketAddr,
+    source: Option<SocketAddr>,
+) -> std::io::Result<UdpSocket> {
+    // Transparent mode: bind the real client `ip:port` as the source with
+    // `IP_TRANSPARENT` so the backend sees datagrams from the client. A
+    // client/backend address-family mismatch falls back to an ordinary bind.
+    if let Some(src) = source.filter(|s| s.is_ipv4() == backend.is_ipv4()) {
+        let sock = UdpSocket::from_std(crate::net::bind_transparent_udp(src)?)?;
+        sock.connect(backend).await?;
+        return Ok(sock);
+    }
     let bind = if backend.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -485,23 +550,35 @@ async fn connect_upstream(backend: SocketAddr) -> std::io::Result<UdpSocket> {
 
 /// Pump backend → client until the upstream socket errors (e.g. ICMP
 /// port-unreachable) or the client send fails. The idle sweep reaps the
-/// session entry afterwards. `reply_src` is `Some` in prefix mode: the reply is
-/// sent with that address as its source (`sendmsg` + pktinfo cmsg).
+/// session entry afterwards.
+///
+/// - transparent mode: `reply_sock` is the `IP_TRANSPARENT` socket bound to the
+///   original destination; replies go out with a plain `send_to`.
+/// - prefix mode: `reply_src` is `Some`; the reply is sent from the shared
+///   listen socket with that IP as its source (`sendmsg` + pktinfo cmsg).
+/// - plain mode: neither is set; a plain `send_to` on the shared socket.
 fn spawn_reply(
     listener: String,
     down: Arc<UdpSocket>,
+    reply_sock: Option<Arc<UdpSocket>>,
     up: Arc<UdpSocket>,
     client: SocketAddr,
     reply_src: Option<IpAddr>,
     last_ms: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let out = reply_sock.as_deref().unwrap_or(down.as_ref());
         let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
             match up.recv(&mut buf).await {
                 Ok(n) => {
                     last_ms.store(now_ms(), Ordering::Relaxed);
-                    if let Err(e) = send_reply(&down, &buf[..n], client, reply_src).await {
+                    let sent = if reply_sock.is_some() {
+                        out.send_to(&buf[..n], client).await
+                    } else {
+                        send_reply(out, &buf[..n], client, reply_src).await
+                    };
+                    if let Err(e) = sent {
                         tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
                         return;
                     }

@@ -50,7 +50,7 @@ crates/
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
     runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
-    net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND)
+    net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND, IP_TRANSPARENT / TPROXY)
     metrics_defs.rs         canonical metric names — ALL metric names live here
     util.rs                 tiny helpers (monotonic now_ms)
   gsp/                       binary
@@ -185,16 +185,22 @@ Phase 3 (routing intelligence) shipped: a priority-ordered
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Phases 0–5 done.** Phase 4 (external resolver): HTTP + gRPC transports,
+Phase 4 (external resolver): HTTP + gRPC transports,
 `pool` + `target` results, `on_error` (`reject`/`fallback_route`/`stale_ok`),
 TTL'd LRU cache. Phase 5 (operability): connection draining with a grace period,
 runtime listener add/remove/rebind, `draining` / `disabled` backend states, full
 CRUD admin API. Deferred: `Resolution.sticky_key`, `GET /sessions`.
 
-**Phase 6 — client-IP preservation, in progress.** Slices 1–3 done: per-pool
+**Phases 0–6 done.** Phase 6 (client-IP preservation): per-pool
 `proxy_protocol: none | v1 | v2 | v2-udp` writes a PROXY protocol header to the
 upstream TCP connection (v1/v2) or the first datagram of each UDP session
-(v2-udp); and `transparent: true` on a TCP listener is Linux TPROXY
-(`IP_TRANSPARENT` listen socket + client-`ip:port`-bound upstream socket, via
-`net::connect_tcp_from`; setup docs in `docs/04`). Next: UDP transparent mode.
-See `HANDOVER.md` and `docs/08`. Don't half-land a slice.
+(v2-udp); and `transparent: true` on a TCP **or UDP** listener is Linux TPROXY —
+`IP_TRANSPARENT` listen socket, original destination read per connection /
+datagram, client-`ip:port`-bound upstream socket, and (UDP) a per-session
+`IP_TRANSPARENT` reply socket bound to the original destination. `socket2` is on
+0.6. Setup docs in `docs/04`.
+
+**Next: phase 7 — security & hardening.** CIDR allow/deny (LPM trie), rate
+limiting (src_ip + /24), global caps, UDP first-packet gate, amplifier-checklist
+tests, optional geo filter, parser fuzzing. See `HANDOVER.md` and `docs/08`.
+Don't half-land a slice.

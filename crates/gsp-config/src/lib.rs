@@ -1198,10 +1198,10 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
-        if l.transparent && l.protocol != Protocol::Tcp {
+        if l.transparent && l.prefix.is_some() {
             return Err(Invalid(format!(
-                "listener {}: `transparent` applies only to tcp listeners (udp transparent \
-                 mode is not implemented yet)",
+                "listener {}: `transparent` and `prefix` are mutually exclusive (both derive \
+                 the per-datagram destination, by different mechanisms)",
                 l.name
             )));
         }
@@ -2263,8 +2263,8 @@ listeners:
             "  - name: l\n    bind: \"[::]:7777\"\n    protocol: udp\n    prefix: \"nonsense\"\n    pool: p",
             // freebind on a udp listener
             "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    freebind: true\n    pool: p",
-            // transparent on a udp listener
-            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    transparent: true\n    pool: p",
+            // transparent + prefix together
+            "  - name: l\n    bind: \"[::]:7777\"\n    protocol: udp\n    transparent: true\n    prefix: \"2001:db8::/64\"\n    pool: p",
         ] {
             let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
@@ -2304,6 +2304,17 @@ listeners:
     pool: p
 "#;
         let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn parses_udp_transparent_listener() {
+        let cfg = parse_str(
+            "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    \
+             transparent: true\n    pool: p\n",
+        )
+        .unwrap();
         assert!(cfg.listeners[0].transparent);
     }
 

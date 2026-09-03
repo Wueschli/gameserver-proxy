@@ -82,19 +82,32 @@ By default the backend only sees the proxy IP. Options, selectable per pool:
 
 #### Config
 
-Set `transparent: true` on a **TCP** listener (Linux only). gsp then:
+Set `transparent: true` on a **TCP or UDP** listener (Linux only). It is
+mutually exclusive with `prefix` (both derive the per-datagram destination).
+
+**TCP** — gsp:
 - binds the listen socket with `IP_TRANSPARENT` (so it accepts connections a
   TPROXY rule redirected to a non-local address; `getsockname()` on the accepted
   socket still returns the original destination, which feeds `dst` / `port`
   routing exactly as a normal bind does);
 - for every upstream connection — pool or resolver `target` — opens the backend
   socket with `IP_TRANSPARENT`, `bind()`s the real client `ip:port` as its
-  source, then connects. If the client and backend address families differ the
-  bind is skipped and a normal connect is used (logged).
+  source, then connects.
 
-UDP transparent mode is not implemented yet (`transparent` is rejected on a UDP
-listener). `IPV6_TRANSPARENT` for an IPv6 *listen* address also still needs the
-socket2 bump; an IPv6 client bound as the upstream source works today.
+**UDP** — gsp:
+- binds the listen socket with `IP_TRANSPARENT` + `IP_RECVORIGDSTADDR` /
+  `IPV6_RECVORIGDSTADDR` and reads the original destination `ip:port` from the
+  `recvmsg` control message (this, not `IP_PKTINFO`, carries the redirected
+  port), feeding `dst` / `port` routing and the session key;
+- binds the per-session upstream socket to the real client `ip:port` with
+  `IP_TRANSPARENT`;
+- sends replies from a per-session `IP_TRANSPARENT` socket bound to the original
+  destination `ip:port`, so the client sees them coming from the address it
+  addressed.
+
+If the client and backend address families differ the upstream source bind is
+skipped and a normal bind/connect is used (logged). v4 and v6 are both
+supported.
 
 #### Network setup (example)
 
@@ -107,6 +120,7 @@ table inet tproxy {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
     ip daddr 198.51.100.0/24 tcp dport 7777 tproxy to :7777 meta mark set 1
+    ip daddr 198.51.100.0/24 udp dport 7777 tproxy to :7777 meta mark set 1
   }
 }
 

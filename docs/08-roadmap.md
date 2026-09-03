@@ -112,10 +112,13 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   (Linux) binds the listen socket with `IP_TRANSPARENT` and every upstream
   connection with the real client `ip:port` as its `IP_TRANSPARENT` source;
   `docs/04` carries the nftables + policy-routing setup.
-- ⬜ **Slice 4**: UDP transparent mode (`IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`
-  recv path, client-bound reply socket) and `IPV6_TRANSPARENT` listen binds
-  (needs the socket2 0.6 bump).
-- **Result**: backends see the real client IP.
+- ✅ **Slice 4**: UDP transparent mode — `IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`
+  on the listen socket (original `ip:port` per datagram), a client-bound
+  `IP_TRANSPARENT` upstream socket, and a per-session `IP_TRANSPARENT` reply
+  socket bound to the original destination. `IPV6_TRANSPARENT` listen binds via
+  the socket2 0.5 → 0.6 bump. Mutually exclusive with `prefix`.
+- **Result**: backends see the real client IP (PROXY protocol or fully
+  transparent, TCP + UDP).
 
 ## Phase 7 – Security & hardening (week 17–18)
 - Filter chain: CIDR allow/deny (LPM trie), rate limit (src_ip + /24), global caps.

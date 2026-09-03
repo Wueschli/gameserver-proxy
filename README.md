@@ -25,7 +25,7 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–5 complete; phase 6 in progress** (resolver `sticky_key` and
+**Roadmap phases 1–6 complete** (resolver `sticky_key` and
 `GET /sessions` deferred). TCP and UDP
 listener → backend pool forwarding with:
 
@@ -61,21 +61,21 @@ listener → backend pool forwarding with:
   a backend at runtime; the edits are layered on the file config and survive a reload
 - runtime listener reconfig: a reload spawns added listeners, stops removed ones and
   re-binds changed ones by name — no restart; a same-bind rebind is gapless
-- client-IP preservation (phase 6, in progress): per-pool `proxy_protocol:
+- client-IP preservation (phase 6): per-pool `proxy_protocol:
   none | v1 | v2` (TCP) prepends a PROXY protocol header to the upstream
   connection, or `v2-udp` prepends the v2 binary header to the first datagram of
-  each UDP session; or a TCP listener with `transparent: true` (Linux TPROXY)
-  sources every upstream connection from the real client `ip:port`
+  each UDP session; or a TCP/UDP listener with `transparent: true` (Linux TPROXY)
+  sources every upstream connection/datagram from the real client `ip:port` and
+  replies from the original destination address
 
-**Phases 1–5 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
+**Phases 1–6 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the
 instance-drain / `GET /config` admin surface, runtime backend add/remove, and
 runtime listener add/remove/rebind. External resolver: HTTP + gRPC `resolvers:`
 + `action: { resolver: <name> }`, `pool` / `target` results, `on_error`, and a
-TTL'd LRU result cache. Phase 6 slices 1–3 landed the PROXY protocol header
-(TCP `v1`/`v2`, UDP `v2-udp`) and TCP TPROXY transparent mode
-(`transparent: true`); next is UDP transparent mode. See
-[docs/08-roadmap.md](docs/08-roadmap.md).
+TTL'd LRU result cache. Phase 6 is complete: the PROXY protocol header
+(TCP `v1`/`v2`, UDP `v2-udp`) and TPROXY transparent mode (`transparent: true`,
+TCP + UDP, v4 + v6). See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

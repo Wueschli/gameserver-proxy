@@ -1,31 +1,72 @@
 //! Low-level socket helpers.
 
 use std::net::SocketAddr;
+use std::os::fd::AsFd;
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::net::{TcpSocket, TcpStream};
+
+/// How a UDP listener learns the real destination address of each datagram.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UdpMode {
+    /// Plain `recv_from`; the destination is the socket's own bind address.
+    Plain,
+    /// Prefix mode: `IP_PKTINFO` / `IPV6_RECVPKTINFO` — one wildcard socket
+    /// serves a routed prefix, the destination IP is read per datagram.
+    Prefix,
+    /// Transparent mode (Linux TPROXY): `IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`
+    /// — the socket receives datagrams redirected to non-local addresses and the
+    /// original destination `ip:port` is read per datagram.
+    Transparent,
+}
 
 /// Bind a UDP socket with `SO_REUSEADDR` / `SO_REUSEPORT` so every worker gets
 /// its own socket on the same port and the kernel pins each client 4-tuple to
 /// one worker (keeping the per-worker session table lock-free).
 ///
-/// With `pktinfo`, also request `IP_PKTINFO` / `IPV6_RECVPKTINFO` so the recv
-/// path can read the real destination address of each datagram (prefix mode).
-pub fn bind_reuseport_udp(addr: SocketAddr, pktinfo: bool) -> std::io::Result<std::net::UdpSocket> {
+/// `mode` selects the per-datagram destination mechanism (see [`UdpMode`]).
+pub fn bind_reuseport_udp(addr: SocketAddr, mode: UdpMode) -> std::io::Result<std::net::UdpSocket> {
     let sock = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
-    if pktinfo {
-        use nix::sys::socket::setsockopt;
-        use nix::sys::socket::sockopt;
-        if addr.is_ipv6() {
-            setsockopt(&sock, sockopt::Ipv6RecvPacketInfo, &true).map_err(std::io::Error::from)?;
-        } else {
-            setsockopt(&sock, sockopt::Ipv4PacketInfo, &true).map_err(std::io::Error::from)?;
+    match mode {
+        UdpMode::Plain => {}
+        UdpMode::Prefix => {
+            use nix::sys::socket::{setsockopt, sockopt};
+            if addr.is_ipv6() {
+                setsockopt(&sock, sockopt::Ipv6RecvPacketInfo, &true)
+                    .map_err(std::io::Error::from)?;
+            } else {
+                setsockopt(&sock, sockopt::Ipv4PacketInfo, &true).map_err(std::io::Error::from)?;
+            }
+        }
+        UdpMode::Transparent => {
+            use nix::sys::socket::{setsockopt, sockopt};
+            set_ip_transparent(&sock, addr.is_ipv6())?;
+            if addr.is_ipv6() {
+                setsockopt(&sock, sockopt::Ipv6OrigDstAddr, &true).map_err(std::io::Error::from)?;
+            } else {
+                setsockopt(&sock, sockopt::Ipv4OrigDstAddr, &true).map_err(std::io::Error::from)?;
+            }
         }
     }
+    sock.bind(&addr.into())?;
+    Ok(sock.into())
+}
+
+/// Bind a UDP socket with `IP_TRANSPARENT` to `addr` (a non-local address) so it
+/// can be the *source* of datagrams sent from it — the reply path in UDP
+/// transparent mode, where the client must see replies coming from the address
+/// it originally addressed.
+pub fn bind_transparent_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let sock = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    set_ip_transparent(&sock, addr.is_ipv6())?;
     sock.bind(&addr.into())?;
     Ok(sock.into())
 }
@@ -52,13 +93,13 @@ pub fn bind_reuseport_tcp(
     sock.set_nonblocking(true)?;
     if freebind {
         if addr.is_ipv6() {
-            sock.set_freebind_ipv6(true)?;
+            sock.set_freebind_v6(true)?;
         } else {
-            sock.set_freebind(true)?;
+            sock.set_freebind_v4(true)?;
         }
     }
     if transparent {
-        set_ip_transparent(&sock)?;
+        set_ip_transparent(&sock, addr.is_ipv6())?;
     }
     sock.bind(&addr.into())?;
     sock.listen(backlog)?;
@@ -86,22 +127,27 @@ pub async fn connect_tcp_from(
     } else {
         TcpSocket::new_v6()?
     };
-    set_ip_transparent(&sock)?;
+    set_ip_transparent(&sock, backend.is_ipv6())?;
     sock.set_reuseaddr(true)?;
     sock.bind(src)?;
     sock.connect(backend).await
 }
 
-/// Set `IP_TRANSPARENT` on a socket. Linux-only; a no-op error elsewhere.
-fn set_ip_transparent<F: std::os::fd::AsFd>(sock: &F) -> std::io::Result<()> {
+/// Set `IP_TRANSPARENT` (v4) or `IPV6_TRANSPARENT` (v6) on a socket. Linux-only;
+/// an `Unsupported` error elsewhere.
+pub fn set_ip_transparent<F: AsFd>(sock: &F, v6: bool) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        use nix::sys::socket::{setsockopt, sockopt};
-        setsockopt(sock, sockopt::IpTransparent, &true).map_err(std::io::Error::from)
+        let r = SockRef::from(sock);
+        if v6 {
+            r.set_ip_transparent_v6(true)
+        } else {
+            r.set_ip_transparent_v4(true)
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = sock;
+        let _ = (sock, v6);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "IP_TRANSPARENT is Linux-only",
