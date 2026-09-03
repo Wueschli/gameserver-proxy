@@ -82,7 +82,8 @@
 > default-deny for any source it does not cover. A blocked connection / new UDP
 > session is dropped silently (no error reply — no reflection) and counted by
 > `gsp_filter_blocked_total{listener,filter="acl"}`. Established UDP sessions are
-> not re-checked per datagram.
+> not re-checked per datagram. `allow` / `deny` are compiled to a radix trie, so
+> large block lists (bogons + a threat feed) match in bounded time.
 >
 > `rate_limit: { per_ip: { rate, burst }, per_net: { rate, burst } }` (at least
 > one of `per_ip` / `per_net`) is a token bucket on *new* connections / *new* UDP

@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–5 done** —
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–6 done** —
 filter chain: per-listener `allow` / `deny` CIDR lists + a per-listener
 `rate_limit` token bucket (per source IP and per /24 / /64) + process-wide
 `settings.limits` caps (`max_connections` / `max_udp_sessions` /
@@ -143,7 +143,7 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   Blocked ⇒ silent drop (no reflection) + `gsp_filter_blocked_total{listener,
   filter="acl"}` (`m::FILTER_BLOCKED`). `GET /config` shows `acl=+N/-M`.
   `ListenerConfig` is `PartialEq` so an `allow`/`deny` change rebinds the
-  listener on reload. Linear `Cidr` scan (no LPM trie yet).
+  listener on reload. Matching is a radix trie since slice 6.
 - **Phase 7 slice 2 done**: per-listener rate limiting. `gsp-config`
   `RawListener::rate_limit` → `Option<RateLimit { per_ip, per_net: Option<TokenBucket
   { rate: u32, burst: u32 }> }>` (`ListenerConfig::rate_limit`); `burst` defaults
@@ -198,13 +198,27 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   payload (proxy prepends nothing toward the client); the rate limit is enforced
   before any session / forward. The `docs/07` checklist is now ticked and
   points at the test names. Test-only slice, no production change.
-- **Next**: phase 7 slice 6+ — optional geo filter (new `maxminddb` dep + DB
-  file lifecycle; roadmap-flagged "optional"), LPM trie for the ACL, fuzzing the
-  peek/sniffer parsers, load tests vs. NFR N1/N2.
+- **Phase 7 slice 6 done**: ACL longest-prefix-match trie. `gsp_config::CidrSet`
+  — a binary radix trie over address bits, v4 / v6 kept in separate roots, with
+  `build(&[Cidr])` / `contains(ip)` / `len()` / `is_empty()`. `TrieNode {
+  terminal, children: [Option<Box>; 2] }`; `insert` stops at a shorter covering
+  prefix and clears children a longer one would need (subsumption); `walk`
+  early-exits on the first `terminal` on the path (membership, not full LPM).
+  `Acl` now holds `allow_set` / `deny_set: CidrSet` alongside the `Cidr` vecs
+  (kept for `PartialEq` reload-diffing — hand-written `impl` over the vecs — and
+  for `GET /config`'s `+N/-M`); `Acl::new(allow, deny)` compiles them;
+  `Acl::permits` walks the tries. No config / semantics / metric change. Built
+  in `validate()` (so it rides the existing `ListenerConfig` clone into
+  `gsp-core`; no new gsp-core plumbing).
+- **Next**: phase 7 tail — parser fuzzing (`cargo fuzz` on `extract_sni` /
+  first-bytes peek), NFR N1/N2 load tests. Optional geo filter is **deferred**:
+  it needs a MaxMind `.mmdb` reader crate and the build environment is offline
+  (no `maxminddb` in the cargo cache, `git fetch` fails). Revisit when deps can
+  be added.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~132 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~133 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -459,7 +473,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
 | UDP first-packet gate (`first_packet_gate` on a UDP listener) | **done** (phase 7 slice 4) |
 | Amplifier-checklist tests (`tests/amplification.rs`) | **done** (phase 7 slice 5) |
-| Geo filter, ACL LPM trie, parser fuzzing, NFR load tests | phase 7 |
+| ACL longest-prefix-match trie (`gsp_config::CidrSet`) | **done** (phase 7 slice 6) |
+| Parser fuzzing, NFR load tests | phase 7 tail |
+| Optional geo filter | deferred — needs a MaxMind reader dep, unavailable in the offline build env |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -559,11 +575,13 @@ the pool opts in; `none` pools and resolver `target` connections pay nothing. No
 lock, no task, nothing per byte.
 
 **Filter chain — CIDR allow/deny** (`allow` / `deny` on a listener): per new TCP
-connection / new UDP session only, one linear scan of the (small, fixed) `Cidr`
-list — bit-compare per entry, no alloc, no lock, no task. TCP runs it before the
-task spawn; UDP runs it only for datagrams that don't hit an established session,
-so the steady-state per-datagram path is unchanged. Listeners with neither list
-pay nothing (`Acl::is_empty`, but the scan over two empty `Vec`s is already ~free).
+connection / new UDP session only, a bounded bit-walk of the `deny` radix trie
+and (when `allow` is non-empty) the `allow` trie — at most 32 (v4) / 128 (v6)
+node hops, early-exiting on the first covering prefix; independent of list size,
+no alloc, no lock, no task. Tries are built once per listener spawn (in
+`validate()`). TCP runs it before the task spawn; UDP runs it only for datagrams
+that don't hit an established session, so the steady-state per-datagram path is
+unchanged. Listeners with neither list pay one `Acl::is_empty` check.
 
 **Rate limiting** (`rate_limit` on a listener): per new TCP connection / new UDP
 session only — one `Mutex<HashMap>` lock (not held across `.await`, like

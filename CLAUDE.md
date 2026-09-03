@@ -217,6 +217,8 @@ datagram is positively recognised (non-`reject` sniffer hint or a matching
 `first_bytes` route: `ListenerConfig::first_packet_recognised`), checked before
 the `route_hint` lookup; else `gsp_datagrams_dropped_total{reason="first_packet_gate"}`.
 Slice 5: automated amplifier-checklist tests
-(`crates/gsp-core/tests/amplification.rs`; `docs/07` checklist ticked). Still to
-do: optional geo filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and
-`docs/08`. Don't half-land a slice.
+(`crates/gsp-core/tests/amplification.rs`; `docs/07` checklist ticked). Slice 6:
+`gsp_config::CidrSet` radix trie backs `Acl::permits` (was a linear `Cidr`
+scan). Still to do: parser fuzzing, NFR load tests; optional geo filter is
+deferred (needs a MaxMind reader dep, unavailable offline). See `HANDOVER.md`
+and `docs/08`. Don't half-land a slice.

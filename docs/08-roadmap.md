@@ -125,8 +125,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   CIDR lists, checked on the client source IP before routing (TCP accept + UDP
   first datagram). `deny` wins; a non-empty `allow` is default-deny. Blocked =
   silent drop + `gsp_filter_blocked_total{listener,filter="acl"}`. Linear scan of
-  the (small) `Cidr` list — no LPM trie yet; established UDP sessions are not
-  re-checked per datagram.
+  the (small) `Cidr` list; established UDP sessions are not re-checked per
+  datagram. (Slice 6 replaced the scan with a radix trie.)
 - ✅ **Slice 2**: per-listener token-bucket rate limit on new connections / new
   UDP sessions — `rate_limit: { per_ip, per_net }` (`rate` permits/s + `burst`),
   `per_net` keyed by /24 (v4) / /64 (v6), checked after the ACL. A permit needs
@@ -153,7 +153,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   replies, no error reply to a dropped datagram, reply size == backend payload
   (proxy adds nothing toward the client), rate limit enforced before any state
   change. Checklist in `docs/07` now ticked.
-- Optional geo filter.
+- ✅ **Slice 6**: ACL longest-prefix-match trie — `gsp_config::CidrSet`, a binary
+  radix trie over address bits (v4 / v6 separate), built once per listener spawn
+  from the `allow` / `deny` lists. `Acl::permits` now does a bounded bit-walk
+  instead of a linear `Cidr` scan, so large threat-feed block lists cost the
+  same as a handful of entries. Config, semantics and `GET /config` output
+  unchanged.
+- Optional geo filter — deferred: needs a MaxMind DB reader dependency that
+  cannot be added in the current offline build environment.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.
 - **Result**: hardened against common L4/7 abuse.
 
