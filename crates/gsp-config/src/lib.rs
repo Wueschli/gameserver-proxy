@@ -111,6 +111,9 @@ struct RawPool {
     health_check: RawHealthCheck,
     #[serde(default)]
     per_backend: RawPerBackend,
+    /// Prepend a PROXY protocol header to the upstream connection.
+    #[serde(default)]
+    proxy_protocol: ProxyProtocol,
 }
 
 fn default_connect_timeout_ms() -> u64 {
@@ -355,6 +358,21 @@ pub enum HashOn {
     #[default]
     SrcIp,
     SrcIpPort,
+}
+
+/// Whether to prepend a [PROXY protocol] header to the upstream connection so
+/// the backend learns the real client address. `none` (default) sends nothing;
+/// `v1` sends the human-readable text header; `v2` sends the binary header.
+/// Only the first bytes toward the backend carry it (TCP: before any payload).
+///
+/// [PROXY protocol]: https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocol {
+    #[default]
+    None,
+    V1,
+    V2,
 }
 
 /// Health probe variant. `tcp_connect` just opens a TCP connection; `udp_probe`
@@ -747,6 +765,8 @@ pub struct PoolConfig {
     pub health_check: HealthCheck,
     /// Max concurrent sessions per backend, if capped.
     pub max_sessions: Option<usize>,
+    /// PROXY protocol header to prepend to the upstream connection.
+    pub proxy_protocol: ProxyProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -962,6 +982,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 fall: hc.fall,
             },
             max_sessions: p.per_backend.max_sessions,
+            proxy_protocol: p.proxy_protocol,
         });
     }
 
@@ -1475,6 +1496,42 @@ listeners:
         assert_eq!(cfg.pools[0].health_check.rise, 2);
         assert_eq!(cfg.pools[0].health_check.fall, 3);
         assert!(cfg.pools[0].max_sessions.is_none());
+        assert_eq!(cfg.pools[0].proxy_protocol, ProxyProtocol::None);
+    }
+
+    #[test]
+    fn parses_proxy_protocol_pool_option() {
+        let cfg = parse_str(
+            r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+    proxy_protocol: v2
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#,
+        )
+        .expect("should parse");
+        assert_eq!(cfg.pools[0].proxy_protocol, ProxyProtocol::V2);
+    }
+
+    #[test]
+    fn rejects_unknown_proxy_protocol() {
+        let err = parse_str(
+            r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+    proxy_protocol: v3
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#,
+        );
+        assert!(err.is_err());
     }
 
     #[test]

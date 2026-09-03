@@ -26,6 +26,8 @@
   `round_robin|least_conn|consistent_hash`; `result` = `ok|no_backend|at_capacity`
 - `gsp_route_hints_applied_total{listener}` – a `POST /route-hint` entry decided
   routing for a connection / UDP session
+- `gsp_proxy_protocol_headers_total{pool,version}` – `version` = `v1|v2`; a PROXY
+  protocol header was prepended to an upstream connection
 
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`

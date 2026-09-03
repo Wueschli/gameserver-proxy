@@ -1,11 +1,13 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 3, 4 & 5 complete**). Phase 5: `enabled` /
-`draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
+Last updated: 2026-09-03 (**phases 3, 4 & 5 complete; phase 6 started**). Phase 5:
+`enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
 `POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
 add/remove/rebind. `GET /sessions` is the only deferred bit.
+Phase 6 slice 1: per-pool `proxy_protocol: none | v1 | v2` prepends a PROXY
+protocol header to the upstream TCP connection (`gsp_core::proxy_protocol`).
 
 ---
 
@@ -69,10 +71,23 @@ add/remove/rebind. `GET /sessions` is the only deferred bit.
   stopped+respawned, added spawned, removed stopped. New groups spawn before old
   ones are awaited, so a same-bind rebind is gapless (`SO_REUSEPORT`).
   `shutdown_with_grace` now does `listeners.stop_all()` + `abort_all()`.
-- **Next**: phase 6 (client-IP preservation: PROXY protocol, TPROXY). Deferred:
-  `GET /sessions` (per-session registry); resolver `sticky_key`; the sniffer
-  plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 88 tests). Needs
+- **Phase 6 slice 1 done**: TCP PROXY protocol. `gsp-config`
+  `ProxyProtocol { None, V1, V2 }` + `pools[].proxy_protocol` (default `none`) →
+  `PoolConfig::proxy_protocol` → `Pool::proxy_protocol`. `gsp_core::proxy_protocol`
+  encodes v1 (text) / v2 (binary) headers from `(client_peer, client_local)`.
+  `proxy::handle_tcp` gained a `client_local: SocketAddr` param and writes the
+  header to the backend right after connect, before the pump; failure ⇒ passive
+  unhealthy + error. `gsp_proxy_protocol_headers_total{pool,version}`. `listener.rs`
+  passes `local`. Live across reload (pool rebuild). `target` connections
+  (resolver) have no pool ⇒ no header.
+- **Next**: phase 6 slice 2 — PROXY protocol **v2-UDP** (header prepended to the
+  first datagram of each UDP session; `proxy_protocol: v2-udp`, UDP-only). Then
+  slice 3 — TPROXY transparent mode (`IP_TRANSPARENT`, `CAP_NET_ADMIN`, bind the
+  client IP as the upstream source; network-setup docs). `proxy_protocol` on a
+  resolver `target` is still unaddressed. Deferred: `GET /sessions`
+  (per-session registry); resolver `sticky_key`; the sniffer plugin loader
+  (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~95 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -143,6 +158,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   on the non-sticky path.
 - **Per-connection pump**: buffered bidirectional copy, connect timeout, per-direction
   idle timeout, half-close propagation, `TCP_NODELAY`.
+- **Client-IP preservation** (TCP): a pool with `proxy_protocol: v1 | v2` gets one
+  PROXY protocol header written to the backend before any client bytes, carrying
+  the real `(client, proxy-local)` addresses. `none` by default. Resolver
+  `target` connections get no header (no pool).
 - **Backend health**: active `tcp_connect` or `udp_probe` probes per pool
   (`udp_probe` sends `send_hex`, expects a reply datagram optionally prefix-matched
   by `expect_hex_prefix`); `interval`, `timeout`, `rise`, `fall`; passive marking on
@@ -382,6 +401,11 @@ data-path cost.
 brief internal lock, no `.await`) on connection/session open and again on close —
 once per TCP connection and once per UDP session, never per byte or per datagram.
 Nothing on the steady-state path.
+
+**PROXY protocol** (`proxy_protocol: v1 | v2`): one `Vec` allocation (≤ 52 B) and
+one extra `write_all` to the backend per new TCP connection, before the pump.
+Only when the pool opts in; `none` pools and resolver `target` connections pay
+nothing. No lock, no task, nothing per byte.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -776,6 +800,34 @@ not surface it.
 
 ---
 
+## Phase 6 — client-IP preservation
+
+Design reference: `docs/04-transport-and-client-ip.md` ("Passing the client IP
+to the backend") and `docs/08` phase 6.
+
+### Slice 1 — TCP PROXY protocol v1/v2 (done)
+
+`gsp-config`: `ProxyProtocol { None, V1, V2 }` (snake_case), `pools[].proxy_protocol`
+(default `none`) → `PoolConfig::proxy_protocol`. `gsp-core::proxy_protocol`:
+`header(mode, src, dst, stream) -> Vec<u8>` — v1 is `PROXY TCP4|TCP6 s d sp dp\r\n`
+(mixed family ⇒ `PROXY UNKNOWN\r\n`); v2 is the 12-byte sig + `0x21` + family/
+transport byte + addr block (mixed family ⇒ `0x20`/`AF_UNSPEC` LOCAL, no addrs).
+`Pool::proxy_protocol` carried from cfg. `proxy::handle_tcp(client, peer,
+client_local, pool)` writes the header to the backend immediately after
+`connect_backend`, before `pump`; a write error is a passive-unhealthy + `Err`.
+`listener.rs` passes `local` (already computed for routing).
+`gsp_proxy_protocol_headers_total{pool,version}`. Live across reload.
+Resolver `target` connections have no pool ⇒ never get a header (open item).
+
+### Do NOT (phase 6)
+
+- Prepend the header per datagram on UDP — the v2-UDP variant is first-datagram
+  only (slice 2).
+- Trust an inbound PROXY header from the client — the proxy only ever writes
+  headers; accepting them is out of scope.
+
+---
+
 ## Codebase map (quick reference)
 
 | File | Responsibility |
@@ -792,7 +844,8 @@ not surface it.
 | `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
 | `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers(&Config)`, a local base64 encoder. |
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
-| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
+| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool; writes the pool's PROXY protocol header before the pump) / `handle_tcp_target` (resolver `target`, no guard, no header) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
+| `crates/gsp-core/src/proxy_protocol.rs` | `header(mode, src, dst, stream)` — PROXY protocol v1 (text) / v2 (binary) encoder. Write-only; parsing is the backend's job. |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` builds the `ListenerManager` (`start_all`) + spawns the health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `reload_requested`; `shutdown_with_grace` = `listeners.stop_all` + health await + `wait_idle` + `abort_all`. `RuntimeHandle`: `store` / `ready` / `route_hints` / `backend_overlay` / `request_reload` / `reconcile_listeners` / `active_conns` / `set_draining` / `is_draining`. |
 | `crates/gsp-core/src/listeners.rs` | `ListenerManager` — one task `Group` (workers + `watch<bool>` stop) per listener; `start_all` (startup), `reconcile(&Snapshot)` (diff by name → spawn/stop/rebind), `stop_all` / `abort_all`. |

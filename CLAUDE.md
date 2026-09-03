@@ -43,7 +43,8 @@ crates/
     pool.rs                 `Pool`, `Backend` (health + active count), `BackendGuard`
     listener.rs             TCP accept loop (one task per worker, SO_REUSEPORT)
     listener_udp.rs         UDP recv loop + worker-local session table + reply pump
-    proxy.rs                per-connection byte pump
+    proxy.rs                per-connection byte pump (+ PROXY protocol header write)
+    proxy_protocol.rs       PROXY protocol v1/v2 header encoder (write-only)
     sniff.rs                sniffer API seam (trait + registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
     resolver.rs             external resolver seam: trait Resolver + resolve_pool (the async route walk); transports live in gsp
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
@@ -184,11 +185,13 @@ Phase 3 (routing intelligence) shipped: a priority-ordered
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Phases 0–4 done.** Phase 4 (external resolver): HTTP + gRPC transports,
+**Phases 0–5 done.** Phase 4 (external resolver): HTTP + gRPC transports,
 `pool` + `target` results, `on_error` (`reject`/`fallback_route`/`stale_ok`),
-TTL'd LRU cache. Deferred: `Resolution.sticky_key`.
+TTL'd LRU cache. Phase 5 (operability): connection draining with a grace period,
+runtime listener add/remove/rebind, `draining` / `disabled` backend states, full
+CRUD admin API. Deferred: `Resolution.sticky_key`, `GET /sessions`.
 
-**Next: phase 5 — operability**: tracked connection draining with a grace
-period on shutdown; runtime listener add/remove/rebind; `draining` / `disabled`
-backend states; full CRUD admin API. See `HANDOVER.md` and `docs/08`. Don't
-half-land a slice.
+**Phase 6 — client-IP preservation, in progress.** Slice 1 done: per-pool
+`proxy_protocol: none | v1 | v2` writes a PROXY protocol header to the upstream
+TCP connection (`gsp_core::proxy_protocol`). Next: the v2-UDP variant, then
+TPROXY transparent mode. See `HANDOVER.md` and `docs/08`. Don't half-land a slice.

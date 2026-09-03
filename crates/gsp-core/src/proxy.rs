@@ -34,12 +34,13 @@ pub struct ConnOutcome {
 pub async fn handle_tcp(
     client: TcpStream,
     client_addr: SocketAddr,
+    client_local: SocketAddr,
     pool: &Pool,
 ) -> anyhow::Result<ConnOutcome> {
     let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
 
-    let backend = match connect_backend(backend_addr, pool.connect_timeout).await {
+    let mut backend = match connect_backend(backend_addr, pool.connect_timeout).await {
         Ok(s) => {
             guard.observe(true);
             s
@@ -49,6 +50,33 @@ pub async fn handle_tcp(
             return Err(e);
         }
     };
+
+    // PROXY protocol header (if the pool asks for one) goes out before any
+    // client bytes so the backend can parse it as the first thing on the wire.
+    let hdr = crate::proxy_protocol::header(
+        pool.proxy_protocol,
+        client_addr,
+        client_local,
+        true,
+    );
+    if !hdr.is_empty() {
+        if let Err(e) = backend.write_all(&hdr).await {
+            guard.observe(false);
+            return Err(anyhow::anyhow!(
+                "write PROXY header to backend {backend_addr} failed: {e}"
+            ));
+        }
+        let version = match pool.proxy_protocol {
+            gsp_config::ProxyProtocol::V1 => "v1",
+            gsp_config::ProxyProtocol::V2 => "v2",
+            gsp_config::ProxyProtocol::None => unreachable!("header() returns empty for None"),
+        };
+        metrics::counter!(
+            m::PROXY_PROTOCOL_HEADERS, "pool" => pool.name.to_string(), "version" => version,
+        )
+        .increment(1);
+    }
+
     Ok(pump(client, backend, backend_addr, pool.idle_timeout).await)
 }
 

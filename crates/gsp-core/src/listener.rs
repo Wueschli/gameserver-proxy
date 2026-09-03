@@ -157,7 +157,9 @@ pub async fn run_tcp_listener(
                             crate::proxy::TARGET_IDLE_TIMEOUT,
                         )
                         .await,
-                        (_, Some(pool)) => crate::proxy::handle_tcp(stream, peer, pool).await,
+                        (_, Some(pool)) => {
+                            crate::proxy::handle_tcp(stream, peer, local, pool).await
+                        }
                         _ => unreachable!("pool route always resolves a pool above"),
                     };
                     match result {

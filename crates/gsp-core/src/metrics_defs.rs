@@ -50,6 +50,10 @@ pub const RESOLVER_REQUESTS: &str = "gsp_resolver_requests_total";
 /// (`hit` | `hit_negative` | `miss` | `stale` | `uncacheable`).
 pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
 
+/// Counter. Labels: `pool`, `version` (`v1` | `v2`). A PROXY protocol header was
+/// prepended to an upstream connection.
+pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
+
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 

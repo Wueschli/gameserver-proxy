@@ -18,6 +18,10 @@ pools:
     balancer: round_robin        # round_robin | least_conn | consistent_hash
     connect_timeout_ms: 300
     idle_timeout_sec: 90
+    # Prepend a PROXY protocol header to the upstream connection so the backend
+    # sees the real client address. none (default) | v1 (text) | v2 (binary).
+    # The backend must accept PROXY headers only from this proxy's IP.
+    proxy_protocol: none
     health_check:
       type: tcp_connect
       interval_sec: 2
@@ -146,7 +150,7 @@ listeners:
         action: { pool: realtime }
 
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
-# Live: pool targets, balancer, health-check params, caps.
+# Live: pool targets, balancer, health-check params, caps, proxy_protocol.
 # Restart-only: listener bind / protocol / routes / affinity / prefix / freebind /
 #   route_hint. (Route-hint *entries* are runtime state via POST /route-hint, not
 #   config, and survive reloads.)

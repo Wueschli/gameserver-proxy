@@ -20,7 +20,9 @@
 > (scalar, not an object) — `consistent_hash` also reads a pool-level
 > `hash_on: src_ip | src_ip_port` (default `src_ip`), rejected on the other
 > balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
-> `expect_hex_prefix` for `udp_probe`; and `per_backend.max_sessions`.
+> `expect_hex_prefix` for `udp_probe`; `per_backend.max_sessions`; and
+> `proxy_protocol: none | v1 | v2` (scalar; `v2-udp` — the UDP variant — is not
+> wired yet, roadmap phase 6 slice 2).
 >
 > A listener maps to a pool either with the `pool: <name>` shorthand or with a
 > priority-ordered `routes:` list — `[{ match, action }]`, first match wins,

@@ -18,6 +18,7 @@ pub mod net;
 pub mod overlay;
 pub mod pool;
 pub mod proxy;
+pub mod proxy_protocol;
 pub mod resolver;
 pub mod route_hint;
 pub mod runtime;

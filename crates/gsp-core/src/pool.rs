@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig};
+use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig, ProxyProtocol};
 
 use crate::metrics_defs as m;
 
@@ -247,6 +247,8 @@ pub struct Pool {
     pub hash_on: Option<HashOn>,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
+    /// PROXY protocol header to prepend to each upstream connection, if any.
+    pub proxy_protocol: ProxyProtocol,
     backends: Vec<Arc<Backend>>,
     rr: AtomicUsize,
 }
@@ -282,6 +284,7 @@ impl Pool {
             hash_on: cfg.hash_on,
             connect_timeout: cfg.connect_timeout,
             idle_timeout: cfg.idle_timeout,
+            proxy_protocol: cfg.proxy_protocol,
             backends,
             rr: AtomicUsize::new(0),
         }
@@ -409,6 +412,7 @@ mod tests {
             hash_on: matches!(balancer, Balancer::ConsistentHash).then_some(HashOn::SrcIp),
             connect_timeout: Duration::from_millis(300),
             idle_timeout: Duration::from_secs(90),
+            proxy_protocol: ProxyProtocol::None,
             health_check: HealthCheck {
                 kind: HealthCheckKind::TcpConnect,
                 interval: Duration::from_secs(2),

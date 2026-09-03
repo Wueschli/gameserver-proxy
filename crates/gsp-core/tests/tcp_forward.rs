@@ -599,3 +599,77 @@ async fn reload_adds_removes_and_rebinds_listeners_at_runtime() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
+    // Backend: read one line (the PROXY header), remember it, then echo.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    tokio::spawn(async move {
+        let mut tx = Some(tx);
+        loop {
+            let (mut s, _) = backend.accept().await.unwrap();
+            // A health-check probe connects and closes with no bytes; skip it.
+            let mut hdr = Vec::new();
+            let mut byte = [0u8; 1];
+            let ok = loop {
+                match s.read_exact(&mut byte).await {
+                    Ok(_) => {
+                        hdr.push(byte[0]);
+                        if hdr.ends_with(b"\r\n") {
+                            break true;
+                        }
+                    }
+                    Err(_) => break false,
+                }
+            };
+            if !ok {
+                continue;
+            }
+            let _ = tx.take().unwrap().send(String::from_utf8(hdr).unwrap());
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = s.read(&mut buf).await {
+                if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+            return;
+        }
+    });
+
+    let proxy_addr = {
+        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        p.local_addr().unwrap()
+    };
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n    proxy_protocol: v1\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let client_local = client.local_addr().unwrap();
+    client.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+
+    let hdr = tokio::time::timeout(Duration::from_secs(1), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = format!(
+        "PROXY TCP4 127.0.0.1 127.0.0.1 {} {}\r\n",
+        client_local.port(),
+        proxy_addr.port()
+    );
+    assert_eq!(hdr, expected);
+
+    drop(client);
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
