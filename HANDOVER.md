@@ -241,9 +241,9 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
 - **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~137 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
-  Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
-  environment (no credentials; the HTTPS credential helper points at a nonexistent
-  Windows path). Push from a machine with credentials, or switch the remote to SSH.
+  `git push` works again (through slice 7); `origin/main` is current. The HTTPS
+  credential helper still logs a harmless "nonexistent Windows path" warning
+  before falling back to a working credential.
 
 ---
 
