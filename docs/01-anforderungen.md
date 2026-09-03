@@ -7,7 +7,10 @@
 - F1.2 Transport: TCP und UDP; QUIC/DTLS als „opaques UDP“ ohne Sonderbehandlung.
 - F1.3 Dualstack (IPv4 + IPv6).
 - F1.4 Optionaler Port-Range-Listener (ein Listener für `30000–30999`) für Spiele mit
-  dynamischen Ports.
+  dynamischen Ports und für Subdomain-per-Port-Routing (Schema B).
+- F1.5 Optionaler Präfix-Listener: Bind auf ein geroutetes IP-Präfix mit **einem**
+  Socket, Ziel-Adresse pro Paket/Verbindung via `IP_PKTINFO`/`getsockname`. Basis für
+  `dst`-Routing bei Spielen ohne Protokoll-Hinweis (Schema A).
 
 ### F2 – Routing
 - F2.1 Statisches Mapping Listener → Pool.
@@ -15,8 +18,14 @@
 - F2.3 Routing nach First-Packet-Match (Bytes-Präfix, Regex auf ersten N Bytes).
 - F2.4 Routing über externen Resolver (gRPC/HTTP-Callback) mit Cache & Timeout-Fallback.
 - F2.5 Routing nach Client-IP / Geo (CIDR-Listen).
-- F2.6 Fallback-/Default-Route, wenn keine Regel greift.
-- F2.7 Regel-Priorität deterministisch (erste passende Regel gewinnt).
+- F2.6 Routing nach **Ziel-IP/-Präfix** (`dst`) und **Ziel-Port** – für Spiele, die
+  rohe Daten an eine feste `IP:Port` ohne Hostname/SNI/Token schicken. Subdomain wird
+  per DNS auf eine eigene Ziel-IP (Schema A) oder einen eigenen Port (Schema B)
+  abgebildet.
+- F2.7 Push-Resolver: kurzlebige `src_ip → pool`-Zuordnung, von einem Launcher/API
+  vorab gesetzt (Schema C).
+- F2.8 Fallback-/Default-Route, wenn keine Regel greift.
+- F2.9 Regel-Priorität deterministisch (erste passende Regel gewinnt).
 
 ### F3 – Upstream / Pool
 - F3.1 Auswahlstrategien: round-robin, least-connections, konsistentes Hashing

@@ -49,7 +49,10 @@ Pool-Struktur, Rest wird geteilt).
 ### 2. Router
 - Wählt die erste passende Route (deterministische Priorität).
 - Matcher-Typen: `always`, `sni`, `first-bytes` (Präfix/Regex/Länge), `client-cidr`,
-  `port`, `external`.
+  `dst` (Ziel-IP/-Präfix), `port` (Ziel-Port), `external`.
+- **Ziel-Adresse ermitteln**: bei Präfix-Bind (ein Socket für ein ganzes Präfix) über
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO` (UDP, pro Datagramm) bzw. `getsockname()` (TCP).
+  Hebel für Spiele ohne Protokoll-Hinweis: Subdomain → eigene Ziel-IP.
 - **First-Packet-Peek** (TCP): `MSG_PEEK` bis zu `peek_max_bytes` oder `peek_timeout`.
   Reicht das nicht (Client sendet nichts zuerst), greift die Default-Route.
 - **External Resolver**: ruft gRPC/HTTP mit `{listener, src_ip, sni, first_bytes(b64),
@@ -90,6 +93,8 @@ Pool-Struktur, Rest wird geteilt).
 ### 7. Admin-API
 - `GET /config` (aktiver Snapshot, redigiert), `GET /pools`, `GET /sessions?...`
 - `POST /pools/{p}/backends`, `DELETE ...`, `PATCH .../{b} {state: draining}`
+- `POST /route-hint` – Push-Resolver: `{src_ip, pool|target, ttl_sec}` für Spiele
+  ohne Protokoll-Hinweis, gesetzt von Launcher/Matchmaker (Schema C in [03](03-routing.md))
 - `POST /reload`, `GET /healthz`, `GET /readyz`, `GET /metrics`
 - Auth: mTLS oder Bearer-Token, nur an internem Interface gebunden.
 

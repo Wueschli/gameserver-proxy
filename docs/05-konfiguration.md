@@ -141,6 +141,33 @@ listeners:
         action: { pool: source-query }
       - match: { type: always }
         action: { pool: match-eu }
+
+  # Rohes UDP ohne Protokoll-Hinweis: Subdomain per Ziel-IP (siehe docs/03 Schema A)
+  - name: raw-udp
+    bind: "[2001:db8:ace:1::]/64:7777"   # Präfix-Bind, ein Socket
+    protocol: udp
+    recv_dst_addr: true                   # IPV6_RECVPKTINFO / IP_PKTINFO aktivieren
+    freebind: true                        # ip_nonlocal_bind / IP_FREEBIND
+    routes:
+      - match: { type: dst, cidr: "2001:db8:ace:1::1/128" }   # survival.example.net
+        action: { pool: match-eu }
+      - match: { type: dst, cidr: "2001:db8:ace:1::2/128" }   # creative.example.net
+        action: { pool: match-us }
+      - match: { type: always }
+        action: { reject: true }          # unbekannte Ziel-IP -> verwerfen
+    affinity: { hash_on: src_ip }
+
+  # Variante nur-IPv4: Subdomain per Port (Schema B), SRV verteilt den Port
+  - name: raw-udp-v4
+    bind: "0.0.0.0:30000-30099"
+    protocol: udp
+    routes:
+      - match: { type: port, eq: 30001 }
+        action: { pool: match-eu }
+      - match: { type: port, eq: 30002 }
+        action: { pool: match-us }
+      - match: { type: always }
+        action: { reject: true }
 ```
 
 ## Validierungsregeln (Auszug)
@@ -151,7 +178,12 @@ listeners:
   (sonst Warnung „kein Default“).
 - `proxy_protocol: v2-udp` nur zusammen mit `protocol: udp`.
 - `consistent_hash` erfordert `hash_on`.
-- Bind-Adressen dürfen sich zwischen Listenern nicht überlappen (gleiche IP:Port:Proto).
+- `match.type: dst` erfordert `recv_dst_addr: true` am Listener (sonst ist die
+  Ziel-Adresse pro Paket/Verbindung nicht bekannt); Präfix-Bind erfordert `freebind:
+  true` und ein auf den Host geroutetes Präfix.
+- `match.type: port` nur sinnvoll bei Range-Bind (`:30000-30099`).
+- Bind-Adressen dürfen sich zwischen Listenern nicht überlappen (gleiche IP:Port:Proto);
+  ein Präfix-Bind darf keine Einzel-Bind-Adresse eines anderen Listeners überdecken.
 - Zahlenbereiche: Timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.
 
 ## Reload-Semantik

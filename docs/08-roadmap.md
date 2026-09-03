@@ -28,6 +28,9 @@ Inkrementell. Jede Phase ist für sich einsetzbar.
 ## Phase 3 – Routing-Intelligenz (Woche 8–10)
 - Route-Regelliste mit Prioritäten.
 - Matcher: `always`, `port`, `client-cidr`, `first-bytes` (prefix/regex/length).
+- `dst`-Matcher + Präfix-Listener (ein Socket, `IP_PKTINFO`/`getsockname`) für Spiele
+  ohne Protokoll-Hinweis (Subdomain → eigene Ziel-IP). Optional Push-Resolver
+  (`/route-hint`).
 - SNI-Peek-Matcher (ohne TLS-Terminierung).
 - Sniffer-Plugin-API (in-process, statisch): `sni`, `minecraft`, `a2s` als Referenz.
 - **Ergebnis**: mehrere Spiele/Regionen hinter einem Port.

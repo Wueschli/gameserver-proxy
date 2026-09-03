@@ -3,6 +3,11 @@
 ## TCP
 
 - **Annahme**: `accept4()` mit `SOCK_NONBLOCK`; `SO_REUSEPORT`-Sharding pro Worker.
+- **Ziel-IP der Verbindung**: für `dst`-basiertes Subdomain-Routing ohne Socket je IP
+  wird der Listener mit `IP_FREEBIND` / `ip_nonlocal_bind` auf ein geroutetes Präfix
+  gebunden; die konkrete Ziel-IP der akzeptierten Verbindung kommt aus
+  `getsockname()`. (Im transparenten Modus liefert `getsockname()` bereits die echte
+  vom Client adressierte IP.)
 - **Peek fürs Routing**: `recv(MSG_PEEK)` bis `peek_max_bytes` / `peek_timeout_ms`.
   Sendet der Client zuerst nichts (server-speaks-first), sofort Default-Route.
 - **Upstream-Connect**: nicht-blockierend, `connect_timeout`. `TCP_NODELAY` gesetzt;
@@ -22,6 +27,16 @@ UDP hat keine Verbindung – der Proxy baut das Konzept „Session“ selbst.
 
 - **Session-Schlüssel**: `(src_ip, src_port, dst_ip, dst_port)` (4-Tupel).
 - **Empfang**: `recvmmsg()` in Batches auf `SO_REUSEPORT`-Sockets, ein Loop je Worker.
+- **Empfang auf einem ganzen Präfix** (für `dst`-Routing bei Spielen ohne
+  Protokoll-Hinweis, siehe [03](03-routing.md)): der Listener bindet **nicht** je
+  Ziel-IP einen Socket, sondern einen Wildcard-Socket und aktiviert
+  `IP_PKTINFO` / `IPV6_RECVPKTINFO`. Pro Datagramm liefert das `cmsg` die
+  **tatsächliche Ziel-Adresse** (`ipi_addr` / `ipi6_addr`); danach `dst`-Match gegen
+  den LPM-Trie. Antworten müssen dieselbe Quell-Adresse tragen – die Ziel-IP wird
+  beim Senden per `cmsg` (`IP_PKTINFO`) bzw. über den an die Client-IP gebundenen
+  Session-Socket gesetzt. Voraussetzung: das Präfix ist auf den Proxy-Host geroutet
+  (kein NDP/ARP je Adresse nötig) und `net.ipv6.ip_nonlocal_bind` bzw. `IP_FREEBIND`
+  erlaubt das Binden.
 - **Pro Session ein Upstream-Socket**, per `connect(2)` an das Backend gebunden:
   - Rückantworten kommen ohne Tabellensuche direkt am richtigen Socket an.
   - Kernel filtert fremde Absender.
