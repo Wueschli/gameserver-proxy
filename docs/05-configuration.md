@@ -1,24 +1,24 @@
-# 05 – Konfiguration
+# 05 – Configuration
 
-## Prinzipien
+## Principles
 
-- **Eine deklarative YAML-Datei** ist die Quelle der Wahrheit. Discovery-Adapter und
-  Admin-API ergänzen zur Laufzeit nur die **Backend-Listen** und **-Zustände**.
-- **Validierung vor Aktivierung.** Fehlerhafte Konfig wird abgelehnt; die laufende
-  bleibt aktiv.
-- **Hot Reload** über `SIGHUP`, Datei-Watch oder `POST /reload`. Listener werden nur
-  bei geänderter Bind-Adresse neu gebunden.
-- Umgebungsvariablen-Interpolation (`${VAR}`) für Secrets/Token.
+- **One declarative YAML file** is the source of truth. Discovery adapters and the
+  admin API only supplement the **backend lists** and **states** at runtime.
+- **Validate before activating.** A faulty config is rejected; the running one stays
+  active.
+- **Hot reload** via `SIGHUP`, file watch, or `POST /reload`. Listeners are re-bound
+  only when their bind address changes.
+- Environment-variable interpolation (`${VAR}`) for secrets/tokens.
 
-## Schema (Referenz)
+## Schema (reference)
 
 ```yaml
 # global
 settings:
-  workers: 0                 # 0 = Anzahl CPU-Kerne
+  workers: 0                 # 0 = number of CPU cores
   admin:
     listen: "127.0.0.1:9900"
-    auth: { mode: "bearer", token: "${ADMIN_TOKEN}" }   # oder mode: mtls
+    auth: { mode: "bearer", token: "${ADMIN_TOKEN}" }   # or mode: mtls
   metrics: { path: "/metrics" }
   log:
     format: "json"
@@ -27,7 +27,7 @@ settings:
     max_connections: 500000
     max_udp_sessions: 1000000
 
-# wiederverwendbare Filter
+# reusable filters
 filters:
   - name: block-bogons
     type: deny_cidr
@@ -38,7 +38,7 @@ filters:
     new_per_sec: 50
     burst: 100
 
-# Backend-Quellen
+# backend sources
 backend_sources:
   - name: static-eu
     type: static
@@ -53,7 +53,7 @@ backend_sources:
     record: "_game._udp.us.internal.example.com"
     refresh_sec: 10
 
-# Pools
+# pools
 pools:
   - name: match-eu
     source: static-eu
@@ -84,20 +84,20 @@ pools:
     balancer: { strategy: round_robin }
     idle_timeout_sec: 10
 
-# Resolver (externe Routing-Logik)
+# resolvers (external routing logic)
 resolvers:
   - name: matchmaker
     type: grpc                 # grpc | http
     endpoint: "https://matchmaker.internal:8443"
     timeout_ms: 40
     cache:
-      key: ["first_bytes:0:16"]     # z. B. Session-Token-Präfix
+      key: ["first_bytes:0:16"]     # e.g. a session-token prefix
       positive_ttl_sec: 30
       negative_ttl_sec: 2
       max_entries: 200000
     on_error: "reject"         # reject | fallback | stale_ok
 
-# Listener + Routen
+# listeners + routes
 listeners:
   - name: public-udp
     bind: "0.0.0.0:7777"
@@ -107,7 +107,7 @@ listeners:
     routes:
       - match: { type: always }
         action: { resolver: matchmaker }
-      - match: { type: always }        # Fallback, falls resolver on_error=fallback
+      - match: { type: always }        # fallback if resolver on_error=fallback
         action: { pool: match-eu }
 
   - name: public-tls
@@ -142,11 +142,11 @@ listeners:
       - match: { type: always }
         action: { pool: match-eu }
 
-  # Rohes UDP ohne Protokoll-Hinweis: Subdomain per Ziel-IP (siehe docs/03 Schema A)
+  # Raw UDP with no protocol hint: subdomain by destination IP (see docs/03 scheme A)
   - name: raw-udp
-    bind: "[2001:db8:ace:1::]/64:7777"   # Präfix-Bind, ein Socket
+    bind: "[2001:db8:ace:1::]/64:7777"   # prefix bind, one socket
     protocol: udp
-    recv_dst_addr: true                   # IPV6_RECVPKTINFO / IP_PKTINFO aktivieren
+    recv_dst_addr: true                   # enable IPV6_RECVPKTINFO / IP_PKTINFO
     freebind: true                        # ip_nonlocal_bind / IP_FREEBIND
     routes:
       - match: { type: dst, cidr: "2001:db8:ace:1::1/128" }   # survival.example.net
@@ -154,10 +154,10 @@ listeners:
       - match: { type: dst, cidr: "2001:db8:ace:1::2/128" }   # creative.example.net
         action: { pool: match-us }
       - match: { type: always }
-        action: { reject: true }          # unbekannte Ziel-IP -> verwerfen
+        action: { reject: true }          # unknown destination IP -> drop
     affinity: { hash_on: src_ip }
 
-  # Variante nur-IPv4: Subdomain per Port (Schema B), SRV verteilt den Port
+  # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port
   - name: raw-udp-v4
     bind: "0.0.0.0:30000-30099"
     protocol: udp
@@ -170,30 +170,30 @@ listeners:
         action: { reject: true }
 ```
 
-## Validierungsregeln (Auszug)
+## Validation rules (excerpt)
 
-- Jeder `pool.source` muss auf eine `backend_sources[].name` zeigen.
-- Jede `action.pool` / `action.resolver` muss existieren.
-- Jeder Listener braucht mindestens eine Route; letzte Route sollte `always` sein
-  (sonst Warnung „kein Default“).
-- `proxy_protocol: v2-udp` nur zusammen mit `protocol: udp`.
-- `consistent_hash` erfordert `hash_on`.
-- `match.type: dst` erfordert `recv_dst_addr: true` am Listener (sonst ist die
-  Ziel-Adresse pro Paket/Verbindung nicht bekannt); Präfix-Bind erfordert `freebind:
-  true` und ein auf den Host geroutetes Präfix.
-- `match.type: port` nur sinnvoll bei Range-Bind (`:30000-30099`).
-- Bind-Adressen dürfen sich zwischen Listenern nicht überlappen (gleiche IP:Port:Proto);
-  ein Präfix-Bind darf keine Einzel-Bind-Adresse eines anderen Listeners überdecken.
-- Zahlenbereiche: Timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.
+- Every `pool.source` must point to a `backend_sources[].name`.
+- Every `action.pool` / `action.resolver` must exist.
+- Every listener needs at least one route; the last route should be `always`
+  (otherwise a "no default" warning).
+- `proxy_protocol: v2-udp` only together with `protocol: udp`.
+- `consistent_hash` requires `hash_on`.
+- `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
+  destination address per packet/connection is unknown); a prefix bind requires
+  `freebind: true` and a prefix routed to the host.
+- `match.type: port` is only meaningful with a range bind (`:30000-30099`).
+- Bind addresses must not overlap between listeners (same IP:port:proto); a prefix
+  bind must not cover a single bind address of another listener.
+- Numeric ranges: timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.
 
-## Reload-Semantik
+## Reload semantics
 
-| Änderung | Verhalten |
-|----------|-----------|
-| Backend hinzugefügt/entfernt | sofort im neuen Snapshot, bestehende Sessions unberührt |
-| Backend → `draining` | keine neuen Sessions, bestehende laufen aus |
-| Pool-Balancer geändert | gilt für **neue** Routing-Entscheidungen |
-| Route geändert/neu | gilt für neue Verbindungen/Sessions |
-| Listener-Bind geändert | alter Socket wird geschlossen, neuer gebunden (kurzer Gap) |
-| `settings.workers` geändert | erfordert Neustart (dokumentiert) |
-| ungültige Datei | Reload abgelehnt, Metrik `config_reload_failed_total++`, alte Konfig aktiv |
+| Change | Behavior |
+|--------|----------|
+| Backend added/removed | immediately in the new snapshot, existing sessions untouched |
+| Backend → `draining` | no new sessions, existing ones drain |
+| Pool balancer changed | applies to **new** routing decisions |
+| Route changed/added | applies to new connections/sessions |
+| Listener bind changed | the old socket is closed, the new one bound (brief gap) |
+| `settings.workers` changed | requires a restart (documented) |
+| Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |
