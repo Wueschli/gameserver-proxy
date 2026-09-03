@@ -63,9 +63,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
   `Resolver` trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest)
   in `gsp`; `pool` results; `on_error: reject | fallback_route`.
-- ⬜ **Slice 2**: result cache — configurable key (`src_ip` / `sni` /
-  `routing_key` / `first_bytes:a:b`), positive/negative TTL, `max_entries` LRU;
-  `on_error: stale_ok`.
+- ✅ **Slice 2**: result cache — configurable key (`src_ip` / `src_ip_port` /
+  `sni` / `routing_key` / `first_bytes:a:b`), positive/negative TTL,
+  `max_entries` LRU (`lru` crate), `on_error: stale_ok`.
 - ⬜ **Slice 3**: gRPC transport (`tonic` + `prost` + `resolver.proto`).
 - ⬜ **Slice 4**: `target` (fixed instance, pool-less connect) + `sticky_key`
   (per-listener sticky table so repeat clients skip the resolver).

@@ -51,7 +51,12 @@ resolvers:
     type: http                     # http (grpc lands in a later slice)
     endpoint: "http://127.0.0.1:8099/resolve"
     timeout_ms: 40
-    on_error: fallback_route       # reject | fallback_route | stale_ok (stale_ok needs the cache, later)
+    on_error: stale_ok             # reject | fallback_route | stale_ok
+    cache:                         # optional; omit for no caching
+      key: ["src_ip", "first_bytes:0:16"]   # src_ip | src_ip_port | sni | routing_key | first_bytes:a:b
+      positive_ttl_sec: 30         # a resolver response `ttl_sec` overrides this
+      negative_ttl_sec: 2
+      max_entries: 100000
 
 listeners:
   # A listener maps to a pool either with the `pool:` shorthand (one implicit
@@ -88,7 +93,8 @@ listeners:
         action: { pool: local }
       - match: { type: port, ports: [7777, "8000-8100"] }
         action: { pool: local }
-      # Ask the matchmaker; on any error fall through to the `always` rule below.
+      # Ask the matchmaker (results are cached; on error it serves a stale answer
+      # if it has one, else drops — see the resolver's on_error).
       - match: { type: always }
         action: { resolver: matchmaker }
       - match: { type: always }

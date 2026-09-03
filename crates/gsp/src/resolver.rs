@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gsp_config::{Config, OnError, ResolverConfig, ResolverKind};
-use gsp_core::{Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
+use gsp_core::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
 use serde::{Deserialize, Serialize};
 
 /// Build the name → resolver map from config. Errors if a resolver cannot be
@@ -14,12 +14,16 @@ use serde::{Deserialize, Serialize};
 pub fn build_resolvers(cfg: &Config) -> anyhow::Result<Resolvers> {
     let mut map = Resolvers::new();
     for rc in &cfg.resolvers {
-        let r: Arc<dyn Resolver> = match rc.kind {
+        let inner: Arc<dyn Resolver> = match rc.kind {
             ResolverKind::Http => Arc::new(HttpResolver::new(rc)?),
             ResolverKind::Grpc => anyhow::bail!(
                 "resolver {}: grpc transport is not implemented yet (phase 4, slice 3)",
                 rc.name
             ),
+        };
+        let r = match &rc.cache {
+            Some(cc) => Arc::new(CachedResolver::new(inner, cc)) as Arc<dyn Resolver>,
+            None => inner,
         };
         map.insert(rc.name.clone(), r);
     }

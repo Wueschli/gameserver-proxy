@@ -46,6 +46,10 @@ pub const ROUTE_HINTS_APPLIED: &str = "gsp_route_hints_applied_total";
 /// Counter. Labels: `resolver`, `result` (`ok` | `empty` | `timeout` | `error`).
 pub const RESOLVER_REQUESTS: &str = "gsp_resolver_requests_total";
 
+/// Counter. Labels: `resolver`, `result`
+/// (`hit` | `hit_negative` | `miss` | `stale` | `uncacheable`).
+pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
+
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 

@@ -262,6 +262,32 @@ struct RawResolver {
     timeout_ms: u64,
     #[serde(default)]
     on_error: OnError,
+    #[serde(default)]
+    cache: Option<RawCache>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCache {
+    /// Key parts, joined to form the cache key: `src_ip` | `src_ip_port` |
+    /// `sni` | `routing_key` | `first_bytes:<a>:<b>`.
+    key: Vec<String>,
+    #[serde(default = "default_positive_ttl_sec")]
+    positive_ttl_sec: u64,
+    #[serde(default = "default_negative_ttl_sec")]
+    negative_ttl_sec: u64,
+    #[serde(default = "default_cache_max_entries")]
+    max_entries: usize,
+}
+
+fn default_positive_ttl_sec() -> u64 {
+    30
+}
+fn default_negative_ttl_sec() -> u64 {
+    2
+}
+fn default_cache_max_entries() -> usize {
+    10_000
 }
 
 fn default_resolver_type() -> String {
@@ -633,6 +659,26 @@ pub enum ResolverKind {
     Grpc,
 }
 
+/// One part of a resolver cache key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheKeyPart {
+    SrcIp,
+    SrcIpPort,
+    Sni,
+    RoutingKey,
+    /// A slice of the first bytes (`first_bytes:a:b`, `a..b`).
+    FirstBytes(RangeInclusive<usize>),
+}
+
+/// Resolver result cache (`resolvers[].cache`).
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub key: Vec<CacheKeyPart>,
+    pub positive_ttl: Duration,
+    pub negative_ttl: Duration,
+    pub max_entries: usize,
+}
+
 /// An external routing resolver (`resolvers:` entry).
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
@@ -641,6 +687,8 @@ pub struct ResolverConfig {
     pub endpoint: String,
     pub timeout: Duration,
     pub on_error: OnError,
+    /// `Some` if `cache:` is set with a non-empty `key`.
+    pub cache: Option<CacheConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -923,12 +971,40 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 r.name
             )));
         }
+        let cache = match r.cache {
+            Some(c) if !c.key.is_empty() => {
+                let mut parts = Vec::with_capacity(c.key.len());
+                for k in &c.key {
+                    parts.push(parse_cache_key_part(&r.name, k)?);
+                }
+                if c.max_entries == 0 {
+                    return Err(Invalid(format!(
+                        "resolver {}: cache.max_entries must be > 0",
+                        r.name
+                    )));
+                }
+                Some(CacheConfig {
+                    key: parts,
+                    positive_ttl: Duration::from_secs(c.positive_ttl_sec),
+                    negative_ttl: Duration::from_secs(c.negative_ttl_sec),
+                    max_entries: c.max_entries,
+                })
+            }
+            Some(_) => {
+                return Err(Invalid(format!(
+                    "resolver {}: cache.key must be non-empty",
+                    r.name
+                )))
+            }
+            None => None,
+        };
         resolvers.push(ResolverConfig {
             name: r.name,
             kind,
             endpoint: r.endpoint,
             timeout: Duration::from_millis(r.timeout_ms),
             on_error: r.on_error,
+            cache,
         });
     }
 
@@ -1215,6 +1291,33 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             "unknown match type {other:?} \
              (always | client_cidr | dst | port | first_bytes | sni | sniffer)"
         ))),
+    }
+}
+
+fn parse_cache_key_part(rname: &str, s: &str) -> Result<CacheKeyPart, ConfigError> {
+    let bad = |m: String| ConfigError::Invalid(format!("resolver {rname}: cache.key: {m}"));
+    match s {
+        "src_ip" => Ok(CacheKeyPart::SrcIp),
+        "src_ip_port" => Ok(CacheKeyPart::SrcIpPort),
+        "sni" => Ok(CacheKeyPart::Sni),
+        "routing_key" => Ok(CacheKeyPart::RoutingKey),
+        _ => {
+            let rest = s
+                .strip_prefix("first_bytes:")
+                .ok_or_else(|| bad(format!("unknown key part {s:?}")))?;
+            let (a, b) = rest
+                .split_once(':')
+                .ok_or_else(|| bad(format!("{s:?} must be `first_bytes:<a>:<b>`")))?;
+            let a: usize = a.parse().map_err(|_| bad(format!("bad start in {s:?}")))?;
+            let b: usize = b.parse().map_err(|_| bad(format!("bad end in {s:?}")))?;
+            if a > b {
+                return Err(bad(format!("{s:?}: start > end")));
+            }
+            if b > PEEK_MAX {
+                return Err(bad(format!("{s:?}: end exceeds the {PEEK_MAX}-byte peek")));
+            }
+            Ok(CacheKeyPart::FirstBytes(a..=b))
+        }
     }
 }
 
@@ -2022,6 +2125,54 @@ listeners:
         );
         // a resolver route forces a full peek so the resolver can see the bytes
         assert_eq!(cfg.listeners[0].peek_len(), PEEK_MAX);
+    }
+
+    #[test]
+    fn parses_resolver_cache() {
+        let yaml = r#"
+pools: [{ name: p, targets: ["127.0.0.1:1"] }]
+resolvers:
+  - name: mm
+    endpoint: "http://x"
+    cache:
+      key: ["src_ip", "sni", "first_bytes:0:16"]
+      positive_ttl_sec: 60
+      negative_ttl_sec: 5
+      max_entries: 1000
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let c = cfg.resolvers[0].cache.as_ref().unwrap();
+        assert_eq!(
+            c.key,
+            vec![
+                CacheKeyPart::SrcIp,
+                CacheKeyPart::Sni,
+                CacheKeyPart::FirstBytes(0..=16)
+            ]
+        );
+        assert_eq!(c.positive_ttl.as_secs(), 60);
+        assert_eq!(c.negative_ttl.as_secs(), 5);
+        assert_eq!(c.max_entries, 1000);
+    }
+
+    #[test]
+    fn rejects_bad_resolver_cache() {
+        for bad in [
+            r#"cache: { key: [] }"#,
+            r#"cache: { key: ["nonsense"] }"#,
+            r#"cache: { key: ["first_bytes:8:4"] }"#,
+            r#"cache: { key: ["first_bytes:0:99999"] }"#,
+            r#"cache: { key: ["src_ip"], max_entries: 0 }"#,
+        ] {
+            let yaml = format!(
+                "pools: [{{ name: p, targets: [\"127.0.0.1:1\"] }}]\nresolvers:\n  - {{ name: mm, endpoint: \"http://x\", {bad} }}\nlisteners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", pool: p }}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]

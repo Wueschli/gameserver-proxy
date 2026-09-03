@@ -181,8 +181,8 @@ Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordere
 matcher, **no built-in sniffers**; the loader is Phase 9), and the
 `POST /route-hint` push resolver (per-listener `route_hint: true`).
 
-**Phase 4 (external resolver) started** — slice 1 (HTTP transport, `pool`
-results, `on_error`) landed; slices 2–4 are the cache, gRPC, and
+**Phase 4 (external resolver) in progress** — slices 1–2 (HTTP transport,
+`pool` results, `on_error`, TTL'd LRU cache) landed; slice 3 is gRPC, slice 4 is
 `target`/`sticky_key`. Then phase 5 (operability — connection draining, runtime
 listener/backend CRUD, `draining` / `disabled` states). See `HANDOVER.md` and
 `docs/08`. Don't half-land a slice.

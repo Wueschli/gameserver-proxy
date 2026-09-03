@@ -50,9 +50,10 @@ listener → backend pool forwarding with:
 - push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` + per-listener
   `route_hint: true` (a short-lived `src_ip → pool` hint wins over the route list)
 
-**Phase 3 complete; phase 4 (external resolver) started** — HTTP `resolvers:` +
-`action: { resolver: <name> }`, `pool` results, `on_error`. Next in phase 4:
-caching, gRPC, `target`. See [docs/08-roadmap.md](docs/08-roadmap.md).
+**Phase 3 complete; phase 4 (external resolver) in progress** — HTTP
+`resolvers:` + `action: { resolver: <name> }`, `pool` results, `on_error`, and a
+TTL'd LRU result cache. Next in phase 4: gRPC, `target`. See
+[docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 
