@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/gsp-config", "crates/gsp-core", "crates/gsp"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Wueschli/gameserver-proxy"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "macros",
+    "signal",
+    "sync",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+arc-swap = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+socket2 = { version = "0.5", features = ["all"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

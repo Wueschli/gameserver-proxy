@@ -1,0 +1,23 @@
+# gsp — reduced v0 schema (walking skeleton).
+# The full target schema is documented in docs/05-configuration.md.
+
+settings:
+  # Accept-loop tasks per listener. 0 = one per CPU core.
+  workers: 0
+  admin:
+    listen: "127.0.0.1:9900"   # /healthz /readyz /metrics /pools
+
+pools:
+  - name: local
+    targets:
+      - "127.0.0.1:9001"
+      - "127.0.0.1:9002"
+    balancer: round_robin
+    connect_timeout_ms: 300
+    idle_timeout_sec: 90
+
+listeners:
+  - name: public-tcp
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    pool: local

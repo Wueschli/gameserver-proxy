@@ -1,0 +1,19 @@
+[package]
+name = "gsp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gsp-config = { path = "../gsp-config" }
+
+tokio.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+metrics.workspace = true
+socket2.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "test-util"] }

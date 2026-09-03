@@ -25,4 +25,33 @@ and access control.
 
 ## Status
 
-Planning phase only. No code yet.
+Early scaffolding. The walking skeleton is in place: a TCP listener that forwards to a
+static round-robin pool, plus the admin/observability API. See
+[docs/08-roadmap.md](docs/08-roadmap.md) for what comes next (health checks, then UDP).
+
+## Build & run
+
+Requires a stable Rust toolchain (`rustup` — the repo pins `stable` via
+`rust-toolchain.toml`).
+
+```sh
+cargo build
+cargo test --all
+
+# validate a config
+cargo run -p gsp -- --config config.example.yaml --check
+
+# run it (Ctrl-C / SIGTERM to stop)
+cargo run -p gsp -- --config config.example.yaml
+```
+
+Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
+`/pools`. Log level via `GSP_LOG` (e.g. `GSP_LOG=debug`).
+
+## Workspace layout
+
+| Crate | Responsibility |
+|-------|----------------|
+| `crates/gsp-config` | YAML config types, parsing, validation (the reduced v0 schema) |
+| `crates/gsp-core` | data plane: config snapshot, backend pools, TCP listener, byte pump |
+| `crates/gsp` | binary: CLI, logging, admin API, process lifecycle |
