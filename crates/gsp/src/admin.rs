@@ -29,6 +29,9 @@ pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: Prometh
         .route("/metrics", get(metrics))
         .route("/pools", get(pools))
         .route("/pools/{pool}/backends/{addr}", patch(patch_backend))
+        .route("/config", get(config))
+        .route("/admin/drain", post(drain))
+        .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
         .with_state(AdminState {
             runtime,
@@ -55,9 +58,75 @@ async fn healthz() -> &'static str {
 async fn readyz(State(s): State<AdminState>) -> impl IntoResponse {
     if s.runtime.ready() {
         (StatusCode::OK, "ready")
+    } else if s.runtime.is_draining() {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
     }
+}
+
+/// `POST /admin/drain` — take this instance out of LB rotation (`readyz` starts
+/// failing) without stopping the data path. In-flight sessions keep running;
+/// operators wait for `active_conns` to fall, then send `SIGTERM`.
+async fn drain(State(s): State<AdminState>) -> (StatusCode, String) {
+    s.runtime.set_draining(true);
+    let n = s.runtime.active_conns();
+    tracing::info!(active_conns = n, "instance marked draining via admin API");
+    (StatusCode::OK, format!("draining; active_conns={n}\n"))
+}
+
+/// `POST /admin/undrain` — put the instance back into rotation.
+async fn undrain(State(s): State<AdminState>) -> (StatusCode, &'static str) {
+    s.runtime.set_draining(false);
+    tracing::info!("instance returned to rotation via admin API");
+    (StatusCode::OK, "ready\n")
+}
+
+/// `GET /config` — a plaintext view of the active snapshot (listeners + pools).
+async fn config(State(s): State<AdminState>) -> impl IntoResponse {
+    let snap = s.runtime.snapshot();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "draining={}\tactive_conns={}\n\nlisteners:\n",
+        s.runtime.is_draining(),
+        s.runtime.active_conns(),
+    ));
+    for l in &snap.listeners {
+        out.push_str(&format!(
+            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}\n",
+            l.name,
+            l.bind,
+            l.protocol,
+            l.routes.len(),
+            if l.route_hint { "\troute_hint" } else { "" },
+            match &l.prefix {
+                Some(p) => format!("\tprefix={p:?}"),
+                None => String::new(),
+            },
+            match &l.sniffer {
+                Some(n) => format!("\tsniffer={n}"),
+                None => String::new(),
+            },
+        ));
+    }
+    out.push_str("\npools:\n");
+    for (name, pool) in &snap.pools {
+        out.push_str(&format!("  {name}\tbalancer={:?}\n", pool.balancer));
+        for b in pool.backends() {
+            out.push_str(&format!(
+                "    {}\t{}\tstate={}\tactive={}\n",
+                b.addr,
+                if b.is_healthy() {
+                    "healthy"
+                } else {
+                    "unhealthy"
+                },
+                b.admin_state().as_str(),
+                b.active(),
+            ));
+        }
+    }
+    out
 }
 
 async fn metrics(State(s): State<AdminState>) -> impl IntoResponse {

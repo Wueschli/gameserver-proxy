@@ -80,8 +80,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
   affinity) while existing sessions drain; carried across reload by address;
   `PATCH /pools/{p}/backends/{addr}`; `gsp_pool_backends{state=draining|disabled}`.
-- ⬜ Admin API: backends CRUD (`POST` / `DELETE` a backend), read snapshot
-  (`GET /config`), `POST /admin/drain` (flip `readyz`).
+- ✅ **Slice 3**: `POST /admin/drain` / `POST /admin/undrain` (flip `readyz`
+  without stopping the data path) + `GET /config` (plaintext snapshot view with
+  `draining` / `active_conns`).
+- ⬜ Admin API: backends CRUD (`POST` / `DELETE` a backend — needs a
+  snapshot-rebuild path outside `reload.rs`).
 - ✅ **Slice 2**: graceful draining of the **proxy instance** — a `ConnTracker`
   counts in-flight TCP connections + UDP sessions; `SIGINT`/`SIGTERM` stops the
   accept/recv loops and `Runtime::shutdown_with_grace` waits for the tracked work

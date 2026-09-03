@@ -82,9 +82,15 @@ carried in the PROXY v2 TLV if the backend should correlate it.
 ## The proxy's own health endpoints
 
 - `GET /healthz` – the process is alive.
-- `GET /readyz` – config loaded & valid, at least one listener bound.
+- `GET /readyz` – config loaded & valid, at least one listener bound, and not
+  drained. Returns `draining` (503) after `POST /admin/drain`.
 - `GET /metrics` – Prometheus.
-- `GET /config`, `GET /pools`, `GET /sessions?listener=&src=&pool=` – introspection.
+- `GET /config` – plaintext view of the active snapshot (listeners + pools +
+  `draining` / `active_conns`). Implemented (phase 5). `GET /pools`,
+  `GET /sessions?listener=&src=&pool=` – introspection (`/sessions` not yet).
+- `POST /admin/drain` / `POST /admin/undrain` – take this instance out of / back
+  into LB rotation by flipping `readyz`, without stopping the data path.
+  Implemented (phase 5).
 - `POST /route-hint` `{src_ip, pool, ttl_sec}` – push-resolver hint (scheme C);
   applied by listeners with `route_hint: true`. Implemented.
 - `PATCH /pools/{pool}/backends/{addr}` `{state: enabled|draining|disabled}` –
@@ -92,7 +98,7 @@ carried in the PROXY v2 TLV if the backend should correlate it.
   remove the backend from new-session selection (including UDP affinity)
   immediately; existing sessions keep running. Carried across a config reload by
   address. `GET /pools` shows the current `state=` per backend.
-- `/config` & `/sessions` are not yet implemented.
+- `/sessions` is not yet implemented.
 
 ## Backend health checks
 
@@ -117,9 +123,9 @@ Flow for swapping a backend without dropping players:
 5. Remove the old backend.
 
 For a **proxy instance** restart:
-1. Set `readyz` to "false" (`POST /admin/drain`) → the upstream LB/anycast takes the
-   instance out of rotation. *(`POST /admin/drain` is not implemented yet — step 4
-   already covers the SIGTERM path.)*
+1. Set `readyz` to "false" (`POST /admin/drain`; `POST /admin/undrain` reverts) →
+   the upstream LB/anycast takes the instance out of rotation. The data path keeps
+   running; watch `active_conns` (in `GET /config`) fall.
 2. Grace period: no new `accept`s, existing sessions keep running.
 3. After `settings.shutdown_grace_sec` (default 30) close remaining sessions, exit
    the process.

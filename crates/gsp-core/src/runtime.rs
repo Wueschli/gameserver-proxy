@@ -1,6 +1,7 @@
 //! Owns the running listeners, the health checker, and the current config
 //! snapshot.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -16,6 +17,10 @@ pub struct Runtime {
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
+    /// Set by `POST /admin/drain` (and by shutdown): forces `readyz` to fail so
+    /// an upstream LB / anycast takes this instance out of rotation while
+    /// in-flight sessions keep running.
+    draining: Arc<AtomicBool>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -28,6 +33,7 @@ pub struct RuntimeHandle {
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
+    draining: Arc<AtomicBool>,
 }
 
 impl RuntimeHandle {
@@ -45,9 +51,22 @@ impl RuntimeHandle {
         self.snapshot.store(snapshot);
     }
 
-    /// Ready once at least one listener is configured in the live snapshot.
+    /// Ready once at least one listener is configured in the live snapshot and
+    /// the instance has not been put into drain (`POST /admin/drain`).
     pub fn ready(&self) -> bool {
-        !self.snapshot.load().listeners.is_empty()
+        !self.is_draining() && !self.snapshot.load().listeners.is_empty()
+    }
+
+    /// Whether `POST /admin/drain` (or a shutdown) has taken this instance out
+    /// of rotation.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Take the instance out of (`true`) or back into (`false`) LB rotation by
+    /// flipping `readyz`. Does not stop the data path.
+    pub fn set_draining(&self, on: bool) {
+        self.draining.store(on, Ordering::Release);
     }
 
     /// The push-resolver hint table (`POST /route-hint`).
@@ -70,6 +89,7 @@ impl Runtime {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
         let hints = RouteHints::new();
         let conns = ConnTracker::new();
+        let draining = Arc::new(AtomicBool::new(false));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let worker_count = if workers == 0 {
@@ -138,6 +158,7 @@ impl Runtime {
             snapshot,
             hints,
             conns,
+            draining,
             shutdown_tx,
             tasks,
         }
@@ -148,6 +169,7 @@ impl Runtime {
             snapshot: self.snapshot.clone(),
             hints: self.hints.clone(),
             conns: self.conns.clone(),
+            draining: self.draining.clone(),
         }
     }
 
@@ -162,6 +184,7 @@ impl Runtime {
     /// the grace period expires the still-running connections are left to be
     /// killed by the runtime shutdown that follows (the process is exiting).
     pub async fn shutdown_with_grace(mut self, grace: std::time::Duration) {
+        self.draining.store(true, Ordering::Release);
         let _ = self.shutdown_tx.send(true);
 
         let drained = {

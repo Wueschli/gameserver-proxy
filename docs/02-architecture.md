@@ -91,7 +91,10 @@ struct, the rest is shared).
   bind changed (otherwise kept running).
 
 ### 7. Admin API
-- `GET /config` (active snapshot, redacted), `GET /pools`, `GET /sessions?...`
+- `GET /config` (active snapshot, plaintext — implemented, phase 5), `GET /pools`,
+  `GET /sessions?...` (`/sessions` planned)
+- `POST /admin/drain` / `POST /admin/undrain` (flip `readyz` for the LB —
+  implemented, phase 5)
 - `PATCH /pools/{p}/backends/{addr} {state: enabled|draining|disabled}` (implemented, phase 5);
   `POST /pools/{p}/backends`, `DELETE ...` (planned)
 - `POST /route-hint` – push resolver: `{src_ip, pool|target, ttl_sec}` for games with

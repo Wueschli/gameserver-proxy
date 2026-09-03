@@ -500,3 +500,37 @@ async fn shutdown_drains_in_flight_connections_then_returns_early() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(TcpStream::connect(proxy).await.is_err());
 }
+
+#[tokio::test]
+async fn admin_drain_flips_readiness_without_stopping_the_data_path() {
+    let a = marker_backend(b'A').await;
+    let proxy = free_port().await;
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(handle.ready());
+    assert!(!handle.is_draining());
+
+    handle.set_draining(true);
+    assert!(!handle.ready(), "drain must make readyz fail");
+    assert!(handle.is_draining());
+
+    // The data path keeps working while drained.
+    let mut c = TcpStream::connect(proxy).await.unwrap();
+    let mut m = [0u8; 1];
+    c.read_exact(&mut m).await.unwrap();
+    assert_eq!(m[0], b'A');
+
+    handle.set_draining(false);
+    assert!(handle.ready(), "undrain restores readiness");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

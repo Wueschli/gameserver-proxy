@@ -54,13 +54,15 @@ listener → backend pool forwarding with:
   existing ones keep running; carried across a reload
 - graceful shutdown: `SIGINT`/`SIGTERM` stops accepting and drains in-flight TCP
   connections + UDP sessions, bounded by `settings.shutdown_grace_sec` (default 30)
+- instance drain: `POST /admin/drain` / `POST /admin/undrain` flip `readyz` for an
+  upstream LB without stopping the data path; `GET /config` dumps the live snapshot
 
 **Phases 1–4 complete** (`sticky_key` deferred); **phase 5 in progress** —
-`draining` / `disabled` backend states and graceful connection draining landed.
-External resolver: HTTP + gRPC `resolvers:` + `action: { resolver: <name> }`,
-`pool` / `target` results, `on_error`, and a TTL'd LRU result cache. Next in
-phase 5: runtime listener/backend CRUD, `GET /config`, `POST /admin/drain`. See
-[docs/08-roadmap.md](docs/08-roadmap.md).
+`draining` / `disabled` backend states, graceful connection draining, and the
+instance-drain / `GET /config` admin surface landed. External resolver: HTTP +
+gRPC `resolvers:` + `action: { resolver: <name> }`, `pool` / `target` results,
+`on_error`, and a TTL'd LRU result cache. Next in phase 5: runtime
+listener/backend CRUD. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

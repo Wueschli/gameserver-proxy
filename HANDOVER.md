@@ -2,9 +2,9 @@
 
 State of the work, decisions already made, and how to pick it up.
 Last updated: 2026-09-03 (**phases 3 & 4 complete**; **phase 5 in progress** —
-slices 1 & 2 landed: `enabled`/`draining`/`disabled` backend states +
+slices 1-3 landed: `enabled`/`draining`/`disabled` backend states +
 `PATCH /pools/{p}/backends/{addr}`; tracked connection draining with a
-`shutdown_grace_sec` on SIGINT/SIGTERM).
+`shutdown_grace_sec` on SIGINT/SIGTERM; `POST /admin/drain` + `GET /config`).
 
 ---
 
@@ -45,11 +45,17 @@ slices 1 & 2 landed: `enabled`/`draining`/`disabled` backend states +
   state on the signal — established sessions keep pumping until they idle out,
   new datagrams are dropped (`reason="draining"`). `RuntimeHandle::active_conns()`
   exposes the live count.
+- **Phase 5 slice 3 done**: `RuntimeHandle::{is_draining,set_draining}` (an
+  `AtomicBool`); `ready()` now also fails while draining. `gsp/src/admin.rs`:
+  `POST /admin/drain` / `POST /admin/undrain` (flip `readyz`, data path keeps
+  running), `GET /config` (plaintext snapshot: listeners + pools + `draining` /
+  `active_conns`). `readyz` returns `draining` (503) when drained.
+  `shutdown_with_grace` also sets the flag.
 - **Next (phase 5)**: runtime listener add/remove/rebind; backend CRUD
-  (`POST` / `DELETE` — needs a snapshot-rebuild design outside `reload.rs`);
-  `GET /config`; `POST /admin/drain` (flip `readyz`, uses `active_conns`). Also
-  deferred: resolver `sticky_key`; the sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 82 tests). Needs
+  (`POST` / `DELETE` a backend — needs a snapshot-rebuild design outside
+  `reload.rs`); `GET /sessions`. Also deferred: resolver `sticky_key`; the
+  sniffer plugin loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 83 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -137,12 +143,15 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   resolve to are read live from the snapshot. Route-**hint entries** are runtime
   state (`POST /route-hint`), independent of reload.
 - **Admin API** (`settings.admin.listen`, default `127.0.0.1:9900`):
-  `GET /healthz` `/readyz` `/metrics` (Prometheus) `/pools`; `POST /route-hint`
-  `{src_ip, pool, ttl_sec}` (push resolver — validates the pool, `ttl_sec`
-  1..=3600); `PATCH /pools/{pool}/backends/{addr}` `{state:
+  `GET /healthz` `/readyz` `/metrics` (Prometheus) `/pools` `/config`;
+  `POST /route-hint` `{src_ip, pool, ttl_sec}` (push resolver — validates the
+  pool, `ttl_sec` 1..=3600); `PATCH /pools/{pool}/backends/{addr}` `{state:
   enabled|draining|disabled}` (operator backend state — `draining`/`disabled`
-  divert new sessions, existing ones drain; carried across reload). `gsp` now
-  depends on `serde` for the request bodies.
+  divert new sessions, existing ones drain; carried across reload);
+  `POST /admin/drain` + `POST /admin/undrain` (flip `readyz` for the LB without
+  stopping the data path). `GET /config` is a plaintext snapshot dump with
+  `draining` / `active_conns`. `gsp` now depends on `serde` for the request
+  bodies.
 - **Metrics**: see `crates/gsp-core/src/metrics_defs.rs`. Connections, bytes,
   duration, backend connect errors, `gsp_pool_backends`, `gsp_healthcheck_total`,
   `gsp_lb_selections_total`, `gsp_route_hints_applied_total{listener}`,
@@ -665,7 +674,21 @@ Config: `settings.shutdown_grace_sec` (default 30) → `Config::shutdown_grace:
 Duration`. `RawSettings` got a hand-written `Default` (the derive gave 0).
 
 Tests use `shutdown_with_grace(100ms)` so they don't wait the 30 s default.
-`RuntimeHandle::active_conns()` is there for a future `POST /admin/drain`.
+
+### Slice 3 — instance drain + `GET /config` (done)
+
+`Runtime` / `RuntimeHandle` carry an `Arc<AtomicBool> draining`.
+`RuntimeHandle::ready()` = `!is_draining() && !listeners.is_empty()`;
+`set_draining(bool)` / `is_draining()`. `shutdown_with_grace` sets the flag
+first thing.
+
+`gsp/src/admin.rs`: `POST /admin/drain` (→ `set_draining(true)`, returns
+`active_conns`), `POST /admin/undrain` (→ `false`). `readyz` now returns
+`draining` (503) vs `not ready` (503) vs `ready` (200). `GET /config` renders a
+plaintext dump of the live snapshot — `draining` / `active_conns` header, then
+listeners (name, bind, proto, route count, flags) and pools (balancer, backends
+with health + admin state + active). No `serde` on the config types — plaintext,
+like `/pools`. `/sessions` still not implemented.
 
 ### Do NOT (phase 5)
 
@@ -693,11 +716,11 @@ Tests use `shutdown_with_grace(100ms)` so they don't wait the 30 s default.
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
-| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints` + `ConnTracker`; `shutdown` / `shutdown_with_grace(grace)` (drain then abort); `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`/`active_conns`). |
+| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints` + `ConnTracker`; `shutdown` / `shutdown_with_grace(grace)` (drain then abort); `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`/`active_conns`/`set_draining`/`is_draining`). |
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |
-| `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools`, `POST /route-hint`, `PATCH /pools/{pool}/backends/{addr}` (set `AdminState`). |
+| `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools` `/config`, `POST /route-hint`, `PATCH /pools/{pool}/backends/{addr}` (set `AdminState`), `POST /admin/drain` `/admin/undrain`. |
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch → debounce → `apply` (validate, build, store). |
 
 ---
