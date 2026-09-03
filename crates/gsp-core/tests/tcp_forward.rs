@@ -711,8 +711,8 @@ async fn acl_deny_drops_the_connection_before_routing() {
     let mut buf = [0u8; 5];
     let read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut buf)).await;
     match read {
-        Ok(Ok(0)) => {}                     // clean EOF
-        Ok(Err(_)) => {}                    // or connection reset
+        Ok(Ok(0)) => {}  // clean EOF
+        Ok(Err(_)) => {} // or connection reset
         other => panic!("expected the connection to be dropped, got {other:?}"),
     }
 
