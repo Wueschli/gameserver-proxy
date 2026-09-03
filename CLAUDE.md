@@ -216,5 +216,7 @@ Slice 4: UDP `first_packet_gate: true` — a session opens only when the first
 datagram is positively recognised (non-`reject` sniffer hint or a matching
 `first_bytes` route: `ListenerConfig::first_packet_recognised`), checked before
 the `route_hint` lookup; else `gsp_datagrams_dropped_total{reason="first_packet_gate"}`.
-Still to do: amplifier-checklist tests, optional geo filter, ACL LPM trie,
-parser fuzzing. See `HANDOVER.md` and `docs/08`. Don't half-land a slice.
+Slice 5: automated amplifier-checklist tests
+(`crates/gsp-core/tests/amplification.rs`; `docs/07` checklist ticked). Still to
+do: optional geo filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and
+`docs/08`. Don't half-land a slice.

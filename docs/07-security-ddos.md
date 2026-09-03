@@ -69,11 +69,20 @@ All steps run **before** buffer/session allocation.
 
 ## Abuse as an amplifier – checklist
 
-- [ ] No reply to datagrams without an established session.
-- [ ] No ICMP/error replies to spoofed senders from the app path.
-- [ ] Reply size never larger than covered by backend payload (the proxy generates no
-      payload of its own).
-- [ ] The rate limit applies before any state change.
+Guarded by `crates/gsp-core/tests/amplification.rs`:
+
+- [x] No reply to datagrams without an established session
+      (`no_unsolicited_or_duplicated_replies`).
+- [x] No error / unsolicited reply from the app path to a dropped datagram —
+      routing, ACL, rate-limit, first-packet-gate drops are all silent
+      (`dropped_datagrams_get_no_error_reply`). ICMP is the kernel's; the proxy
+      emits none itself.
+- [x] Reply size never larger than the backend payload — the proxy forwards
+      backend bytes verbatim and prepends nothing toward the client
+      (`reply_is_exactly_the_backend_payload`).
+- [x] The rate limit applies before any state change — rejected datagrams create
+      no session and are never forwarded
+      (`rate_limit_is_enforced_before_any_state_change`).
 
 ## Security logging
 

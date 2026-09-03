@@ -148,7 +148,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   before the `route_hint` lookup; unrecognised ⇒ no session, no reply,
   `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. `validate()`
   rejects it on TCP or with nothing to gate on.
-- Automated tests for the amplifier checklist.
+- ✅ **Slice 5**: automated amplifier-checklist tests
+  (`crates/gsp-core/tests/amplification.rs`) — no unsolicited / duplicated
+  replies, no error reply to a dropped datagram, reply size == backend payload
+  (proxy adds nothing toward the client), rate limit enforced before any state
+  change. Checklist in `docs/07` now ticked.
 - Optional geo filter.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.
 - **Result**: hardened against common L4/7 abuse.

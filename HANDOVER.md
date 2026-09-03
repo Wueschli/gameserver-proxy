@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–4 done** —
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–5 done** —
 filter chain: per-listener `allow` / `deny` CIDR lists + a per-listener
 `rate_limit` token bucket (per source IP and per /24 / /64) + process-wide
 `settings.limits` caps (`max_connections` / `max_udp_sessions` /
@@ -191,12 +191,20 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   can't bypass it) → `Err("first_packet_gate")` ⇒
   `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. `GET /config` shows
   the `first_packet_gate` flag.
-- **Next**: phase 7 slice 5+ — amplifier checklist tests, optional geo filter,
-  LPM trie for the ACL, fuzzing the peek/sniffer parsers.
+- **Phase 7 slice 5 done**: automated amplifier-checklist tests
+  (`crates/gsp-core/tests/amplification.rs`, 4) — no unsolicited / duplicated
+  replies; a dropped datagram (routing / ACL / rate / gate) gets no error reply
+  and reaches no backend; the client-facing reply is byte-for-byte the backend
+  payload (proxy prepends nothing toward the client); the rate limit is enforced
+  before any session / forward. The `docs/07` checklist is now ticked and
+  points at the test names. Test-only slice, no production change.
+- **Next**: phase 7 slice 6+ — optional geo filter (new `maxminddb` dep + DB
+  file lifecycle; roadmap-flagged "optional"), LPM trie for the ACL, fuzzing the
+  peek/sniffer parsers, load tests vs. NFR N1/N2.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~128 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~132 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -380,6 +388,13 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   routes `127.0.0.2` vs `127.0.0.3` (real `IP_PKTINFO` recv) and the client —
   `connect`-ed to the sub-address — only accepts the reply if its source is that
   address, proving the `sendmsg` pktinfo path.
+- `gsp-core/tests/amplification.rs` (4): the `docs/07` amplifier checklist — no
+  unsolicited / duplicated replies (silent client + bystander hear nothing, one
+  request → one reply); a `no_route` datagram gets no error reply and reaches no
+  backend; the client-facing reply is exactly the backend payload (proxy adds
+  nothing); a low `rate_limit` rejects datagrams before any session / forward.
+
+(The per-file counts above predate phases 3–7; `make check` runs ~132.)
 
 ---
 
@@ -443,7 +458,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
 | UDP first-packet gate (`first_packet_gate` on a UDP listener) | **done** (phase 7 slice 4) |
-| Geo filter, ACL LPM trie, amplifier-checklist tests, parser fuzzing | phase 7 |
+| Amplifier-checklist tests (`tests/amplification.rs`) | **done** (phase 7 slice 5) |
+| Geo filter, ACL LPM trie, parser fuzzing, NFR load tests | phase 7 |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
