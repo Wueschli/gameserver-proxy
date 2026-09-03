@@ -12,6 +12,16 @@
 
 ## Schema (reference)
 
+> **Implemented subset (roadmap phase 2).** `gsp-config` currently accepts a
+> reduced, flatter schema: `pools[].targets` (no `backend_sources`),
+> `balancer: round_robin | least_conn` (scalar, not an object),
+> `health_check.type: tcp_connect | udp_probe` with `send_hex` /
+> `expect_hex_prefix` for `udp_probe`, `per_backend.max_sessions`, and one
+> `pool` per listener (no `routes`). UDP listeners take
+> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting to `src_ip`); a UDP
+> session reads `idle_timeout_sec` once when it is created. See
+> `config.example.yaml`. The full schema below is the target.
+
 ```yaml
 # global
 settings:

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use tokio::net::TcpStream;
+use gsp_config::HealthCheckKind;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -53,8 +54,9 @@ async fn sweep(snapshot: &Arc<ArcSwap<Snapshot>>) {
             backend.mark_checked(now);
             let backend = backend.clone();
             let pool_name = pool_name.clone();
+            let kind = backend.check_kind().clone();
             probes.push(tokio::spawn(async move {
-                let ok = probe(backend.addr, backend.check_timeout()).await;
+                let ok = probe(backend.addr, backend.check_timeout(), &kind).await;
                 metrics::counter!(
                     m::HEALTHCHECK,
                     "pool" => pool_name.clone(),
@@ -95,9 +97,26 @@ async fn sweep(snapshot: &Arc<ArcSwap<Snapshot>>) {
     }
 }
 
-async fn probe(addr: SocketAddr, timeout: Duration) -> bool {
-    matches!(
-        tokio::time::timeout(timeout, TcpStream::connect(addr)).await,
-        Ok(Ok(_))
-    )
+async fn probe(addr: SocketAddr, timeout: Duration, kind: &HealthCheckKind) -> bool {
+    match kind {
+        HealthCheckKind::TcpConnect => matches!(
+            tokio::time::timeout(timeout, TcpStream::connect(addr)).await,
+            Ok(Ok(_))
+        ),
+        HealthCheckKind::UdpProbe {
+            send,
+            expect_prefix,
+        } => {
+            let fut = async {
+                let bind = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+                let sock = UdpSocket::bind(bind).await.ok()?;
+                sock.connect(addr).await.ok()?;
+                sock.send(send).await.ok()?;
+                let mut buf = [0u8; 2048];
+                let n = sock.recv(&mut buf).await.ok()?;
+                Some(n > 0 && (expect_prefix.is_empty() || buf[..n].starts_with(expect_prefix)))
+            };
+            matches!(tokio::time::timeout(timeout, fut).await, Ok(Some(true)))
+        }
+    }
 }

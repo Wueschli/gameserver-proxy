@@ -7,6 +7,16 @@ pub const LISTENER_CONNECTIONS: &str = "gsp_listener_connections_total";
 /// Gauge. Labels: `listener`.
 pub const ACTIVE_CONNECTIONS: &str = "gsp_active_connections";
 
+/// Gauge. Labels: `listener`. Live UDP sessions across the worker-local tables.
+pub const ACTIVE_UDP_SESSIONS: &str = "gsp_active_udp_sessions";
+
+/// Counter. Labels: `listener`, `dir` (`c2s` | `s2c`). UDP datagrams forwarded.
+pub const PACKETS: &str = "gsp_packets_total";
+
+/// Counter. Labels: `listener`, `reason`
+/// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send`).
+pub const DATAGRAMS_DROPPED: &str = "gsp_datagrams_dropped_total";
+
 /// Counter. Labels: `listener`, `dir` (`c2s` | `s2c`).
 pub const BYTES: &str = "gsp_bytes_total";
 

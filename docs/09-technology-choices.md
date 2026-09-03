@@ -70,6 +70,7 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 | 6 | External routing logic via a resolver callback + cache | matchmaking stays outside; the proxy understands no tokens | hard-coding routing rules in the proxy |
 | 7 | Rust | GC-free latency, safe parsers | Go (GC), C++ (memory safety) |
 | 8 | UDP: a `connect(2)` socket per session | return path without a table lookup, kernel sender filtering | one socket + manual demux |
+| 9 | UDP v0: one spawned reply-pump task per session; idle expiry by a 1 s sweep; sticky table bounded by a hard cap and cleared wholesale | ships the vertical slice without `recvmmsg`/timing-wheel/LRU machinery; each is a drop-in later | building the batching + timing wheel + LRU up front |
 
 ## Risks & mitigations
 

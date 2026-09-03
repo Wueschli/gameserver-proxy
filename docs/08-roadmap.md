@@ -24,12 +24,16 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   backend counts, healthcheck results, LB selections, config reload/version.
 - **Result**: usable as a plain TCP game server front proxy.
 
-## Phase 2 – L4 UDP proxy (week 5–7)
-- UDP listener, `recvmmsg`/`sendmmsg`, thread-local session table, timing wheel.
-- Per-session `connect(2)` upstream socket.
-- Session affinity (`hash_on: src_ip` + sticky table), `consistent_hash`.
-- `udp_probe` health check.
-- Session caps, per-route idle timeout.
+## Phase 2 – L4 UDP proxy ✅
+- ✅ UDP listener with `SO_REUSEPORT`, one recv task per core, worker-local
+  (lock-free) session table. (`recvmmsg`/`sendmmsg` batching and a timing wheel
+  deferred — plain `recv_from`/`send` and a 1 s idle sweep for now.)
+- ✅ Per-session `connect(2)` upstream socket + a reply-pump task per session.
+- ✅ Session affinity (`hash_on: src_ip | src_ip_port` + per-worker sticky
+  table). (`consistent_hash` balancer deferred.)
+- ✅ `udp_probe` health check (`send_hex` / `expect_hex_prefix`).
+- ✅ Per-backend session caps (shared with TCP) + per-pool idle timeout;
+  amplification guard (no reply without an established session).
 - **Result**: covers the majority of real-time game servers.
 
 ## Phase 3 – Routing intelligence (week 8–10)

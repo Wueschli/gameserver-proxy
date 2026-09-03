@@ -2,13 +2,15 @@
 //! pools with health state, the TCP listener accept loop, the byte pump, and
 //! the active health checker.
 //!
-//! Roadmap status (`docs/08-roadmap.md`): phase 1 complete — TCP forwarding,
+//! Roadmap status (`docs/08-roadmap.md`): phases 1–2 — TCP and UDP forwarding,
 //! round-robin / least-connections balancing, per-backend session caps,
-//! active `tcp_connect` health checks with passive failure feedback, and hot
-//! reload via an atomic snapshot swap. UDP is phase 2.
+//! active `tcp_connect` / `udp_probe` health checks with passive failure
+//! feedback, per-worker UDP session tables with `src_ip` affinity, and hot
+//! reload via an atomic snapshot swap.
 
 pub mod health;
 pub mod listener;
+pub mod listener_udp;
 pub mod metrics_defs;
 pub mod net;
 pub mod pool;

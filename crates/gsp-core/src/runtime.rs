@@ -65,10 +65,22 @@ impl Runtime {
                 let lc = lc.clone();
                 let mut sd = shutdown_rx.clone();
                 tasks.push(tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::listener::run_tcp_listener(lc.clone(), snap, worker_id, &mut sd)
+                    let res = match lc.protocol {
+                        gsp_config::Protocol::Tcp => {
+                            crate::listener::run_tcp_listener(lc.clone(), snap, worker_id, &mut sd)
+                                .await
+                        }
+                        gsp_config::Protocol::Udp => {
+                            crate::listener_udp::run_udp_listener(
+                                lc.clone(),
+                                snap,
+                                worker_id,
+                                &mut sd,
+                            )
                             .await
-                    {
+                        }
+                    };
+                    if let Err(e) = res {
                         tracing::error!(
                             listener = %lc.name, worker = worker_id, error = %e,
                             "listener task exited with error"

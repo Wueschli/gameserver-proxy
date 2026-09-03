@@ -12,8 +12,9 @@
 
 ### Throughput
 - `gsp_bytes_total{listener,pool,dir}` – `dir` = `c2s|s2c`
-- `gsp_packets_total{listener,pool,dir}` (UDP)
-- `gsp_datagrams_dropped_total{listener,reason}`
+- `gsp_packets_total{listener,pool,dir}` (UDP) — v0 emits `{listener,dir}` only
+- `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
+  `no_route|no_backend|upstream_bind|upstream_send`
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)

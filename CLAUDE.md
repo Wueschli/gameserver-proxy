@@ -42,8 +42,9 @@ crates/
     snapshot.rs            immutable `Snapshot` (listeners + pools) behind ArcSwap
     pool.rs                 `Pool`, `Backend` (health + active count), `BackendGuard`
     listener.rs             TCP accept loop (one task per worker, SO_REUSEPORT)
+    listener_udp.rs         UDP recv loop + worker-local session table + reply pump
     proxy.rs                per-connection byte pump
-    health.rs               active health-check sweep task
+    health.rs               active health-check sweep task (tcp_connect + udp_probe)
     runtime.rs              owns listener + health tasks, holds the ArcSwap
     net.rs                  socket helpers (SO_REUSEPORT bind)
     metrics_defs.rs         canonical metric names — ALL metric names live here
@@ -164,6 +165,8 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 
 ## Roadmap position
 
-Phases 0 and 1 are done (TCP forwarding, round-robin + least-conn, health checks,
-per-backend caps, hot reload, metrics). **Phase 2 is UDP** — see `HANDOVER.md` for the
-concrete plan. Do not start UDP piecemeal.
+Phases 0–2 are done: TCP + UDP forwarding, round-robin + least-conn, active
+`tcp_connect` / `udp_probe` health checks, per-backend caps, worker-local UDP
+session tables with `src_ip` affinity, hot reload, metrics. **Phase 3 is routing
+intelligence** (route rule list + matchers) — see `HANDOVER.md` and `docs/03`.
+Don't half-land a phase.

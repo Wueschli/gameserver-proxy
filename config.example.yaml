@@ -1,4 +1,4 @@
-# gsp — reduced v0 schema (roadmap phase 1).
+# gsp — reduced v0 schema (roadmap phase 2).
 # The full target schema is documented in docs/05-configuration.md.
 
 settings:
@@ -24,12 +24,36 @@ pools:
     per_backend:
       max_sessions: 500           # optional; omit for uncapped
 
+  - name: realtime
+    targets:
+      - "127.0.0.1:27015"
+      - "127.0.0.1:27016"
+    balancer: least_conn
+    idle_timeout_sec: 30           # UDP session idle eviction
+    health_check:
+      type: udp_probe             # send a payload, expect a reply datagram
+      send_hex: "ffffffff54536f7572636520456e67696e6520517565727900"
+      expect_hex_prefix: "ffffffff49"
+      interval_sec: 2
+      timeout_ms: 500
+      rise: 2
+      fall: 3
+
 listeners:
   - name: public-tcp
     bind: "0.0.0.0:7777"
     protocol: tcp
     pool: local
 
+  - name: public-udp
+    bind: "0.0.0.0:27015"
+    protocol: udp
+    pool: realtime
+    affinity:
+      hash_on: src_ip             # src_ip (default for udp) | src_ip_port
+
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps.
-# Restart-only: listener bind / protocol / pool mapping.
+# Restart-only: listener bind / protocol / pool mapping / affinity.
+# Note: a UDP session reads idle_timeout_sec once at creation; a reload that
+# changes it applies to sessions opened afterwards.

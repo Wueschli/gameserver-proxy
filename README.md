@@ -25,17 +25,21 @@ and access control.
 
 ## Status
 
-**Roadmap phase 1 complete.** TCP listener → backend pool forwarding with:
+**Roadmap phases 1–2 complete.** TCP and UDP listener → backend pool forwarding
+with:
 
 - `round_robin` and `least_conn` balancing
-- active `tcp_connect` health checks (`rise`/`fall` thresholds) plus passive
-  connect-failure feedback; unhealthy backends are skipped
-- optional per-backend session caps
+- active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
+  passive connect-failure feedback; unhealthy backends are skipped
+- UDP: worker-local (lock-free) session tables, one `connect(2)` upstream socket per
+  session, `src_ip` / `src_ip_port` backend affinity, idle-timeout eviction, and a
+  no-unsolicited-reply amplification guard
+- optional per-backend session caps (shared by TCP connections and UDP sessions)
 - hot reload on `SIGHUP` or config-file change (atomic snapshot swap; backend health
   carried across the swap)
 - admin/observability API and Prometheus metrics
 
-Next: phase 2 — UDP. See [docs/08-roadmap.md](docs/08-roadmap.md).
+Next: phase 3 — routing intelligence. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 
@@ -57,7 +61,7 @@ Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
 | Crate | Responsibility |
 |-------|----------------|
 | `crates/gsp-config` | YAML config types, parsing, validation (the reduced v0 schema) |
-| `crates/gsp-core` | data plane: config snapshot, backend pools, TCP listener, byte pump |
+| `crates/gsp-core` | data plane: config snapshot, backend pools, TCP + UDP listeners, byte pump, UDP session tables |
 | `crates/gsp` | binary: CLI, logging, admin API, process lifecycle |
 
 ## Contributing / continuing the work

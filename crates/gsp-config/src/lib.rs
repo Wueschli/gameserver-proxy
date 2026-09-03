@@ -109,6 +109,13 @@ struct RawHealthCheck {
     rise: u32,
     #[serde(default = "default_hc_fall")]
     fall: u32,
+    /// `udp_probe` only: hex-encoded payload to send to the backend.
+    #[serde(default)]
+    send_hex: Option<String>,
+    /// `udp_probe` only: hex-encoded prefix the reply must start with. Empty /
+    /// absent means "any reply datagram counts as healthy".
+    #[serde(default)]
+    expect_hex_prefix: Option<String>,
 }
 
 impl Default for RawHealthCheck {
@@ -119,6 +126,8 @@ impl Default for RawHealthCheck {
             timeout_ms: default_hc_timeout_ms(),
             rise: default_hc_rise(),
             fall: default_hc_fall(),
+            send_hex: None,
+            expect_hex_prefix: None,
         }
     }
 }
@@ -154,6 +163,16 @@ struct RawListener {
     #[serde(default)]
     protocol: Protocol,
     pool: String,
+    /// UDP only: per-client → backend stickiness across session re-creation.
+    #[serde(default)]
+    affinity: Option<RawAffinity>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAffinity {
+    #[serde(default)]
+    hash_on: HashOn,
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +197,23 @@ pub enum Protocol {
     Udp,
 }
 
+/// What a UDP session's client key hashes on for backend stickiness.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HashOn {
+    #[default]
+    SrcIp,
+    SrcIpPort,
+}
+
+/// Health probe variant. `tcp_connect` just opens a TCP connection; `udp_probe`
+/// sends `send` and expects a reply datagram (optionally prefix-matched).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthCheckKind {
+    TcpConnect,
+    UdpProbe { send: Vec<u8>, expect_prefix: Vec<u8> },
+}
+
 // ---------------------------------------------------------------------------
 // Validated types: parsed, resolved, ready for the runtime to consume.
 // ---------------------------------------------------------------------------
@@ -193,6 +229,7 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct HealthCheck {
+    pub kind: HealthCheckKind,
     pub interval: Duration,
     pub timeout: Duration,
     /// Consecutive successes needed to mark an unhealthy backend healthy.
@@ -219,6 +256,8 @@ pub struct ListenerConfig {
     pub bind: SocketAddr,
     pub protocol: Protocol,
     pub pool: String,
+    /// `Some` on UDP listeners (stickiness key); `None` on TCP.
+    pub affinity: Option<HashOn>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,12 +320,54 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         }
 
         let hc = &p.health_check;
-        if hc.kind != "tcp_connect" {
-            return Err(Invalid(format!(
-                "pool {}: health_check.type {:?} is not supported (only tcp_connect)",
-                p.name, hc.kind
-            )));
-        }
+        let hc_kind = match hc.kind.as_str() {
+            "tcp_connect" => {
+                if hc.send_hex.is_some() || hc.expect_hex_prefix.is_some() {
+                    return Err(Invalid(format!(
+                        "pool {}: send_hex / expect_hex_prefix only apply to health_check.type \
+                         udp_probe",
+                        p.name
+                    )));
+                }
+                HealthCheckKind::TcpConnect
+            }
+            "udp_probe" => {
+                let send = match &hc.send_hex {
+                    Some(s) => parse_hex(s).map_err(|e| {
+                        Invalid(format!("pool {}: health_check.send_hex: {e}", p.name))
+                    })?,
+                    None => {
+                        return Err(Invalid(format!(
+                            "pool {}: health_check.type udp_probe requires send_hex",
+                            p.name
+                        )))
+                    }
+                };
+                if send.is_empty() {
+                    return Err(Invalid(format!(
+                        "pool {}: health_check.send_hex must not be empty",
+                        p.name
+                    )));
+                }
+                let expect_prefix = match &hc.expect_hex_prefix {
+                    Some(s) => parse_hex(s).map_err(|e| {
+                        Invalid(format!("pool {}: health_check.expect_hex_prefix: {e}", p.name))
+                    })?,
+                    None => Vec::new(),
+                };
+                HealthCheckKind::UdpProbe {
+                    send,
+                    expect_prefix,
+                }
+            }
+            other => {
+                return Err(Invalid(format!(
+                    "pool {}: health_check.type {other:?} is not supported \
+                     (tcp_connect | udp_probe)",
+                    p.name
+                )))
+            }
+        };
         if hc.interval_sec == 0 || hc.timeout_ms == 0 {
             return Err(Invalid(format!(
                 "pool {}: health_check interval_sec and timeout_ms must be > 0",
@@ -313,6 +394,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             connect_timeout: Duration::from_millis(p.connect_timeout_ms),
             idle_timeout: Duration::from_secs(p.idle_timeout_sec),
             health_check: HealthCheck {
+                kind: hc_kind,
                 interval: Duration::from_secs(hc.interval_sec),
                 timeout: Duration::from_millis(hc.timeout_ms),
                 rise: hc.rise,
@@ -347,17 +429,23 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name, l.pool
             )));
         }
-        if l.protocol == Protocol::Udp {
-            return Err(Invalid(format!(
-                "listener {}: UDP is not implemented yet (scaffold supports TCP only)",
-                l.name
-            )));
-        }
+        let affinity = match (l.protocol, l.affinity) {
+            (Protocol::Tcp, Some(_)) => {
+                return Err(Invalid(format!(
+                    "listener {}: affinity applies only to udp listeners",
+                    l.name
+                )))
+            }
+            (Protocol::Tcp, None) => None,
+            (Protocol::Udp, None) => Some(HashOn::default()),
+            (Protocol::Udp, Some(a)) => Some(a.hash_on),
+        };
         listeners.push(ListenerConfig {
             name: l.name,
             bind,
             protocol: l.protocol,
             pool: l.pool,
+            affinity,
         });
     }
 
@@ -367,6 +455,21 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         pools,
         listeners,
     })
+}
+
+/// Parse a hex string (optional ASCII whitespace between bytes) into bytes.
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    let compact: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if !compact.len().is_multiple_of(2) {
+        return Err(format!("odd number of hex digits in {s:?}"));
+    }
+    (0..compact.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&compact[i..i + 2], 16)
+                .map_err(|_| format!("invalid hex byte {:?}", &compact[i..i + 2]))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -433,7 +536,7 @@ listeners:
     }
 
     #[test]
-    fn rejects_udp_for_now() {
+    fn accepts_udp_listener_with_default_affinity() {
         let yaml = r#"
 pools:
   - name: local
@@ -443,6 +546,63 @@ listeners:
     bind: "0.0.0.0:7777"
     protocol: udp
     pool: local
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(cfg.listeners[0].protocol, Protocol::Udp);
+        assert_eq!(cfg.listeners[0].affinity, Some(HashOn::SrcIp));
+    }
+
+    #[test]
+    fn rejects_affinity_on_tcp_listener() {
+        let yaml = r#"
+pools:
+  - name: local
+    targets: ["127.0.0.1:9001"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    pool: local
+    affinity: { hash_on: src_ip }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn parses_udp_probe_health_check() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+    health_check: { type: udp_probe, send_hex: "ff ff ff ff", expect_hex_prefix: "ffff" }
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(
+            cfg.pools[0].health_check.kind,
+            HealthCheckKind::UdpProbe {
+                send: vec![0xff, 0xff, 0xff, 0xff],
+                expect_prefix: vec![0xff, 0xff],
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_udp_probe_without_send_hex() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+    health_check: { type: udp_probe }
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    pool: p
 "#;
         assert!(parse_str(yaml).is_err());
     }

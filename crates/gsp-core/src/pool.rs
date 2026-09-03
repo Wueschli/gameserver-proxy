@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gsp_config::{Balancer, HealthCheck, PoolConfig};
+use gsp_config::{Balancer, HealthCheck, HealthCheckKind, PoolConfig};
 
 use crate::metrics_defs as m;
 
@@ -39,6 +39,7 @@ pub struct Backend {
     streaks: Mutex<Streaks>,
     rise: u32,
     fall: u32,
+    check_kind: HealthCheckKind,
     check_interval: Duration,
     check_timeout: Duration,
     max_sessions: Option<usize>,
@@ -61,6 +62,7 @@ impl Backend {
             streaks: Mutex::new(Streaks::default()),
             rise: hc.rise,
             fall: hc.fall,
+            check_kind: hc.kind.clone(),
             check_interval: hc.interval,
             check_timeout: hc.timeout,
             max_sessions,
@@ -77,6 +79,10 @@ impl Backend {
 
     pub fn check_timeout(&self) -> Duration {
         self.check_timeout
+    }
+
+    pub fn check_kind(&self) -> &HealthCheckKind {
+        &self.check_kind
     }
 
     pub(crate) fn due_for_check(&self, now_ms: u64) -> bool {
@@ -213,6 +219,17 @@ impl Pool {
         &self.backends
     }
 
+    /// Reserve a slot on the backend at `want` specifically (UDP session
+    /// affinity). Returns `None` if that backend is gone, unhealthy, or full;
+    /// the caller then falls back to [`Pool::acquire`].
+    pub fn acquire_addr(&self, want: SocketAddr) -> Option<BackendGuard> {
+        let b = self.backends.iter().find(|b| b.addr == want)?;
+        if !b.is_healthy() {
+            return None;
+        }
+        b.try_acquire()
+    }
+
     /// Select a healthy backend with free capacity and reserve a session slot.
     pub fn acquire(&self) -> Result<BackendGuard, PickError> {
         let mut healthy: Vec<&Arc<Backend>> =
@@ -279,6 +296,7 @@ mod tests {
             connect_timeout: Duration::from_millis(300),
             idle_timeout: Duration::from_secs(90),
             health_check: HealthCheck {
+                kind: HealthCheckKind::TcpConnect,
                 interval: Duration::from_secs(2),
                 timeout: Duration::from_millis(500),
                 rise: 2,
