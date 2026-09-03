@@ -67,6 +67,10 @@ listener → backend pool forwarding with:
   each UDP session; or a TCP/UDP listener with `transparent: true` (Linux TPROXY)
   sources every upstream connection/datagram from the real client `ip:port` and
   replies from the original destination address
+- security hardening (phase 7, in progress): per-listener `allow` / `deny` CIDR
+  filter chain checked on the client source IP before routing (`deny` wins;
+  non-empty `allow` is default-deny), blocked traffic dropped silently and
+  counted by `gsp_filter_blocked_total`
 
 **Phases 1–6 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the

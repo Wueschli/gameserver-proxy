@@ -55,6 +55,10 @@ pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
 /// a session (UDP `v2-udp`).
 pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
 
+/// Counter. Labels: `listener`, `filter` (`acl`). A connection / new UDP session
+/// was dropped by the pre-routing filter chain on its source IP.
+pub const FILTER_BLOCKED: &str = "gsp_filter_blocked_total";
+
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 

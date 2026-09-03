@@ -673,3 +673,50 @@ async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn acl_deny_drops_the_connection_before_routing() {
+    // Echo backend that should never be reached.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let proxy_addr = {
+        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        p.local_addr().unwrap()
+    };
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n    deny: [\"127.0.0.1/32\"]\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // The proxy accepts the TCP connection then drops it without connecting a
+    // backend: the client sees EOF and never gets its bytes echoed.
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let _ = client.write_all(b"hello").await;
+    let mut buf = [0u8; 5];
+    let read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut buf)).await;
+    match read {
+        Ok(Ok(0)) => {}                     // clean EOF
+        Ok(Err(_)) => {}                    // or connection reset
+        other => panic!("expected the connection to be dropped, got {other:?}"),
+    }
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

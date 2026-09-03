@@ -63,6 +63,18 @@ pub async fn run_tcp_listener(
                 };
 
                 let listener_name = cfg.name.clone();
+
+                // Filter chain (phase 7): drop connections from a denied source
+                // IP before any bookkeeping or task spawn.
+                if !cfg.acl.permits(peer.ip()) {
+                    metrics::counter!(
+                        m::FILTER_BLOCKED,
+                        "listener" => listener_name.clone(), "filter" => "acl",
+                    ).increment(1);
+                    tracing::debug!(listener = %listener_name, peer = %peer, "connection blocked by acl");
+                    continue;
+                }
+
                 metrics::counter!(
                     m::LISTENER_CONNECTIONS,
                     "listener" => listener_name.clone(),

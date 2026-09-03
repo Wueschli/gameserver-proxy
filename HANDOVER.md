@@ -1,7 +1,10 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 3, 4 & 5 complete; phase 6 started**). Phase 5:
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slice 1 done** —
+per-listener `allow` / `deny` CIDR filter chain, checked on the client source IP
+before routing; `deny` wins, non-empty `allow` is default-deny; blocked traffic
+dropped silently + `gsp_filter_blocked_total`). Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
 `POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
@@ -123,13 +126,28 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   to the first datagram only (one `Cow::Owned` alloc; later datagrams untouched).
   `local` is the real per-datagram dest in prefix mode. `ProxyProtocol::label()`
   feeds `gsp_proxy_protocol_headers_total{pool,version}` (`v1|v2|v2-udp`).
-- **Next**: phase 7 — security & hardening (CIDR allow/deny LPM trie, rate
-  limiting on src_ip + /24, global caps, UDP first-packet gate, amplifier
-  checklist tests, optional geo filter, fuzzing the peek/sniffer parsers).
+- **Phase 7 slice 1 done**: CIDR allow/deny filter chain. `gsp-config`
+  `RawListener` gains `allow: Vec<String>` / `deny: Vec<String>` → parsed to
+  `Acl { allow: Vec<Cidr>, deny: Vec<Cidr> }` (`gsp_config::Acl`, `permits(ip)` /
+  `is_empty()`), a new `ListenerConfig::acl` field (always present, empty =
+  admit-all). Semantics: `deny` checked first and wins; a non-empty `allow` makes
+  the listener default-deny. `validate()` parses each CIDR (bad string ⇒
+  `Invalid`). `listener.rs` checks `cfg.acl.permits(peer.ip())` right after
+  `accept()` (before the `accepted` counter / task spawn); `listener_udp.rs`
+  checks `cfg.acl.permits(client.ip())` after the established-session fast path,
+  before `open_session` — established UDP sessions keep a scan-free steady path.
+  Blocked ⇒ silent drop (no reflection) + `gsp_filter_blocked_total{listener,
+  filter="acl"}` (`m::FILTER_BLOCKED`). `GET /config` shows `acl=+N/-M`.
+  `ListenerConfig` is `PartialEq` so an `allow`/`deny` change rebinds the
+  listener on reload. Linear `Cidr` scan (no LPM trie yet).
+- **Next**: phase 7 slice 2+ — rate limiting on src_ip + /24, global caps
+  (`max_connections`, `max_udp_sessions`, `max_new_sessions_per_sec`), UDP
+  first-packet gate, amplifier checklist tests, optional geo filter, LPM trie for
+  the ACL, fuzzing the peek/sniffer parsers.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~103 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~110 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -372,7 +390,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
-| Rate limiting, ACLs, geo, first-packet gate | phase 7 |
+| CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
+| Rate limiting, geo, first-packet gate, global caps, ACL LPM trie | phase 7 |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -470,6 +489,13 @@ one extra `write_all` to the backend per new TCP connection, before the pump.
 no extra syscall. Steady-state datagrams are byte-for-byte unchanged. Only when
 the pool opts in; `none` pools and resolver `target` connections pay nothing. No
 lock, no task, nothing per byte.
+
+**Filter chain — CIDR allow/deny** (`allow` / `deny` on a listener): per new TCP
+connection / new UDP session only, one linear scan of the (small, fixed) `Cidr`
+list — bit-compare per entry, no alloc, no lock, no task. TCP runs it before the
+task spawn; UDP runs it only for datagrams that don't hit an established session,
+so the steady-state per-datagram path is unchanged. Listeners with neither list
+pay nothing (`Acl::is_empty`, but the scan over two empty `Vec`s is already ~free).
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**

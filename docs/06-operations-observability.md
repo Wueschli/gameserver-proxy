@@ -30,6 +30,10 @@
   PROXY protocol header was prepended to an upstream connection (TCP) or the first
   datagram of a session (UDP `v2-udp`)
 
+### Security / filter chain
+- `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl`; a connection /
+  new UDP session was dropped by the pre-routing filter chain on its source IP
+
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`
 - `gsp_resolver_cache_total{resolver,result}` – `hit|hit_negative|miss|stale|uncacheable`

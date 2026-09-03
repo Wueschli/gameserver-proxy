@@ -200,7 +200,11 @@ datagram, client-`ip:port`-bound upstream socket, and (UDP) a per-session
 `IP_TRANSPARENT` reply socket bound to the original destination. `socket2` is on
 0.6. Setup docs in `docs/04`.
 
-**Next: phase 7 — security & hardening.** CIDR allow/deny (LPM trie), rate
-limiting (src_ip + /24), global caps, UDP first-packet gate, amplifier-checklist
-tests, optional geo filter, parser fuzzing. See `HANDOVER.md` and `docs/08`.
-Don't half-land a slice.
+**Phase 7 (security & hardening) — in progress.** Slice 1 done: per-listener
+`allow` / `deny` CIDR filter chain (`gsp_config::Acl` on `ListenerConfig::acl`),
+checked on the client source IP before routing (TCP accept + UDP first datagram);
+`deny` wins, a non-empty `allow` is default-deny; blocked ⇒ silent drop +
+`gsp_filter_blocked_total{listener,filter="acl"}`. Still to do: rate limiting
+(src_ip + /24), global caps, UDP first-packet gate, amplifier-checklist tests,
+optional geo filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and
+`docs/08`. Don't half-land a slice.

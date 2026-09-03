@@ -121,7 +121,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   transparent, TCP + UDP).
 
 ## Phase 7 – Security & hardening (week 17–18)
-- Filter chain: CIDR allow/deny (LPM trie), rate limit (src_ip + /24), global caps.
+- ✅ **Slice 1**: CIDR allow/deny filter chain — per-listener `allow` / `deny`
+  CIDR lists, checked on the client source IP before routing (TCP accept + UDP
+  first datagram). `deny` wins; a non-empty `allow` is default-deny. Blocked =
+  silent drop + `gsp_filter_blocked_total{listener,filter="acl"}`. Linear scan of
+  the (small) `Cidr` list — no LPM trie yet; established UDP sessions are not
+  re-checked per datagram.
+- Rate limit (src_ip + /24), global caps (`max_connections`, `max_udp_sessions`,
+  `max_new_sessions_per_sec`).
 - UDP first-packet gate, automated tests for the amplifier checklist.
 - Optional geo filter.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.

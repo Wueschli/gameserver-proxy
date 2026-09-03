@@ -74,7 +74,17 @@
 > `IP_TRANSPARENT` on the listen socket, the original destination read per
 > connection / datagram, and the real client address bound as the upstream
 > source (needs `CAP_NET_ADMIN`; mutually exclusive with `prefix`);
-> `route_hint: true` → consult the push resolver. UDP listeners
+> `route_hint: true` → consult the push resolver.
+>
+> **Filter chain (phase 7):** `allow: [<cidr>, …]` / `deny: [<cidr>, …]` on a
+> listener (TCP or UDP) are checked against the client source IP before routing.
+> `deny` is checked first and wins; a non-empty `allow` makes the listener
+> default-deny for any source it does not cover. A blocked connection / new UDP
+> session is dropped silently (no error reply — no reflection) and counted by
+> `gsp_filter_blocked_total{listener,filter="acl"}`. Established UDP sessions are
+> not re-checked per datagram.
+>
+> UDP listeners
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
@@ -248,6 +258,7 @@ listeners:
   (otherwise a "no default" warning).
 - `proxy_protocol: v2-udp` only together with `protocol: udp`.
 - `transparent: true` (TCP or UDP) may not be combined with `prefix`.
+- Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires

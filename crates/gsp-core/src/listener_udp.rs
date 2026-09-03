@@ -230,6 +230,17 @@ pub async fn run_udp_listener(
                     continue;
                 }
 
+                // Filter chain (phase 7): a new session from a denied source IP
+                // is dropped before session allocation. Established sessions
+                // keep their steady-state path scan-free.
+                if !cfg.acl.permits(client.ip()) {
+                    metrics::counter!(
+                        m::FILTER_BLOCKED,
+                        "listener" => cfg.name.clone(), "filter" => "acl",
+                    ).increment(1);
+                    continue;
+                }
+
                 // New session — refused once draining.
                 if draining {
                     metrics::counter!(

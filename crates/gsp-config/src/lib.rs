@@ -221,6 +221,14 @@ struct RawListener {
     /// list: a live `src_ip → pool` hint wins if its pool still exists.
     #[serde(default)]
     route_hint: bool,
+    /// Filter chain, checked on the client source IP before routing. If `deny`
+    /// matches, the connection / new datagram is dropped. If `allow` is
+    /// non-empty, only source IPs it matches are admitted. `deny` wins over
+    /// `allow`. CIDR strings (`10.0.0.0/8`, `2001:db8::/32`).
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +471,32 @@ fn bits_match(a: &[u8], b: &[u8], prefix: u8) -> bool {
     }
     let mask = 0xffu8 << (8 - rem);
     (a[full] & mask) == (b[full] & mask)
+}
+
+/// Per-listener source-IP filter, checked before routing (phase 7). Empty =
+/// admit everyone. `deny` is checked first and wins; a non-empty `allow` then
+/// makes the listener default-deny for anything it does not cover.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Acl {
+    pub allow: Vec<Cidr>,
+    pub deny: Vec<Cidr>,
+}
+
+impl Acl {
+    pub fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.deny.is_empty()
+    }
+
+    /// Is a connection / datagram from `ip` admitted?
+    pub fn permits(&self, ip: IpAddr) -> bool {
+        if self.deny.iter().any(|c| c.contains(ip)) {
+            return false;
+        }
+        if !self.allow.is_empty() && !self.allow.iter().any(|c| c.contains(ip)) {
+            return false;
+        }
+        true
+    }
 }
 
 /// A host pattern for the `sni` matcher. Parsed lowercase; `*.foo` and `.foo`
@@ -820,6 +854,8 @@ pub struct ListenerConfig {
     pub sniffer: Option<String>,
     /// Check the `POST /route-hint` push-resolver table before the route list.
     pub route_hint: bool,
+    /// Source-IP filter chain, checked before routing. Empty ⇒ admit everyone.
+    pub acl: Acl,
 }
 
 impl ListenerConfig {
@@ -1206,6 +1242,19 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             )));
         }
 
+        let parse_cidrs = |field: &str, raw: &[String]| -> Result<Vec<Cidr>, ConfigError> {
+            raw.iter()
+                .map(|s| {
+                    Cidr::parse(s)
+                        .map_err(|e| Invalid(format!("listener {}: {field}: {e}", l.name)))
+                })
+                .collect()
+        };
+        let acl = Acl {
+            allow: parse_cidrs("allow", &l.allow)?,
+            deny: parse_cidrs("deny", &l.deny)?,
+        };
+
         // At most one sniffer plugin per listener (gsp-core runs one per conn).
         let mut sniffer: Option<String> = None;
         for r in &routes {
@@ -1234,6 +1283,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             transparent: l.transparent,
             sniffer,
             route_hint: l.route_hint,
+            acl,
         });
     }
 
@@ -2288,6 +2338,56 @@ listeners:
         assert!(cfg.listeners[0].prefix.is_none());
         assert!(!cfg.listeners[0].route_hint);
         assert!(!cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn parses_and_applies_listener_acl() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+    allow: ["10.0.0.0/8", "192.168.0.0/16"]
+    deny: ["10.6.6.0/24"]
+"#;
+        let acl = &parse_str(yaml).unwrap().listeners[0].acl;
+        assert!(!acl.is_empty());
+        assert!(acl.permits("10.1.2.3".parse().unwrap()));
+        assert!(acl.permits("192.168.9.9".parse().unwrap()));
+        // deny wins over an allow match
+        assert!(!acl.permits("10.6.6.6".parse().unwrap()));
+        // non-empty allow ⇒ default-deny for anything uncovered
+        assert!(!acl.permits("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn deny_only_acl_is_default_allow() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+                    deny: [\"203.0.113.0/24\"]\n";
+        let acl = &parse_str(yaml).unwrap().listeners[0].acl;
+        assert!(!acl.permits("203.0.113.5".parse().unwrap()));
+        assert!(acl.permits("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn absent_acl_is_empty_and_permits_all() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        let acl = &parse_str(yaml).unwrap().listeners[0].acl;
+        assert!(acl.is_empty());
+        assert!(acl.permits("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_bad_acl_cidr() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+                    deny: [\"not-a-cidr\"]\n";
+        assert!(parse_str(yaml).is_err());
     }
 
     #[test]
