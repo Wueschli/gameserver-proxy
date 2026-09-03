@@ -10,6 +10,7 @@
 
 pub mod drain;
 pub mod health;
+pub mod limits;
 pub mod listener;
 pub mod listener_udp;
 pub mod listeners;
@@ -28,6 +29,7 @@ pub mod sniff;
 mod util;
 
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+pub use limits::{GlobalLimits, LimitGuard};
 pub use listeners::ListenerManager;
 pub use overlay::BackendOverlay;
 pub use ratelimit::RateLimiter;

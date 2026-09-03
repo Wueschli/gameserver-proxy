@@ -207,8 +207,11 @@ checked on the client source IP before routing (TCP accept + UDP first datagram)
 `rate_limit: { per_ip, per_net }` token bucket (`gsp_config::RateLimit` →
 `gsp_core::ratelimit::RateLimiter`, one per listener shared across workers) on
 new connections / new UDP sessions, checked after the ACL; `per_net` keyed by
-/24 (v4) / /64 (v6). Blocked ⇒ silent drop +
-`gsp_filter_blocked_total{listener,filter="acl"|"rate_ip"|"rate_net"}`. Still to
-do: global caps, UDP first-packet gate, amplifier-checklist tests, optional geo
+/24 (v4) / /64 (v6). Slice 3: process-wide `settings.limits`
+(`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`, startup-only)
+→ `gsp_core::limits::GlobalLimits` (atomic counters + a new-session token bucket,
+RAII `LimitGuard`), refused before allocation. Blocked ⇒ silent drop +
+`gsp_filter_blocked_total{listener,filter="acl"|"rate_ip"|"rate_net"|"max_conn"|"max_udp"|"max_new_rate"}`.
+Still to do: UDP first-packet gate, amplifier-checklist tests, optional geo
 filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and `docs/08`. Don't
 half-land a slice.

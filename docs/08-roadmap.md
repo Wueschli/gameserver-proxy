@@ -134,7 +134,14 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `gsp_filter_blocked_total{filter="rate_ip"|"rate_net"}`. One `Mutex<HashMap>`
   per listener shared across workers, lazy prune of idle buckets. Established UDP
   sessions keep a scan-free steady path.
-- Global caps (`max_connections`, `max_udp_sessions`, `max_new_sessions_per_sec`).
+- ✅ **Slice 3**: global caps — `settings.limits.{max_connections,
+  max_udp_sessions, max_new_sessions_per_sec}` (all optional; startup-only). Live
+  `AtomicUsize` counters for TCP conns / UDP sessions + a token bucket for the
+  new-session rate, held in one `gsp_core::limits::GlobalLimits` shared by every
+  worker. A new connection / session over a cap is refused before allocation
+  (existing untouched) + `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
+  "max_new_rate"}`. RAII `LimitGuard` releases the slot on connection / session
+  end.
 - UDP first-packet gate, automated tests for the amplifier checklist.
 - Optional geo filter.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.

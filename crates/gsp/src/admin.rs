@@ -90,10 +90,17 @@ async fn undrain(State(s): State<AdminState>) -> (StatusCode, &'static str) {
 async fn config(State(s): State<AdminState>) -> impl IntoResponse {
     let snap = s.runtime.snapshot();
     let mut out = String::new();
+    fn opt(v: Option<impl std::fmt::Display>) -> String {
+        v.map_or_else(|| "-".to_string(), |n| n.to_string())
+    }
+    let lim = &snap.limits;
     out.push_str(&format!(
-        "draining={}\tactive_conns={}\n\nlisteners:\n",
+        "draining={}\tactive_conns={}\tlimits=conn:{},udp:{},new_rate:{}\n\nlisteners:\n",
         s.runtime.is_draining(),
         s.runtime.active_conns(),
+        opt(lim.max_connections),
+        opt(lim.max_udp_sessions),
+        opt(lim.max_new_sessions_per_sec),
     ));
     for l in &snap.listeners {
         out.push_str(&format!(

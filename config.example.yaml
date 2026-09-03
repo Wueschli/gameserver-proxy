@@ -9,6 +9,14 @@ settings:
   shutdown_grace_sec: 30
   admin:
     listen: "127.0.0.1:9900"   # /healthz /readyz /metrics /pools
+  # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
+  # reload does not change these. Hitting a cap drops the new connection /
+  # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
+  # "max_new_rate"}; established ones are untouched.
+  limits:
+    max_connections: 200000        # live proxied TCP connections
+    max_udp_sessions: 200000       # live UDP sessions
+    max_new_sessions_per_sec: 20000  # new conns + sessions/s (burst = the rate)
 
 pools:
   - name: local

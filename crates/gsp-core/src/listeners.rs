@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use gsp_config::{ListenerConfig, Protocol};
 
 use crate::drain::ConnTracker;
+use crate::limits::GlobalLimits;
 use crate::ratelimit::RateLimiter;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
@@ -58,6 +59,7 @@ pub struct ListenerManager {
     hints: Arc<RouteHints>,
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
+    limits: Arc<GlobalLimits>,
     workers: usize,
     groups: Mutex<HashMap<String, Group>>,
 }
@@ -68,6 +70,7 @@ impl ListenerManager {
         hints: Arc<RouteHints>,
         conns: Arc<ConnTracker>,
         resolvers: Arc<Resolvers>,
+        limits: Arc<GlobalLimits>,
         workers: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -75,6 +78,7 @@ impl ListenerManager {
             hints,
             conns,
             resolvers,
+            limits,
             workers,
             groups: Mutex::new(HashMap::new()),
         })
@@ -92,6 +96,7 @@ impl ListenerManager {
             let conns = self.conns.clone();
             let resolvers = self.resolvers.clone();
             let limiter = limiter.clone();
+            let limits = self.limits.clone();
             let lc = cfg.clone();
             let mut sd = stop_rx.clone();
             tasks.push(tokio::spawn(async move {
@@ -104,6 +109,7 @@ impl ListenerManager {
                             conns,
                             resolvers,
                             limiter,
+                            limits,
                             worker_id,
                             &mut sd,
                         )
@@ -117,6 +123,7 @@ impl ListenerManager {
                             conns,
                             resolvers,
                             limiter,
+                            limits,
                             worker_id,
                             &mut sd,
                         )

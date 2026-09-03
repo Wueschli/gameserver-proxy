@@ -9,6 +9,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+use crate::limits::GlobalLimits;
 use crate::listeners::ListenerManager;
 use crate::overlay::BackendOverlay;
 use crate::resolver::Resolvers;
@@ -136,11 +137,13 @@ impl Runtime {
             workers
         };
 
+        let limits = GlobalLimits::new(&initial.limits);
         let listeners = ListenerManager::new(
             snapshot.clone(),
             hints.clone(),
             conns.clone(),
             resolvers,
+            limits,
             worker_count,
         );
         listeners.start_all(&initial);

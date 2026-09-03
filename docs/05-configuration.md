@@ -93,6 +93,16 @@
 > `gsp_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
 > is per proxy instance (size it per node behind anycast HA).
 >
+> **Global caps:** `settings.limits: { max_connections, max_udp_sessions,
+> max_new_sessions_per_sec }` are process-wide ceilings (all optional; omit for no
+> cap). `max_connections` / `max_udp_sessions` bound the live counts across every
+> listener; `max_new_sessions_per_sec` is a token bucket (burst = the rate) over
+> new connections **and** new UDP sessions combined. A new connection / session
+> that would breach a cap is dropped before it is allocated (existing ones keep
+> running) and counted by
+> `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
+> Startup-only, like `settings.workers`.
+>
 > UDP listeners
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
@@ -115,6 +125,7 @@ settings:
   limits:
     max_connections: 500000
     max_udp_sessions: 1000000
+    max_new_sessions_per_sec: 50000   # new conns + UDP sessions/s (burst = rate)
 
 # reusable filters
 filters:
@@ -270,6 +281,8 @@ listeners:
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
   `rate >= 1`.
+- Every `settings.limits.*` value, if present, must be `>= 1` (0 would block all
+  traffic — omit the key for no cap).
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires
@@ -290,4 +303,5 @@ listeners:
 | Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / affinity / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
+| `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |

@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use gsp_config::ListenerConfig;
 
 use crate::drain::ConnTracker;
+use crate::limits::GlobalLimits;
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
 use crate::ratelimit::RateLimiter;
@@ -33,6 +34,7 @@ pub async fn run_tcp_listener(
     conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
     limiter: Arc<RateLimiter>,
+    limits: Arc<GlobalLimits>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -91,6 +93,21 @@ pub async fn run_tcp_listener(
                     );
                     continue;
                 }
+                // Global caps (process-wide): refuse before allocating anything.
+                let limit_guard = match limits.acquire_tcp() {
+                    Ok(g) => g,
+                    Err(which) => {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => listener_name.clone(), "filter" => which,
+                        ).increment(1);
+                        tracing::debug!(
+                            listener = %listener_name, peer = %peer, cap = which,
+                            "connection dropped by a global cap"
+                        );
+                        continue;
+                    }
+                };
 
                 metrics::counter!(
                     m::LISTENER_CONNECTIONS,
@@ -108,6 +125,8 @@ pub async fn run_tcp_listener(
                     // Held for the whole connection so a graceful shutdown waits
                     // for it; dropped when this task returns.
                     let _conn_guard = conn_guard;
+                    // Releases the global `max_connections` slot on task exit.
+                    let _limit_guard = limit_guard;
                     let local = stream.local_addr().unwrap_or(cfg.bind);
 
                     // Peek the first bytes only when a route needs them.

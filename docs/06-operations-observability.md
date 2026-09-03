@@ -31,10 +31,12 @@
   datagram of a session (UDP `v2-udp`)
 
 ### Security / filter chain
-- `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl` |
-  `rate_ip` | `rate_net`; a connection / new UDP session was dropped by the
-  pre-routing filter chain — `acl` = source-IP allow/deny, `rate_ip` / `rate_net`
-  = the per-IP / per-/24 (per-/64) token bucket was empty
+- `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl` | `rate_ip` |
+  `rate_net` | `max_conn` | `max_udp` | `max_new_rate`; a connection / new UDP
+  session was dropped by the pre-routing filter chain — `acl` = source-IP
+  allow/deny, `rate_ip` / `rate_net` = the per-listener per-IP / per-/24 (per-/64)
+  token bucket was empty, `max_conn` / `max_udp` / `max_new_rate` = a process-wide
+  `settings.limits` cap was hit
 
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`

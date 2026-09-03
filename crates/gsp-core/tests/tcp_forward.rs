@@ -777,3 +777,70 @@ async fn rate_limit_drops_connections_past_the_burst() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn global_max_connections_caps_live_tcp() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let proxy_addr = {
+        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        p.local_addr().unwrap()
+    };
+    let yaml = format!(
+        "settings:\n  limits:\n    max_connections: 2\n\
+         pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Two long-lived connections fill the cap.
+    let mut c1 = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut c2 = TcpStream::connect(proxy_addr).await.unwrap();
+    for c in [&mut c1, &mut c2] {
+        c.write_all(b"z").await.unwrap();
+        let mut b = [0u8; 1];
+        c.read_exact(&mut b).await.unwrap();
+    }
+
+    // The third is accepted at the socket level but dropped before a backend
+    // connect: no echo comes back.
+    let mut c3 = TcpStream::connect(proxy_addr).await.unwrap();
+    let _ = c3.write_all(b"z").await;
+    let mut b = [0u8; 1];
+    let r = tokio::time::timeout(Duration::from_millis(400), c3.read(&mut b)).await;
+    assert!(
+        matches!(r, Ok(Ok(0)) | Ok(Err(_))),
+        "3rd connection should be dropped by the cap, got {r:?}"
+    );
+
+    // Free a slot; a new connection now gets through.
+    drop(c1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut c4 = TcpStream::connect(proxy_addr).await.unwrap();
+    c4.write_all(b"z").await.unwrap();
+    let mut b = [0u8; 1];
+    tokio::time::timeout(Duration::from_millis(400), c4.read_exact(&mut b))
+        .await
+        .expect("slot freed, 4th connection should be forwarded")
+        .unwrap();
+
+    drop((c2, c4));
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

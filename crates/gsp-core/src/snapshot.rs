@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gsp_config::{Config, ListenerConfig};
+use gsp_config::{Config, GlobalLimits, ListenerConfig};
 
 use crate::overlay::BackendOverlay;
 use crate::pool::Pool;
@@ -17,6 +17,8 @@ use crate::pool::Pool;
 pub struct Snapshot {
     pub listeners: Vec<ListenerConfig>,
     pub pools: HashMap<String, Arc<Pool>>,
+    /// Process-wide caps (read once at `Runtime::start`; startup-only).
+    pub limits: GlobalLimits,
 }
 
 impl Snapshot {
@@ -52,6 +54,7 @@ impl Snapshot {
         Arc::new(Self {
             listeners: cfg.listeners.clone(),
             pools,
+            limits: cfg.limits,
         })
     }
 

@@ -1,11 +1,12 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–2 done** —
-per-listener source-IP filter chain: `allow` / `deny` CIDR lists (`deny` wins,
-non-empty `allow` is default-deny) + a `rate_limit` token bucket per source IP
-and per /24 (v4) / /64 (v6) on new connections / UDP sessions; blocked traffic
-dropped silently + `gsp_filter_blocked_total{filter="acl"|"rate_ip"|"rate_net"}`).
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–3 done** —
+filter chain: per-listener `allow` / `deny` CIDR lists + a per-listener
+`rate_limit` token bucket (per source IP and per /24 / /64) + process-wide
+`settings.limits` caps (`max_connections` / `max_udp_sessions` /
+`max_new_sessions_per_sec`); blocked traffic dropped silently +
+`gsp_filter_blocked_total{filter="acl"|"rate_ip"|"rate_net"|"max_conn"|"max_udp"|"max_new_rate"}`).
 Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
@@ -161,14 +162,29 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   after the ACL: TCP before the task spawn, UDP after the established-session
   fast path. `m::FILTER_BLOCKED` gains `filter="rate_ip"|"rate_net"`. `GET
   /config` shows `rate_limit=ip:R/B,net:R/B`.
-- **Next**: phase 7 slice 3+ — global caps (`max_connections`,
-  `max_udp_sessions`, `max_new_sessions_per_sec`), UDP first-packet gate,
-  amplifier checklist tests, optional geo filter, LPM trie for the ACL, fuzzing
-  the peek/sniffer parsers.
+- **Phase 7 slice 3 done**: process-wide global caps. `gsp-config`
+  `settings.limits` → `Config::limits: GlobalLimits { max_connections,
+  max_udp_sessions, max_new_sessions_per_sec: Option<...> }` (also copied onto
+  `Snapshot::limits`); `validate()` rejects a `0` for any of the three.
+  `gsp-core::limits::GlobalLimits` — two `AtomicUsize` live counters (TCP conns /
+  UDP sessions) + an optional `Mutex<NewRate>` token bucket (burst = the rate)
+  for new conns **and** sessions combined; `acquire_tcp()` / `acquire_udp()` →
+  `Result<LimitGuard, &'static str>` check the count cap (reversible
+  `fetch_add`/`fetch_sub`) then the rate bucket, consuming nothing on refusal;
+  `LimitGuard` RAII-releases the count slot on drop. Built once in
+  `Runtime::start` from `initial.limits`, threaded `ListenerManager` → workers →
+  `run_tcp_listener` / `run_udp_listener` (`limits: Arc<GlobalLimits>` param).
+  Checked right after the per-listener rate limiter: TCP holds the guard in the
+  per-conn task (`_limit_guard`), UDP stores it on `Session` (drops on
+  eviction). Startup-only (reload does **not** re-read — like `workers`).
+  `m::FILTER_BLOCKED` gains `filter="max_conn"|"max_udp"|"max_new_rate"`. `GET
+  /config` shows `limits=conn:N,udp:N,new_rate:N`.
+- **Next**: phase 7 slice 4+ — UDP first-packet gate, amplifier checklist tests,
+  optional geo filter, LPM trie for the ACL, fuzzing the peek/sniffer parsers.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~119 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~129 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -413,7 +429,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
-| Geo filter, UDP first-packet gate, global caps, ACL LPM trie | phase 7 |
+| Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
+| Geo filter, UDP first-packet gate, ACL LPM trie | phase 7 |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -526,6 +543,12 @@ no task, no per-connection heap alloc (entries are reused; prune is amortised).
 UDP runs it only for datagrams that miss an established session, so the
 steady-state per-datagram path is untouched. Listeners without `rate_limit` pay a
 single `is_enabled()` bool check (`permit` short-circuits before locking).
+
+**Global caps** (`settings.limits`): per new TCP connection / new UDP session
+only — one or two relaxed-ish atomic ops (`fetch_add` + maybe `fetch_sub`) and,
+if `max_new_sessions_per_sec` is set, one short `Mutex<NewRate>` lock (no
+`.await`). One `LimitGuard` created/dropped per connection / session, never per
+byte / datagram. Uncapped ⇒ a single `is_enabled()` check.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**

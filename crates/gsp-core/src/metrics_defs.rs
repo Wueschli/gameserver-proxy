@@ -55,10 +55,12 @@ pub const RESOLVER_CACHE: &str = "gsp_resolver_cache_total";
 /// a session (UDP `v2-udp`).
 pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
 
-/// Counter. Labels: `listener`, `filter` (`acl` | `rate_ip` | `rate_net`). A
+/// Counter. Labels: `listener`, `filter`
+/// (`acl` | `rate_ip` | `rate_net` | `max_conn` | `max_udp` | `max_new_rate`). A
 /// connection / new UDP session was dropped by the pre-routing filter chain:
-/// `acl` = source IP allow/deny, `rate_ip` / `rate_net` = the per-IP / per-/24
-/// (per-/64) token bucket was empty.
+/// `acl` = source IP allow/deny; `rate_ip` / `rate_net` = the per-listener
+/// per-IP / per-/24 (per-/64) token bucket was empty; `max_conn` / `max_udp` /
+/// `max_new_rate` = a process-wide `settings.limits` cap was hit.
 pub const FILTER_BLOCKED: &str = "gsp_filter_blocked_total";
 
 /// Counter. Labels: `result` (`ok` | `failed`).

@@ -58,6 +58,9 @@ struct RawSettings {
     shutdown_grace_sec: u64,
     #[serde(default)]
     admin: RawAdmin,
+    /// Process-wide caps (phase 7). Startup-only (like `workers`).
+    #[serde(default)]
+    limits: RawLimits,
 }
 
 impl Default for RawSettings {
@@ -66,8 +69,24 @@ impl Default for RawSettings {
             workers: 0,
             shutdown_grace_sec: default_shutdown_grace_sec(),
             admin: RawAdmin::default(),
+            limits: RawLimits::default(),
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLimits {
+    /// Max live proxied TCP connections across all listeners. Absent ⇒ no cap.
+    #[serde(default)]
+    max_connections: Option<usize>,
+    /// Max live UDP sessions across all listeners. Absent ⇒ no cap.
+    #[serde(default)]
+    max_udp_sessions: Option<usize>,
+    /// Max new connections + UDP sessions accepted per second (token bucket,
+    /// burst = the rate). Absent ⇒ no cap.
+    #[serde(default)]
+    max_new_sessions_per_sec: Option<u32>,
 }
 
 fn default_shutdown_grace_sec() -> u64 {
@@ -845,6 +864,25 @@ pub struct Config {
     pub pools: Vec<PoolConfig>,
     pub resolvers: Vec<ResolverConfig>,
     pub listeners: Vec<ListenerConfig>,
+    /// Process-wide caps. Startup-only — a reload does not change them.
+    pub limits: GlobalLimits,
+}
+
+/// Process-wide resource caps (phase 7). `None` fields = uncapped. The live
+/// counters / token bucket live in `gsp-core`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalLimits {
+    pub max_connections: Option<usize>,
+    pub max_udp_sessions: Option<usize>,
+    pub max_new_sessions_per_sec: Option<u32>,
+}
+
+impl GlobalLimits {
+    pub fn is_empty(&self) -> bool {
+        self.max_connections.is_none()
+            && self.max_udp_sessions.is_none()
+            && self.max_new_sessions_per_sec.is_none()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1411,6 +1449,27 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         }
     }
 
+    let rl = &raw.settings.limits;
+    for (name, zero) in [
+        ("max_connections", rl.max_connections == Some(0)),
+        ("max_udp_sessions", rl.max_udp_sessions == Some(0)),
+        (
+            "max_new_sessions_per_sec",
+            rl.max_new_sessions_per_sec == Some(0),
+        ),
+    ] {
+        if zero {
+            return Err(Invalid(format!(
+                "settings.limits.{name}: 0 blocks all traffic; omit the key for no cap"
+            )));
+        }
+    }
+    let limits = GlobalLimits {
+        max_connections: rl.max_connections,
+        max_udp_sessions: rl.max_udp_sessions,
+        max_new_sessions_per_sec: rl.max_new_sessions_per_sec,
+    };
+
     Ok(Config {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
@@ -1418,6 +1477,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         pools,
         resolvers,
         listeners,
+        limits,
     })
 }
 
@@ -2423,6 +2483,30 @@ listeners:
         assert!(cfg.listeners[0].prefix.is_none());
         assert!(!cfg.listeners[0].route_hint);
         assert!(!cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn parses_global_limits_and_rejects_zero() {
+        let yaml = "settings:\n  limits:\n    max_connections: 5000\n    \
+                    max_new_sessions_per_sec: 200\n\
+                    pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        let lim = parse_str(yaml).unwrap().limits;
+        assert_eq!(lim.max_connections, Some(5000));
+        assert_eq!(lim.max_udp_sessions, None);
+        assert_eq!(lim.max_new_sessions_per_sec, Some(200));
+
+        let bad = "settings:\n  limits:\n    max_udp_sessions: 0\n\
+                   pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                   listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        assert!(parse_str(bad).is_err());
+    }
+
+    #[test]
+    fn absent_global_limits_are_empty() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        assert!(parse_str(yaml).unwrap().limits.is_empty());
     }
 
     #[test]
