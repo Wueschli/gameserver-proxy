@@ -1,13 +1,15 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–6 done** —
-filter chain: per-listener `allow` / `deny` CIDR lists + a per-listener
-`rate_limit` token bucket (per source IP and per /24 / /64) + process-wide
-`settings.limits` caps (`max_connections` / `max_udp_sessions` /
-`max_new_sessions_per_sec`) + a UDP `first_packet_gate` (session only on
-positive first-datagram recognition); blocked traffic dropped silently +
-`gsp_filter_blocked_total{filter=…}` / `gsp_datagrams_dropped_total{reason="first_packet_gate"}`).
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–7 done** —
+filter chain: per-listener radix-trie `allow` / `deny` CIDR lists + an optional
+MaxMind GeoIP `geo: { allow, deny }` country filter + a per-listener `rate_limit`
+token bucket (per source IP and per /24 / /64) + process-wide `settings.limits`
+caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) + a
+UDP `first_packet_gate` (session only on positive first-datagram recognition);
+blocked traffic dropped silently + `gsp_filter_blocked_total{filter=…}` /
+`gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Amplifier checklist
+covered by `tests/amplification.rs`).
 Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
@@ -210,15 +212,33 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `Acl::permits` walks the tries. No config / semantics / metric change. Built
   in `validate()` (so it rides the existing `ListenerConfig` clone into
   `gsp-core`; no new gsp-core plumbing).
+- **Phase 7 slice 7 done**: optional GeoIP country filter. `gsp-config`:
+  `settings.geo_db: Option<String>` → `Config::geo_db` / `Snapshot::geo_db`;
+  per-listener `geo: { allow, deny }` (ISO 3166-1 alpha-2, upper-cased at parse)
+  → `ListenerConfig::geo: Option<GeoAcl>`. `GeoAcl::permits(Option<[u8;2]>)`
+  mirrors `Acl`: `deny` wins, non-empty `allow` is default-deny, `None` country
+  admitted only when `allow` is empty. `validate()` requires `settings.geo_db`
+  when any listener has `geo`, a non-empty allow/deny, and 2-letter codes.
+  `gsp-core::geo::GeoDb` wraps `maxminddb::Reader<Vec<u8>>`
+  (`open` + `country_code(ip) -> Option<[u8;2]>` via `decode_path(&path!["country",
+  "iso_code"])`). `Runtime::start_with_geo(snapshot, resolvers, Option<Arc<GeoDb>>,
+  workers)` (plain `start` delegates with `None`, keeping ~29 call sites intact);
+  the `gsp` binary opens the DB in `main.rs` and fails `--check` / startup if the
+  path is bad, threading `Option<Arc<GeoDb>>` through `ListenerManager` → workers.
+  Checked in `listener.rs` / `listener_udp.rs` right after the CIDR ACL:
+  `geo.as_deref().map(|db| geo_acl.permits(db.country_code(ip))).unwrap_or(false)`
+  — **fail-closed** if the DB isn't loaded. `m::FILTER_BLOCKED` gains
+  `filter="geo"`. `GET /config` shows `geo_db=<path>` and per-listener
+  `geo=+N/-M`. `geo:` codes reload (respawn); `geo_db` path is startup-only.
+  Test fixture: `crates/gsp-core/tests/data/GeoIP2-Country-Test.mmdb` (MaxMind's
+  Apache-2.0 synthetic test DB, see the data `README.md`).
 - **Next**: phase 7 tail — parser fuzzing (`cargo fuzz` on `extract_sni` /
-  first-bytes peek), NFR N1/N2 load tests. Optional geo filter is **deferred**:
-  it needs a MaxMind `.mmdb` reader crate and the build environment is offline
-  (no `maxminddb` in the cargo cache, `git fetch` fails). Revisit when deps can
-  be added.
+  first-bytes peek), NFR N1/N2 load tests. Both are tooling tasks rather than
+  feature slices; phase 7's feature work is complete.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~133 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~137 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -408,7 +428,12 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   backend; the client-facing reply is exactly the backend payload (proxy adds
   nothing); a low `rate_limit` rejects datagrams before any session / forward.
 
-(The per-file counts above predate phases 3–7; `make check` runs ~132.)
+- `gsp-core/tests/data/GeoIP2-Country-Test.mmdb` — MaxMind's Apache-2.0
+  synthetic test DB (see the sibling `README.md`); used by `geo::tests` and by
+  `tcp_forward::geo_filter_denies_unlisted_country` (a listener with
+  `allow: [SE]` fails a loopback client closed, no geo admits it).
+
+(The per-file counts above predate phases 3–7; `make check` runs ~137.)
 
 ---
 
@@ -429,7 +454,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Discovery adapters, sniffers | **designed in `docs/`, not yet built.** |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
 | External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
-| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, and `async-trait` for `Resolver`.) |
+| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
 
 ---
 
@@ -474,8 +499,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP first-packet gate (`first_packet_gate` on a UDP listener) | **done** (phase 7 slice 4) |
 | Amplifier-checklist tests (`tests/amplification.rs`) | **done** (phase 7 slice 5) |
 | ACL longest-prefix-match trie (`gsp_config::CidrSet`) | **done** (phase 7 slice 6) |
-| Parser fuzzing, NFR load tests | phase 7 tail |
-| Optional geo filter | deferred — needs a MaxMind reader dep, unavailable in the offline build env |
+| Optional GeoIP country filter (`settings.geo_db` + per-listener `geo`) | **done** (phase 7 slice 7) |
+| Parser fuzzing, NFR load tests | phase 7 tail (tooling) |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -582,6 +607,13 @@ no alloc, no lock, no task. Tries are built once per listener spawn (in
 `validate()`). TCP runs it before the task spawn; UDP runs it only for datagrams
 that don't hit an established session, so the steady-state per-datagram path is
 unchanged. Listeners with neither list pay one `Acl::is_empty` check.
+
+**GeoIP filter** (`geo` on a listener): per new TCP connection / new UDP session
+only — one MaxMind tree lookup (bounded bit-walk of an mmap-free in-memory
+buffer) plus a small `Vec` scan of the listener's country codes. No lock, no
+task, no per-connection alloc beyond a transient `String` for the ISO code.
+Listeners without `geo` pay one `Option::is_some` check. The `GeoDb` is opened
+once at startup.
 
 **Rate limiting** (`rate_limit` on a listener): per new TCP connection / new UDP
 session only — one `Mutex<HashMap>` lock (not held across `.await`, like

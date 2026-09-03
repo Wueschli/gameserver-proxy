@@ -9,6 +9,7 @@
 //! reload via an atomic snapshot swap.
 
 pub mod drain;
+pub mod geo;
 pub mod health;
 pub mod limits;
 pub mod listener;
@@ -29,6 +30,7 @@ pub mod sniff;
 mod util;
 
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
 pub use listeners::ListenerManager;
 pub use overlay::BackendOverlay;

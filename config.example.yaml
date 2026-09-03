@@ -17,6 +17,9 @@ settings:
     max_connections: 200000        # live proxied TCP connections
     max_udp_sessions: 200000       # live UDP sessions
     max_new_sessions_per_sec: 20000  # new conns + sessions/s (burst = the rate)
+  # Path to a MaxMind Country .mmdb, required if any listener has a `geo` filter.
+  # The proxy fails startup / --check if it can't be opened. Startup-only.
+  # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
 
 pools:
   - name: local
@@ -115,6 +118,13 @@ listeners:
     rate_limit:
       per_ip:  { rate: 20, burst: 40 }
       per_net: { rate: 200, burst: 400 }
+    # GeoIP country filter on the client source IP, checked after the CIDR ACL.
+    # ISO 3166-1 alpha-2 codes; `deny` wins, a non-empty `allow` is default-deny.
+    # Needs settings.geo_db. An IP not in the DB is admitted only when `allow` is
+    # empty. Blocked => gsp_filter_blocked_total{filter="geo"}. (Needs geo_db set
+    # above to be active; left commented so this example validates as-is.)
+    # geo:
+    #   deny: ["KP", "RU"]
     routes:
       - match: { type: dst, cidrs: ["198.51.100.7/32"] }
         action: { pool: local }
@@ -200,7 +210,7 @@ listeners:
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
 #   protocol / routes / affinity / prefix / freebind / transparent / route_hint
-#   / allow / deny / rate_limit / first_packet_gate.
+#   / allow / deny / rate_limit / first_packet_gate / geo.
 #   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
 #   survive reloads.)
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that

@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use gsp_config::ListenerConfig;
 
 use crate::drain::ConnTracker;
+use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
@@ -35,6 +36,7 @@ pub async fn run_tcp_listener(
     resolvers: Arc<Resolvers>,
     limiter: Arc<RateLimiter>,
     limits: Arc<GlobalLimits>,
+    geo: Option<Arc<GeoDb>>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -81,6 +83,20 @@ pub async fn run_tcp_listener(
                     ).increment(1);
                     tracing::debug!(listener = %listener_name, peer = %peer, "connection blocked by acl");
                     continue;
+                }
+                if let Some(geo_acl) = &cfg.geo {
+                    let admitted = geo
+                        .as_deref()
+                        .map(|db| geo_acl.permits(db.country_code(peer.ip())))
+                        .unwrap_or(false); // fail closed if the DB did not load
+                    if !admitted {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => listener_name.clone(), "filter" => "geo",
+                        ).increment(1);
+                        tracing::debug!(listener = %listener_name, peer = %peer, "connection blocked by geo filter");
+                        continue;
+                    }
                 }
                 if let Some(which) = limiter.permit(peer.ip()) {
                     metrics::counter!(

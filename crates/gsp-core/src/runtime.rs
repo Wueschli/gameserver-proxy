@@ -9,6 +9,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
 use crate::listeners::ListenerManager;
 use crate::overlay::BackendOverlay;
@@ -121,6 +122,18 @@ impl Runtime {
     /// `resolvers` are the external routing resolvers, built from config by the
     /// caller (empty map = none).
     pub fn start(initial: Arc<Snapshot>, resolvers: Arc<Resolvers>, workers: usize) -> Self {
+        Self::start_with_geo(initial, resolvers, None, workers)
+    }
+
+    /// Like [`Runtime::start`], with a preloaded GeoIP database for listeners
+    /// that declare a `geo` filter. The binary opens it (and fails startup if
+    /// the path is bad); tests pass `None`.
+    pub fn start_with_geo(
+        initial: Arc<Snapshot>,
+        resolvers: Arc<Resolvers>,
+        geo: Option<Arc<GeoDb>>,
+        workers: usize,
+    ) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
         let hints = RouteHints::new();
         let conns = ConnTracker::new();
@@ -138,12 +151,19 @@ impl Runtime {
         };
 
         let limits = GlobalLimits::new(&initial.limits);
+        if geo.is_none() && initial.geo_db.is_some() {
+            tracing::error!(
+                "listeners with a `geo` filter will fail closed: geo DB not loaded \
+                 (use Runtime::start_with_geo)"
+            );
+        }
         let listeners = ListenerManager::new(
             snapshot.clone(),
             hints.clone(),
             conns.clone(),
             resolvers,
             limits,
+            geo,
             worker_count,
         );
         listeners.start_all(&initial);

@@ -49,11 +49,25 @@ fn main() -> anyhow::Result<()> {
         "configuration loaded"
     );
 
+    // A configured GeoIP DB must load, both for `--check` and at startup.
+    let geo_db = match &cfg.geo_db {
+        Some(path) => Some(
+            gsp_core::GeoDb::open(path)
+                .map_err(|e| anyhow::anyhow!("settings.geo_db {path:?}: {e}"))?,
+        ),
+        None => None,
+    };
+
     if args.check {
         println!(
-            "config OK: {} listener(s), {} pool(s)",
+            "config OK: {} listener(s), {} pool(s){}",
             cfg.listeners.len(),
-            cfg.pools.len()
+            cfg.pools.len(),
+            if geo_db.is_some() {
+                ", geo_db loaded"
+            } else {
+                ""
+            },
         );
         return Ok(());
     }
@@ -61,10 +75,14 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(cfg, args.config))
+        .block_on(run(cfg, args.config, geo_db))
 }
 
-async fn run(cfg: gsp_config::Config, config_path: PathBuf) -> anyhow::Result<()> {
+async fn run(
+    cfg: gsp_config::Config,
+    config_path: PathBuf,
+    geo_db: Option<Arc<gsp_core::GeoDb>>,
+) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
     let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
@@ -72,7 +90,7 @@ async fn run(cfg: gsp_config::Config, config_path: PathBuf) -> anyhow::Result<()
     if !resolvers.is_empty() {
         tracing::info!(count = resolvers.len(), "external resolvers ready");
     }
-    let runtime = Runtime::start(snapshot, resolvers, cfg.workers);
+    let runtime = Runtime::start_with_geo(snapshot, resolvers, geo_db, cfg.workers);
     let handle = runtime.handle();
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 

@@ -19,6 +19,8 @@ pub struct Snapshot {
     pub pools: HashMap<String, Arc<Pool>>,
     /// Process-wide caps (read once at `Runtime::start`; startup-only).
     pub limits: GlobalLimits,
+    /// MaxMind Country DB path (read once at `Runtime::start`; startup-only).
+    pub geo_db: Option<String>,
 }
 
 impl Snapshot {
@@ -55,6 +57,7 @@ impl Snapshot {
             listeners: cfg.listeners.clone(),
             pools,
             limits: cfg.limits,
+            geo_db: cfg.geo_db.clone(),
         })
     }
 

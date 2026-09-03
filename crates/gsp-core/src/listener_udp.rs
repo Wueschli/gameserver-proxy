@@ -47,6 +47,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use gsp_config::{HashOn, ListenerConfig};
 
 use crate::drain::{ConnGuard, ConnTracker};
+use crate::geo::GeoDb;
 use crate::limits::{GlobalLimits, LimitGuard};
 use crate::metrics_defs as m;
 use crate::net::{bind_reuseport_udp, bind_transparent_udp, UdpMode};
@@ -128,6 +129,7 @@ pub async fn run_udp_listener(
     resolvers: Arc<Resolvers>,
     limiter: Arc<RateLimiter>,
     limits: Arc<GlobalLimits>,
+    geo: Option<Arc<GeoDb>>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -248,6 +250,19 @@ pub async fn run_udp_listener(
                         "listener" => cfg.name.clone(), "filter" => "acl",
                     ).increment(1);
                     continue;
+                }
+                if let Some(geo_acl) = &cfg.geo {
+                    let admitted = geo
+                        .as_deref()
+                        .map(|db| geo_acl.permits(db.country_code(client.ip())))
+                        .unwrap_or(false); // fail closed if the DB did not load
+                    if !admitted {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => cfg.name.clone(), "filter" => "geo",
+                        ).increment(1);
+                        continue;
+                    }
                 }
                 if let Some(which) = limiter.permit(client.ip()) {
                     metrics::counter!(

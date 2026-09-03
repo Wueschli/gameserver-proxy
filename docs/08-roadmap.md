@@ -159,8 +159,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   instead of a linear `Cidr` scan, so large threat-feed block lists cost the
   same as a handful of entries. Config, semantics and `GET /config` output
   unchanged.
-- Optional geo filter — deferred: needs a MaxMind DB reader dependency that
-  cannot be added in the current offline build environment.
+- ✅ **Slice 7**: optional GeoIP country filter — `settings.geo_db` (a MaxMind
+  Country `.mmdb`, opened once at startup / `--check`) + per-listener
+  `geo: { allow, deny }` (ISO 3166-1 alpha-2), checked right after the CIDR ACL
+  on the client source IP, same precedence. `gsp_config::GeoAcl` holds the
+  decision; `gsp_core::geo::GeoDb` (dep: `maxminddb`) does the lookup. Fails
+  closed if the DB isn't loaded. `gsp_filter_blocked_total{filter="geo"}`.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.
 - **Result**: hardened against common L4/7 abuse.
 

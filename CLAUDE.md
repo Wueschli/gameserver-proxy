@@ -49,6 +49,9 @@ crates/
     resolver.rs             external resolver seam: trait Resolver + resolve_pool (the async route walk); transports live in gsp
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
+    ratelimit.rs            per-listener token-bucket rate limiter (src_ip + /24 / /64)
+    limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)
+    geo.rs                  optional MaxMind GeoIP country lookup (GeoDb) for the geo filter
     runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
     net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND, IP_TRANSPARENT / TPROXY)
     metrics_defs.rs         canonical metric names — ALL metric names live here
@@ -218,7 +221,9 @@ datagram is positively recognised (non-`reject` sniffer hint or a matching
 the `route_hint` lookup; else `gsp_datagrams_dropped_total{reason="first_packet_gate"}`.
 Slice 5: automated amplifier-checklist tests
 (`crates/gsp-core/tests/amplification.rs`; `docs/07` checklist ticked). Slice 6:
-`gsp_config::CidrSet` radix trie backs `Acl::permits` (was a linear `Cidr`
-scan). Still to do: parser fuzzing, NFR load tests; optional geo filter is
-deferred (needs a MaxMind reader dep, unavailable offline). See `HANDOVER.md`
-and `docs/08`. Don't half-land a slice.
+`gsp_config::CidrSet` radix trie backs `Acl::permits`. Slice 7: optional GeoIP
+filter — `settings.geo_db` + per-listener `geo: { allow, deny }` (ISO codes),
+`gsp_config::GeoAcl` decision + `gsp_core::geo::GeoDb` (dep `maxminddb`,
+loaded once via `Runtime::start_with_geo`), checked after the CIDR ACL, fails
+closed. Still to do: parser fuzzing, NFR load tests. See `HANDOVER.md` and
+`docs/08`. Don't half-land a slice.

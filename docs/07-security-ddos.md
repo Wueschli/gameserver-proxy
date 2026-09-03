@@ -18,7 +18,10 @@
 
 1. **CIDR allow/deny** – static lists + an optional dynamic block list (feed/file, hot
    reload). O(1) via an LPM trie.
-2. **Geo filter** (optional) – MaxMind DB, allow/deny by country per listener.
+2. **Geo filter** (optional) – MaxMind Country DB (`settings.geo_db`), per-listener
+   `geo: { allow, deny }` by ISO country code; `deny` wins, a non-empty `allow`
+   is default-deny, an unplaceable IP is admitted only with no `allow` list.
+   Fails closed if the DB is not loaded.
 3. **Connection/datagram rate limit** – token bucket per `src_ip` **and** per `/24`
    (against distributed single IPs). Scope configurable. Excess → drop + metric, **no**
    error reply (no reflect).

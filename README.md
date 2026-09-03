@@ -67,15 +67,17 @@ listener → backend pool forwarding with:
   each UDP session; or a TCP/UDP listener with `transparent: true` (Linux TPROXY)
   sources every upstream connection/datagram from the real client `ip:port` and
   replies from the original destination address
-- security hardening (phase 7, in progress): a filter chain checked before
-  routing — per-listener `allow` / `deny` CIDR lists (`deny` wins; non-empty
-  `allow` is default-deny) and a `rate_limit` token bucket per source IP and per
-  /24 (v4) / /64 (v6) on the client source IP, plus process-wide
+- security hardening (phase 7): a filter chain checked before routing —
+  per-listener `allow` / `deny` CIDR lists (radix-trie matched; `deny` wins,
+  non-empty `allow` is default-deny), an optional MaxMind GeoIP country filter
+  (`settings.geo_db` + per-listener `geo: { allow, deny }`), and a `rate_limit`
+  token bucket per source IP and per /24 (v4) / /64 (v6) — plus process-wide
   `settings.limits` caps (`max_connections`, `max_udp_sessions`,
   `max_new_sessions_per_sec`); blocked traffic is dropped silently and counted by
   `gsp_filter_blocked_total`. UDP listeners can also set `first_packet_gate: true`
   to open a session only when the first datagram is positively recognised
-  (`first_bytes` / sniffer), keeping spoof floods off the session table
+  (`first_bytes` / sniffer), keeping spoof floods off the session table. The
+  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`
 
 **Phases 1–6 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the

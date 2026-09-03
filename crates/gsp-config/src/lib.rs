@@ -61,6 +61,10 @@ struct RawSettings {
     /// Process-wide caps (phase 7). Startup-only (like `workers`).
     #[serde(default)]
     limits: RawLimits,
+    /// Path to a MaxMind Country `.mmdb`, required when any listener has a `geo`
+    /// filter. Startup-only.
+    #[serde(default)]
+    geo_db: Option<String>,
 }
 
 impl Default for RawSettings {
@@ -70,6 +74,7 @@ impl Default for RawSettings {
             shutdown_grace_sec: default_shutdown_grace_sec(),
             admin: RawAdmin::default(),
             limits: RawLimits::default(),
+            geo_db: None,
         }
     }
 }
@@ -254,6 +259,10 @@ struct RawListener {
     /// the session table. Needs at least one `first_bytes` route or a `sniffer`.
     #[serde(default)]
     first_packet_gate: bool,
+    /// GeoIP country filter on the client source IP, checked after the CIDR ACL.
+    /// Needs `settings.geo_db`. `deny` wins; a non-empty `allow` is default-deny.
+    #[serde(default)]
+    geo: Option<RawGeo>,
     /// Token-bucket rate limit on new connections / new UDP sessions, keyed by
     /// source IP and/or /24 (v4) / /64 (v6). Checked after the ACL, before
     /// routing. Excess is dropped silently (no reflection).
@@ -368,6 +377,15 @@ fn default_resolver_timeout_ms() -> u64 {
 struct RawAffinity {
     #[serde(default)]
     hash_on: HashOn,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGeo {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,6 +680,36 @@ impl Acl {
             return false;
         }
         true
+    }
+}
+
+/// Per-listener GeoIP country filter (phase 7), checked after the CIDR [`Acl`]
+/// on the client source IP. Codes are ISO 3166-1 alpha-2, upper-cased at parse.
+/// Same precedence as `Acl`: `deny` wins; a non-empty `allow` is default-deny.
+/// The country lookup itself lives in `gsp-core` (needs the MaxMind DB).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GeoAcl {
+    pub allow: Vec<[u8; 2]>,
+    pub deny: Vec<[u8; 2]>,
+}
+
+impl GeoAcl {
+    /// Admit a client whose source IP resolves to `country` (`None` = the IP is
+    /// not in the database). An unknown country is admitted only when there is
+    /// no `allow` list to fail closed against.
+    pub fn permits(&self, country: Option<[u8; 2]>) -> bool {
+        match country {
+            Some(cc) => {
+                if self.deny.contains(&cc) {
+                    return false;
+                }
+                if !self.allow.is_empty() && !self.allow.contains(&cc) {
+                    return false;
+                }
+                true
+            }
+            None => self.allow.is_empty(),
+        }
     }
 }
 
@@ -985,6 +1033,9 @@ pub struct Config {
     pub listeners: Vec<ListenerConfig>,
     /// Process-wide caps. Startup-only — a reload does not change them.
     pub limits: GlobalLimits,
+    /// Path to the MaxMind Country DB, if any listener uses a `geo` filter.
+    /// Startup-only.
+    pub geo_db: Option<String>,
 }
 
 /// Process-wide resource caps (phase 7). `None` fields = uncapped. The live
@@ -1060,6 +1111,8 @@ pub struct ListenerConfig {
     pub first_packet_gate: bool,
     /// Source-IP filter chain, checked before routing. Empty ⇒ admit everyone.
     pub acl: Acl,
+    /// GeoIP country filter, checked after `acl`. `None` ⇒ no geo check.
+    pub geo: Option<GeoAcl>,
     /// Token-bucket rate limit on new connections / UDP sessions. `None` ⇒ no
     /// limit. Checked after the ACL.
     pub rate_limit: Option<RateLimit>,
@@ -1496,6 +1549,45 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             parse_cidrs("deny", &l.deny)?,
         );
 
+        let geo = match &l.geo {
+            None => None,
+            Some(g) => {
+                if raw.settings.geo_db.is_none() {
+                    return Err(Invalid(format!(
+                        "listener {}: `geo` needs `settings.geo_db` to be set",
+                        l.name
+                    )));
+                }
+                if g.allow.is_empty() && g.deny.is_empty() {
+                    return Err(Invalid(format!(
+                        "listener {}: `geo` needs a non-empty `allow` or `deny`",
+                        l.name
+                    )));
+                }
+                let parse_ccs = |field: &str,
+                                 raw: &[String]|
+                 -> Result<Vec<[u8; 2]>, ConfigError> {
+                    raw.iter()
+                        .map(|s| {
+                            let b = s.as_bytes();
+                            if b.len() == 2 && b.iter().all(u8::is_ascii_alphabetic) {
+                                Ok([b[0].to_ascii_uppercase(), b[1].to_ascii_uppercase()])
+                            } else {
+                                Err(Invalid(format!(
+                                    "listener {}: geo.{field}: {s:?} is not a 2-letter country code",
+                                    l.name
+                                )))
+                            }
+                        })
+                        .collect()
+                };
+                Some(GeoAcl {
+                    allow: parse_ccs("allow", &g.allow)?,
+                    deny: parse_ccs("deny", &g.deny)?,
+                })
+            }
+        };
+
         let rate_limit = match l.rate_limit {
             None => None,
             Some(rl) => {
@@ -1562,6 +1654,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             route_hint: l.route_hint,
             first_packet_gate: l.first_packet_gate,
             acl,
+            geo,
             rate_limit,
         });
     }
@@ -1634,6 +1727,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         resolvers,
         listeners,
         limits,
+        geo_db: raw.settings.geo_db,
     })
 }
 
@@ -2663,6 +2757,65 @@ listeners:
         let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
                     listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
         assert!(parse_str(yaml).unwrap().limits.is_empty());
+    }
+
+    #[test]
+    fn parses_geo_filter_and_uppercases_codes() {
+        let yaml = r#"
+settings:
+  geo_db: "/tmp/whatever.mmdb"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+    geo:
+      allow: ["se"]
+      deny: ["Gb", "RU"]
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(cfg.geo_db.as_deref(), Some("/tmp/whatever.mmdb"));
+        let geo = cfg.listeners[0].geo.clone().unwrap();
+        assert_eq!(geo.allow, vec![*b"SE"]);
+        assert_eq!(geo.deny, vec![*b"GB", *b"RU"]);
+
+        // deny wins; non-empty allow is default-deny; an unknown country is
+        // admitted only with no allow list.
+        assert!(geo.permits(Some(*b"SE")));
+        assert!(!geo.permits(Some(*b"GB")));
+        assert!(!geo.permits(Some(*b"FR"))); // not in allow
+        assert!(!geo.permits(None)); // allow present -> fail closed
+        let deny_only = GeoAcl {
+            allow: vec![],
+            deny: vec![*b"GB"],
+        };
+        assert!(deny_only.permits(None));
+        assert!(deny_only.permits(Some(*b"FR")));
+        assert!(!deny_only.permits(Some(*b"GB")));
+    }
+
+    #[test]
+    fn rejects_bad_geo_filter() {
+        for bad in [
+            // geo without settings.geo_db
+            "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+             geo:\n      deny: [\"GB\"]",
+            // empty geo
+            "settings:\n  geo_db: \"/x.mmdb\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+             geo: {}",
+            // not a 2-letter code
+            "settings:\n  geo_db: \"/x.mmdb\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
+             geo:\n      deny: [\"GBR\"]",
+        ] {
+            assert!(parse_str(bad).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]

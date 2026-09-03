@@ -94,6 +94,17 @@
 > `gsp_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
 > is per proxy instance (size it per node behind anycast HA).
 >
+> **GeoIP filter:** `geo: { allow: [CC], deny: [CC] }` on a listener (ISO 3166-1
+> alpha-2 country codes, case-insensitive) is checked on the client source IP
+> right after the CIDR ACL. Same precedence as `allow`/`deny`: `deny` wins, a
+> non-empty `allow` is default-deny, and an IP the database can't place is
+> admitted only when there is no `allow` list. Requires `settings.geo_db` — the
+> path to a MaxMind Country `.mmdb` (e.g. MaxMind's free GeoLite2-Country);
+> `--check` and startup fail if it can't be opened, and a listener whose DB
+> somehow isn't loaded fails closed. Blocked ⇒
+> `gsp_filter_blocked_total{listener,filter="geo"}`. Startup-only, like
+> `settings.workers`.
+>
 > **Global caps:** `settings.limits: { max_connections, max_udp_sessions,
 > max_new_sessions_per_sec }` are process-wide ceilings (all optional; omit for no
 > cap). `max_connections` / `max_udp_sessions` bound the live counts across every
@@ -295,6 +306,8 @@ listeners:
   traffic — omit the key for no cap).
 - `first_packet_gate: true` is UDP-only and needs at least one `first_bytes`
   route or a `sniffer` on the listener.
+- A listener `geo` filter requires `settings.geo_db`, a non-empty `allow` or
+  `deny`, and 2-letter country codes; the DB file must open at startup / `--check`.
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires
@@ -316,4 +329,5 @@ listeners:
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
+| `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |

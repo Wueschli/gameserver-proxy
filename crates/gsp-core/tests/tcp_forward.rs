@@ -844,3 +844,56 @@ async fn global_max_connections_caps_live_tcp() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn geo_filter_denies_unlisted_country() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 64];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let proxy_addr = {
+        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        p.local_addr().unwrap()
+    };
+    // `allow: [SE]` — the loopback client resolves to no country in the test DB,
+    // so a non-empty allow list fails it closed.
+    let yaml = format!(
+        "settings:\n  geo_db: \"{}/tests/data/GeoIP2-Country-Test.mmdb\"\n\
+         pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n\
+         \x20   geo:\n      allow: [\"SE\"]\n",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let geo = gsp_core::GeoDb::open(cfg.geo_db.as_ref().unwrap()).unwrap();
+    let runtime = gsp_core::Runtime::start_with_geo(
+        Snapshot::from_config(&cfg),
+        Default::default(),
+        Some(geo),
+        1,
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut c = TcpStream::connect(proxy_addr).await.unwrap();
+    let _ = c.write_all(b"hi").await;
+    let mut buf = [0u8; 2];
+    let r = tokio::time::timeout(Duration::from_secs(1), c.read(&mut buf)).await;
+    match r {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        other => panic!("geo-denied connection should be dropped, got {other:?}"),
+    }
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
