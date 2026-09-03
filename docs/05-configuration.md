@@ -70,7 +70,10 @@
 >
 > Listener options: `prefix: <cidr>` (UDP only) → prefix mode as above, with a
 > wildcard `bind`; `freebind: true` (TCP only) → bind with `IP_FREEBIND` /
-> `IPV6_FREEBIND`; `route_hint: true` → consult the push resolver. UDP listeners
+> `IPV6_FREEBIND`; `transparent: true` (TCP only, Linux) → TPROXY mode:
+> `IP_TRANSPARENT` on the listen socket and a client-address-bound upstream
+> socket per connection (needs `CAP_NET_ADMIN`); `route_hint: true` → consult the
+> push resolver. UDP listeners
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
@@ -243,6 +246,7 @@ listeners:
 - Every listener needs at least one route; the last route should be `always`
   (otherwise a "no default" warning).
 - `proxy_protocol: v2-udp` only together with `protocol: udp`.
+- `transparent: true` only on a TCP listener (UDP transparent mode is not built yet).
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires

@@ -35,21 +35,23 @@ pub async fn handle_tcp(
     client: TcpStream,
     client_addr: SocketAddr,
     client_local: SocketAddr,
+    transparent_source: Option<SocketAddr>,
     pool: &Pool,
 ) -> anyhow::Result<ConnOutcome> {
     let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
 
-    let mut backend = match connect_backend(backend_addr, pool.connect_timeout).await {
-        Ok(s) => {
-            guard.observe(true);
-            s
-        }
-        Err(e) => {
-            guard.observe(false);
-            return Err(e);
-        }
-    };
+    let mut backend =
+        match connect_backend(backend_addr, pool.connect_timeout, transparent_source).await {
+            Ok(s) => {
+                guard.observe(true);
+                s
+            }
+            Err(e) => {
+                guard.observe(false);
+                return Err(e);
+            }
+        };
 
     // PROXY protocol header (if the pool asks for one) goes out before any
     // client bytes so the backend can parse it as the first thing on the wire.
@@ -86,13 +88,23 @@ pub async fn handle_tcp_target(
     target: SocketAddr,
     connect_timeout: Duration,
     idle_timeout: Duration,
+    transparent_source: Option<SocketAddr>,
 ) -> anyhow::Result<ConnOutcome> {
-    let backend = connect_backend(target, connect_timeout).await?;
+    let backend = connect_backend(target, connect_timeout, transparent_source).await?;
     Ok(pump(client, backend, target, idle_timeout).await)
 }
 
-async fn connect_backend(addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
-    match timeout(connect_timeout, TcpStream::connect(addr)).await {
+async fn connect_backend(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    transparent_source: Option<SocketAddr>,
+) -> anyhow::Result<TcpStream> {
+    match timeout(
+        connect_timeout,
+        crate::net::connect_tcp_from(addr, transparent_source),
+    )
+    .await
+    {
         Ok(Ok(s)) => Ok(s),
         Ok(Err(e)) => {
             metrics::counter!(

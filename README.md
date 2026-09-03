@@ -64,16 +64,18 @@ listener → backend pool forwarding with:
 - client-IP preservation (phase 6, in progress): per-pool `proxy_protocol:
   none | v1 | v2` (TCP) prepends a PROXY protocol header to the upstream
   connection, or `v2-udp` prepends the v2 binary header to the first datagram of
-  each UDP session, so the backend sees the real client address
+  each UDP session; or a TCP listener with `transparent: true` (Linux TPROXY)
+  sources every upstream connection from the real client `ip:port`
 
 **Phases 1–5 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
 added `draining` / `disabled` backend states, graceful connection draining, the
 instance-drain / `GET /config` admin surface, runtime backend add/remove, and
 runtime listener add/remove/rebind. External resolver: HTTP + gRPC `resolvers:`
 + `action: { resolver: <name> }`, `pool` / `target` results, `on_error`, and a
-TTL'd LRU result cache. Phase 6 slices 1–2 landed the PROXY protocol header —
-TCP `v1`/`v2` and UDP `v2-udp` (first datagram); next is TPROXY transparent
-mode. See [docs/08-roadmap.md](docs/08-roadmap.md).
+TTL'd LRU result cache. Phase 6 slices 1–3 landed the PROXY protocol header
+(TCP `v1`/`v2`, UDP `v2-udp`) and TCP TPROXY transparent mode
+(`transparent: true`); next is UDP transparent mode. See
+[docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

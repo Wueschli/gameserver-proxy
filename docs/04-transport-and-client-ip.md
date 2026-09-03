@@ -80,6 +80,46 @@ By default the backend only sees the proxy IP. Options, selectable per pool:
   transparent.
 - Required capability: `CAP_NET_ADMIN` (or `CAP_NET_RAW`), no full root.
 
+#### Config
+
+Set `transparent: true` on a **TCP** listener (Linux only). gsp then:
+- binds the listen socket with `IP_TRANSPARENT` (so it accepts connections a
+  TPROXY rule redirected to a non-local address; `getsockname()` on the accepted
+  socket still returns the original destination, which feeds `dst` / `port`
+  routing exactly as a normal bind does);
+- for every upstream connection — pool or resolver `target` — opens the backend
+  socket with `IP_TRANSPARENT`, `bind()`s the real client `ip:port` as its
+  source, then connects. If the client and backend address families differ the
+  bind is skipped and a normal connect is used (logged).
+
+UDP transparent mode is not implemented yet (`transparent` is rejected on a UDP
+listener). `IPV6_TRANSPARENT` for an IPv6 *listen* address also still needs the
+socket2 bump; an IPv6 client bound as the upstream source works today.
+
+#### Network setup (example)
+
+Redirect inbound game traffic to the proxy's port `7777` and mark it, then route
+marked traffic locally:
+
+```
+# nftables: TPROXY inbound game ports to the local proxy
+table inet tproxy {
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    ip daddr 198.51.100.0/24 tcp dport 7777 tproxy to :7777 meta mark set 1
+  }
+}
+
+# policy routing: locally deliver anything with mark 1
+ip rule add fwmark 1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+The backend's **return** traffic must come back through the proxy host — either
+make the proxy the backend's default gateway, or add an `ip rule` on the backend
+network that sends the client prefixes back via the proxy. Without that the
+client gets replies straight from the backend IP and the connection stalls.
+
 ### 3. No preservation
 - The backend sees the proxy IP. Sufficient when anti-cheat/logic does not need the
   client IP or gets it elsewhere (in the game login token). Documented default

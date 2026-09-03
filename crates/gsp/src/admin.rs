@@ -97,12 +97,14 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
     ));
     for l in &snap.listeners {
         out.push_str(&format!(
-            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}\n",
+            "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}\n",
             l.name,
             l.bind,
             l.protocol,
             l.routes.len(),
             if l.route_hint { "\troute_hint" } else { "" },
+            if l.freebind { "\tfreebind" } else { "" },
+            if l.transparent { "\ttransparent" } else { "" },
             match &l.prefix {
                 Some(p) => format!("\tprefix={p:?}"),
                 None => String::new(),

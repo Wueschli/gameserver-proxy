@@ -108,8 +108,13 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 2**: v2-UDP variant — `proxy_protocol: v2-udp` (UDP-only, validated)
   prepends the v2 binary header to the **first datagram** of each session; later
   datagrams are untouched.
-- ⬜ **Slice 3**: transparent mode (TPROXY) including docs for the
-  network/routing setup.
+- ✅ **Slice 3**: transparent mode (TPROXY) for **TCP** — `transparent: true`
+  (Linux) binds the listen socket with `IP_TRANSPARENT` and every upstream
+  connection with the real client `ip:port` as its `IP_TRANSPARENT` source;
+  `docs/04` carries the nftables + policy-routing setup.
+- ⬜ **Slice 4**: UDP transparent mode (`IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`
+  recv path, client-bound reply socket) and `IPV6_TRANSPARENT` listen binds
+  (needs the socket2 0.6 bump).
 - **Result**: backends see the real client IP.
 
 ## Phase 7 – Security & hardening (week 17–18)

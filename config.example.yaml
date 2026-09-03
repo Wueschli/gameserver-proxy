@@ -122,6 +122,18 @@ listeners:
       - match: { type: always }
         action: { pool: realtime }
 
+  # Transparent mode (Linux TPROXY, TCP): the listen socket is bound with
+  # IP_TRANSPARENT and every upstream connection binds the real client ip:port as
+  # its source, so the backend sees the client IP with no protocol change. Needs
+  # CAP_NET_ADMIN and policy routing that returns backend replies via this host —
+  # see docs/04-transport-and-client-ip.md. Mutually exclusive with nothing, but
+  # rejected on udp listeners.
+  - name: transparent-tcp
+    bind: "0.0.0.0:7778"
+    protocol: tcp
+    transparent: true
+    pool: local
+
   - name: public-tls
     bind: "0.0.0.0:443"
     protocol: tcp
@@ -153,8 +165,9 @@ listeners:
 
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
-# Restart-only: listener bind / protocol / routes / affinity / prefix / freebind /
-#   route_hint. (Route-hint *entries* are runtime state via POST /route-hint, not
-#   config, and survive reloads.)
+# Reconciled by name on reload (stop + respawn if changed): listener bind /
+#   protocol / routes / affinity / prefix / freebind / transparent / route_hint.
+#   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
+#   survive reloads.)
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that
 # changes it applies to sessions opened afterwards.

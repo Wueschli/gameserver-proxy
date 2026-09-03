@@ -31,7 +31,12 @@ pub async fn run_tcp_listener(
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
-    let listener = TcpListener::from_std(bind_reuseport_tcp(cfg.bind, 1024, cfg.freebind)?)?;
+    let listener = TcpListener::from_std(bind_reuseport_tcp(
+        cfg.bind,
+        1024,
+        cfg.freebind,
+        cfg.transparent,
+    )?)?;
     crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
     tracing::info!(
         listener = %cfg.name,
@@ -149,16 +154,20 @@ pub async fn run_tcp_listener(
                     metrics::gauge!(m::ACTIVE_CONNECTIONS, "listener" => listener_name.clone())
                         .increment(1.0);
                     let started = std::time::Instant::now();
+                    // Transparent mode: bind the real client address as the
+                    // upstream source so the backend sees the client IP.
+                    let tsrc = cfg.transparent.then_some(peer);
                     let result = match (&routed, &pool) {
                         (Routed::Target(addr), _) => crate::proxy::handle_tcp_target(
                             stream,
                             *addr,
                             crate::proxy::TARGET_CONNECT_TIMEOUT,
                             crate::proxy::TARGET_IDLE_TIMEOUT,
+                            tsrc,
                         )
                         .await,
                         (_, Some(pool)) => {
-                            crate::proxy::handle_tcp(stream, peer, local, pool).await
+                            crate::proxy::handle_tcp(stream, peer, local, tsrc, pool).await
                         }
                         _ => unreachable!("pool route always resolves a pool above"),
                     };

@@ -209,6 +209,14 @@ struct RawListener {
     /// address that is not (yet) configured on an interface.
     #[serde(default)]
     freebind: bool,
+    /// TCP only (Linux): transparent mode. The listen socket is bound with
+    /// `IP_TRANSPARENT` (accepts connections TPROXY-redirected to non-local
+    /// addresses) and every upstream connection binds the real client address
+    /// as its source, so the backend sees the client IP directly. Needs
+    /// `CAP_NET_ADMIN` and policy routing that returns the backend's replies
+    /// through this host — see `docs/04-transport-and-client-ip.md`.
+    #[serde(default)]
+    transparent: bool,
     /// Consult the push-resolver table (`POST /route-hint`) before the route
     /// list: a live `src_ip → pool` hint wins if its pool still exists.
     #[serde(default)]
@@ -803,6 +811,10 @@ pub struct ListenerConfig {
     pub prefix: Option<Cidr>,
     /// TCP only: bind with `IP_FREEBIND` / `IPV6_FREEBIND`.
     pub freebind: bool,
+    /// TCP only (Linux): transparent mode — `IP_TRANSPARENT` on the listen
+    /// socket and a client-address-bound `IP_TRANSPARENT` upstream socket per
+    /// connection. Needs `CAP_NET_ADMIN`.
+    pub transparent: bool,
     /// The single sniffer plugin this listener's routes use (`None` if no
     /// `sniffer` route). `gsp-core` runs it once per connection before routing.
     pub sniffer: Option<String>,
@@ -1186,6 +1198,13 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
+        if l.transparent && l.protocol != Protocol::Tcp {
+            return Err(Invalid(format!(
+                "listener {}: `transparent` applies only to tcp listeners (udp transparent \
+                 mode is not implemented yet)",
+                l.name
+            )));
+        }
 
         // At most one sniffer plugin per listener (gsp-core runs one per conn).
         let mut sniffer: Option<String> = None;
@@ -1212,6 +1231,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             affinity,
             prefix,
             freebind: l.freebind,
+            transparent: l.transparent,
             sniffer,
             route_hint: l.route_hint,
         });
@@ -2243,6 +2263,8 @@ listeners:
             "  - name: l\n    bind: \"[::]:7777\"\n    protocol: udp\n    prefix: \"nonsense\"\n    pool: p",
             // freebind on a udp listener
             "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    freebind: true\n    pool: p",
+            // transparent on a udp listener
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    transparent: true\n    pool: p",
         ] {
             let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
@@ -2265,6 +2287,24 @@ listeners:
         assert!(cfg.listeners[0].freebind);
         assert!(cfg.listeners[0].prefix.is_none());
         assert!(!cfg.listeners[0].route_hint);
+        assert!(!cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn parses_tcp_transparent_listener() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: tcp
+    transparent: true
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.listeners[0].transparent);
     }
 
     #[test]

@@ -9,6 +9,9 @@ add/remove/rebind. `GET /sessions` is the only deferred bit.
 Phase 6 slices 1–2: per-pool `proxy_protocol: none | v1 | v2 | v2-udp` prepends a
 PROXY protocol header to the upstream TCP connection (v1/v2) or the first
 datagram of each UDP session (v2-udp) — `gsp_core::proxy_protocol`.
+Phase 6 slice 3: `transparent: true` on a TCP listener = Linux TPROXY —
+`IP_TRANSPARENT` on the listen socket + a client-`ip:port`-bound `IP_TRANSPARENT`
+upstream socket per connection (`net::connect_tcp_from`).
 
 ---
 
@@ -81,6 +84,19 @@ datagram of each UDP session (v2-udp) — `gsp_core::proxy_protocol`.
   unhealthy + error. `gsp_proxy_protocol_headers_total{pool,version}`. `listener.rs`
   passes `local`. Live across reload (pool rebuild). `target` connections
   (resolver) have no pool ⇒ no header.
+- **Phase 6 slice 3 done**: TCP TPROXY transparent mode. `gsp-config`
+  `listeners[].transparent: bool` (default false) → `ListenerConfig::transparent`;
+  `validate()` rejects it on a UDP listener. `net::bind_reuseport_tcp` gained a
+  `transparent` param → `set_ip_transparent` (nix `sockopt::IpTransparent`,
+  `#[cfg(target_os = "linux")]`, `Unsupported` error elsewhere — still zero
+  `unsafe`). New `net::connect_tcp_from(backend, Option<source>)`: `None` ⇒ plain
+  `TcpStream::connect`; `Some(src)` (same family as backend) ⇒ `TcpSocket` +
+  `IP_TRANSPARENT` + `bind(src)` + `connect`; family mismatch ⇒ warn + plain
+  connect. `proxy::{connect_backend, handle_tcp, handle_tcp_target}` take a
+  `transparent_source: Option<SocketAddr>`; `listener.rs` passes
+  `cfg.transparent.then_some(peer)` (pool **and** resolver `target` paths).
+  `GET /config` shows `freebind` / `transparent` flags. `ListenerConfig` is
+  `PartialEq`, so flipping `transparent` triggers a listener rebind on reload.
 - **Phase 6 slice 2 done**: `ProxyProtocol::V2Udp` (`proxy_protocol: v2-udp`,
   serde `rename = "v2-udp"`). `proxy_protocol::header` switches on the mode
   (`V2` → STREAM byte `0x11`, `V2Udp` → DGRAM byte `0x12`); the `stream` param is
@@ -94,12 +110,14 @@ datagram of each UDP session (v2-udp) — `gsp_core::proxy_protocol`.
   to the first datagram only (one `Cow::Owned` alloc; later datagrams untouched).
   `local` is the real per-datagram dest in prefix mode. `ProxyProtocol::label()`
   feeds `gsp_proxy_protocol_headers_total{pool,version}` (`v1|v2|v2-udp`).
-- **Next**: phase 6 slice 3 — TPROXY transparent mode (`IP_TRANSPARENT`,
-  `CAP_NET_ADMIN`, bind the client IP as the upstream source; policy-routing /
-  nftables network-setup docs). `proxy_protocol` on a resolver `target`
-  (pool-less) is still unaddressed. Deferred: `GET /sessions` (per-session
-  registry); resolver `sticky_key`; the sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~95 tests). Needs
+- **Next**: phase 6 slice 4 — **UDP** transparent mode (`IP_TRANSPARENT` +
+  `IP_RECVORIGDSTADDR` recv path for the original dst, client-bound
+  `IP_TRANSPARENT` reply socket) and `IPV6_TRANSPARENT` listen binds (needs a
+  socket2 0.5 → 0.6 bump for `set_ip_transparent_v6`). Then phase 7 (security /
+  hardening). `proxy_protocol` on a resolver `target` (pool-less TCP) is still
+  unaddressed. Deferred: `GET /sessions` (per-session registry); resolver
+  `sticky_key`; the sniffer plugin loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~99 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -175,7 +193,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   the real `(client, proxy-local)` addresses; `v2-udp` prepends the v2 binary
   header to the first datagram of each UDP session (later datagrams untouched).
   `none` by default; the form is validated against the listener transport.
-  Resolver `target` connections get no header (no pool).
+  Resolver `target` connections get no header (no pool). Alternatively, a TCP
+  listener with `transparent: true` (Linux TPROXY) makes every upstream
+  connection source from the real client `ip:port` — no protocol change, needs
+  `CAP_NET_ADMIN` + return routing through this host.
 - **Backend health**: active `tcp_connect` or `udp_probe` probes per pool
   (`udp_probe` sends `send_hex`, expects a reply datagram optionally prefix-matched
   by `expect_hex_prefix`); `interval`, `timeout`, `rise`, `fall`; passive marking on
@@ -415,6 +436,12 @@ data-path cost.
 brief internal lock, no `.await`) on connection/session open and again on close —
 once per TCP connection and once per UDP session, never per byte or per datagram.
 Nothing on the steady-state path.
+
+**Transparent mode** (`transparent: true`): the per-connection upstream socket
+becomes a `TcpSocket` + one `setsockopt(IP_TRANSPARENT)` + one `bind` before the
+`connect` — a couple of extra syscalls at connect time only, no allocation, no
+lock, nothing per byte. Non-transparent listeners keep the plain
+`TcpStream::connect` path.
 
 **PROXY protocol** (`proxy_protocol: v1 | v2`): one `Vec` allocation (≤ 52 B) and
 one extra `write_all` to the backend per new TCP connection, before the pump.
@@ -836,6 +863,27 @@ client_local, pool)` writes the header to the backend immediately after
 `gsp_proxy_protocol_headers_total{pool,version}`. Live across reload.
 Resolver `target` connections have no pool ⇒ never get a header (open item).
 
+### Slice 3 — TCP transparent mode (done)
+
+`listeners[].transparent: bool` (TCP-only, validated). `net.rs`:
+`bind_reuseport_tcp(.., transparent)` sets `IP_TRANSPARENT` on the listen
+socket; `connect_tcp_from(backend, source)` opens the upstream socket, and with
+`source` set (same family as `backend`) sets `IP_TRANSPARENT` + `bind(source)`
+before connecting — a family mismatch or `None` is a plain connect.
+`set_ip_transparent` is `#[cfg(target_os = "linux")]` via nix
+`sockopt::IpTransparent` (no `unsafe`). `proxy::connect_backend` / `handle_tcp` /
+`handle_tcp_target` carry `transparent_source: Option<SocketAddr>`; the listener
+passes `cfg.transparent.then_some(peer)`. Inbound routing is unchanged — the
+`IP_TRANSPARENT` listen socket's `getsockname()` already yields the original
+destination that `local` / `dst` / `port` use. `GET /config` prints the
+`freebind` / `transparent` flags. Network setup (nftables TPROXY + `ip rule`) is
+in `docs/04`.
+
+Not done: UDP transparent (slice 4); `IPV6_TRANSPARENT` for an IPv6 listen bind
+(socket2 0.6); a foreign-source upstream bind still needs `CAP_NET_ADMIN` at
+runtime (no e2e test — config plumbing + `connect_tcp_from` fallback are
+covered).
+
 ### Slice 2 — v2-UDP variant (done)
 
 `ProxyProtocol::V2Udp` (serde `rename = "v2-udp"`). `header()` lost its `stream`
@@ -875,7 +923,7 @@ first datagram only (`Cow::Owned`); the plain `send(first)` becomes
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
 | `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` builds the `ListenerManager` (`start_all`) + spawns the health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `reload_requested`; `shutdown_with_grace` = `listeners.stop_all` + health await + `wait_idle` + `abort_all`. `RuntimeHandle`: `store` / `ready` / `route_hints` / `backend_overlay` / `request_reload` / `reconcile_listeners` / `active_conns` / `set_draining` / `is_draining`. |
 | `crates/gsp-core/src/listeners.rs` | `ListenerManager` — one task `Group` (workers + `watch<bool>` stop) per listener; `start_all` (startup), `reconcile(&Snapshot)` (diff by name → spawn/stop/rebind), `stop_all` / `abort_all`. |
-| `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
+| `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind` / `transparent`), `bind_reuseport_udp` (+ `pktinfo`), `connect_tcp_from` (transparent client-bound upstream connect), `set_ip_transparent`. |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |
 | `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools` `/config`, `POST /route-hint`, `PATCH /pools/{pool}/backends/{addr}` (set `AdminState`), `POST /admin/drain` `/admin/undrain`. |
