@@ -103,6 +103,15 @@
 > `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
 > Startup-only, like `settings.workers`.
 >
+> **UDP first-packet gate:** `first_packet_gate: true` on a UDP listener makes it
+> create a session only when the first datagram is positively recognised — a
+> `sniffer` hint that is not `reject`, or a `first_bytes` route on the listener
+> that matches the datagram. Applied before the `route_hint` lookup (a spoofable
+> `src_ip` hint must not bypass it). Unrecognised datagrams are dropped with no
+> session and no reply, counted by
+> `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
+> one `first_bytes` route or a `sniffer` (else it would drop everything).
+>
 > UDP listeners
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
@@ -283,6 +292,8 @@ listeners:
   `rate >= 1`.
 - Every `settings.limits.*` value, if present, must be `>= 1` (0 would block all
   traffic — omit the key for no cap).
+- `first_packet_gate: true` is UDP-only and needs at least one `first_bytes`
+  route or a `sniffer` on the listener.
 - `consistent_hash` requires `hash_on`.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires

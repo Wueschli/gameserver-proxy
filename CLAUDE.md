@@ -212,6 +212,9 @@ new connections / new UDP sessions, checked after the ACL; `per_net` keyed by
 → `gsp_core::limits::GlobalLimits` (atomic counters + a new-session token bucket,
 RAII `LimitGuard`), refused before allocation. Blocked ⇒ silent drop +
 `gsp_filter_blocked_total{listener,filter="acl"|"rate_ip"|"rate_net"|"max_conn"|"max_udp"|"max_new_rate"}`.
-Still to do: UDP first-packet gate, amplifier-checklist tests, optional geo
-filter, ACL LPM trie, parser fuzzing. See `HANDOVER.md` and `docs/08`. Don't
-half-land a slice.
+Slice 4: UDP `first_packet_gate: true` — a session opens only when the first
+datagram is positively recognised (non-`reject` sniffer hint or a matching
+`first_bytes` route: `ListenerConfig::first_packet_recognised`), checked before
+the `route_hint` lookup; else `gsp_datagrams_dropped_total{reason="first_packet_gate"}`.
+Still to do: amplifier-checklist tests, optional geo filter, ACL LPM trie,
+parser fuzzing. See `HANDOVER.md` and `docs/08`. Don't half-land a slice.

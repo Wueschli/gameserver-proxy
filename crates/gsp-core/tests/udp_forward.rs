@@ -417,3 +417,54 @@ listeners:
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn first_packet_gate_drops_unrecognised_datagrams() {
+    let b = echo_backend(7).await;
+    let proxy_addr = free_udp_addr();
+
+    // Gate on: only datagrams starting 0xFFFFFFFF create a session.
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    first_packet_gate: true
+    routes:
+      - match: {{ type: first_bytes, prefix: "hex:ffffffff" }}
+        action: {{ pool: p }}
+      - match: {{ type: always }}
+        action: {{ pool: p }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Unrecognised first datagram: no session, no reply.
+    let bad = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    bad.connect(proxy_addr).await.unwrap();
+    bad.send(b"not a handshake").await.unwrap();
+    let mut buf = [0u8; 64];
+    let r = tokio::time::timeout(Duration::from_millis(300), bad.recv(&mut buf)).await;
+    assert!(r.is_err(), "gated datagram must get no reply, got {r:?}");
+
+    // Recognised first datagram: session opens, echo comes back.
+    let good = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    good.connect(proxy_addr).await.unwrap();
+    good.send(&[0xff, 0xff, 0xff, 0xff, 0x10]).await.unwrap();
+    let n = tokio::time::timeout(Duration::from_millis(500), good.recv(&mut buf))
+        .await
+        .expect("recognised datagram should be forwarded")
+        .unwrap();
+    assert_eq!(buf[0], 7, "reply should come from the echo backend");
+    assert_eq!(&buf[1..n], &[0xff, 0xff, 0xff, 0xff, 0x10]);
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

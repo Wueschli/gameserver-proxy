@@ -1,12 +1,13 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–3 done** —
+Last updated: 2026-09-03 (**phases 0–6 complete; phase 7 slices 1–4 done** —
 filter chain: per-listener `allow` / `deny` CIDR lists + a per-listener
 `rate_limit` token bucket (per source IP and per /24 / /64) + process-wide
 `settings.limits` caps (`max_connections` / `max_udp_sessions` /
-`max_new_sessions_per_sec`); blocked traffic dropped silently +
-`gsp_filter_blocked_total{filter="acl"|"rate_ip"|"rate_net"|"max_conn"|"max_udp"|"max_new_rate"}`).
+`max_new_sessions_per_sec`) + a UDP `first_packet_gate` (session only on
+positive first-datagram recognition); blocked traffic dropped silently +
+`gsp_filter_blocked_total{filter=…}` / `gsp_datagrams_dropped_total{reason="first_packet_gate"}`).
 Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
@@ -179,12 +180,23 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   eviction). Startup-only (reload does **not** re-read — like `workers`).
   `m::FILTER_BLOCKED` gains `filter="max_conn"|"max_udp"|"max_new_rate"`. `GET
   /config` shows `limits=conn:N,udp:N,new_rate:N`.
-- **Next**: phase 7 slice 4+ — UDP first-packet gate, amplifier checklist tests,
-  optional geo filter, LPM trie for the ACL, fuzzing the peek/sniffer parsers.
+- **Phase 7 slice 4 done**: UDP first-packet gate. `gsp-config`
+  `RawListener::first_packet_gate: bool` → `ListenerConfig::first_packet_gate`
+  (UDP-only; `validate()` rejects it on TCP or when the listener has no
+  `first_bytes` route and no `sniffer`). `ListenerConfig::first_packet_recognised(&MatchContext)`
+  = `sniff` hint present and not `reject`, **or** any `FirstBytes` route matches
+  the datagram. `listener_udp::open_session` checks
+  `cfg.first_packet_gate && !cfg.first_packet_recognised(&mctx)` right after
+  building `mctx` (before the `route_hint` lookup, so a spoofable src_ip hint
+  can't bypass it) → `Err("first_packet_gate")` ⇒
+  `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. `GET /config` shows
+  the `first_packet_gate` flag.
+- **Next**: phase 7 slice 5+ — amplifier checklist tests, optional geo filter,
+  LPM trie for the ACL, fuzzing the peek/sniffer parsers.
   `proxy_protocol` on a resolver `target` (pool-less TCP) is still unaddressed.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~129 tests). Needs
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~128 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -430,7 +442,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
-| Geo filter, UDP first-packet gate, ACL LPM trie | phase 7 |
+| UDP first-packet gate (`first_packet_gate` on a UDP listener) | **done** (phase 7 slice 4) |
+| Geo filter, ACL LPM trie, amplifier-checklist tests, parser fuzzing | phase 7 |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 
 ---
@@ -549,6 +562,12 @@ only — one or two relaxed-ish atomic ops (`fetch_add` + maybe `fetch_sub`) and
 if `max_new_sessions_per_sec` is set, one short `Mutex<NewRate>` lock (no
 `.await`). One `LimitGuard` created/dropped per connection / session, never per
 byte / datagram. Uncapped ⇒ a single `is_enabled()` check.
+
+**UDP first-packet gate** (`first_packet_gate`): per new UDP session only, inside
+`open_session` — the sniff hint is already computed for routing; the gate adds a
+short linear scan of the route list for a matching `FirstBytes` matcher (only
+until routing itself runs). No lock, no alloc, no task; steady-state datagrams
+never touch it. Listeners without the flag pay nothing.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**

@@ -132,6 +132,12 @@ listeners:
   - name: query-and-game
     bind: "0.0.0.0:27016"
     protocol: udp
+    # First-packet gate (udp): open a session only if the first datagram is
+    # positively recognised — matches a `first_bytes` route here (or a sniffer
+    # hint). Generic spoof floods never reach the session table. Drops show up
+    # as gsp_datagrams_dropped_total{reason="first_packet_gate"}. Needs at least
+    # one first_bytes route / sniffer (else it would drop everything).
+    first_packet_gate: true
     routes:
       # Valve A2S query packets start with the 0xFFFFFFFF connectionless header.
       - match: { type: first_bytes, prefix: "hex:ffffffff" }
@@ -194,7 +200,7 @@ listeners:
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
 #   protocol / routes / affinity / prefix / freebind / transparent / route_hint
-#   / allow / deny / rate_limit.
+#   / allow / deny / rate_limit / first_packet_gate.
 #   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
 #   survive reloads.)
 # Note: a UDP session reads idle_timeout_sec once at creation; a reload that

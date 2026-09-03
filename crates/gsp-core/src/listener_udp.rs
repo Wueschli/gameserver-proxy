@@ -413,6 +413,14 @@ async fn open_session(
         first_bytes: first,
         sniff: hint.as_ref(),
     };
+
+    // First-packet gate (phase 7): no session unless the first datagram is
+    // positively recognised. Applies before the push-resolver hint — a src_ip
+    // hint must not let a spoofed flood past.
+    if cfg.first_packet_gate && !cfg.first_packet_recognised(&mctx) {
+        return Err("first_packet_gate");
+    }
+
     let hinted = cfg
         .route_hint
         .then(|| hints.lookup(client.ip()))

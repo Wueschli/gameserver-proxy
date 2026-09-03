@@ -15,7 +15,7 @@ pub const PACKETS: &str = "gsp_packets_total";
 
 /// Counter. Labels: `listener`, `reason`
 /// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send` |
-/// `outside_prefix` | `draining` | `reply_bind`).
+/// `outside_prefix` | `draining` | `reply_bind` | `first_packet_gate`).
 pub const DATAGRAMS_DROPPED: &str = "gsp_datagrams_dropped_total";
 
 /// Counter. Labels: `listener`, `dir` (`c2s` | `s2c`).

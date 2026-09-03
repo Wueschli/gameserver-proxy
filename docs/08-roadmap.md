@@ -142,7 +142,13 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   (existing untouched) + `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
   "max_new_rate"}`. RAII `LimitGuard` releases the slot on connection / session
   end.
-- UDP first-packet gate, automated tests for the amplifier checklist.
+- ✅ **Slice 4**: UDP first-packet gate — `first_packet_gate: true` on a UDP
+  listener opens a session only when the first datagram is positively recognised
+  (a non-`reject` sniffer hint, or a matching `first_bytes` route). Checked
+  before the `route_hint` lookup; unrecognised ⇒ no session, no reply,
+  `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. `validate()`
+  rejects it on TCP or with nothing to gate on.
+- Automated tests for the amplifier checklist.
 - Optional geo filter.
 - Fuzzing of the peek/sniffer parsers, load tests against the NFRs.
 - **Result**: hardened against common L4/7 abuse.

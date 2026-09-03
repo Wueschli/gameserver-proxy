@@ -248,6 +248,12 @@ struct RawListener {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+    /// UDP only: create a session only when the first datagram is positively
+    /// recognised — a `sniffer` hint that is not `reject`, or a `first_bytes`
+    /// route on this listener that matches it. Keeps generic spoof floods off
+    /// the session table. Needs at least one `first_bytes` route or a `sniffer`.
+    #[serde(default)]
+    first_packet_gate: bool,
     /// Token-bucket rate limit on new connections / new UDP sessions, keyed by
     /// source IP and/or /24 (v4) / /64 (v6). Checked after the ACL, before
     /// routing. Excess is dropped silently (no reflection).
@@ -937,6 +943,8 @@ pub struct ListenerConfig {
     pub sniffer: Option<String>,
     /// Check the `POST /route-hint` push-resolver table before the route list.
     pub route_hint: bool,
+    /// UDP only: gate new sessions on positive first-datagram recognition.
+    pub first_packet_gate: bool,
     /// Source-IP filter chain, checked before routing. Empty ⇒ admit everyone.
     pub acl: Acl,
     /// Token-bucket rate limit on new connections / UDP sessions. `None` ⇒ no
@@ -975,6 +983,19 @@ impl ListenerConfig {
         from_matchers
             .unwrap_or(0)
             .max(if needs_resolver { PEEK_MAX } else { 0 })
+    }
+
+    /// UDP first-packet gate (phase 7): is the first datagram positively
+    /// recognised — the sniffer produced a non-`reject` hint, or a `first_bytes`
+    /// route on this listener matches it? Only consulted when
+    /// `first_packet_gate` is set.
+    pub fn first_packet_recognised(&self, ctx: &MatchContext) -> bool {
+        if ctx.sniff.is_some_and(|h| !h.reject) {
+            return true;
+        }
+        self.routes
+            .iter()
+            .any(|r| matches!(r.matcher, Matcher::FirstBytes { .. }) && r.matcher.matches(ctx))
     }
 }
 
@@ -1327,6 +1348,27 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
+        if l.first_packet_gate {
+            if l.protocol != Protocol::Udp {
+                return Err(Invalid(format!(
+                    "listener {}: `first_packet_gate` applies only to udp listeners",
+                    l.name
+                )));
+            }
+            let has_gateable = routes.iter().any(|r| {
+                matches!(
+                    r.matcher,
+                    Matcher::FirstBytes { .. } | Matcher::Sniffer { .. }
+                )
+            });
+            if !has_gateable {
+                return Err(Invalid(format!(
+                    "listener {}: `first_packet_gate` needs at least one `first_bytes` route \
+                     or a `sniffer` (otherwise it drops every datagram)",
+                    l.name
+                )));
+            }
+        }
 
         let parse_cidrs = |field: &str, raw: &[String]| -> Result<Vec<Cidr>, ConfigError> {
             raw.iter()
@@ -1405,6 +1447,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             transparent: l.transparent,
             sniffer,
             route_hint: l.route_hint,
+            first_packet_gate: l.first_packet_gate,
             acl,
             rate_limit,
         });
@@ -2507,6 +2550,50 @@ listeners:
         let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
                     listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
         assert!(parse_str(yaml).unwrap().limits.is_empty());
+    }
+
+    #[test]
+    fn first_packet_gate_parses_and_recognises_known_first_bytes() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    protocol: udp
+    first_packet_gate: true
+    routes:
+      - match: { type: first_bytes, prefix: "hex:ffffffff" }
+        action: { pool: p }
+      - match: { type: always }
+        action: { pool: p }
+"#;
+        let l = &parse_str(yaml).unwrap().listeners[0];
+        assert!(l.first_packet_gate);
+        let ctx = |b: &'static [u8]| MatchContext {
+            src: "1.2.3.4:5".parse().unwrap(),
+            local: "9.9.9.9:7777".parse().unwrap(),
+            first_bytes: b,
+            sniff: None,
+        };
+        assert!(l.first_packet_recognised(&ctx(&[0xff, 0xff, 0xff, 0xff, 0x01])));
+        assert!(!l.first_packet_recognised(&ctx(b"random junk")));
+    }
+
+    #[test]
+    fn rejects_bad_first_packet_gate() {
+        for bad in [
+            // tcp listener
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: tcp\n    first_packet_gate: true\n    pool: p",
+            // udp but nothing to gate on
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    first_packet_gate: true\n    pool: p",
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
     }
 
     #[test]
