@@ -25,7 +25,7 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–2 complete; phase 3 (routing) started.** TCP and UDP
+**Roadmap phases 1–3 complete.** TCP and UDP
 listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
@@ -47,8 +47,11 @@ listener → backend pool forwarding with:
 - UDP `prefix:` listeners — one wildcard `IP_PKTINFO` socket serves a whole
   routed prefix, routing by the real per-datagram destination and replying from
   it; TCP `freebind:`
+- push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` + per-listener
+  `route_hint: true` (a short-lived `src_ip → pool` hint wins over the route list)
 
-Next: phase 3 wrap-up — `first_bytes` regex, `/route-hint` push resolver. See
+**Phase 3 complete.** Next: phase 4 (external resolver) or phase 5 (operability
+— connection draining, runtime listener/backend CRUD). See
 [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run

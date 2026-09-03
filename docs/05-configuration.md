@@ -38,12 +38,19 @@
 > `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (one sniffer
 > per listener) but matches nothing until a sniffer plugin is loaded — no
 > sniffers are built in; the name is checked at listener start, not by
-> `validate()`. The `first_bytes` `regex` variant, the sniffer loader (Phase 9)
-> and the `external` resolver are still to come.
+> `validate()`. The sniffer loader (Phase 9) and the `external` resolver are
+> still to come; regex-over-first-bytes is a Phase 9 plugin concern, not a
+> `first_bytes` sub-form.
+>
+> **Push resolver:** `POST /route-hint` (admin API) with
+> `{ "src_ip": "...", "pool": "...", "ttl_sec": 30 }` records a short-lived
+> `src_ip → pool` hint; a listener with `route_hint: true` applies it before its
+> route list. `pool` must exist; `ttl_sec` 1..=3600.
 >
 > Listener options: `prefix: <cidr>` (UDP only) → prefix mode as above, with a
 > wildcard `bind`; `freebind: true` (TCP only) → bind with `IP_FREEBIND` /
-> `IPV6_FREEBIND`. UDP listeners take
+> `IPV6_FREEBIND`; `route_hint: true` → consult the push resolver. UDP listeners
+> take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
 > when it is created. See `config.example.yaml`. The full schema below is the

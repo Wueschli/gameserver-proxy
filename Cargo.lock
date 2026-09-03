@@ -359,6 +359,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "notify",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",

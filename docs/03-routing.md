@@ -33,20 +33,27 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). The sniffer **seam**
 > is `gsp_core::sniff::Sniffer` → `RouteHint { host, key, reject }`, fed into
 > routing before matchers run; loading real sniffers (sandboxed, from a separate
-> repo) is Phase 9. Still pending: the TCP side of prefix binding beyond
-> `freebind`, `first-bytes` `regex`, the sniffer loader, the `external` resolver,
-> and the `weighted` / `first_available` balancers. A listener with a bare
-> `pool:` is normalised to one `always` route.
+> repo) is Phase 9. The **push resolver** (`POST /route-hint`) is implemented:
+> a listener with `route_hint: true` checks a short-lived `src_ip → pool` table
+> before its route list (`gsp_route_hints_applied_total{listener}` counts hits).
+> Still pending: the TCP side of prefix binding beyond `freebind`, the sniffer
+> loader, the `external` resolver, and the `weighted` / `first_available`
+> balancers. Regex-over-first-bytes is folded into the Phase 9 plugin layer, not
+> a `first-bytes` sub-form. A listener with a bare `pool:` is normalised to one
+> `always` route.
 
 ## Evaluation order
 
 1. **Early filters** (ACL, rate limit, geo) – before routing, may reject immediately.
 2. **Listener binding** – the listener may already map 1:1 to a pool (simplest case,
    no further logic).
-3. **Route matching** – the listener's ordered rule list; **the first matching rule
+3. **Push-resolver hint** – if the listener has `route_hint: true` and a live
+   `src_ip → pool` entry exists (from `POST /route-hint`) whose pool still
+   exists, it wins and steps 4–6 are skipped.
+4. **Route matching** – the listener's ordered rule list; **the first matching rule
    wins**. Each rule: `match` + `action` (`pool` or `resolver`).
-4. **Resolver** (if the rule requires it) – external lookup with cache/fallback.
-5. **Default route** – when nothing matches.
+5. **Resolver** (if the rule requires it) – external lookup with cache/fallback.
+6. **Default route** – when nothing matches.
 
 ## Matcher types
 

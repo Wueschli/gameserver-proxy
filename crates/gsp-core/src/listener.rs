@@ -11,6 +11,7 @@ use gsp_config::ListenerConfig;
 
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
+use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 
 /// How long to wait for a client's first bytes when a route needs to peek them.
@@ -21,6 +22,7 @@ const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 pub async fn run_tcp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
+    hints: Arc<RouteHints>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -60,6 +62,7 @@ pub async fn run_tcp_listener(
 
                 let snap = snapshot.load_full();
                 let cfg = cfg.clone();
+                let hints = hints.clone();
 
                 tokio::spawn(async move {
                     let local = stream.local_addr().unwrap_or(cfg.bind);
@@ -87,7 +90,20 @@ pub async fn run_tcp_listener(
                         first_bytes: first,
                         sniff: hint.as_ref(),
                     };
-                    let Some(pool_name) = cfg.route_for(&mctx) else {
+                    let hinted = cfg
+                        .route_hint
+                        .then(|| hints.lookup(peer.ip()))
+                        .flatten()
+                        .filter(|p| snap.pool(p).is_some());
+                    if hinted.is_some() {
+                        metrics::counter!(
+                            m::ROUTE_HINTS_APPLIED, "listener" => listener_name.clone(),
+                        ).increment(1);
+                    }
+                    let Some(pool_name) = hinted
+                        .as_deref()
+                        .or_else(|| cfg.route_for(&mctx))
+                    else {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,
                             "listener" => listener_name.clone(),

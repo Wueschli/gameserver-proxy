@@ -329,3 +329,58 @@ listeners:
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn route_hint_overrides_the_route_list_for_a_source_ip() {
+    let hinted = marker_backend(b'H').await;
+    let normal = marker_backend(b'N').await;
+    let proxy_addr = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: hinted
+    targets: ["{hinted}"]
+  - name: normal
+    targets: ["{normal}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    route_hint: true
+    routes:
+      - match: {{ type: always }}
+        action: {{ pool: normal }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let hit = || async {
+        let mut c = TcpStream::connect(proxy_addr).await.unwrap();
+        let mut m = [0u8; 1];
+        c.read_exact(&mut m).await.unwrap();
+        m[0]
+    };
+
+    // No hint yet: the `always` route wins.
+    assert_eq!(hit().await, b'N');
+
+    // Push a hint for the loopback client; now it wins.
+    runtime.handle().route_hints().set(
+        "127.0.0.1".parse().unwrap(),
+        "hinted".into(),
+        Duration::from_secs(30),
+    );
+    assert_eq!(hit().await, b'H');
+
+    // A hint naming a pool that does not exist is ignored.
+    runtime.handle().route_hints().set(
+        "127.0.0.1".parse().unwrap(),
+        "ghost".into(),
+        Duration::from_secs(30),
+    );
+    assert_eq!(hit().await, b'N');
+
+    runtime.shutdown().await;
+}

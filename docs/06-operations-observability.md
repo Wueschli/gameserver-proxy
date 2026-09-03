@@ -24,6 +24,8 @@
 - `gsp_healthcheck_total{pool,backend,result}`
 - `gsp_lb_selections_total{pool,strategy,result}` – `strategy` =
   `round_robin|least_conn|consistent_hash`; `result` = `ok|no_backend|at_capacity`
+- `gsp_route_hints_applied_total{listener}` – a `POST /route-hint` entry decided
+  routing for a connection / UDP session
 
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|error|timeout`
@@ -82,6 +84,9 @@ carried in the PROXY v2 TLV if the backend should correlate it.
 - `GET /readyz` – config loaded & valid, at least one listener bound.
 - `GET /metrics` – Prometheus.
 - `GET /config`, `GET /pools`, `GET /sessions?listener=&src=&pool=` – introspection.
+- `POST /route-hint` `{src_ip, pool, ttl_sec}` – push-resolver hint (scheme C);
+  applied by listeners with `route_hint: true`. Implemented; `/config` &
+  `/sessions` are not yet.
 
 ## Backend health checks
 

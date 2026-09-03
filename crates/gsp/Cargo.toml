@@ -15,6 +15,7 @@ gsp-config = { path = "../gsp-config" }
 gsp-core = { path = "../gsp-core" }
 
 tokio.workspace = true
+serde.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

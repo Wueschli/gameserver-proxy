@@ -187,6 +187,10 @@ struct RawListener {
     /// address that is not (yet) configured on an interface.
     #[serde(default)]
     freebind: bool,
+    /// Consult the push-resolver table (`POST /route-hint`) before the route
+    /// list: a live `src_ip → pool` hint wins if its pool still exists.
+    #[serde(default)]
+    route_hint: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -630,6 +634,8 @@ pub struct ListenerConfig {
     /// The single sniffer plugin this listener's routes use (`None` if no
     /// `sniffer` route). `gsp-core` runs it once per connection before routing.
     pub sniffer: Option<String>,
+    /// Check the `POST /route-hint` push-resolver table before the route list.
+    pub route_hint: bool,
 }
 
 impl ListenerConfig {
@@ -942,6 +948,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             prefix,
             freebind: l.freebind,
             sniffer,
+            route_hint: l.route_hint,
         });
     }
 
@@ -1830,6 +1837,22 @@ listeners:
         let cfg = parse_str(yaml).unwrap();
         assert!(cfg.listeners[0].freebind);
         assert!(cfg.listeners[0].prefix.is_none());
+        assert!(!cfg.listeners[0].route_hint);
+    }
+
+    #[test]
+    fn parses_route_hint_listener_flag() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    route_hint: true
+    pool: p
+"#;
+        assert!(parse_str(yaml).unwrap().listeners[0].route_hint);
     }
 
     #[test]

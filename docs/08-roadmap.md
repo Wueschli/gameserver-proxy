@@ -36,21 +36,21 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   amplification guard (no reply without an established session).
 - **Result**: covers the majority of real-time game servers.
 
-## Phase 3 – Routing intelligence (week 8–10) 🔜
+## Phase 3 – Routing intelligence (week 8–10) ✅
 - ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
 - ✅ `first-bytes` matcher — `prefix` (`hex:` / `ascii:`, ≤ 512 B) and/or
-  `length: { min, max }`; TCP peek / first UDP datagram. ⬜ `regex` variant
-  (belongs in the sniffer layer).
+  `length: { min, max }`; TCP peek / first UDP datagram. (Regex-over-first-bytes
+  moved to Phase 9 — it is a plugin concern, not a `first-bytes` sub-form.)
 - ✅ `consistent_hash` balancer (rendezvous/HRW hash, pool `hash_on: src_ip |
   src_ip_port`) — session affinity without a sticky table.
 - ✅ SNI peek matcher (`sni`, `host` exact / `*.suffix` / `.suffix`; ClientHello
   peeked, not terminated; TCP only).
 - ✅ `dst` matcher (destination IP vs `cidrs`). ✅ UDP prefix listener
   (`prefix: <cidr>`, one wildcard `IP_PKTINFO` socket serving the whole routed
-  prefix, replies from the hit address) + TCP `freebind`. ⬜ optional push
-  resolver (`/route-hint`).
+  prefix, replies from the hit address) + TCP `freebind`. ✅ push resolver
+  (`POST /route-hint`, per-listener `route_hint: true`).
 - ✅ Sniffer API **seam** — `gsp_core::sniff::Sniffer` → `RouteHint`, the
   `sniffer` matcher, and the listener wiring that feeds a hint into routing.
   **No built-in sniffers ship** (game-specific parsing does not belong in the
@@ -97,6 +97,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   call; input capped at `peek_max_bytes`.
 - Config: a plugins directory + per-listener `sniffer:` name resolved against
   the loaded set; reload picks up added/removed modules.
+- A generic `first-bytes` `regex` matcher would ship as one of these plugins
+  (precompiled, bounded `N`) rather than pulling `regex` onto the core routing
+  path.
 - Supply chain: module signing / pinning; the proxy ships a small first-party
   set (e.g. `minecraft`, `a2s`, `sni`) built the same way, no special-casing.
 - Open question: latency of the WASM boundary vs. the NFR budget — measure

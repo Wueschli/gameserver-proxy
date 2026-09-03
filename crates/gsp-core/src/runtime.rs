@@ -7,19 +7,23 @@ use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 
 pub struct Runtime {
     snapshot: Arc<ArcSwap<Snapshot>>,
+    hints: Arc<RouteHints>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
-/// A cheap, cloneable handle to the live snapshot. Reads are lock-free; the
-/// reload task uses [`RuntimeHandle::store`] to swap in a new snapshot.
+/// A cheap, cloneable handle to the live snapshot and the route-hint table.
+/// Reads are lock-free; the reload task uses [`RuntimeHandle::store`] to swap in
+/// a new snapshot.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     snapshot: Arc<ArcSwap<Snapshot>>,
+    hints: Arc<RouteHints>,
 }
 
 impl RuntimeHandle {
@@ -41,6 +45,11 @@ impl RuntimeHandle {
     pub fn ready(&self) -> bool {
         !self.snapshot.load().listeners.is_empty()
     }
+
+    /// The push-resolver hint table (`POST /route-hint`).
+    pub fn route_hints(&self) -> &Arc<RouteHints> {
+        &self.hints
+    }
 }
 
 impl Runtime {
@@ -48,6 +57,7 @@ impl Runtime {
     /// each) plus the health checker. `workers == 0` means one per CPU core.
     pub fn start(initial: Arc<Snapshot>, workers: usize) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
+        let hints = RouteHints::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let worker_count = if workers == 0 {
@@ -62,18 +72,26 @@ impl Runtime {
         for lc in &initial.listeners {
             for worker_id in 0..worker_count {
                 let snap = snapshot.clone();
+                let hints = hints.clone();
                 let lc = lc.clone();
                 let mut sd = shutdown_rx.clone();
                 tasks.push(tokio::spawn(async move {
                     let res = match lc.protocol {
                         gsp_config::Protocol::Tcp => {
-                            crate::listener::run_tcp_listener(lc.clone(), snap, worker_id, &mut sd)
-                                .await
+                            crate::listener::run_tcp_listener(
+                                lc.clone(),
+                                snap,
+                                hints,
+                                worker_id,
+                                &mut sd,
+                            )
+                            .await
                         }
                         gsp_config::Protocol::Udp => {
                             crate::listener_udp::run_udp_listener(
                                 lc.clone(),
                                 snap,
+                                hints,
                                 worker_id,
                                 &mut sd,
                             )
@@ -100,6 +118,7 @@ impl Runtime {
 
         Self {
             snapshot,
+            hints,
             shutdown_tx,
             tasks,
         }
@@ -108,6 +127,7 @@ impl Runtime {
     pub fn handle(&self) -> RuntimeHandle {
         RuntimeHandle {
             snapshot: self.snapshot.clone(),
+            hints: self.hints.clone(),
         }
     }
 

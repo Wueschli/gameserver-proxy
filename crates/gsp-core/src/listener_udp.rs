@@ -49,6 +49,7 @@ use gsp_config::{HashOn, ListenerConfig};
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_udp;
 use crate::pool::BackendGuard;
+use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::util::now_ms;
 
@@ -106,6 +107,7 @@ fn sticky_key(
 pub async fn run_udp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
+    hints: Arc<RouteHints>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -199,7 +201,7 @@ pub async fn run_udp_listener(
                 }
 
                 // New session.
-                match open_session(&cfg, &snapshot, &sock, &mut sticky, client, dst, &buf[..n]).await {
+                match open_session(&cfg, &snapshot, &hints, &sock, &mut sticky, client, dst, &buf[..n]).await {
                     Ok(session) => {
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -298,6 +300,7 @@ fn sockaddr_to_std(a: nix::sys::socket::SockaddrStorage) -> Option<SocketAddr> {
 async fn open_session(
     cfg: &ListenerConfig,
     snapshot: &Arc<ArcSwap<Snapshot>>,
+    hints: &Arc<RouteHints>,
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
     client: SocketAddr,
@@ -320,7 +323,18 @@ async fn open_session(
         first_bytes: first,
         sniff: hint.as_ref(),
     };
-    let pool_name = cfg.route_for(&mctx).ok_or("no_route")?;
+    let hinted = cfg
+        .route_hint
+        .then(|| hints.lookup(client.ip()))
+        .flatten()
+        .filter(|p| snap.pool(p).is_some());
+    if hinted.is_some() {
+        metrics::counter!(m::ROUTE_HINTS_APPLIED, "listener" => cfg.name.clone()).increment(1);
+    }
+    let pool_name = hinted
+        .as_deref()
+        .or_else(|| cfg.route_for(&mctx))
+        .ok_or("no_route")?;
     let pool = snap.pool(pool_name).ok_or("no_route")?;
     let idle_ms = pool.idle_timeout.as_millis() as u64;
 

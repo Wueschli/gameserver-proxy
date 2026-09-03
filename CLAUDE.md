@@ -44,15 +44,16 @@ crates/
     listener.rs             TCP accept loop (one task per worker, SO_REUSEPORT)
     listener_udp.rs         UDP recv loop + worker-local session table + reply pump
     proxy.rs                per-connection byte pump
-    sniff.rs                static sniffer plugins (sni / minecraft / a2s) — the ONLY place for game protocol parsing
+    sniff.rs                sniffer API seam (trait + registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
+    route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
-    runtime.rs              owns listener + health tasks, holds the ArcSwap
+    runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
     net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND)
     metrics_defs.rs         canonical metric names — ALL metric names live here
     util.rs                 tiny helpers (monotonic now_ms)
   gsp/                       binary
     main.rs                 CLI, tracing, runtime bring-up, shutdown
-    admin.rs                axum admin API: /healthz /readyz /metrics /pools
+    admin.rs                axum admin API: GET /healthz /readyz /metrics /pools, POST /route-hint
     reload.rs               SIGHUP + file-watch → rebuild snapshot → atomic swap
 ```
 
@@ -167,15 +168,15 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 
 ## Roadmap position
 
-Phases 0–2 are done: TCP + UDP forwarding, round-robin + least-conn, active
-`tcp_connect` / `udp_probe` health checks, per-backend caps, worker-local UDP
-session tables with `src_ip` affinity, hot reload, metrics. **Phase 3 (routing
-intelligence) is in progress**: slices 1–8 landed a priority-ordered `routes:`
-list with `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` +
-`length`) / `sni` matchers, the `consistent_hash` balancer (rendezvous hash,
-pool `hash_on`), the UDP `prefix:` listener (one wildcard `IP_PKTINFO` socket
-per routed prefix, via `nix` — still zero `unsafe`) + TCP `freebind:`, and the
-sniffer API **seam** (`gsp_core::sniff` — trait + `sniffer` matcher, **no
-built-in sniffers**; the loader is roadmap Phase 9). Next is `first_bytes` regex
-and the `/route-hint` push resolver, which close phase 3. See `HANDOVER.md` and
-`docs/03`. Don't half-land a slice.
+Phases 0–3 are done. Phase 3 (routing intelligence) shipped: a priority-ordered
+`routes:` list with `always` / `client_cidr` / `dst` / `port` / `first_bytes`
+(`prefix` + `length`) / `sni` matchers, the `consistent_hash` balancer
+(rendezvous hash, pool `hash_on`), the UDP `prefix:` listener (one wildcard
+`IP_PKTINFO` socket per routed prefix, via `nix` — still zero `unsafe`) + TCP
+`freebind:`, the sniffer API **seam** (`gsp_core::sniff` — trait + `sniffer`
+matcher, **no built-in sniffers**; the loader is Phase 9), and the
+`POST /route-hint` push resolver (per-listener `route_hint: true`).
+
+**Next: phase 4** (external resolver — gRPC/HTTP callback + cache) **or phase 5**
+(operability — connection draining, runtime listener/backend CRUD, `draining` /
+`disabled` states). See `HANDOVER.md` and `docs/08`. Don't half-land a slice.

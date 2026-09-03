@@ -39,6 +39,10 @@ pub const HEALTHCHECK: &str = "gsp_healthcheck_total";
 /// Counter. Labels: `pool`, `strategy`, `result` (`ok` | `no_backend` | `at_capacity`).
 pub const LB_SELECTIONS: &str = "gsp_lb_selections_total";
 
+/// Counter. Labels: `listener`. A `POST /route-hint` entry decided routing for a
+/// connection / UDP session (bypassing the route list).
+pub const ROUTE_HINTS_APPLIED: &str = "gsp_route_hints_applied_total";
+
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 
