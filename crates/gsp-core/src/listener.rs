@@ -75,7 +75,17 @@ pub async fn run_tcp_listener(
                         &[]
                     };
 
-                    let mctx = gsp_config::MatchContext { src: peer, local, first_bytes: first };
+                    let hint = cfg
+                        .sniffer
+                        .as_deref()
+                        .and_then(crate::sniff::sniffer)
+                        .and_then(|s| s.sniff(first));
+                    let mctx = gsp_config::MatchContext {
+                        src: peer,
+                        local,
+                        first_bytes: first,
+                        sniff: hint.as_ref(),
+                    };
                     let Some(pool_name) = cfg.route_for(&mctx) else {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,

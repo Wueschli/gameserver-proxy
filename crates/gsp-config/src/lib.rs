@@ -2,7 +2,8 @@
 //!
 //! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
 //! route rule list (`always` / `client_cidr` / `dst` / `port` / `first_bytes` /
-//! `sni` matchers) onto static pools, with active health checks, round-robin /
+//! `sni` / `sniffer` matchers) onto static pools, with active health checks,
+//! round-robin /
 //! least-connections / consistent-hash balancing, per-backend session caps, and
 //! UDP session affinity. The full target schema lives in
 //! `docs/05-configuration.md` and grows into this crate incrementally.
@@ -212,9 +213,12 @@ struct RawMatch {
     /// `first_bytes` only: observed first-bytes length must fall in this range.
     #[serde(default)]
     length: Option<RawLen>,
-    /// `sni` only: host patterns — exact, `*.suffix` or `.suffix`.
+    /// `sni` / `sniffer`: host patterns — exact, `*.suffix` or `.suffix`.
     #[serde(default)]
     host: Option<Vec<String>>,
+    /// `sniffer` only: the plugin name (see `KNOWN_SNIFFERS`).
+    #[serde(default)]
+    sniffer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +366,23 @@ impl HostPattern {
     }
 }
 
+/// Structured hints a sniffer plugin returns after inspecting a connection's
+/// first bytes. Read-only: a sniffer never sees later bytes and never writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteHint {
+    /// A hostname the sniffer recognised (Minecraft handshake host, TLS SNI, …).
+    pub host: Option<String>,
+    /// An opaque affinity / routing key (fed to a sticky table later).
+    pub key: Option<String>,
+    /// The sniffer wants this connection rejected outright.
+    pub reject: bool,
+}
+
+/// Sniffer plugin names `gsp-core` knows. Kept here so `validate()` can reject
+/// an unknown name; the actual implementations live in `gsp_core::sniff` and
+/// this list must stay in sync with the registry there.
+pub const KNOWN_SNIFFERS: &[&str] = &["sni", "minecraft", "a2s"];
+
 /// A single route's match condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matcher {
@@ -389,6 +410,13 @@ pub enum Matcher {
     /// The TLS ClientHello's SNI host matches one of these patterns (TCP only;
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
+    /// The named sniffer plugin (`gsp_core::sniff`) recognised the first bytes.
+    /// With `host` patterns: also requires the hint's `host` to match one of
+    /// them; empty `host` ⇒ matches on any (non-`reject`) recognition.
+    Sniffer {
+        name: String,
+        host: Vec<HostPattern>,
+    },
 }
 
 /// Hard cap on how many leading bytes the TCP path will `MSG_PEEK` (and on the
@@ -404,6 +432,9 @@ pub struct MatchContext<'a> {
     pub src: SocketAddr,
     pub local: SocketAddr,
     pub first_bytes: &'a [u8],
+    /// The listener's sniffer result, if it has a `sniffer` route and the
+    /// plugin produced a hint. `gsp-core` fills this in before routing.
+    pub sniff: Option<&'a RouteHint>,
 }
 
 impl Matcher {
@@ -422,6 +453,16 @@ impl Matcher {
                 Some(host) => pats.iter().any(|p| p.matches(&host)),
                 None => false,
             },
+            Matcher::Sniffer { name: _, host } => match ctx.sniff {
+                Some(hint) if !hint.reject => {
+                    host.is_empty()
+                        || hint
+                            .host
+                            .as_deref()
+                            .is_some_and(|h| host.iter().any(|p| p.matches(h)))
+                }
+                _ => false,
+            },
         }
     }
 
@@ -434,7 +475,7 @@ impl Matcher {
                 len.as_ref()
                     .map_or(0, |r| r.end().saturating_add(1).min(PEEK_MAX)),
             ),
-            Matcher::Sni(_) => PEEK_MAX,
+            Matcher::Sni(_) | Matcher::Sniffer { .. } => PEEK_MAX,
             _ => 0,
         }
     }
@@ -589,6 +630,9 @@ pub struct ListenerConfig {
     pub prefix: Option<Cidr>,
     /// TCP only: bind with `IP_FREEBIND` / `IPV6_FREEBIND`.
     pub freebind: bool,
+    /// The single sniffer plugin this listener's routes use (`None` if no
+    /// `sniffer` route). `gsp-core` runs it once per connection before routing.
+    pub sniffer: Option<String>,
 }
 
 impl ListenerConfig {
@@ -875,6 +919,23 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             )));
         }
 
+        // At most one sniffer plugin per listener (gsp-core runs one per conn).
+        let mut sniffer: Option<String> = None;
+        for r in &routes {
+            if let Matcher::Sniffer { name, .. } = &r.matcher {
+                match &sniffer {
+                    Some(prev) if prev != name => {
+                        return Err(Invalid(format!(
+                            "listener {}: routes use two different sniffers ({prev}, {name}); \
+                             only one per listener is supported",
+                            l.name
+                        )));
+                    }
+                    _ => sniffer = Some(name.clone()),
+                }
+            }
+        }
+
         listeners.push(ListenerConfig {
             name: l.name,
             bind,
@@ -883,6 +944,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             affinity,
             prefix,
             freebind: l.freebind,
+            sniffer,
         });
     }
 
@@ -917,7 +979,27 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
     allow("ports", m.ports.is_some(), m.kind == "port")?;
     allow("prefix", m.prefix.is_some(), m.kind == "first_bytes")?;
     allow("length", m.length.is_some(), m.kind == "first_bytes")?;
-    allow("host", m.host.is_some(), m.kind == "sni")?;
+    allow(
+        "host",
+        m.host.is_some(),
+        m.kind == "sni" || m.kind == "sniffer",
+    )?;
+    allow("sniffer", m.sniffer.is_some(), m.kind == "sniffer")?;
+
+    // Optional (present or empty) host-pattern list, shared by `sni` / `sniffer`.
+    let host_patterns = |min_one: bool| -> Result<Vec<HostPattern>, ConfigError> {
+        match m.host.as_ref().filter(|h| !h.is_empty()) {
+            Some(raw) => raw
+                .iter()
+                .map(|h| parse_host_pattern(h).map_err(&at))
+                .collect(),
+            None if min_one => Err(at(format!(
+                "match type `{}` needs a non-empty `host` list",
+                m.kind
+            ))),
+            None => Ok(Vec::new()),
+        }
+    };
 
     match m.kind.as_str() {
         "always" => Ok(Matcher::Always),
@@ -980,20 +1062,28 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             }
             Ok(Matcher::FirstBytes { prefix, len })
         }
-        "sni" => {
-            let raw = m
-                .host
-                .as_ref()
-                .filter(|h| !h.is_empty())
-                .ok_or_else(|| at("match type `sni` needs a non-empty `host` list".into()))?;
-            let mut pats = Vec::with_capacity(raw.len());
-            for h in raw {
-                pats.push(parse_host_pattern(h).map_err(&at)?);
+        "sni" => Ok(Matcher::Sni(host_patterns(true)?)),
+        "sniffer" => {
+            let name = m
+                .sniffer
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| at("match type `sniffer` needs a `sniffer` name".into()))?;
+            if !KNOWN_SNIFFERS.contains(&name) {
+                return Err(at(format!(
+                    "unknown sniffer {name:?} ({})",
+                    KNOWN_SNIFFERS.join(" | ")
+                )));
             }
-            Ok(Matcher::Sni(pats))
+            Ok(Matcher::Sniffer {
+                name: name.to_string(),
+                host: host_patterns(false)?,
+            })
         }
         other => Err(at(format!(
-            "unknown match type {other:?} (always | client_cidr | dst | port | first_bytes | sni)"
+            "unknown match type {other:?} \
+             (always | client_cidr | dst | port | first_bytes | sni | sniffer)"
         ))),
     }
 }
@@ -1097,6 +1187,17 @@ mod tests {
             src: src.parse().unwrap(),
             local: local.parse().unwrap(),
             first_bytes,
+            sniff: None,
+        }
+    }
+
+    /// Like [`ctx`] but with a sniffer hint attached.
+    fn ctx_sniff<'a>(hint: &'a RouteHint) -> MatchContext<'a> {
+        MatchContext {
+            src: "9.9.9.9:1".parse().unwrap(),
+            local: "1.1.1.1:25565".parse().unwrap(),
+            first_bytes: &[],
+            sniff: Some(hint),
         }
     }
 
@@ -1607,6 +1708,78 @@ listeners:
             "  - name: l\n    bind: \"0.0.0.0:443\"\n    routes: [{ match: { type: sni, cidrs: [\"10.0.0.0/8\"] }, action: { pool: p } }]",
         ] {
             let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n{bad}\n");
+            assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn parses_sniffer_matcher_and_hints_the_listener() {
+        let yaml = r#"
+pools:
+  - name: survival
+    targets: ["127.0.0.1:1"]
+  - name: lobby
+    targets: ["127.0.0.1:2"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:25565"
+    routes:
+      - match: { type: sniffer, sniffer: minecraft, host: ["survival.example.net"] }
+        action: { pool: survival }
+      - match: { type: sniffer, sniffer: minecraft }
+        action: { pool: lobby }
+      - match: { type: always }
+        action: { pool: lobby }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.sniffer.as_deref(), Some("minecraft"));
+        assert_eq!(l.peek_len(), PEEK_MAX);
+
+        let hint = |host: Option<&str>, reject: bool| RouteHint {
+            host: host.map(str::to_string),
+            key: None,
+            reject,
+        };
+        // exact host -> survival
+        assert_eq!(
+            l.route_for(&ctx_sniff(&hint(Some("survival.example.net"), false))),
+            Some("survival")
+        );
+        // recognised but different host -> the bare `sniffer` rule (lobby)
+        assert_eq!(
+            l.route_for(&ctx_sniff(&hint(Some("creative.example.net"), false))),
+            Some("lobby")
+        );
+        // recognised, no host -> bare `sniffer` rule
+        assert_eq!(l.route_for(&ctx_sniff(&hint(None, false))), Some("lobby"));
+        // reject -> neither sniffer rule matches, falls to `always`
+        assert_eq!(
+            l.route_for(&ctx_sniff(&hint(Some("survival.example.net"), true))),
+            Some("lobby")
+        );
+        // no hint at all -> falls to `always`
+        assert_eq!(
+            l.route_for(&ctx("9.9.9.9:5", "1.1.1.1:25565", &[])),
+            Some("lobby")
+        );
+    }
+
+    #[test]
+    fn rejects_bad_sniffer_matchers() {
+        for bad in [
+            // unknown sniffer name
+            r#"routes: [{ match: { type: sniffer, sniffer: doom }, action: { pool: p } }]"#,
+            // missing sniffer name
+            r#"routes: [{ match: { type: sniffer, host: ["a.example.com"] }, action: { pool: p } }]"#,
+            // sniffer field on a non-sniffer matcher
+            r#"routes: [{ match: { type: always, sniffer: sni }, action: { pool: p } }]"#,
+            // two different sniffers on one listener
+            r#"routes: [{ match: { type: sniffer, sniffer: minecraft }, action: { pool: p } }, { match: { type: sniffer, sniffer: a2s }, action: { pool: p } }]"#,
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
+            );
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
         }
     }

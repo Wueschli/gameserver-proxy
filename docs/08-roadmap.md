@@ -51,7 +51,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   (`prefix: <cidr>`, one wildcard `IP_PKTINFO` socket serving the whole routed
   prefix, replies from the hit address) + TCP `freebind`. ⬜ optional push
   resolver (`/route-hint`).
-- Sniffer plugin API (in-process, static): `sni`, `minecraft`, `a2s` as references.
+- ✅ Sniffer plugin API (in-process, static; `gsp_core::sniff::Sniffer` →
+  `RouteHint`): `sni`, `minecraft`, `a2s` reference impls; `sniffer` matcher.
+  ⬜ `first-bytes` `regex` (belongs in this layer).
 - **Result**: multiple games/regions behind one port.
 
 ## Phase 4 – External routing logic (week 11–12)

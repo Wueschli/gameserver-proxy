@@ -13,11 +13,14 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > `length: { min, max }` byte-count window; on TCP `length` sees only what one
 > peek returned, on UDP the exact datagram length), and `sni`
 > (`host` patterns: exact, `*.suffix`, `.suffix` — matched against `server_name`
-> from the peeked, non-terminated TLS ClientHello; TCP listeners only). The TCP
-> path `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
-> needs bytes; UDP inspects the first datagram it already holds. A ClientHello
-> split across TCP segments (only part in the peek buffer) simply does not match
-> the `sni` route.
+> from the peeked, non-terminated TLS ClientHello; TCP listeners only), and
+> `sniffer` (a named in-process plugin — `sni` / `minecraft` / `a2s` — that
+> reads the first bytes and returns a hint; optional `host` patterns then match
+> the hint's hostname; one sniffer per listener). The TCP path `MSG_PEEK`s up to
+> 4096 B (250 ms budget) before routing, only when a route needs bytes; UDP
+> inspects the first datagram it already holds. A ClientHello split across TCP
+> segments (only part in the peek buffer) simply does not match the `sni` /
+> `sniffer` route.
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
 > healthy backends). **`dst` — two forms:** a normally-bound TCP/UDP listener sees
@@ -27,11 +30,12 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > `IP_PKTINFO` / `IPV6_RECVPKTINFO` serves the whole routed prefix (scheme A
 > below): the real per-datagram destination feeds `dst`, replies go out from
 > that address, and datagrams outside the prefix are dropped
-> (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). Still pending: the
-> TCP side of prefix binding beyond `freebind`, `first-bytes` `regex` / `sniffer`
-> variants, the `external` resolver, and the `weighted` / `first_available`
-> balancers. A listener with a bare `pool:` is normalised to
-> one `always` route.
+> (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). Sniffer plugins are
+> static/in-process (`gsp_core::sniff`); `RouteHint` carries `host` / `key` /
+> `reject`. Still pending: the TCP side of prefix binding beyond `freebind`,
+> `first-bytes` `regex`, more sniffers, the `external` resolver, and the
+> `weighted` / `first_available` balancers. A listener with a bare `pool:` is
+> normalised to one `always` route.
 
 ## Evaluation order
 

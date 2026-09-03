@@ -41,14 +41,15 @@ listener → backend pool forwarding with:
 - admin/observability API and Prometheus metrics
 - per-listener route rule list (`routes:`, first match wins) with `always`,
   `client_cidr` (source IP), `dst` (destination IP), `port` (destination port),
-  `first_bytes` (prefix and/or length of the first bytes — TCP peek / first UDP
-  datagram) and `sni` (host from the peeked, non-terminated TLS ClientHello)
+  `first_bytes` (prefix and/or length of the first bytes), `sni` (host from the
+  peeked, non-terminated TLS ClientHello) and `sniffer` (a named in-process
+  plugin — `sni` / `minecraft` / `a2s` — that recognises the first bytes)
   matchers
 - UDP `prefix:` listeners — one wildcard `IP_PKTINFO` socket serves a whole
   routed prefix, routing by the real per-datagram destination and replying from
   it; TCP `freebind:`
 
-Next: phase 3 continued — `first_bytes` regex, sniffer plugins. See
+Next: phase 3 wrap-up — `first_bytes` regex, `/route-hint` push resolver. See
 [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run

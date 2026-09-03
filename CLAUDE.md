@@ -44,9 +44,10 @@ crates/
     listener.rs             TCP accept loop (one task per worker, SO_REUSEPORT)
     listener_udp.rs         UDP recv loop + worker-local session table + reply pump
     proxy.rs                per-connection byte pump
+    sniff.rs                static sniffer plugins (sni / minecraft / a2s) — the ONLY place for game protocol parsing
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
     runtime.rs              owns listener + health tasks, holds the ArcSwap
-    net.rs                  socket helpers (SO_REUSEPORT bind)
+    net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND)
     metrics_defs.rs         canonical metric names — ALL metric names live here
     util.rs                 tiny helpers (monotonic now_ms)
   gsp/                       binary
@@ -139,6 +140,7 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 | Config schema | `gsp-config` raw+resolved types, `validate()`, `config.example.yaml`, `docs/05` |
 | New metric | `metrics_defs.rs`, `docs/06` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
+| New sniffer plugin | `gsp_core::sniff` registry **and** `gsp_config::KNOWN_SNIFFERS` (kept in sync by hand), `docs/03`, tests |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
@@ -168,10 +170,12 @@ export PATH="$HOME/.cargo/bin:$PATH"     # or: source "$HOME/.cargo/env"
 Phases 0–2 are done: TCP + UDP forwarding, round-robin + least-conn, active
 `tcp_connect` / `udp_probe` health checks, per-backend caps, worker-local UDP
 session tables with `src_ip` affinity, hot reload, metrics. **Phase 3 (routing
-intelligence) is in progress**: slices 1–7 landed a priority-ordered `routes:`
+intelligence) is in progress**: slices 1–8 landed a priority-ordered `routes:`
 list with `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix` +
-`length`) / `sni` matchers, the `consistent_hash` balancer (rendezvous hash,
-pool `hash_on`), and the UDP `prefix:` listener (one wildcard `IP_PKTINFO`
-socket per routed prefix, via `nix` — still zero `unsafe`) + TCP `freebind:`.
-Next is `first_bytes` regex and the sniffer plugin API. See `HANDOVER.md` and
-`docs/03`. Don't half-land a slice.
+`length`) / `sni` / `sniffer` matchers, the `consistent_hash` balancer
+(rendezvous hash, pool `hash_on`), the UDP `prefix:` listener (one wildcard
+`IP_PKTINFO` socket per routed prefix, via `nix` — still zero `unsafe`) + TCP
+`freebind:`, and the in-process sniffer plugin API (`gsp_core::sniff`: `sni` /
+`minecraft` / `a2s`). Next is `first_bytes` regex and the `/route-hint` push
+resolver, which close phase 3. See `HANDOVER.md` and `docs/03`. Don't half-land
+a slice.

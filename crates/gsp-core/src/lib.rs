@@ -17,6 +17,7 @@ pub mod pool;
 pub mod proxy;
 pub mod runtime;
 pub mod snapshot;
+pub mod sniff;
 mod util;
 
 pub use runtime::{Runtime, RuntimeHandle};

@@ -308,10 +308,16 @@ async fn open_session(
         Some(ip) => SocketAddr::new(ip, cfg.bind.port()),
         None => down.local_addr().unwrap_or(cfg.bind),
     };
+    let hint = cfg
+        .sniffer
+        .as_deref()
+        .and_then(crate::sniff::sniffer)
+        .and_then(|s| s.sniff(first));
     let mctx = gsp_config::MatchContext {
         src: client,
         local,
         first_bytes: first,
+        sniff: hint.as_ref(),
     };
     let pool_name = cfg.route_for(&mctx).ok_or("no_route")?;
     let pool = snap.pool(pool_name).ok_or("no_route")?;

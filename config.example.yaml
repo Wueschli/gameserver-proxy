@@ -62,8 +62,10 @@ listeners:
   # peek / first UDP datagram — a `prefix:` "hex:.."/"ascii:.." (<= 512 B) and/or
   # a `length: { min, max }` byte-count window; on TCP the length is only what a
   # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
-  # only, not terminated;
-  # `host` patterns: exact, `*.suffix` or `.suffix`).
+  # only, not terminated; `host` patterns: exact, `*.suffix` or `.suffix`);
+  # `sniffer` (a named read-only plugin — `sni` | `minecraft` | `a2s` — that
+  # recognises the first bytes; optional `host` patterns match the plugin's
+  # hostname; one sniffer per listener).
   # `pool` and `routes` are mutually exclusive.
   - name: public-tcp
     bind: "0.0.0.0:7777"
@@ -100,6 +102,18 @@ listeners:
       - match: { type: sni, host: ["*.eu.example.com", "lobby.example.com"] }
         action: { pool: local }
       - match: { type: always }
+        action: { pool: local }
+
+  - name: minecraft
+    bind: "0.0.0.0:25565"
+    protocol: tcp
+    routes:
+      # The `minecraft` sniffer reads the handshake's advertised hostname.
+      - match: { type: sniffer, sniffer: minecraft, host: ["survival.example.net"] }
+        action: { pool: local }
+      - match: { type: sniffer, sniffer: minecraft, host: ["*.creative.example.net"] }
+        action: { pool: local }
+      - match: { type: always }                # not Minecraft, or unknown host
         action: { pool: local }
 
   # Prefix mode (UDP): one wildcard socket serves a whole routed prefix. The real
