@@ -160,6 +160,8 @@ listeners:
         assert_eq!(mark("survival.example.net").await, b'S');
         assert_eq!(mark("creative.example.net").await, b'L');
 
-        runtime.shutdown().await;
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
     }
 }

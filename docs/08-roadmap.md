@@ -82,8 +82,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `PATCH /pools/{p}/backends/{addr}`; `gsp_pool_backends{state=draining|disabled}`.
 - ⬜ Admin API: backends CRUD (`POST` / `DELETE` a backend), read snapshot
   (`GET /config`), `POST /admin/drain` (flip `readyz`).
-- ⬜ Graceful draining of the **proxy instance**: tracked in-flight connections +
-  `shutdown_grace` on `SIGTERM` (today they are detached).
+- ✅ **Slice 2**: graceful draining of the **proxy instance** — a `ConnTracker`
+  counts in-flight TCP connections + UDP sessions; `SIGINT`/`SIGTERM` stops the
+  accept/recv loops and `Runtime::shutdown_with_grace` waits for the tracked work
+  to finish, bounded by `settings.shutdown_grace_sec` (default 30). UDP listeners
+  keep pumping established sessions until they idle out; new datagrams while
+  draining are dropped (`reason="draining"`).
 - ⬜ Runtime listener add / remove / rebind (needs a restart today).
 - ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.

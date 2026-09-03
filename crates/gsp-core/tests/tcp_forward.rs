@@ -59,7 +59,9 @@ async fn forwards_tcp_bytes_end_to_end() {
     assert_eq!(&buf, b"hello proxy");
 
     drop(client);
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -129,7 +131,9 @@ listeners:
         successes >= 8,
         "expected most requests to succeed, got {successes}/10"
     );
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 /// Spawn a backend that, on each connection, writes a single identifying byte.
@@ -211,7 +215,9 @@ listeners:
         "non-matching CIDR should fall through to pool b"
     );
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -253,7 +259,9 @@ listeners:
         assert_eq!(m[0], b'B', "drained backend A must get no new connections");
     }
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -294,7 +302,9 @@ listeners:
         "src_ip hashing must pin one client IP to a single backend, saw {seen:?}"
     );
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 /// A minimal TLS ClientHello record carrying `sni`.
@@ -369,7 +379,9 @@ listeners:
     assert_eq!(hit_mark("frankfurt.eu.example.com").await, b'E');
     assert_eq!(hit_mark("us.example.com").await, b'L');
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -424,5 +436,67 @@ listeners:
     );
     assert_eq!(hit().await, b'N');
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn shutdown_drains_in_flight_connections_then_returns_early() {
+    // Backend echoes each write back after a short delay, keeping the
+    // connection busy across the shutdown signal.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let baddr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 64];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let proxy = free_port().await;
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{baddr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut c = TcpStream::connect(proxy).await.unwrap();
+    c.write_all(b"ping").await.unwrap();
+
+    // Start a shutdown with a long grace while the request is still in flight.
+    let t0 = std::time::Instant::now();
+    let sd = tokio::spawn(async move {
+        runtime.shutdown_with_grace(Duration::from_secs(5)).await;
+    });
+
+    // The connection accepted before shutdown still completes.
+    let mut buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(2), c.read_exact(&mut buf))
+        .await
+        .expect("in-flight response should not be cut off by shutdown")
+        .unwrap();
+    assert_eq!(&buf, b"ping");
+    drop(c);
+
+    sd.await.unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "shutdown should return once the connection drains, not wait out the full grace"
+    );
+
+    // New connections are refused once the listener has stopped.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(TcpStream::connect(proxy).await.is_err());
 }

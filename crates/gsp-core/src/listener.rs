@@ -9,6 +9,7 @@ use tokio::sync::watch;
 
 use gsp_config::ListenerConfig;
 
+use crate::drain::ConnTracker;
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_tcp;
 use crate::resolver::{resolve_route, Resolvers, Routed};
@@ -24,6 +25,7 @@ pub async fn run_tcp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
+    conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
@@ -66,8 +68,12 @@ pub async fn run_tcp_listener(
                 let cfg = cfg.clone();
                 let hints = hints.clone();
                 let resolvers = resolvers.clone();
+                let conn_guard = conns.track();
 
                 tokio::spawn(async move {
+                    // Held for the whole connection so a graceful shutdown waits
+                    // for it; dropped when this task returns.
+                    let _conn_guard = conn_guard;
                     let local = stream.local_addr().unwrap_or(cfg.bind);
 
                     // Peek the first bytes only when a route needs them.

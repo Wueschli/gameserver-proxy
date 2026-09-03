@@ -2,8 +2,9 @@
 
 State of the work, decisions already made, and how to pick it up.
 Last updated: 2026-09-03 (**phases 3 & 4 complete**; **phase 5 in progress** —
-slice 1 landed: `enabled` / `draining` / `disabled` backend states +
-`PATCH /pools/{p}/backends/{addr}`).
+slices 1 & 2 landed: `enabled`/`draining`/`disabled` backend states +
+`PATCH /pools/{p}/backends/{addr}`; tracked connection draining with a
+`shutdown_grace_sec` on SIGINT/SIGTERM).
 
 ---
 
@@ -34,12 +35,21 @@ slice 1 landed: `enabled` / `draining` / `disabled` backend states +
   `PATCH /pools/{pool}/backends/{addr} {state}` in `gsp/src/admin.rs`;
   `GET /pools` shows `state=`; `gsp_pool_backends` now has
   `state=draining|disabled` too.
-- **Next (phase 5)**: proxy-instance graceful drain — tracked in-flight
-  connections + `shutdown_grace` on `SIGTERM` (today they are detached);
-  runtime listener add/remove/rebind; backend CRUD (`POST` / `DELETE`);
-  `GET /config`; `POST /admin/drain` (flip `readyz`). Also deferred: resolver
-  `sticky_key`; the sniffer plugin loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 78 tests). Needs
+- **Phase 5 slice 2 done**: graceful connection draining. `gsp_core::drain`
+  (`ConnTracker` + `ConnGuard`, a `watch<usize>` counter). Every TCP per-conn
+  task and every UDP session holds a `ConnGuard`. `Runtime::shutdown_with_grace`
+  signals the accept/recv loops, awaits them, then `ConnTracker::wait_idle`,
+  the whole thing bounded by `settings.shutdown_grace_sec` (default 30, →
+  `Config::shutdown_grace`); leftover tasks are aborted after the deadline.
+  `main.rs` passes `cfg.shutdown_grace`. UDP listeners now enter a `draining`
+  state on the signal — established sessions keep pumping until they idle out,
+  new datagrams are dropped (`reason="draining"`). `RuntimeHandle::active_conns()`
+  exposes the live count.
+- **Next (phase 5)**: runtime listener add/remove/rebind; backend CRUD
+  (`POST` / `DELETE` — needs a snapshot-rebuild design outside `reload.rs`);
+  `GET /config`; `POST /admin/drain` (flip `readyz`, uses `active_conns`). Also
+  deferred: resolver `sticky_key`; the sniffer plugin loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 82 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -139,8 +149,12 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `gsp_config_reload_total`, `gsp_config_version`, and for UDP:
   `gsp_active_udp_sessions{listener}`, `gsp_packets_total{listener,dir}`,
   `gsp_datagrams_dropped_total{listener,reason}`.
-- **Graceful stop** on SIGINT/SIGTERM: listeners and the health checker stop; in-flight
-  connections are detached (tracked drain with a grace period is phase 5).
+- **Graceful stop** on SIGINT/SIGTERM: the accept / recv loops and the health
+  checker stop taking new work; in-flight TCP connections and established UDP
+  sessions keep running and are waited on (`ConnTracker`), bounded by
+  `settings.shutdown_grace_sec` (default 30). UDP sessions drain until they idle
+  out; new datagrams to a draining listener are dropped
+  (`gsp_datagrams_dropped_total{reason="draining"}`).
 
 ### Tests (75, all green)
 
@@ -237,7 +251,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `weighted` / `first_available` balancers | later |
 | UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
 | Listener add / remove / rebind at runtime (needs restart today) | phase 5 |
-| Tracked connection drain with a grace period on shutdown | phase 5 |
+| Tracked connection drain with a grace period on shutdown | **done** (phase 5 slice 2) |
 | CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain` (`PATCH` backend state is **done**) | phase 5 |
 | `draining` / `disabled` backend states | **done** (phase 5 slice 1) |
 | Reload debounce only coalesces within one 200 ms window; wider-spaced events cause separate (idempotent) reloads | polish, low priority |
@@ -323,6 +337,11 @@ repeat key is a `Mutex<LruCache>` get instead. Listeners with no `resolver`
 route pay nothing (the loop is just `matching_routes` → `Pool`). A `target`
 connection skips the `Pool::acquire_for` (no LB sort, no atomic, no
 `BackendGuard`) — strictly cheaper than a pooled one.
+
+**Connection draining** (`ConnTracker`): one `watch::Sender::send_modify` (a
+brief internal lock, no `.await`) on connection/session open and again on close —
+once per TCP connection and once per UDP session, never per byte or per datagram.
+Nothing on the steady-state path.
 
 **If you add a per-connection or per-datagram task, hop, or allocation, record it
 here.**
@@ -614,8 +633,39 @@ bad state string or unparseable `addr`. `AdminState` is imported there as
 interface — same as the rest of the admin API).
 
 Not done: `POST` / `DELETE` a backend (needs a snapshot rebuild path outside
-`reload.rs` — the next slice), `GET /config`, `POST /admin/drain`,
-proxy-instance connection draining, runtime listener reconfiguration.
+`reload.rs`), `GET /config`, `POST /admin/drain`, runtime listener
+reconfiguration.
+
+### Slice 2 — graceful connection draining (done)
+
+`gsp_core::drain`: `ConnTracker` (an `Arc` around a `watch::Sender<usize>`) hands
+out `ConnGuard`s that `+1` on `track()` and `-1` on `Drop`. `wait_idle()` is a
+`watch::Receiver::wait_for(|n| *n == 0)` — immediate when already zero, no
+lost-wakeup race.
+
+Wiring: `Runtime` owns one `ConnTracker`, threaded into `run_tcp_listener` /
+`run_udp_listener` (like `hints`). The TCP per-conn `tokio::spawn` holds a guard
+for the whole connection; each UDP `Session` carries `_conn_guard` (built in
+`open_session`).
+
+`Runtime::shutdown()` → `shutdown_with_grace(DEFAULT_SHUTDOWN_GRACE)`;
+`shutdown_with_grace(grace)` sends the shutdown watch, then
+`timeout(grace, { join all listener/health tasks; conns.wait_idle() })`; on
+timeout it logs the leftover count. Finally `t.abort()` on the (already-finished)
+listener/health tasks — detached conn tasks are killed by the process exit that
+follows. `main.rs` calls `shutdown_with_grace(cfg.shutdown_grace)`.
+
+UDP: the recv loop no longer returns immediately on the signal — it sets a local
+`draining` flag, keeps pumping established sessions and running the idle sweep,
+refuses new sessions (`gsp_datagrams_dropped_total{reason="draining"}`), and
+returns once `sessions.is_empty()`. So `t.await` in `shutdown_with_grace` blocks
+on real UDP drain, and the outer `timeout` + `abort()` is the backstop.
+
+Config: `settings.shutdown_grace_sec` (default 30) → `Config::shutdown_grace:
+Duration`. `RawSettings` got a hand-written `Default` (the derive gave 0).
+
+Tests use `shutdown_with_grace(100ms)` so they don't wait the 30 s default.
+`RuntimeHandle::active_conns()` is there for a future `POST /admin/drain`.
 
 ### Do NOT (phase 5)
 
@@ -637,12 +687,13 @@ proxy-instance connection draining, runtime listener reconfiguration.
 | `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client,dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. Prefix mode: `recv_one` / `recvmsg_pktinfo` / `send_reply` / `sendmsg_pktinfo` (`nix`, `IP_PKTINFO`). |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — the `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`). Lock-free read. |
+| `crates/gsp-core/src/drain.rs` | `ConnTracker` / `ConnGuard` — `watch<usize>` count of live TCP conns + UDP sessions; `wait_idle()` for graceful shutdown. `DEFAULT_SHUTDOWN_GRACE`. |
 | `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` map, `resolve_pool` (the async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
 | `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers(&Config)`, a local base64 encoder. |
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
-| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints`; `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`). |
+| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints` + `ConnTracker`; `shutdown` / `shutdown_with_grace(grace)` (drain then abort); `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`/`active_conns`). |
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |

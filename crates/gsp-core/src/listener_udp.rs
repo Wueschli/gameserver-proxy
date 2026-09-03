@@ -46,6 +46,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use gsp_config::{HashOn, ListenerConfig};
 
+use crate::drain::{ConnGuard, ConnTracker};
 use crate::metrics_defs as m;
 use crate::net::bind_reuseport_udp;
 use crate::pool::BackendGuard;
@@ -73,6 +74,8 @@ struct Session {
     idle_ms: u64,
     /// `None` for a resolver `target` (no pool slot to hold).
     _guard: Option<BackendGuard>,
+    /// Keeps this session counted for graceful-shutdown draining.
+    _conn_guard: ConnGuard,
     reply_task: JoinHandle<()>,
 }
 
@@ -110,6 +113,7 @@ pub async fn run_udp_listener(
     cfg: ListenerConfig,
     snapshot: Arc<ArcSwap<Snapshot>>,
     hints: Arc<RouteHints>,
+    conns: Arc<ConnTracker>,
     resolvers: Arc<Resolvers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
@@ -131,12 +135,24 @@ pub async fn run_udp_listener(
     let mut sweep = interval(SWEEP_PERIOD);
     sweep.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // Once set (by the shutdown signal), no new sessions are opened; the task
+    // keeps pumping existing sessions until they idle out, then returns. The
+    // grace period is enforced by the caller aborting the task.
+    let mut draining = false;
+
     loop {
+        if draining && sessions.is_empty() {
+            tracing::info!(listener = %cfg.name, worker = worker_id, "udp listener drained");
+            return Ok(());
+        }
         tokio::select! {
             _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    tracing::info!(listener = %cfg.name, worker = worker_id, "udp listener stopping");
-                    return Ok(());
+                if *shutdown.borrow() && !draining {
+                    draining = true;
+                    tracing::info!(
+                        listener = %cfg.name, worker = worker_id,
+                        sessions = sessions.len(), "udp listener draining"
+                    );
                 }
             }
             _ = sweep.tick() => {
@@ -203,8 +219,15 @@ pub async fn run_udp_listener(
                     continue;
                 }
 
-                // New session.
-                match open_session(&cfg, &snapshot, &hints, &resolvers, &sock, &mut sticky, client, dst, &buf[..n]).await {
+                // New session — refused once draining.
+                if draining {
+                    metrics::counter!(
+                        m::DATAGRAMS_DROPPED,
+                        "listener" => cfg.name.clone(), "reason" => "draining",
+                    ).increment(1);
+                    continue;
+                }
+                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sock, &mut sticky, client, dst, &buf[..n]).await {
                     Ok(session) => {
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -304,6 +327,7 @@ async fn open_session(
     cfg: &ListenerConfig,
     snapshot: &Arc<ArcSwap<Snapshot>>,
     hints: &Arc<RouteHints>,
+    conns: &Arc<ConnTracker>,
     resolvers: &Arc<Resolvers>,
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
@@ -419,6 +443,7 @@ async fn open_session(
         backend,
         idle_ms,
         _guard: guard,
+        _conn_guard: conns.track(),
         reply_task,
     })
 }

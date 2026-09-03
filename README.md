@@ -52,12 +52,14 @@ listener → backend pool forwarding with:
 - operator backend states: `PATCH /pools/{p}/backends/{addr} {state:
   enabled|draining|disabled}` — `draining` / `disabled` divert new sessions while
   existing ones keep running; carried across a reload
+- graceful shutdown: `SIGINT`/`SIGTERM` stops accepting and drains in-flight TCP
+  connections + UDP sessions, bounded by `settings.shutdown_grace_sec` (default 30)
 
 **Phases 1–4 complete** (`sticky_key` deferred); **phase 5 in progress** —
-`draining` / `disabled` backend states landed. External resolver: HTTP + gRPC
-`resolvers:` + `action: { resolver: <name> }`, `pool` / `target` results,
-`on_error`, and a TTL'd LRU result cache. Next in phase 5: proxy-instance
-connection draining, runtime listener/backend CRUD. See
+`draining` / `disabled` backend states and graceful connection draining landed.
+External resolver: HTTP + gRPC `resolvers:` + `action: { resolver: <name> }`,
+`pool` / `target` results, `on_error`, and a TTL'd LRU result cache. Next in
+phase 5: runtime listener/backend CRUD, `GET /config`, `POST /admin/drain`. See
 [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run

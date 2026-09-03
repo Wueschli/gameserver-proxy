@@ -80,9 +80,12 @@ async fn run(cfg: gsp_config::Config, config_path: PathBuf) -> anyhow::Result<()
     let reload = tokio::spawn(reload::run(config_path, handle));
 
     wait_for_shutdown().await;
-    tracing::info!("shutdown signal received; draining");
+    tracing::info!(
+        grace_sec = cfg.shutdown_grace.as_secs(),
+        "shutdown signal received; draining in-flight connections"
+    );
 
-    runtime.shutdown().await;
+    runtime.shutdown_with_grace(cfg.shutdown_grace).await;
     reload.abort();
     admin.abort();
     tracing::info!("stopped");

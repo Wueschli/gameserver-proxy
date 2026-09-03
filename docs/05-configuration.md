@@ -76,6 +76,7 @@
 # global
 settings:
   workers: 0                 # 0 = number of CPU cores
+  shutdown_grace_sec: 30     # wait this long for in-flight conns on SIGTERM
   admin:
     listen: "127.0.0.1:9900"
     auth: { mode: "bearer", token: "${ADMIN_TOKEN}" }   # or mode: mtls

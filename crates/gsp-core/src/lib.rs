@@ -8,6 +8,7 @@
 //! feedback, per-worker UDP session tables with `src_ip` affinity, and hot
 //! reload via an atomic snapshot swap.
 
+pub mod drain;
 pub mod health;
 pub mod listener;
 pub mod listener_udp;
@@ -22,6 +23,7 @@ pub mod snapshot;
 pub mod sniff;
 mod util;
 
+pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 pub use resolver::{
     CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers, Routed,
 };

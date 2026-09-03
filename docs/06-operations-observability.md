@@ -118,10 +118,17 @@ Flow for swapping a backend without dropping players:
 
 For a **proxy instance** restart:
 1. Set `readyz` to "false" (`POST /admin/drain`) → the upstream LB/anycast takes the
-   instance out of rotation.
+   instance out of rotation. *(`POST /admin/drain` is not implemented yet — step 4
+   already covers the SIGTERM path.)*
 2. Grace period: no new `accept`s, existing sessions keep running.
-3. After `shutdown_grace` (e.g. 30–120 s) close remaining sessions, exit the process.
-4. `SIGTERM` triggers exactly this flow.
+3. After `settings.shutdown_grace_sec` (default 30) close remaining sessions, exit
+   the process.
+4. `SIGINT` / `SIGTERM` triggers exactly this flow (implemented, phase 5): the TCP
+   accept loops and the UDP recv loops stop taking new work immediately; in-flight
+   TCP connections and established UDP sessions keep running and are waited on (UDP
+   sessions until they idle out); once all have finished — or the grace period
+   expires — the process exits. New datagrams to a draining UDP listener are
+   dropped (`gsp_datagrams_dropped_total{reason="draining"}`).
 
 ## Capacity planning / alerts
 

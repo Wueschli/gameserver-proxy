@@ -4,6 +4,9 @@
 settings:
   # Accept-loop tasks per listener. 0 = one per CPU core.
   workers: 0
+  # On SIGINT/SIGTERM the listeners stop accepting and the proxy waits this
+  # long for in-flight connections / UDP sessions to finish before exiting.
+  shutdown_grace_sec: 30
   admin:
     listen: "127.0.0.1:9900"   # /healthz /readyz /metrics /pools
 

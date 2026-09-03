@@ -74,7 +74,9 @@ listeners:
         }
     }
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -127,7 +129,9 @@ listeners:
         .expect("slot should be free after eviction");
     assert_eq!(c, vec![7, b'c']);
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -173,7 +177,9 @@ listeners:
     assert_eq!(recv_tag(&[0xff, 0xff, 0xff, 0xff, 0x54, 0x53]).await, b'Q');
     assert_eq!(recv_tag(b"\x01\x02plain gameplay").await, b'G');
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -219,7 +225,9 @@ listeners:
     assert_eq!(tag(vec![1, 2, 3, 4]).await, b'S');
     assert_eq!(tag(vec![0u8; 40]).await, b'L');
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
 }
 
 #[tokio::test]
@@ -271,5 +279,63 @@ listeners:
     assert_eq!(hit("127.0.0.2").await, b"Aping");
     assert_eq!(hit("127.0.0.3").await, b"Bping");
 
-    runtime.shutdown().await;
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn shutdown_drains_udp_sessions_then_returns() {
+    let b = echo_backend(9).await;
+    let proxy_addr = free_udp_addr();
+
+    // Short idle timeout so the drained session evicts quickly.
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b}"]
+    idle_timeout_sec: 1
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    client.send(b"one").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+        .await
+        .expect("first reply timed out")
+        .unwrap();
+    assert_eq!(&buf[1..n], b"one");
+
+    // Begin shutdown with a generous grace while the session is live.
+    let t0 = std::time::Instant::now();
+    let sd = tokio::spawn(async move {
+        runtime.shutdown_with_grace(Duration::from_secs(5)).await;
+    });
+
+    // The established session still forwards during the drain.
+    client.send(b"two").await.unwrap();
+    let n = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+        .await
+        .expect("in-flight udp session should keep working during drain")
+        .unwrap();
+    assert_eq!(&buf[1..n], b"two");
+
+    // Stop sending: the session idle-evicts and the listener returns before the
+    // 5 s grace deadline.
+    sd.await.unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "drain should finish when the session idles out, not at the grace deadline"
+    );
 }

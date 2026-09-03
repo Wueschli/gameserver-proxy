@@ -567,7 +567,10 @@ mod tests {
         assert!(p.acquire_addr("127.0.0.1:1".parse().unwrap()).is_none());
         // The pre-existing guard is untouched.
         assert_eq!(held.addr().port(), 1);
-        assert_eq!(p.backend("127.0.0.1:1".parse().unwrap()).unwrap().active(), 1);
+        assert_eq!(
+            p.backend("127.0.0.1:1".parse().unwrap()).unwrap().active(),
+            1
+        );
     }
 
     #[test]

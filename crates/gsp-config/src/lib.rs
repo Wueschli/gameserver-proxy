@@ -47,14 +47,31 @@ struct RawConfig {
     listeners: Vec<RawListener>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSettings {
     /// Accept-loop tasks per listener. `0` means "one per CPU core".
     #[serde(default)]
     workers: usize,
+    /// Grace period for in-flight connections on shutdown, in seconds.
+    #[serde(default = "default_shutdown_grace_sec")]
+    shutdown_grace_sec: u64,
     #[serde(default)]
     admin: RawAdmin,
+}
+
+impl Default for RawSettings {
+    fn default() -> Self {
+        Self {
+            workers: 0,
+            shutdown_grace_sec: default_shutdown_grace_sec(),
+            admin: RawAdmin::default(),
+        }
+    }
+}
+
+fn default_shutdown_grace_sec() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize)]
@@ -699,6 +716,8 @@ pub struct ResolverConfig {
 pub struct Config {
     /// `0` means "one worker per CPU core".
     pub workers: usize,
+    /// How long `shutdown` waits for in-flight connections to finish.
+    pub shutdown_grace: Duration,
     pub admin_listen: SocketAddr,
     pub pools: Vec<PoolConfig>,
     pub resolvers: Vec<ResolverConfig>,
@@ -1161,6 +1180,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
 
     Ok(Config {
         workers: raw.settings.workers,
+        shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,
         pools,
         resolvers,

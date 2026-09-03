@@ -499,7 +499,9 @@ listeners:
         c.read_exact(&mut m).await.unwrap();
         assert_eq!(m[0], b'M', "resolver named mm-pool");
 
-        runtime.shutdown().await;
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
     }
 
     /// End to end: a resolver `target` routes a real connection straight to an
@@ -570,7 +572,9 @@ listeners:
         c.read_exact(&mut m).await.unwrap();
         assert_eq!(m[0], b'T', "connected straight to the resolver target");
 
-        runtime.shutdown().await;
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
     }
 
     // ---- cache ----
