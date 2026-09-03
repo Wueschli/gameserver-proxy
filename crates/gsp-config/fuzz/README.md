@@ -29,6 +29,11 @@ fuzz` (`FUZZ_TIME=<sec>`) does exactly this. Crashes land in
 `fuzz/artifacts/<target>/`; reproduce with
 `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`.
 
+In CI the `fuzz` job runs a 45 s smoke pass per target on every push / PR; when
+it finds a crash the step fails and the crashing inputs are uploaded as the
+`fuzz-artifacts` bundle on the workflow run (download, drop under
+`fuzz/artifacts/<target>/`, and reproduce with the command above).
+
 `fuzz/corpus/`, `artifacts/`, `coverage/` and `target/` are git-ignored.
 
 This crate is a standalone workspace (`[workspace]` in its `Cargo.toml`) so its
