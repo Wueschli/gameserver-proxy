@@ -1,10 +1,11 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 3 & 4 complete**; **phase 5 in progress** —
-slices 1-4 landed: `enabled`/`draining`/`disabled` backend states +
-`PATCH /pools/{p}/backends/{addr}`; tracked connection draining with a
-`shutdown_grace_sec` on SIGINT/SIGTERM; `POST /admin/drain` + `GET /config`; runtime backend CRUD via an overlay).
+Last updated: 2026-09-03 (**phases 3, 4 & 5 complete**). Phase 5: `enabled` /
+`draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
+tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
+`POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
+add/remove/rebind. `GET /sessions` is the only deferred bit.
 
 ---
 
@@ -60,10 +61,18 @@ slices 1-4 landed: `enabled`/`draining`/`disabled` backend states +
   alongside SIGHUP / file-watch and builds via `build_with_overlay`, so admin
   edits survive a file reload and there is still exactly one snapshot writer.
   `GET /config` shows `overlay=+N/-M` per pool.
-- **Next (phase 5)**: runtime listener add/remove/rebind (last phase-5 item);
-  `GET /sessions`. Also deferred: resolver `sticky_key`; the sniffer plugin
-  loader (Phase 9).
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 87 tests). Needs
+- **Phase 5 slice 5 done** (closes phase 5): runtime listener add/remove/rebind.
+  `gsp_core::listeners::ListenerManager` owns one task `Group` per listener
+  (its `workers` accept tasks + a private `watch<bool>` stop). `Runtime::start`
+  calls `start_all`; `reload::apply` calls `handle.reconcile_listeners().await`
+  when `cfg.listeners` changed — diff by name, unchanged kept, changed
+  stopped+respawned, added spawned, removed stopped. New groups spawn before old
+  ones are awaited, so a same-bind rebind is gapless (`SO_REUSEPORT`).
+  `shutdown_with_grace` now does `listeners.stop_all()` + `abort_all()`.
+- **Next**: phase 6 (client-IP preservation: PROXY protocol, TPROXY). Deferred:
+  `GET /sessions` (per-session registry); resolver `sticky_key`; the sniffer
+  plugin loader (Phase 9).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + 88 tests). Needs
   `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   Local is **ahead of `origin/main` and unpushed** — pushing is blocked in this
@@ -144,12 +153,14 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
 - **Hot reload**: `SIGHUP` or config-file change → validate → rebuild `Snapshot` →
   atomic `ArcSwap` store. Invalid config is rejected and the running config kept.
   Backend health is carried across the swap by address. Pool membership / balancer /
-  health-check / cap changes are **live**; changes to a listener's bind, protocol,
-  routes, affinity, `prefix`, `freebind` or `route_hint` are **not** applied live
-  (logged as a warning — full listener reconfiguration is phase 5). Route rules
-  are captured per listener task at startup; only the *pool contents* they
-  resolve to are read live from the snapshot. Route-**hint entries** are runtime
-  state (`POST /route-hint`), independent of reload.
+  health-check / cap changes are **live**. **Listeners are reconciled by name**
+  (`ListenerManager::reconcile`): an added listener is spawned, a removed one is
+  stopped, and one whose `ListenerConfig` changed (bind, protocol, routes,
+  affinity, `prefix`, `freebind`, `route_hint`) is stopped and re-spawned — a
+  same-bind rebind is gapless (`SO_REUSEPORT`, new sockets bind first). An
+  unchanged listener keeps running, its route rules captured at spawn; only the
+  *pool contents* they resolve to are read live. Route-**hint entries** and
+  **backend overlay** edits are runtime state, independent of the file.
 - **Admin API** (`settings.admin.listen`, default `127.0.0.1:9900`):
   `GET /healthz` `/readyz` `/metrics` (Prometheus) `/pools` `/config`;
   `POST /route-hint` `{src_ip, pool, ttl_sec}` (push resolver — validates the
@@ -269,7 +280,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `consistent_hash` used to retire the UDP per-worker sticky table | polish |
 | `weighted` / `first_available` balancers | later |
 | UDP ICMP port-unreachable as an explicit passive health signal (currently just ends the reply pump; the idle sweep reaps) | phase 5–7 |
-| Listener add / remove / rebind at runtime (needs restart today) | phase 5 |
+| Listener add / remove / rebind at runtime | **done** (phase 5 slice 5) |
 | Tracked connection drain with a grace period on shutdown | **done** (phase 5 slice 2) |
 | CRUD admin API: `POST` / `DELETE` a backend, `GET /config`, `POST /admin/drain`, `PATCH` backend state | **done** (phase 5 slices 1, 3, 4) |
 | `GET /sessions` introspection (needs a per-session registry) | phase 5 / later |
@@ -357,6 +368,11 @@ repeat key is a `Mutex<LruCache>` get instead. Listeners with no `resolver`
 route pay nothing (the loop is just `matching_routes` → `Pool`). A `target`
 connection skips the `Pool::acquire_for` (no LB sort, no atomic, no
 `BackendGuard`) — strictly cheaper than a pooled one.
+
+**Listener reconcile** (`ListenerManager`): control-plane only — a reload with
+changed `listeners` walks the (small) listener list and spawns/stops task
+groups. Zero data-path cost; running accept loops are untouched when their
+config is unchanged.
 
 **Backend overlay** (`POST`/`DELETE` backend): touched only during a snapshot
 rebuild (`effective_targets`, one `Mutex` lock + a small `Vec` per pool). Zero
@@ -729,6 +745,29 @@ persistence layer that keeps them from being undone by a file reload. Backend
 *state* (`PATCH`) still mutates atomics on the live `Backend` and needs no
 rebuild.
 
+### Slice 5 — runtime listener add / remove / rebind (done, closes phase 5)
+
+`gsp_core::listeners::ListenerManager` — the per-listener accept tasks moved out
+of `Runtime::start` into one `Group { cfg, stop: watch<bool>, tasks }` per
+listener, keyed by `ListenerConfig::name`. `spawn_group` is the old inner loop
+(one task per worker). The groups map is a plain `std::sync::Mutex` that is
+never held across `.await`: `reconcile` does phase 1 under the lock (remove
+stale groups into a `Vec<Group>`, spawn+insert new ones — all sync), then phase
+2 with the lock released (`group.stop().await` = fire the watch, await the
+tasks).
+
+`Runtime::start` → `ListenerManager::new(...)` + `start_all(&initial)` (sync,
+spawns everything). `reload::apply`: after `handle.store(...)`, when
+`cfg.listeners != prev.listeners`, `handle.reconcile_listeners().await` (was a
+"needs a restart" warning). `shutdown_with_grace` = `listeners.stop_all().await`
++ await the health task + `wait_idle`, then `abort()` health + `listeners.abort_all()`.
+
+Rebind is stop-old-then-start-new but ordered new-first (phase 1 spawns before
+phase 2 awaits the stop), so on a same bind `SO_REUSEPORT` gives a gapless
+handover. A listener whose bind is genuinely unavailable spawns a group whose
+tasks log an error and exit — same as a startup bind failure; `reconcile` does
+not surface it.
+
 ### Do NOT (phase 5)
 
 - Build + `store` a `Snapshot` anywhere but `reload::apply`. New runtime edits
@@ -755,7 +794,8 @@ rebuild.
 | `crates/gsp/proto/resolver.proto` + `crates/gsp/build.rs` | The gRPC resolver contract + `tonic_build` codegen. |
 | `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`copy_with_idle` both ways). |
 | `crates/gsp-core/src/health.rs` | `run`: 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + gauges. |
-| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` spawns listener + health tasks, owns the `RouteHints` + `ConnTracker`; `shutdown` / `shutdown_with_grace(grace)` (drain then abort); `RuntimeHandle` (`current`/`store`/`ready`/`route_hints`/`active_conns`/`set_draining`/`is_draining`). |
+| `crates/gsp-core/src/runtime.rs` | `Runtime::start(snapshot, resolvers, workers)` builds the `ListenerManager` (`start_all`) + spawns the health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `reload_requested`; `shutdown_with_grace` = `listeners.stop_all` + health await + `wait_idle` + `abort_all`. `RuntimeHandle`: `store` / `ready` / `route_hints` / `backend_overlay` / `request_reload` / `reconcile_listeners` / `active_conns` / `set_draining` / `is_draining`. |
+| `crates/gsp-core/src/listeners.rs` | `ListenerManager` — one task `Group` (workers + `watch<bool>` stop) per listener; `start_all` (startup), `reconcile(&Snapshot)` (diff by name → spawn/stop/rebind), `stop_all` / `abort_all`. |
 | `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind`), `bind_reuseport_udp` (+ `pktinfo`). |
 | `crates/gsp-core/src/metrics_defs.rs` | Every metric name. |
 | `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing init, runtime bring-up, shutdown. |

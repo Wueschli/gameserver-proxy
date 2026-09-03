@@ -76,9 +76,10 @@ async fn apply(path: &Path, handle: &RuntimeHandle) {
             metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
             metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
             if listeners_changed {
-                tracing::warn!(
-                    "listener definitions changed; bind / protocol / pool-mapping changes need a \
-                     restart (pool membership, balancer and health-check changes are already live)"
+                let (running, stopped) = handle.reconcile_listeners().await;
+                tracing::info!(
+                    running, stopped,
+                    "listener definitions changed; listeners reconciled (added / removed / rebound)"
                 );
             }
             tracing::info!(config = %path.display(), "configuration reloaded");

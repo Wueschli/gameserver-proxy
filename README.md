@@ -25,7 +25,8 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–4 complete** (resolver `sticky_key` deferred). TCP and UDP
+**Roadmap phases 1–5 complete** (resolver `sticky_key` and `GET /sessions`
+deferred). TCP and UDP
 listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
@@ -58,14 +59,16 @@ listener → backend pool forwarding with:
   upstream LB without stopping the data path; `GET /config` dumps the live snapshot
 - runtime backend CRUD: `POST` / `DELETE /pools/{p}/backends[/{addr}]` add or remove
   a backend at runtime; the edits are layered on the file config and survive a reload
+- runtime listener reconfig: a reload spawns added listeners, stops removed ones and
+  re-binds changed ones by name — no restart; a same-bind rebind is gapless
 
-**Phases 1–4 complete** (`sticky_key` deferred); **phase 5 in progress** —
-`draining` / `disabled` backend states, graceful connection draining, the
-instance-drain / `GET /config` admin surface, and runtime backend add/remove
-landed. External resolver: HTTP + gRPC `resolvers:` + `action: { resolver:
-<name> }`, `pool` / `target` results, `on_error`, and a TTL'd LRU result cache.
-Next in phase 5: runtime listener add/remove/rebind. See
-[docs/08-roadmap.md](docs/08-roadmap.md).
+**Phases 1–5 complete** (`sticky_key` and `GET /sessions` deferred). Phase 5
+added `draining` / `disabled` backend states, graceful connection draining, the
+instance-drain / `GET /config` admin surface, runtime backend add/remove, and
+runtime listener add/remove/rebind. External resolver: HTTP + gRPC `resolvers:`
++ `action: { resolver: <name> }`, `pool` / `target` results, `on_error`, and a
+TTL'd LRU result cache. Next: phase 6 (client-IP preservation — PROXY protocol,
+TPROXY). See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

@@ -9,6 +9,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+use crate::listeners::ListenerManager;
 use crate::overlay::BackendOverlay;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
@@ -23,8 +24,10 @@ pub struct Runtime {
     /// in-flight sessions keep running.
     draining: Arc<AtomicBool>,
     overlay: Arc<BackendOverlay>,
+    listeners: Arc<ListenerManager>,
     reload_requested: Arc<Notify>,
     shutdown_tx: watch::Sender<bool>,
+    /// The health-checker task. Listener tasks live in `listeners`.
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -38,6 +41,7 @@ pub struct RuntimeHandle {
     conns: Arc<ConnTracker>,
     draining: Arc<AtomicBool>,
     overlay: Arc<BackendOverlay>,
+    listeners: Arc<ListenerManager>,
     reload_requested: Arc<Notify>,
 }
 
@@ -96,6 +100,14 @@ impl RuntimeHandle {
         &self.reload_requested
     }
 
+    /// Bring the running listener set in line with the current snapshot:
+    /// spawn added listeners, stop removed ones, rebind changed ones. Call
+    /// after [`RuntimeHandle::store`]. Returns `(running, stopped)` counts.
+    pub async fn reconcile_listeners(&self) -> (usize, usize) {
+        let snap = self.snapshot.load_full();
+        self.listeners.reconcile(&snap).await
+    }
+
     /// Live proxied-connection count (TCP pumps + UDP sessions).
     pub fn active_conns(&self) -> usize {
         self.conns.active()
@@ -124,52 +136,16 @@ impl Runtime {
             workers
         };
 
-        let mut tasks = Vec::new();
-        for lc in &initial.listeners {
-            for worker_id in 0..worker_count {
-                let snap = snapshot.clone();
-                let hints = hints.clone();
-                let conns = conns.clone();
-                let resolvers = resolvers.clone();
-                let lc = lc.clone();
-                let mut sd = shutdown_rx.clone();
-                tasks.push(tokio::spawn(async move {
-                    let res = match lc.protocol {
-                        gsp_config::Protocol::Tcp => {
-                            crate::listener::run_tcp_listener(
-                                lc.clone(),
-                                snap,
-                                hints,
-                                conns,
-                                resolvers,
-                                worker_id,
-                                &mut sd,
-                            )
-                            .await
-                        }
-                        gsp_config::Protocol::Udp => {
-                            crate::listener_udp::run_udp_listener(
-                                lc.clone(),
-                                snap,
-                                hints,
-                                conns,
-                                resolvers,
-                                worker_id,
-                                &mut sd,
-                            )
-                            .await
-                        }
-                    };
-                    if let Err(e) = res {
-                        tracing::error!(
-                            listener = %lc.name, worker = worker_id, error = %e,
-                            "listener task exited with error"
-                        );
-                    }
-                }));
-            }
-        }
+        let listeners = ListenerManager::new(
+            snapshot.clone(),
+            hints.clone(),
+            conns.clone(),
+            resolvers,
+            worker_count,
+        );
+        listeners.start_all(&initial);
 
+        let mut tasks = Vec::new();
         {
             let snap = snapshot.clone();
             let mut sd = shutdown_rx.clone();
@@ -184,6 +160,7 @@ impl Runtime {
             conns,
             draining,
             overlay,
+            listeners,
             reload_requested,
             shutdown_tx,
             tasks,
@@ -197,6 +174,7 @@ impl Runtime {
             conns: self.conns.clone(),
             draining: self.draining.clone(),
             overlay: self.overlay.clone(),
+            listeners: self.listeners.clone(),
             reload_requested: self.reload_requested.clone(),
         }
     }
@@ -217,8 +195,10 @@ impl Runtime {
 
         let drained = {
             let conns = self.conns.clone();
+            let listeners = self.listeners.clone();
             let tasks = &mut self.tasks;
             tokio::time::timeout(grace, async move {
+                listeners.stop_all().await;
                 for t in tasks.iter_mut() {
                     let _ = t.await;
                 }
@@ -238,5 +218,6 @@ impl Runtime {
         for t in &self.tasks {
             t.abort();
         }
+        self.listeners.abort_all();
     }
 }

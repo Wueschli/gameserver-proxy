@@ -74,7 +74,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   needs its own design).
 - **Result**: matchmaker integration, token→instance routing.
 
-## Phase 5 – Operations & zero-downtime (week 13–14) 🔜
+## Phase 5 – Operations & zero-downtime (week 13–14) ✅
 - ✅ Hot reload (SIGHUP + file watch), atomic snapshot swap. *(phase 1)*
 - ✅ **Slice 1**: `enabled` / `draining` / `disabled` backend states —
   `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
@@ -94,7 +94,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   to finish, bounded by `settings.shutdown_grace_sec` (default 30). UDP listeners
   keep pumping established sessions until they idle out; new datagrams while
   draining are dropped (`reason="draining"`).
-- ⬜ Runtime listener add / remove / rebind (needs a restart today).
+- ✅ **Slice 5**: runtime listener add / remove / rebind — `ListenerManager`
+  owns one task group per listener; a reload reconciles them by name (`SO_REUSEPORT`
+  makes a same-bind rebind gapless). `GET /sessions` is the only deferred bit
+  (needs a per-session registry).
 - ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.
 

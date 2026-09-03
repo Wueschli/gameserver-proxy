@@ -87,8 +87,9 @@ struct, the rest is shared).
 - Loads/validates YAML, builds the snapshot, compiles matchers.
 - Adapters (DNS SRV, Consul, K8s Endpoints, static) implement a common
   `BackendSource` interface and provide backend lists per pool.
-- Reload: new snapshot becomes active atomically; listeners are re-bound only if their
-  bind changed (otherwise kept running).
+- Reload: new snapshot becomes active atomically; listeners are reconciled by name
+  (added spawned, removed stopped, changed re-spawned) — an unchanged listener
+  keeps running.
 
 ### 7. Admin API
 - `GET /config` (active snapshot, plaintext — implemented, phase 5), `GET /pools`,

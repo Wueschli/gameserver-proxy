@@ -6,8 +6,10 @@
   admin API only supplement the **backend lists** and **states** at runtime.
 - **Validate before activating.** A faulty config is rejected; the running one stays
   active.
-- **Hot reload** via `SIGHUP`, file watch, or `POST /reload`. Listeners are re-bound
-  only when their bind address changes.
+- **Hot reload** via `SIGHUP` or file watch. Listeners are reconciled by name: an
+  added listener is spawned, a removed one is stopped, and one whose definition
+  changed (bind, protocol, routes, affinity, …) is stopped and re-spawned. A
+  listener whose definition is unchanged keeps running untouched.
 - Environment-variable interpolation (`${VAR}`) for secrets/tokens.
 
 ## Schema (reference)
@@ -255,6 +257,7 @@ listeners:
 | Backend → `draining` / `disabled` (`PATCH .../{addr}`) | no new sessions, existing ones drain; state carried across a reload by address |
 | Pool balancer changed | applies to **new** routing decisions |
 | Route changed/added | applies to new connections/sessions |
-| Listener bind changed | the old socket is closed, the new one bound (brief gap) |
+| Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / affinity / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
+| `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |

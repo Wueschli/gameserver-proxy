@@ -534,3 +534,68 @@ async fn admin_drain_flips_readiness_without_stopping_the_data_path() {
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+#[tokio::test]
+async fn reload_adds_removes_and_rebinds_listeners_at_runtime() {
+    let a = marker_backend(b'A').await;
+    let p1 = free_port().await;
+    let p2 = free_port().await;
+    let p2b = free_port().await;
+
+    let only_l1 = format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l1\n    bind: \"{p1}\"\n    pool: p\n"
+    );
+    // Start with just l1.
+    let cfg = parse_str(&only_l1).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let hit = |addr: std::net::SocketAddr| async move {
+        let mut c = TcpStream::connect(addr).await.ok()?;
+        let mut m = [0u8; 1];
+        c.read_exact(&mut m).await.ok()?;
+        Some(m[0])
+    };
+    assert_eq!(hit(p1).await, Some(b'A'));
+    assert!(hit(p2).await.is_none(), "l2 not configured yet");
+
+    // Reload: add l2 on p2.
+    let cfg2 = parse_str(&format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l1\n    bind: \"{p1}\"\n    pool: p\n\
+         \x20 - name: l2\n    bind: \"{p2}\"\n    pool: p\n"
+    ))
+    .unwrap();
+    handle.store(Snapshot::from_config(&cfg2));
+    handle.reconcile_listeners().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(hit(p1).await, Some(b'A'));
+    assert_eq!(hit(p2).await, Some(b'A'), "l2 should be live after reload");
+
+    // Reload: rebind l2 p2 -> p2b, and drop... keep l1.
+    let cfg3 = parse_str(&format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l1\n    bind: \"{p1}\"\n    pool: p\n\
+         \x20 - name: l2\n    bind: \"{p2b}\"\n    pool: p\n"
+    ))
+    .unwrap();
+    handle.store(Snapshot::from_config(&cfg3));
+    handle.reconcile_listeners().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(hit(p2).await.is_none(), "old l2 bind should be gone");
+    assert_eq!(hit(p2b).await, Some(b'A'), "l2 rebound to the new port");
+
+    // Reload: remove l2 entirely.
+    let cfg4 = parse_str(&only_l1).unwrap();
+    handle.store(Snapshot::from_config(&cfg4));
+    handle.reconcile_listeners().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(hit(p2b).await.is_none(), "l2 removed");
+    assert_eq!(hit(p1).await, Some(b'A'), "l1 still serving");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}

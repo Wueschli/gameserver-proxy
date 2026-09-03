@@ -12,6 +12,7 @@ pub mod drain;
 pub mod health;
 pub mod listener;
 pub mod listener_udp;
+pub mod listeners;
 pub mod metrics_defs;
 pub mod net;
 pub mod overlay;
@@ -25,6 +26,7 @@ pub mod sniff;
 mod util;
 
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+pub use listeners::ListenerManager;
 pub use overlay::BackendOverlay;
 pub use resolver::{
     CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers, Routed,
