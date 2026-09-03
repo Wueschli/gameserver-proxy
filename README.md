@@ -25,9 +25,17 @@ and access control.
 
 ## Status
 
-Early scaffolding. The walking skeleton is in place: a TCP listener that forwards to a
-static round-robin pool, plus the admin/observability API. See
-[docs/08-roadmap.md](docs/08-roadmap.md) for what comes next (health checks, then UDP).
+**Roadmap phase 1 complete.** TCP listener → backend pool forwarding with:
+
+- `round_robin` and `least_conn` balancing
+- active `tcp_connect` health checks (`rise`/`fall` thresholds) plus passive
+  connect-failure feedback; unhealthy backends are skipped
+- optional per-backend session caps
+- hot reload on `SIGHUP` or config-file change (atomic snapshot swap; backend health
+  carried across the swap)
+- admin/observability API and Prometheus metrics
+
+Next: phase 2 — UDP. See [docs/08-roadmap.md](docs/08-roadmap.md).
 
 ## Build & run
 

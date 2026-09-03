@@ -1,4 +1,5 @@
-//! Owns the running listeners and the current config snapshot.
+//! Owns the running listeners, the health checker, and the current config
+//! snapshot.
 
 use std::sync::Arc;
 
@@ -14,8 +15,8 @@ pub struct Runtime {
     tasks: Vec<JoinHandle<()>>,
 }
 
-/// A cheap, cloneable handle for read-only access to the live snapshot
-/// (used by the admin API).
+/// A cheap, cloneable handle to the live snapshot. Reads are lock-free; the
+/// reload task uses [`RuntimeHandle::store`] to swap in a new snapshot.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     snapshot: Arc<ArcSwap<Snapshot>>,
@@ -26,6 +27,16 @@ impl RuntimeHandle {
         self.snapshot.load()
     }
 
+    /// The current snapshot as an owned `Arc` (for building the next one).
+    pub fn current(&self) -> Arc<Snapshot> {
+        self.snapshot.load_full()
+    }
+
+    /// Atomically replace the live snapshot.
+    pub fn store(&self, snapshot: Arc<Snapshot>) {
+        self.snapshot.store(snapshot);
+    }
+
     /// Ready once at least one listener is configured in the live snapshot.
     pub fn ready(&self) -> bool {
         !self.snapshot.load().listeners.is_empty()
@@ -34,7 +45,7 @@ impl RuntimeHandle {
 
 impl Runtime {
     /// Spawn `workers` accept tasks per listener (one `SO_REUSEPORT` socket
-    /// each). `workers == 0` means one per CPU core.
+    /// each) plus the health checker. `workers == 0` means one per CPU core.
     pub fn start(initial: Arc<Snapshot>, workers: usize) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -67,6 +78,14 @@ impl Runtime {
             }
         }
 
+        {
+            let snap = snapshot.clone();
+            let mut sd = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                crate::health::run(snap, &mut sd).await;
+            }));
+        }
+
         Self {
             snapshot,
             shutdown_tx,
@@ -80,9 +99,8 @@ impl Runtime {
         }
     }
 
-    /// Signal every listener to stop accepting and wait for the accept tasks to
-    /// finish. In-flight connection tasks are detached; a later slice adds a
-    /// tracked drain with a grace period.
+    /// Signal every task to stop and wait for them. In-flight connection tasks
+    /// are detached; a tracked drain with a grace period arrives in phase 5.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         for t in self.tasks {

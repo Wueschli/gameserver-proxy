@@ -57,11 +57,19 @@ async fn pools(State(s): State<AdminState>) -> impl IntoResponse {
     let snap = s.runtime.snapshot();
     let mut out = String::new();
     for (name, pool) in &snap.pools {
-        out.push_str(&format!(
-            "{name}\tbalancer={:?}\ttargets={}\n",
-            pool.balancer,
-            pool.targets().len()
-        ));
+        out.push_str(&format!("{name}\tbalancer={:?}\n", pool.balancer));
+        for b in pool.backends() {
+            out.push_str(&format!(
+                "  {}\t{}\tactive={}\n",
+                b.addr,
+                if b.is_healthy() {
+                    "healthy"
+                } else {
+                    "unhealthy"
+                },
+                b.active(),
+            ));
+        }
     }
     out
 }

@@ -2,19 +2,26 @@
 
 Incremental. Each phase is usable on its own.
 
-## Phase 0 – Skeleton (week 1–2)
-- Project setup, CI, lint, test harness.
-- Config loading + validation + snapshot data structure (no reload yet).
-- Structured logging, `/healthz`, `/metrics` skeleton, `build_info`.
-- **Result**: the process starts with a config and exposes basic metrics.
+Status legend: ✅ done · 🔜 next · ⬜ planned.
 
-## Phase 1 – L4 TCP proxy (week 3–4)
-- TCP listener with `SO_REUSEPORT`, one worker per core.
-- Static listener→pool mapping, `round_robin` + `least_conn`.
-- Bidirectional pump with `splice()` + fallback.
-- Connect/idle timeouts, half-close.
-- Active `tcp_connect` health checks; backend states.
-- Core metrics (connections, bytes, duration, backend errors).
+## Phase 0 – Skeleton ✅
+- ✅ Project setup (Cargo workspace: `gsp-config`, `gsp-core`, `gsp`), CI (fmt +
+  clippy `-D warnings` + tests), test harness.
+- ✅ Config loading + validation + immutable snapshot behind `ArcSwap`.
+- ✅ Structured logging (`tracing`), `/healthz`, `/readyz`, `/metrics`, `build_info`.
+
+## Phase 1 – L4 TCP proxy ✅
+- ✅ TCP listener with `SO_REUSEPORT`, one accept task per core.
+- ✅ Static listener→pool mapping, `round_robin` + `least_conn`.
+- ✅ Bidirectional buffered pump; per-direction idle timeout, connect timeout,
+  half-close. (`splice()` fast path deferred — slots in behind the same function.)
+- ✅ Active `tcp_connect` health checks (`rise`/`fall`), passive connect-failure
+  feedback, backend healthy/unhealthy state, per-backend session caps.
+- ✅ Hot reload on `SIGHUP` / config-file change: rebuild snapshot, atomic swap,
+  backend health carried over by address. Listener bind/protocol/pool-mapping
+  changes still need a restart (full listener reconfiguration is phase 5).
+- ✅ Core metrics: connections, bytes, duration, backend connect errors, pool
+  backend counts, healthcheck results, LB selections, config reload/version.
 - **Result**: usable as a plain TCP game server front proxy.
 
 ## Phase 2 – L4 UDP proxy (week 5–7)

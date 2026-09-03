@@ -21,14 +21,23 @@ pub struct ConnOutcome {
     pub backend: SocketAddr,
 }
 
-/// Connect to a backend from `pool` and pump bytes both ways until either side
-/// closes or a direction goes idle past `pool.idle_timeout`.
+/// Select a backend from `pool`, connect, and pump bytes both ways until either
+/// side closes or a direction goes idle past `pool.idle_timeout`.
+///
+/// The [`BackendGuard`](crate::pool::BackendGuard) returned by `acquire` holds
+/// an active-session slot for the whole connection (released on drop) and
+/// carries passive connect results back into the backend's health state.
 pub async fn handle_tcp(client: TcpStream, pool: &Pool) -> anyhow::Result<ConnOutcome> {
-    let backend_addr = pool.pick();
+    let guard = pool.acquire()?;
+    let backend_addr = guard.addr();
 
     let backend = match timeout(pool.connect_timeout, TcpStream::connect(backend_addr)).await {
-        Ok(Ok(s)) => s,
+        Ok(Ok(s)) => {
+            guard.observe(true);
+            s
+        }
         Ok(Err(e)) => {
+            guard.observe(false);
             metrics::counter!(
                 m::BACKEND_CONNECT_ERRORS,
                 "backend" => backend_addr.to_string(),
@@ -40,6 +49,7 @@ pub async fn handle_tcp(client: TcpStream, pool: &Pool) -> anyhow::Result<ConnOu
             ));
         }
         Err(_) => {
+            guard.observe(false);
             metrics::counter!(
                 m::BACKEND_CONNECT_ERRORS,
                 "backend" => backend_addr.to_string(),

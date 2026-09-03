@@ -1,4 +1,4 @@
-# gsp — reduced v0 schema (walking skeleton).
+# gsp — reduced v0 schema (roadmap phase 1).
 # The full target schema is documented in docs/05-configuration.md.
 
 settings:
@@ -12,12 +12,24 @@ pools:
     targets:
       - "127.0.0.1:9001"
       - "127.0.0.1:9002"
-    balancer: round_robin
+    balancer: round_robin        # or: least_conn
     connect_timeout_ms: 300
     idle_timeout_sec: 90
+    health_check:
+      type: tcp_connect
+      interval_sec: 2
+      timeout_ms: 500
+      rise: 2                     # consecutive OK checks to mark healthy
+      fall: 3                     # consecutive failed checks to mark unhealthy
+    per_backend:
+      max_sessions: 500           # optional; omit for uncapped
 
 listeners:
   - name: public-tcp
     bind: "0.0.0.0:7777"
     protocol: tcp
     pool: local
+
+# Reload without restart: `kill -HUP <pid>` or just edit this file.
+# Live: pool targets, balancer, health-check params, caps.
+# Restart-only: listener bind / protocol / pool mapping.

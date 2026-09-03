@@ -1,10 +1,11 @@
 //! `gsp` — game-agnostic game server reverse proxy.
 //!
-//! Walking skeleton: load a YAML config, start the TCP listeners, serve the
-//! admin API (`/healthz`, `/readyz`, `/metrics`, `/pools`), and shut down
-//! cleanly on SIGINT/SIGTERM.
+//! Phase 1: load a YAML config, start the TCP listeners and the health
+//! checker, serve the admin API (`/healthz`, `/readyz`, `/metrics`, `/pools`),
+//! reload on SIGHUP / file change, and shut down cleanly on SIGINT/SIGTERM.
 
 mod admin;
+mod reload;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,22 +60,25 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(cfg))
+        .block_on(run(cfg, args.config))
 }
 
-async fn run(cfg: gsp_config::Config) -> anyhow::Result<()> {
+async fn run(cfg: gsp_config::Config, config_path: PathBuf) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
     let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
     let runtime = Runtime::start(snapshot, cfg.workers);
     let handle = runtime.handle();
+    metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 
-    let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle, prometheus));
+    let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
+    let reload = tokio::spawn(reload::run(config_path, handle));
 
     wait_for_shutdown().await;
     tracing::info!("shutdown signal received; draining");
 
     runtime.shutdown().await;
+    reload.abort();
     admin.abort();
     tracing::info!("stopped");
     Ok(())
