@@ -53,12 +53,7 @@ pub async fn handle_tcp(
 
     // PROXY protocol header (if the pool asks for one) goes out before any
     // client bytes so the backend can parse it as the first thing on the wire.
-    let hdr = crate::proxy_protocol::header(
-        pool.proxy_protocol,
-        client_addr,
-        client_local,
-        true,
-    );
+    let hdr = crate::proxy_protocol::header(pool.proxy_protocol, client_addr, client_local, true);
     if !hdr.is_empty() {
         if let Err(e) = backend.write_all(&hdr).await {
             guard.observe(false);
