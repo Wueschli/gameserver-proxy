@@ -886,6 +886,87 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 
 ---
 
+## Deferred-work plan (what to finish before the fleet phases, and what waits)
+
+Analysis of every deferred item above + the phase-9 follow-ups + `docs/08`
+"Later / optional", split by whether it belongs to **finishing the
+single-instance proxy** or **after fleet management & controls (phases 10–12)**.
+Suggested sequencing: one "data-plane completion" phase (list A + C) → one
+"perf pass" phase (list B) → then phases 10–12. This matches the `docs/08`
+milestone cut where v1.3 is additive and the data-plane contract is unchanged.
+
+### Do NOW — to call the single-instance proxy "finished"
+
+**A. Real feature / correctness gaps (a production deployment will hit these):**
+
+1. **ClientHello / first-bytes split across TCP segments** — real clients
+   fragment; today the connection silently falls through to `always` /
+   `no_route`. Loop the `MSG_PEEK` until enough bytes or the 250 ms budget
+   expires. Highest-value correctness fix.
+2. **Per-plugin sniffer config** (`settings.sniffers.modules[].config` blob) —
+   phase 9's own docs call `regex-firstbytes` "a template, not a generic
+   engine" only because there is no per-plugin config path. Needs a
+   config-schema extension (`gsp-config` + `validate()` + `config.example.yaml`
+   + `docs/05`) and threading the blob to `WasmSniffer`.
+3. **`RouteHint.reject` → hard drop** — security-relevant and small: a sniffer
+   that positively rejects should be able to drop the connection / datagram,
+   not just decline to match the `sniffer` route.
+4. **Live reload of `resolvers:` and `backend_sources:`** — both startup-only
+   today; a proxy that advertises zero-downtime reload should fold these into
+   the existing `validate → Snapshot::build → ArcSwap::store` path.
+5. **`weighted` balancer** — heterogeneous backend hardware is a normal case.
+   (`first_available` can wait.)
+6. **Per-resolver `target` connect/idle timeout knob** (fixed 300 ms / 90 s
+   now) — cheap, natural to do alongside item 4.
+
+**B. Dedicated performance pass (its own phase, before v1.x — the NFRs are the
+project's north star):**
+
+7. **`splice()` zero-copy TCP**, **`recvmmsg`/`sendmmsg` UDP batching** (incl.
+   the transparent recv path), **UDP idle expiry via a timing wheel**. All
+   already scoped as drop-in replacements behind the same fn. These gate
+   N3/N4/N5 throughput.
+8. **`IPV6_TRANSPARENT` on musl / non-glibc** — pull in here if shipping Alpine
+   containers.
+
+**C. Cheap polish / docs (fold into A or B):**
+
+9. **epoch-ticker thread in `docs/02`** threading-model table — trivial doc pass.
+10. **`GET /sessions`** introspection — single-instance operability, and phase 10's
+    Web UI will want it. Small per-session registry.
+11. **Reload debounce widening** (only coalesces within one 200 ms window) — low
+    priority, low cost.
+12. **LRU eviction for the UDP sticky table and the per-source cap**
+    (refuse / wholesale-clear when full now) — acceptable defaults; do only if
+    load testing shows them biting.
+
+### WAIT until after fleet management & controls (phases 10–12)
+
+- **NFR N9 (HA)** — HA is anycast / L4-LB in front of a fleet; can't be
+  validated before the fleet exists.
+- **NFR N3 / N4 / N5 (aggregate throughput, full 500k / 1M conns)** — need
+  multiple hosts + a real load generator; done on the same hardware used to
+  test the fleet. The concurrency-ramp harness already went as far as one box
+  allows.
+- **Resolver `sticky_key`** — deferral is explicitly pending a design for how a
+  later request recovers the key; that overlaps the control-plane intent/routing
+  model. Do it with phase 11.
+- **k8s discovery watch informer** (polling now) — a convergence-speed
+  optimization that belongs with the discovery/scaling rework the fleet phases
+  touch.
+- **Retire the UDP sticky table via `consistent_hash`** — pure polish, no
+  user-visible gap.
+- **TCP whole-prefix bind** (beyond `freebind`) — niche, no demand signal;
+  revisit if a user asks.
+- **More sniffers (`quic`, `wireguard`, …)** — community / plugin ecosystem
+  work, genuinely parallel, never blocking core completion.
+- **Multiple distinct sniffers per listener** — polish; wait for a real use case.
+- **TLS/DTLS termination, QUIC-CID session keying, eBPF/XDP pre-filter** —
+  already parked under `docs/08` "Later / optional"; each is its own project.
+- **`serde_yaml` deprecation** — monitor only; act if it actually breaks.
+
+---
+
 ## Latency ledger
 
 Per-TCP-connection cost: 1 `Pool::acquire` (lock-free reads + one atomic add),
