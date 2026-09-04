@@ -80,6 +80,52 @@ listeners:
 }
 
 #[tokio::test]
+async fn sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend() {
+    let backend = echo_backend(9).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(handle.sessions().is_empty());
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    client.send(b"hi").await.unwrap();
+    let mut buf = [0u8; 32];
+    tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+        .await
+        .expect("reply timed out")
+        .unwrap();
+
+    let live = handle.sessions();
+    assert_eq!(live.len(), 1, "one live UDP session expected");
+    let e = &live[0];
+    assert_eq!(e.proto, gsp_core::Proto::Udp);
+    assert_eq!(e.listener, "l");
+    assert_eq!(e.pool.as_deref(), Some("p"));
+    assert_eq!(e.backend, Some(backend));
+    assert_eq!(e.peer, client.local_addr().unwrap());
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
 async fn idle_timeout_evicts_the_session_and_frees_the_backend_slot() {
     let backend = echo_backend(7).await;
     let proxy_addr = free_udp_addr();
