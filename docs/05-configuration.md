@@ -333,34 +333,24 @@ listeners:
         action: { pool: match-eu }
       - match: { type: dst, cidrs: ["2001:db8:ace:1::2/128"] }   # creative.example.net
         action: { pool: match-us }
-      - match: { type: always }
-        action: { reject: true }          # unknown destination IP -> drop
+      # No `always`/catch-all route and no `reject` action — there isn't one;
+      # an unmatched destination IP simply has no matching route and is
+      # dropped (no_route).
     affinity: { hash_on: src_ip }
 
   # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port.
-  # A listener socket binds to exactly one port today — the port-range bind
-  # (requirement F1.4, one listener spawning a socket per port across a range)
-  # is planned but not yet built, see HANDOVER.md — so at real scale this
-  # needs one listener per port; `port` below is a *route matcher* (it does
-  # support a "lo-hi" range, but only within one listener's routes, not as a
-  # bind address).
-  - name: raw-udp-eu
-    bind: "0.0.0.0:30001"
+  # One listener, one `bind: "host:lo-hi"` port range (F1.4) — one real socket
+  # per port, all sharing this listener's routes; the `port` route matcher
+  # picks the pool by the port the datagram actually arrived on. Ports in the
+  # range with no matching route (anything but 30001/30002 here) are dropped.
+  - name: raw-udp-v4
+    bind: "0.0.0.0:30000-30099"
     protocol: udp
     routes:
       - match: { type: port, ports: [30001] }
         action: { pool: match-eu }
-      - match: { type: always }
-        action: { reject: true }
-
-  - name: raw-udp-us
-    bind: "0.0.0.0:30002"
-    protocol: udp
-    routes:
       - match: { type: port, ports: [30002] }
         action: { pool: match-us }
-      - match: { type: always }
-        action: { reject: true }
 ```
 
 ## Validation rules (excerpt)
@@ -404,13 +394,18 @@ listeners:
   `prefix` (a UDP prefix listener needs the routed prefix reachable to the
   host, not `IP_FREEBIND`).
 - `match.type: port` matches the destination port of the accepting socket; its
-  own `ports:` list supports a `"lo-hi"` range. A *listener's* `bind` address
-  is always a single port today — a port-range bind (spawning one socket per
-  port in a configured range under one listener) is a real, planned
-  requirement (F1.4 in `docs/01-requirements.md`) that hasn't been built yet;
-  see the follow-up in `HANDOVER.md` / `docs/08` Phase 3.
-- Bind addresses must not overlap between listeners (same IP:port:proto); a prefix
-  bind must not cover a single bind address of another listener.
+  own `ports:` list supports a `"lo-hi"` range.
+- A listener's `bind` is either one `host:port` socket address, or a
+  `host:lo-hi` port range (F1.4) — one real socket per port (TCP: one per
+  worker per port; UDP: same, `SO_REUSEPORT`-shared), all sharing that
+  listener's routes/filters/pool selection; a route's `port` matcher still
+  sees the real port a connection/datagram arrived on. Capped at 1024 ports
+  per range (a typo like `0-65535` would otherwise try to open tens of
+  thousands of sockets). Mutually exclusive with `prefix` (which needs
+  exactly one wildcard socket).
+- Bind addresses must not overlap between listeners (same IP:port:proto,
+  checked per port of a range too); a prefix bind must not cover a single
+  bind address of another listener.
 - Numeric ranges: timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.
 
 ## Reload semantics

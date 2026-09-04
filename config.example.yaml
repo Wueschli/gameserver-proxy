@@ -207,6 +207,22 @@ listeners:
       - match: { type: always }
         action: { pool: local }
 
+  # A port-range bind (F1.4): "host:lo-hi" spawns one real socket per port
+  # (all sharing this listener's routes/filters) instead of one listener
+  # config per port — for dedicated-server fleets that hand each match a
+  # dynamically-picked port from a shared range (e.g. Agones-style
+  # `hostPort` ranges) or subdomain-per-port routing (scheme B, docs/03).
+  # Capped at 1024 ports/range; mutually exclusive with `prefix`.
+  - name: match-port-range
+    bind: "0.0.0.0:28000-28009"
+    protocol: udp
+    routes:
+      # Only 28000 is routed; a datagram on any other port in the range has
+      # no matching route and is dropped (no `always` catch-all here — there
+      # is no `reject` action, an unmatched route list just drops silently).
+      - match: { type: port, ports: [28000] }
+        action: { pool: local }
+
   - name: query-and-game
     bind: "0.0.0.0:27016"
     protocol: udp

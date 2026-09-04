@@ -25,6 +25,17 @@ implementation narration lives in git history and `docs/08`, not here.
 - **Perf pass** — `splice(2)` zero-copy TCP pump (ADR 17); `recvmmsg(2)` UDP
   ingress batching (ADR 18); UDP idle expiry via a single-level timing wheel
   (ADR 19). Still deferred: `sendmmsg` UDP egress batching.
+- **Listener port-range bind (F1.4)** — `bind: "host:lo-hi"` (e.g.
+  `"0.0.0.0:30000-30999"`) spawns one real socket per port (× `workers`,
+  `SO_REUSEPORT`-shared) under one listener config, sharing its
+  routes/filters/pool selection; a route's `port` matcher still sees the real
+  accepted/received port. `gsp_config::ListenerConfig::bind` is the primary
+  (lowest) port, `extra_binds: Vec<SocketAddr>` the rest (empty for a plain
+  bind); `ListenerConfig::binds()` iterates both. Capped at 1024 ports/range
+  (`MAX_BIND_RANGE`); mutually exclusive with `prefix`. Was requirement F1.4
+  in `docs/01-requirements.md`, written down at project start and never
+  carried into a phase or deferred-work note until a documentation audit
+  caught the gap — closed out right after, see `docs/08` Phase 3.
 
 **Next**: phases 10–12 (the distributed control plane —
 [`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md)),
@@ -35,7 +46,6 @@ what the user wants.
 
 | Item | Notes |
 |------|-------|
-| Listener port-range bind (requirement F1.4, `docs/01-requirements.md`) | never implemented and — until a documentation audit caught it — never even tracked as deferred; a `RawListener.bind` is one `SocketAddr`, there's no "spawn a socket per port in a range" mechanism. Needed for dedicated-server fleets that dynamically pick a port per match (Agones-style `hostPort` ranges, Source/UE auto-incrementing ports) and for scheme B at real scale; today's workaround is one `listeners[]` entry per port. See `docs/08` Phase 3. |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |

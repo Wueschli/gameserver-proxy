@@ -1319,7 +1319,16 @@ pub struct PoolConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenerConfig {
     pub name: String,
+    /// Primary (lowest-port) bind address. For a plain `"host:port"` bind
+    /// this is the whole listener; for a `"host:lo-hi"` port-range bind
+    /// (F1.4) it's the first port, with the rest in `extra_binds` — one real
+    /// socket per port, all sharing this listener's routes/filters. A route's
+    /// `port` matcher still sees the specific port a connection/datagram
+    /// actually arrived on, via `ctx.local`, not this field.
     pub bind: SocketAddr,
+    /// The rest of a `"host:lo-hi"` bind range, if any (empty for a plain
+    /// single-port bind).
+    pub extra_binds: Vec<SocketAddr>,
     pub protocol: Protocol,
     /// Priority-ordered; the first matching route's pool wins. A listener with a
     /// bare `pool:` is normalised to one `always` route here.
@@ -1355,6 +1364,12 @@ pub struct ListenerConfig {
 }
 
 impl ListenerConfig {
+    /// Every real socket address this listener binds — `bind` plus
+    /// `extra_binds` (a plain single-port listener yields just `bind`).
+    pub fn binds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        std::iter::once(self.bind).chain(self.extra_binds.iter().copied())
+    }
+
     /// The routes whose matcher fires for `ctx`, in priority order. The runtime
     /// walks this: a `Pool` action ends the walk; a `Resolver` action may
     /// continue it (`on_error: fallback_route`).
@@ -1798,17 +1813,14 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         if !listener_names.insert(l.name.clone()) {
             return Err(Invalid(format!("duplicate listener name: {}", l.name)));
         }
-        let bind: SocketAddr = l.bind.parse().map_err(|_| {
-            Invalid(format!(
-                "listener {}: bind is not a valid socket address: {}",
-                l.name, l.bind
-            ))
-        })?;
-        if !binds.insert((bind, l.protocol)) {
-            return Err(Invalid(format!(
-                "listener {}: bind {bind} is already used by another listener",
-                l.name
-            )));
+        let (bind, extra_binds) = parse_bind_spec(&l.name, &l.bind)?;
+        for addr in std::iter::once(bind).chain(extra_binds.iter().copied()) {
+            if !binds.insert((addr, l.protocol)) {
+                return Err(Invalid(format!(
+                    "listener {}: bind {addr} is already used by another listener",
+                    l.name
+                )));
+            }
         }
         let routes = if !l.routes.is_empty() {
             if l.pool.is_some() {
@@ -1889,6 +1901,13 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 if l.protocol != Protocol::Udp {
                     return Err(Invalid(format!(
                         "listener {}: `prefix` mode requires a udp listener",
+                        l.name
+                    )));
+                }
+                if !extra_binds.is_empty() {
+                    return Err(Invalid(format!(
+                        "listener {}: `prefix` mode needs exactly one wildcard socket, not a \
+                         bind port range",
                         l.name
                     )));
                 }
@@ -2075,6 +2094,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         listeners.push(ListenerConfig {
             name: l.name,
             bind,
+            extra_binds,
             protocol: l.protocol,
             routes,
             affinity,
@@ -2442,6 +2462,63 @@ fn parse_byte_spec(s: &str) -> Result<Vec<u8>, String> {
     } else {
         Err(format!("prefix {s:?} must start with `hex:` or `ascii:`"))
     }
+}
+
+/// Max ports a single `bind: "host:lo-hi"` range may cover — one real socket
+/// per port per worker, so an unbounded range risks fd exhaustion from a
+/// typo (e.g. `0-65535`).
+const MAX_BIND_RANGE: usize = 1024;
+
+/// Parse a listener's `bind` string: either a plain `host:port` socket
+/// address, or a `host:lo-hi` port range (requirement F1.4) — one socket per
+/// port in the range, all sharing this listener's routes/filters/pool
+/// selection (a route's `port` matcher still sees the real accepted/received
+/// port). Returns the lowest port's address as the primary bind and the rest
+/// (empty for a plain bind) as the extras.
+fn parse_bind_spec(lname: &str, raw: &str) -> Result<(SocketAddr, Vec<SocketAddr>), ConfigError> {
+    let bad = |s: String| ConfigError::Invalid(format!("listener {lname}: bind: {s}"));
+    if let Ok(addr) = raw.parse::<SocketAddr>() {
+        return Ok((addr, Vec::new()));
+    }
+    let invalid = || {
+        bad(format!(
+            "{raw:?} is not a valid socket address or port range"
+        ))
+    };
+    let (host_part, port_part) = raw.rsplit_once(':').ok_or_else(invalid)?;
+    let (lo, hi) = port_part.split_once('-').ok_or_else(invalid)?;
+    let lo: u16 = lo.trim().parse().map_err(|_| {
+        bad(format!(
+            "bind range {raw:?} has an invalid lower port bound"
+        ))
+    })?;
+    let hi: u16 = hi.trim().parse().map_err(|_| {
+        bad(format!(
+            "bind range {raw:?} has an invalid upper port bound"
+        ))
+    })?;
+    if lo == 0 || hi == 0 {
+        return Err(bad(format!("bind range {raw:?} includes port 0")));
+    }
+    if lo > hi {
+        return Err(bad(format!("bind range {raw:?} is reversed (lo > hi)")));
+    }
+    let width = (hi - lo) as usize + 1;
+    if width > MAX_BIND_RANGE {
+        return Err(bad(format!(
+            "bind range {raw:?} covers {width} ports, over the {MAX_BIND_RANGE} limit \
+             (one socket per port, per worker)"
+        )));
+    }
+    let host = host_part.trim_start_matches('[').trim_end_matches(']');
+    let ip: IpAddr = host
+        .parse()
+        .map_err(|_| bad(format!("bind range {raw:?} has an invalid host {host:?}")))?;
+    let mut addrs = (lo..=hi).map(|p| SocketAddr::new(ip, p));
+    let first = addrs
+        .next()
+        .expect("lo..=hi is non-empty (lo <= hi checked above)");
+    Ok((first, addrs.collect()))
 }
 
 fn parse_port_range(
@@ -3289,6 +3366,96 @@ listeners:
         assert!(cfg.listeners[0].prefix.is_none());
         assert!(!cfg.listeners[0].route_hint);
         assert!(!cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn parses_bind_port_range_listener() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:30000-30099"
+    protocol: udp
+    routes:
+      - match: { type: port, ports: [30001] }
+        action: { pool: p }
+      - match: { type: always }
+        action: { pool: p }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.bind, "0.0.0.0:30000".parse::<SocketAddr>().unwrap());
+        assert_eq!(l.extra_binds.len(), 99);
+        assert_eq!(
+            l.extra_binds.last().copied().unwrap(),
+            "0.0.0.0:30099".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(l.binds().count(), 100);
+        assert!(l.binds().all(|a| a.ip() == std::net::Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parses_bind_port_range_ipv6() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: l
+    bind: "[2001:db8::1]:7000-7001"
+    protocol: tcp
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let l = &cfg.listeners[0];
+        assert_eq!(l.bind, "[2001:db8::1]:7000".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            l.extra_binds,
+            vec!["[2001:db8::1]:7001".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn bind_range_overlap_is_rejected_like_a_plain_bind() {
+        // A range that overlaps another listener's single bind is rejected,
+        // same as two plain binds colliding.
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                     listeners:\n  \
+                     - name: a\n    bind: \"0.0.0.0:30050\"\n    pool: p\n  \
+                     - name: b\n    bind: \"0.0.0.0:30000-30099\"\n    pool: p\n";
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_bind_ranges() {
+        for bad in [
+            // reversed range
+            "0.0.0.0:30099-30000",
+            // port 0 in range
+            "0.0.0.0:0-10",
+            // non-numeric bound
+            "0.0.0.0:abc-30099",
+            // way over the sanity cap
+            "0.0.0.0:1-65000",
+            // bad host
+            "not-an-ip:30000-30099",
+        ] {
+            let yaml = format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                 listeners:\n  - name: l\n    bind: {bad:?}\n    pool: p\n"
+            );
+            assert!(parse_str(&yaml).is_err(), "should reject bind: {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_bind_range_combined_with_prefix() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                     listeners:\n  - name: l\n    bind: \"[::]:7777-7778\"\n    \
+                     protocol: udp\n    prefix: \"2001:db8::/64\"\n    pool: p\n";
+        assert!(parse_str(yaml).is_err());
     }
 
     #[test]

@@ -235,6 +235,22 @@ async fn free_port() -> std::net::SocketAddr {
         .unwrap()
 }
 
+/// Two adjacent free ports on 127.0.0.1, for the bind-range test — retries a
+/// few times since "port N+1 is also free right now" isn't guaranteed by a
+/// single ephemeral-port grab.
+async fn free_port_pair() -> (u16, u16) {
+    for _ in 0..20 {
+        let lo = free_port().await.port();
+        if lo == u16::MAX {
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", lo + 1)).await.is_ok() {
+            return (lo, lo + 1);
+        }
+    }
+    panic!("couldn't find two adjacent free ports after 20 tries");
+}
+
 #[tokio::test]
 async fn first_matching_route_selects_the_pool() {
     let a = marker_backend(b'A').await;
@@ -284,6 +300,54 @@ listeners:
     assert_eq!(
         m2[0], b'B',
         "non-matching CIDR should fall through to pool b"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn bind_port_range_listener_serves_every_port_and_routes_by_it() {
+    // F1.4: one listener config, `bind: "host:lo-hi"`, spawns a real socket per
+    // port; each port still routes independently via the `port` matcher.
+    let a = marker_backend(b'A').await;
+    let b = marker_backend(b'B').await;
+    let (lo, hi) = free_port_pair().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: a
+    targets: ["{a}"]
+  - name: b
+    targets: ["{b}"]
+listeners:
+  - name: ranged
+    bind: "127.0.0.1:{lo}-{hi}"
+    routes:
+      - match: {{ type: port, ports: [{lo}] }}
+        action: {{ pool: a }}
+      - match: {{ type: always }}
+        action: {{ pool: b }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    assert_eq!(cfg.listeners[0].extra_binds.len(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut c1 = TcpStream::connect(("127.0.0.1", lo)).await.unwrap();
+    let mut m1 = [0u8; 1];
+    c1.read_exact(&mut m1).await.unwrap();
+    assert_eq!(m1[0], b'A', "the low port of the range should reach pool a");
+
+    let mut c2 = TcpStream::connect(("127.0.0.1", hi)).await.unwrap();
+    let mut m2 = [0u8; 1];
+    c2.read_exact(&mut m2).await.unwrap();
+    assert_eq!(
+        m2[0], b'B',
+        "the high port of the range should fall through to pool b"
     );
 
     runtime

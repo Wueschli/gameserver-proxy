@@ -82,13 +82,11 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 Always matches. For default/catch-all rules.
 
 ### `port`
-The destination port (of the *listener's own* bound socket) selects the pool;
-`ports:` accepts a `"lo-hi"` range too, though on a single-port listener that
-only matters if the range happens to include that one port. The real
-`30000–30099 → pool-a` split this matcher is meant for needs a *port-range
-listener* — one config entry binding a whole range across many sockets
-(F1.4). That part is planned but not yet built — see `HANDOVER.md`. Until
-then, achieve the same split with one listener per port.
+The destination port (of the accepting socket) selects the pool; `ports:`
+accepts a `"lo-hi"` range too. Pairs naturally with a *port-range listener*
+(`bind: "host:lo-hi"`, F1.4) — one config entry spawning a real socket per
+port across the range, so `30000–30099 → pool-a` needs one listener, not one
+per port. See [05](05-configuration.md).
 
 ### `dst` (destination IP / prefix of the incoming packet)
 The address the client sent to — **not** from the payload but from the socket.
@@ -212,8 +210,8 @@ schemes, used alone or combined:
 - Where the game/protocol supports it, an **SRV record** hands out host+port
   (`_game._udp.survival.example.net SRV 0 0 30001 edge.example.net`). Otherwise the
   launcher / server-browser config carries the port.
-- Proxy: a port-range listener (F1.4, **not yet built** — see `HANDOVER.md`;
-  today, one plain listener per port) + `port` matcher (`30001 → pool-survival`).
+- Proxy: a port-range listener (`bind: "0.0.0.0:30000-30099"`, F1.4) + `port`
+  matcher (`30001 → pool-survival`).
 - Limits: some clients hard-code the port; restrictive client firewalls; SRV support
   is rare outside a few protocols.
 
@@ -308,7 +306,7 @@ listener raw-udp-v4
     route 2: port 30002 → pool creative
     route 3: always     → reject
 ```
-(Pseudo-code — the `bind: "0.0.0.0:30000-30099/udp"` single-listener-range
-shorthand is F1.4, **not built yet** (`HANDOVER.md`); today this needs one
-real listener per port, each with its own `port` route. See `docs/05` for the
-actual YAML shape.)
+(Pseudo-code — real YAML has no `/udp` suffix on `bind`, `protocol: udp` is
+its own key, and `routes:` entries are `{ match: {...}, action: {...} }`. See
+`docs/05` for the actual shape; the range-bind idea itself (F1.4) is real and
+built.)

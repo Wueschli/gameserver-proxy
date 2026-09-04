@@ -96,67 +96,77 @@ impl ListenerManager {
 
     fn spawn_group(&self, cfg: &ListenerConfig) -> Group {
         let (stop_tx, stop_rx) = watch::channel(false);
-        // One limiter per listener, shared across its workers; rebuilt on every
-        // respawn so it tracks the live `ListenerConfig`.
+        // One limiter per listener (shared across every port's workers, not
+        // per-port — a port-range bind is still one logical listener), rebuilt
+        // on every respawn so it tracks the live `ListenerConfig`.
         let limiter = Arc::new(RateLimiter::new(cfg.rate_limit.as_ref()));
         let src_limiter = SourceLimiter::new(cfg.per_source.as_ref());
-        let mut tasks = Vec::with_capacity(self.workers);
-        for worker_id in 0..self.workers {
-            let snap = self.snapshot.clone();
-            let hints = self.hints.clone();
-            let conns = self.conns.clone();
-            let resolvers = self.resolvers.clone();
-            let limiter = limiter.clone();
-            let src_limiter = src_limiter.clone();
-            let limits = self.limits.clone();
-            let geo = self.geo.clone();
-            let sniffers = self.sniffers.clone();
-            let lc = cfg.clone();
-            let mut sd = stop_rx.clone();
-            tasks.push(tokio::spawn(async move {
-                let res = match lc.protocol {
-                    Protocol::Tcp => {
-                        crate::listener::run_tcp_listener(
-                            lc.clone(),
-                            snap,
-                            hints,
-                            conns,
-                            resolvers,
-                            limiter,
-                            src_limiter,
-                            limits,
-                            geo,
-                            sniffers,
-                            worker_id,
-                            &mut sd,
-                        )
-                        .await
+        let binds: Vec<_> = cfg.binds().collect();
+        let mut tasks = Vec::with_capacity(self.workers * binds.len());
+        for bind in binds {
+            // A port-range bind (F1.4) spawns this same worker loop once per
+            // port, each on its own real socket; every clone below carries
+            // `lc.bind` overridden to the one address this task actually
+            // binds, so `run_tcp_listener`/`run_udp_listener` need no change —
+            // route/filter/pool selection still comes from the shared `lc`.
+            for worker_id in 0..self.workers {
+                let snap = self.snapshot.clone();
+                let hints = self.hints.clone();
+                let conns = self.conns.clone();
+                let resolvers = self.resolvers.clone();
+                let limiter = limiter.clone();
+                let src_limiter = src_limiter.clone();
+                let limits = self.limits.clone();
+                let geo = self.geo.clone();
+                let sniffers = self.sniffers.clone();
+                let mut lc = cfg.clone();
+                lc.bind = bind;
+                let mut sd = stop_rx.clone();
+                tasks.push(tokio::spawn(async move {
+                    let res = match lc.protocol {
+                        Protocol::Tcp => {
+                            crate::listener::run_tcp_listener(
+                                lc.clone(),
+                                snap,
+                                hints,
+                                conns,
+                                resolvers,
+                                limiter,
+                                src_limiter,
+                                limits,
+                                geo,
+                                sniffers,
+                                worker_id,
+                                &mut sd,
+                            )
+                            .await
+                        }
+                        Protocol::Udp => {
+                            crate::listener_udp::run_udp_listener(
+                                lc.clone(),
+                                snap,
+                                hints,
+                                conns,
+                                resolvers,
+                                limiter,
+                                src_limiter,
+                                limits,
+                                geo,
+                                sniffers,
+                                worker_id,
+                                &mut sd,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(e) = res {
+                        tracing::error!(
+                            listener = %lc.name, worker = worker_id, error = %e,
+                            "listener task exited with error"
+                        );
                     }
-                    Protocol::Udp => {
-                        crate::listener_udp::run_udp_listener(
-                            lc.clone(),
-                            snap,
-                            hints,
-                            conns,
-                            resolvers,
-                            limiter,
-                            src_limiter,
-                            limits,
-                            geo,
-                            sniffers,
-                            worker_id,
-                            &mut sd,
-                        )
-                        .await
-                    }
-                };
-                if let Err(e) = res {
-                    tracing::error!(
-                        listener = %lc.name, worker = worker_id, error = %e,
-                        "listener task exited with error"
-                    );
-                }
-            }));
+                }));
+            }
         }
         Group {
             cfg: cfg.clone(),

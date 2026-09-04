@@ -111,10 +111,17 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
         snap.geo_db.as_deref().unwrap_or("-"),
     ));
     for l in &snap.listeners {
+        let bind_display = if l.extra_binds.is_empty() {
+            l.bind.to_string()
+        } else {
+            // Port-range bind (F1.4): one real socket per port, shown compactly
+            // rather than listing every address.
+            format!("{} (+{} ports)", l.bind, l.extra_binds.len())
+        };
         out.push_str(&format!(
             "  {}\tbind={}\tproto={:?}\troutes={}{}{}{}{}{}{}{}{}{}{}\n",
             l.name,
-            l.bind,
+            bind_display,
             l.protocol,
             l.routes.len(),
             if l.route_hint { "\troute_hint" } else { "" },

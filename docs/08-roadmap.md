@@ -62,19 +62,20 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   loader is Phase 9.
 - **Result**: multiple games/regions behind one port (via `dst` / `sni` /
   `first-bytes`; game-protocol sniffing once plugins land).
-- ⬜ **Not built**: F1.4's port-range listener (`docs/01-requirements.md`) —
-  one listener config spawning a socket per port across a configured range
-  (e.g. `30000–30999`), for dedicated-server fleets that dynamically pick a
-  port per match/instance (Agones-style `hostPort` ranges, Source/UE servers
-  auto-incrementing past a taken default port) and for scheme B
-  (subdomain-per-port) at real scale. This requirement was written down at
-  the very start and never carried into an implementation slice or a
-  deferred-work note — caught by a documentation audit, not forgotten on
-  purpose. Today's workaround is one `listeners[]` entry per port, which
-  doesn't scale past a handful of fixed ports. `port` (the *route* matcher)
-  already supports a `"lo-hi"` range within one listener's routes — this is
-  about the *bind*, spawning many real sockets under one config block, closer
-  in shape to how UDP `prefix:` spawns one socket for a whole IP range.
+- ✅ F1.4's port-range listener (`docs/01-requirements.md`) — `bind:
+  "host:lo-hi"` (e.g. `"0.0.0.0:30000-30999"`) spawns one real socket per
+  port (× `workers`, `SO_REUSEPORT`-shared) under one listener config, for
+  dedicated-server fleets that dynamically pick a port per match/instance
+  (Agones-style `hostPort` ranges, Source/UE servers auto-incrementing past a
+  taken default port) and for scheme B (subdomain-per-port) at real scale.
+  This requirement was written down at project start and not carried into an
+  implementation slice for a long time — caught by a documentation audit, not
+  by design — then closed out right after. `gsp_config::ListenerConfig::bind`
+  (primary/lowest port) + `extra_binds` (the rest); capped at 1024 ports per
+  range. Mutually exclusive with `prefix` (which needs exactly one wildcard
+  socket). The `port` *route* matcher (which already supported a `"lo-hi"`
+  range within one listener's routes) is what actually splits pools by port
+  within the range — the bind range just makes the sockets exist.
 
 ## Phase 4 – External routing logic (week 11–12) ✅ (sticky_key deferred)
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
