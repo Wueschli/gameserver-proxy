@@ -562,10 +562,24 @@ token, is ever exposed to a human directly.
      in → `GET /api/fleet/pools` showed the real pushed data; a drain
      through the full `gsp-ui → gsp-aggregator → gsp` path landed for real,
      confirmed by the instance's own `/readyz` flipping to `503`.
-11d. `gsp-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by `gsp-ui`
-     itself subscribing to `gsp-aggregator`'s slice-11a SSE feed and relaying
-     each update — the browser never opens a connection to the aggregator
-     directly.
+11d. ✅ `gsp-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by a
+     single shared `crate::fleet_feed` subscription to `gsp-aggregator`'s
+     slice-11a SSE feed (one aggregator connection total, fanned out to
+     every browser tab — not one per tab). `fleet_feed::run` reuses `gsp`'s
+     own `controller_client`'s hand-rolled SSE parsing (a chunked-body loop
+     splitting on blank lines) and reconnects with the same capped
+     exponential backoff on disconnect; a `latest` cache means a browser
+     connecting between two pushes gets the current view immediately rather
+     than waiting for the next one. A `Lagged` WS subscriber resends
+     `latest` rather than replaying — same "this is state, not a log"
+     reasoning as `gsp-aggregator`'s own `subscribe_fleet_worker`. Gated by
+     `require_session` like everything else the browser reaches (a WS
+     upgrade is an ordinary `GET` until the `101` handshake). 5 new tests,
+     3 of them against a *real* WebSocket client (`tokio-tungstenite`) and a
+     real `axum::serve` listener, not mocks. Verified live end-to-end over
+     the full five-hop chain with a throwaway probe client: real `gsp` →
+     real `gsp-aggregator` (SSE) → real `gsp-ui` (`fleet_feed`) → a
+     WebSocket client, watching live pushes arrive in real time.
 11e. `gsp-ui` proxies the controller's config API too
      (`--controller-url`/`--controller-token`): `GET`/`POST /config`,
      revision history/diff/rollback — phase 10's "full management" GUI

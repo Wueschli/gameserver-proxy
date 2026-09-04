@@ -372,12 +372,39 @@ through the full chain landed for real, confirmed by the instance's own
 `GET /readyz` flipping to `503`. This is the whole point of the `gsp-ui`
 redesign proven working, not just each piece in isolation.
 
-**Next**: 11d–11f — the browser-facing WebSocket fed by subscribing to the
-aggregator's `/fleet/subscribe` (11d), proxying the controller's config API
-too (11e), then the actual React/Vite/TS frontend (11f). Then slice 12
-(integration tests spinning up N `gsp` + controller + aggregator + `gsp-ui`
-together) and slice 13 (docs polish: `docs/06`, `README.md` status block,
-`docs/08` status legend).
+**Slice 11d done**: `crates/gsp-ui/src/fleet_feed.rs` (a single shared
+subscription to the aggregator's `/fleet/subscribe`, fanned out via a
+`broadcast::Sender<String>` plus a `latest` cache) + `src/ws.rs` (`GET
+/ws/fleet`, gated by `require_session` same as everything else). Deliberate
+design point: one aggregator SSE connection total, not one per browser tab —
+`fleet_feed::run` is spawned once at startup and every WS connection just
+subscribes to its internal broadcast. Reused `gsp`'s `controller_client`'s
+hand-rolled SSE parsing verbatim (same reasoning: control-plane, human-paced,
+not worth a dependency) and its reconnect-with-backoff shape. A `Lagged` WS
+subscriber resends `latest` rather than trying to replay — consistent with
+every other "this is state, not a log" spot in this codebase now
+(`gsp-aggregator`'s `subscribe_fleet_worker`, `gsp-controller`'s
+`subscribe_worker` handles an actual log so it's the one exception, correctly).
+
+5 new tests, 3 of them against a *real* `tokio-tungstenite` client and a real
+`axum::serve` listener (added `tokio-tungstenite` + `futures-util` as
+`gsp-ui` dev-deps) — not mocks. One cleanup along the way: `FleetFeed::
+set_latest` started private, but the WS tests needed to drive the cache
+directly without a real aggregator connection, so it's `pub(crate)` with a
+comment explaining why a test-only relaxation is fine here.
+
+Verified live end-to-end over the **full five-hop chain** with a throwaway
+`examples/ws_probe.rs` (written, used, then deleted — not part of the
+crate): real `gsp` → real `gsp-aggregator` (SSE) → real `gsp-ui`
+(`fleet_feed`) → a real WebSocket client, watching five live pushes arrive
+in real time as `gsp` kept pushing on its 1s interval.
+
+**Next**: 11e — `gsp-ui` proxying the controller's config API
+(`--controller-url`/`--controller-token`: `GET`/`POST /config`, revision
+history/diff/rollback). Then 11f (the actual React/Vite/TS frontend), slice
+12 (integration tests spinning up N `gsp` + controller + aggregator +
+`gsp-ui` together), and slice 13 (docs polish: `docs/06`, `README.md` status
+block, `docs/08` status legend).
 
 ### Known follow-ups (none blocking)
 

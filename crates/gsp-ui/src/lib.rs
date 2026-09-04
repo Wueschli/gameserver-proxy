@@ -18,10 +18,14 @@
 //! Slice 11b: [`session::SessionStore`] + `POST /ui/login`/`/ui/logout`
 //! ([`api`]) + [`auth::require_session`]. Slice 11c ([`aggregator_proxy`]):
 //! fleet reads + the slice-9 operational verbs, proxied to `gsp-aggregator`.
-//! Slice 11d (the WebSocket bridge) and 11e (proxying the controller's
-//! config API) aren't built yet; slice 11f is the actual frontend.
+//! Slice 11d ([`fleet_feed`] + [`ws`]): a single shared subscription to the
+//! aggregator's `/fleet/subscribe` SSE feed, fanned out to every connected
+//! browser over `GET /ws/fleet`. Slice 11e (proxying the controller's config
+//! API) isn't built yet; slice 11f is the actual frontend.
 
 pub mod aggregator_proxy;
 pub mod api;
 pub mod auth;
+pub mod fleet_feed;
 pub mod session;
+pub mod ws;

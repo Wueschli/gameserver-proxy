@@ -1,8 +1,9 @@
 //! `gsp-ui` binary — see `lib.rs` for the design pointer and slice plan.
 //! Slice 11b: session login/logout. Slice 11c: fleet reads + operational
-//! verbs proxied to `gsp-aggregator`. Proxying `gsp-controller`'s config API
-//! (11e), the WebSocket bridge (11d), and the frontend itself (11f) aren't
-//! built yet.
+//! verbs proxied to `gsp-aggregator`. Slice 11d: the browser WebSocket, fed
+//! by a shared subscription to the aggregator's `/fleet/subscribe`.
+//! Proxying `gsp-controller`'s config API (11e) and the frontend itself
+//! (11f) aren't built yet.
 
 use std::net::SocketAddr;
 
@@ -54,8 +55,16 @@ async fn main() -> anyhow::Result<()> {
 
     let login_required = args.ui_password.is_some();
     let mut state = AppState::new(args.ui_password);
+    let mut feed_task = None;
     if let Some(aggregator_url) = args.aggregator_url {
-        state = state.with_aggregator(aggregator_url, args.aggregator_token);
+        state = state.with_aggregator(aggregator_url.clone(), args.aggregator_token.clone());
+        let feed = gsp_ui::fleet_feed::FleetFeed::new();
+        feed_task = Some(tokio::spawn(gsp_ui::fleet_feed::run(
+            aggregator_url,
+            args.aggregator_token,
+            feed.clone(),
+        )));
+        state = state.with_fleet_feed(feed);
     }
     tracing::info!(
         login_required,
@@ -71,5 +80,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(listen = %args.listen, "gsp-ui listening");
     axum::serve(listener, app).await?;
 
+    if let Some(task) = feed_task {
+        task.abort();
+    }
     Ok(())
 }

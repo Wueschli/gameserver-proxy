@@ -46,6 +46,10 @@ pub struct AppState {
     /// internally), reuses connections.
     pub http: reqwest::Client,
     pub aggregator: Option<AggregatorTarget>,
+    /// The live bridge to the aggregator's `/fleet/subscribe` feed
+    /// ([`crate::fleet_feed`], slice 11d) — `None` when no aggregator is
+    /// configured at all, same as `aggregator` being `None`.
+    pub fleet_feed: Option<std::sync::Arc<crate::fleet_feed::FleetFeed>>,
 }
 
 impl AppState {
@@ -55,6 +59,7 @@ impl AppState {
             sessions: Arc::new(SessionStore::new()),
             http: reqwest::Client::new(),
             aggregator: None,
+            fleet_feed: None,
         }
     }
 
@@ -62,16 +67,22 @@ impl AppState {
         self.aggregator = Some(AggregatorTarget { base_url, token });
         self
     }
+
+    pub fn with_fleet_feed(mut self, feed: std::sync::Arc<crate::fleet_feed::FleetFeed>) -> Self {
+        self.fleet_feed = Some(feed);
+        self
+    }
 }
 
 /// `/ui/login` and `/ui/logout` must be reachable *without* a session (that
-/// would be circular); everything else this process serves — `/ui/session`
-/// plus `crate::aggregator_proxy`'s routes — is gated by
-/// [`crate::auth::require_session`].
+/// would be circular); everything else this process serves — `/ui/session`,
+/// `crate::aggregator_proxy`'s routes, and `crate::ws`'s WebSocket — is
+/// gated by [`crate::auth::require_session`].
 pub fn router(state: AppState) -> Router {
     let gated = Router::new()
         .route("/ui/session", get(session_status))
         .merge(crate::aggregator_proxy::router())
+        .merge(crate::ws::router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::require_session,
