@@ -34,6 +34,7 @@
 //! connections (deliberate: simplicity over instance-reuse latency, revisited
 //! in slice 6 if the per-call instantiate cost misses NFR N1).
 
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
@@ -182,69 +183,103 @@ fn decode_route_hint(bytes: &[u8]) -> Option<RouteHint> {
     Some(RouteHint { host, key, reject })
 }
 
-/// Scan `cfg.dir` for `*.wasm` modules and compile each into a [`WasmSniffer`].
-/// A module is named after its file stem (`a2s.wasm` → sniffer `a2s`). When
-/// `cfg.modules` is non-empty every loaded file must have a matching pin
-/// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the load.
-/// Spawns one epoch-ticker thread per call, shared by every loaded module.
-pub fn build_sniffers(cfg: &SniffersConfig) -> Result<Sniffers> {
-    let mut engine_cfg = Config::new();
-    engine_cfg.epoch_interruption(true);
-    let engine = Arc::new(
-        Engine::new(&engine_cfg)
-            .map_err(|e| anyhow::anyhow!("building the sniffer wasm engine: {e}"))?,
-    );
+/// A persistent handle to the shared `wasmtime::Engine` and its epoch-ticker
+/// thread — built once at startup and reused for every rescan of
+/// `settings.sniffers.dir` on a config reload (phase 9 slice 4). `dir` (and
+/// `modules` pins) can differ between calls to [`SnifferLoader::scan`]; the
+/// engine itself — and therefore `call_timeout_ms` — is fixed for the life of
+/// the process, like `settings.workers`.
+pub struct SnifferLoader {
+    engine: Arc<Engine>,
+}
 
-    {
-        let engine = engine.clone();
-        let period = cfg.call_timeout;
-        std::thread::Builder::new()
-            .name("gsp-sniffer-epoch".into())
-            .spawn(move || loop {
-                std::thread::sleep(period);
-                engine.increment_epoch();
-            })
-            .context("spawning the sniffer epoch-ticker thread")?;
+impl SnifferLoader {
+    /// Build the engine and spawn its epoch-ticker thread (bumps the epoch
+    /// every `call_timeout`, forever — one thread for the process, not one
+    /// per plugin or per call).
+    pub fn new(call_timeout: std::time::Duration) -> Result<Self> {
+        let mut engine_cfg = Config::new();
+        engine_cfg.epoch_interruption(true);
+        let engine = Arc::new(
+            Engine::new(&engine_cfg)
+                .map_err(|e| anyhow::anyhow!("building the sniffer wasm engine: {e}"))?,
+        );
+        {
+            let engine = engine.clone();
+            std::thread::Builder::new()
+                .name("gsp-sniffer-epoch".into())
+                .spawn(move || loop {
+                    std::thread::sleep(call_timeout);
+                    engine.increment_epoch();
+                })
+                .context("spawning the sniffer epoch-ticker thread")?;
+        }
+        Ok(Self { engine })
     }
 
-    let mut registry = Sniffers::new();
-    let entries =
-        fs::read_dir(&cfg.dir).with_context(|| format!("settings.sniffers.dir {:?}", cfg.dir))?;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
-            continue;
-        }
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-
-        if !cfg.modules.is_empty() {
-            let digest = format!("{:x}", Sha256::digest(&bytes));
-            match cfg.modules.iter().find(|m| m.name == name) {
-                Some(pin) if pin.sha256 == digest => {}
-                Some(pin) => bail!(
-                    "sniffer {name}: sha256 mismatch (pinned {}, loaded {digest})",
-                    pin.sha256
-                ),
-                None => bail!("sniffer {name}: not listed in settings.sniffers.modules"),
+    /// Scan `cfg.dir` for `*.wasm` modules and compile each into a
+    /// [`WasmSniffer`], returning the resulting name→plugin map. A module is
+    /// named after its file stem (`a2s.wasm` → sniffer `a2s`). When
+    /// `cfg.modules` is non-empty every loaded file must have a matching pin
+    /// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the
+    /// whole scan (an old, still-pinned registry should be kept by the
+    /// caller rather than left half-updated).
+    pub fn scan(&self, cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
+        let mut modules = HashMap::new();
+        let entries = fs::read_dir(&cfg.dir)
+            .with_context(|| format!("settings.sniffers.dir {:?}", cfg.dir))?;
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                continue;
             }
-        }
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
 
-        let module = Module::new(&engine, &bytes)
-            .map_err(|e| anyhow::anyhow!("compiling {}: {e}", path.display()))?;
-        registry.register(Arc::new(WasmSniffer {
-            name: name.clone(),
-            engine: engine.clone(),
-            module,
-            max_memory_bytes: cfg.max_memory_bytes,
-        }));
-        tracing::info!(sniffer = %name, path = %path.display(), "sniffer plugin loaded");
+            if !cfg.modules.is_empty() {
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                match cfg.modules.iter().find(|m| m.name == name) {
+                    Some(pin) if pin.sha256 == digest => {}
+                    Some(pin) => bail!(
+                        "sniffer {name}: sha256 mismatch (pinned {}, loaded {digest})",
+                        pin.sha256
+                    ),
+                    None => bail!("sniffer {name}: not listed in settings.sniffers.modules"),
+                }
+            }
+
+            let module = Module::new(&self.engine, &bytes)
+                .map_err(|e| anyhow::anyhow!("compiling {}: {e}", path.display()))?;
+            let sniffer: Arc<dyn Sniffer> = Arc::new(WasmSniffer {
+                name: name.clone(),
+                engine: self.engine.clone(),
+                module,
+                max_memory_bytes: cfg.max_memory_bytes,
+            });
+            tracing::info!(sniffer = %name, path = %path.display(), "sniffer plugin loaded");
+            modules.insert(name, sniffer);
+        }
+        Ok(modules)
     }
-    Ok(registry)
+}
+
+/// Startup convenience: build a [`SnifferLoader`] (and its engine / ticker
+/// thread) and do the first [`SnifferLoader::scan`] in one call. The returned
+/// loader is kept by the caller (`main.rs`) and handed to the reload task so
+/// later scans reuse the same engine instead of leaking a ticker thread per
+/// reload.
+pub fn build_sniffers(cfg: &SniffersConfig) -> Result<(SnifferLoader, Sniffers)> {
+    let loader = SnifferLoader::new(cfg.call_timeout)?;
+    let modules = loader.scan(cfg)?;
+    let registry = Sniffers::new();
+    for sniffer in modules.into_values() {
+        registry.register(sniffer);
+    }
+    Ok((loader, registry))
 }
 
 #[cfg(test)]
@@ -397,7 +432,7 @@ mod tests {
             wat::parse_str(HOST_SNIFFER_WAT).unwrap(),
         )
         .unwrap();
-        let reg = build_sniffers(&cfg(&dir)).unwrap();
+        let (_loader, reg) = build_sniffers(&cfg(&dir)).unwrap();
         let s = reg.get("test-host").unwrap();
         assert_eq!(s.sniff(b"HOST:x").unwrap().host.as_deref(), Some("x"));
     }
@@ -421,6 +456,39 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(&bytes)),
         });
         assert!(build_sniffers(&c).is_ok(), "correct pin must load");
+    }
+
+    #[test]
+    fn scan_reflects_added_and_removed_modules() {
+        let dir = tempdir();
+        std::fs::write(
+            dir.join("test-host.wasm"),
+            wat::parse_str(HOST_SNIFFER_WAT).unwrap(),
+        )
+        .unwrap();
+        let (loader, registry) = build_sniffers(&cfg(&dir)).unwrap();
+        assert!(registry.get("test-host").is_some());
+
+        // A second module appears; scan (as a reload rescan would) and apply
+        // the result the same way the reload task does.
+        std::fs::write(
+            dir.join("other.wasm"),
+            wat::parse_str(HOST_SNIFFER_WAT).unwrap(),
+        )
+        .unwrap();
+        let map = loader.scan(&cfg(&dir)).unwrap();
+        assert_eq!(map.len(), 2);
+        registry.replace(map);
+        assert!(registry.get("test-host").is_some());
+        assert!(registry.get("other").is_some());
+
+        // Removing a file and rescanning drops it from the next map.
+        std::fs::remove_file(dir.join("other.wasm")).unwrap();
+        let map = loader.scan(&cfg(&dir)).unwrap();
+        assert_eq!(map.len(), 1);
+        registry.replace(map);
+        assert!(registry.get("test-host").is_some());
+        assert!(registry.get("other").is_none());
     }
 
     /// A tiny per-test-process unique scratch dir under the system temp dir.

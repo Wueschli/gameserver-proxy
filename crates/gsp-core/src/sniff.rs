@@ -20,6 +20,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+
 use gsp_config::RouteHint;
 
 /// A read-only first-bytes inspector. Implemented by loaded plugins. `name` is
@@ -32,13 +34,19 @@ pub trait Sniffer: Send + Sync {
 }
 
 /// The live set of loaded sniffers, keyed by their configured name. Built once
-/// at startup (and rescanned on reload, Phase 9 slice 4) by the `gsp` binary's
-/// plugin loader; threaded `Runtime` → `ListenerManager` → listener workers,
-/// the same seam as `Resolvers` / `Option<Arc<GeoDb>>`. The default (and, until
-/// the loader lands, only) registry is empty.
+/// at startup by the `gsp` binary's plugin loader; threaded `Runtime` →
+/// `ListenerManager` → listener workers, the same seam as `Resolvers` /
+/// `Option<Arc<GeoDb>>`. The default (and, until a loader configures one,
+/// only) registry is empty.
+///
+/// Reads are lock-free (an [`ArcSwap`] over the name→plugin map, mirroring
+/// [`crate::route_hint::RouteHints`]): every `Arc<Sniffers>` clone handed to a
+/// listener worker points at the same instance, so [`Sniffers::replace`] (used
+/// by the config-reload plugin rescan, phase 9 slice 4) is visible to every
+/// worker immediately, with no replumbing needed through `Runtime` itself.
 #[derive(Default)]
 pub struct Sniffers {
-    map: HashMap<String, Arc<dyn Sniffer>>,
+    map: ArcSwap<HashMap<String, Arc<dyn Sniffer>>>,
 }
 
 impl Sniffers {
@@ -46,12 +54,25 @@ impl Sniffers {
         Self::default()
     }
 
-    pub fn register(&mut self, sniffer: Arc<dyn Sniffer>) {
-        self.map.insert(sniffer.name().to_string(), sniffer);
+    /// Register one sniffer, replacing any earlier one under the same name.
+    pub fn register(&self, sniffer: Arc<dyn Sniffer>) {
+        self.map.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.insert(sniffer.name().to_string(), sniffer.clone());
+            next
+        });
     }
 
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Sniffer>> {
-        self.map.get(name)
+    /// Atomically replace the whole registry with `map` (phase 9 slice 4: a
+    /// config reload rescans the plugin dir and swaps in the new set — added
+    /// modules appear, removed ones vanish, changed ones are already a fresh
+    /// compile since the caller rebuilt `map` from scratch).
+    pub fn replace(&self, map: HashMap<String, Arc<dyn Sniffer>>) {
+        self.map.store(Arc::new(map));
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Sniffer>> {
+        self.map.load().get(name).cloned()
     }
 }
 
@@ -92,7 +113,7 @@ pub(crate) mod tests {
 
     /// A registry with just `test-host`, for tests that exercise the seam.
     pub(crate) fn test_registry() -> Sniffers {
-        let mut s = Sniffers::new();
+        let s = Sniffers::new();
         s.register(Arc::new(TestHost));
         s
     }

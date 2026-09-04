@@ -299,8 +299,25 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   entry still owed to slice 6's bench (per-call instantiate cost vs. NFR N1) —
   today's cost is: one `Store`/`Instance` per call, only on listeners with a
   `sniffer:` route (already gated by `peek_len`), never on the accept loop.
-- **Slice 4**: reload rescans `dir` — added modules load, removed drop, changed
-  (hash) recompile; the registry is swapped like the snapshot.
+- ✅ **Slice 4**: reload rescans `dir` — added modules load, removed drop,
+  changed (hash) recompile; the registry is swapped like the snapshot.
+  `gsp_core::sniff::Sniffers` grew interior mutability (an `ArcSwap` over its
+  name→plugin map, mirroring `RouteHints`): every `Arc<Sniffers>` clone handed
+  to a listener worker at spawn time points at the *same* instance, so
+  `Sniffers::replace(map)` from the reload task is visible everywhere
+  instantly — no replumbing through `Runtime`/`ListenerManager` needed, unlike
+  the snapshot swap. `Sniffer::get` now returns an owned `Arc<dyn Sniffer>`
+  (was `&Arc<dyn Sniffer>`) so callers aren't holding a reference into a table
+  that can be swapped out from under them. The `gsp` binary's
+  `sniffer_loader::SnifferLoader` holds only the shared `wasmtime::Engine` /
+  epoch-ticker thread (built once at startup) and exposes `scan(&SniffersConfig)
+  -> HashMap<name, Arc<dyn Sniffer>>`; `build_sniffers` (startup) is now
+  `SnifferLoader::new` + one `scan`. `main.rs` keeps the loader alive and
+  passes it (plus the live `Arc<Sniffers>`) into `reload::run`, which rescans
+  on every applied reload — a scan error keeps the previous plugin set (never
+  half-applies); `settings.sniffers` appearing/disappearing between reloads is
+  logged as needing a restart, matching `docs/05`. Engine params
+  (`call_timeout_ms`/`max_memory_bytes`) are still startup-only.
 - **Slice 5**: first-party plugin crates under `crates/plugins/{a2s,minecraft,
   regex-firstbytes}` + a tiny `gsp-sniffer-abi` helper crate (guest-side
   `alloc` / pack / `RouteHint` encode). `make plugins` builds them to

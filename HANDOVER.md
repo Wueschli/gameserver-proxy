@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–3 landed).
+Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–4 landed).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -390,19 +390,49 @@ output alone; check the exit code or scroll to the top of the log.
   (via the `wat` dev-dep — no `wasm32-unknown-unknown` toolchain needed) that
   proves the epoch deadline actually traps an infinite-loop plugin instead of
   hanging. `make check` green (gsp: 11 tests now).
-- **Next**: phase 9 slices 4–7. Per the locked plan in `docs/08` Phase 9:
-  slice 4 is reload rescanning `dir` (added modules load, removed drop,
-  changed-hash recompile — swapped like the snapshot); slice 5 is the
-  first-party plugin crates (`a2s`, `minecraft`, `regex-firstbytes`) under
-  `crates/plugins/` + a `gsp-sniffer-abi` guest helper crate (the write side
-  of the ABI slice 3 defined), built via `make plugins` to
-  `wasm32-unknown-unknown`; slice 6 is a WASM-boundary latency bench vs. NFR
-  N1 (real numbers for the per-call instantiate cost, with the `InstancePre`
-  / warm-instance fallbacks on standby if it misses) + a `docs/07`
-  sandbox-guarantees section; slice 7 is an end-to-end test through the real
-  loader with a compiled (not hand-WAT) fixture. Per-source cap LRU eviction,
-  `GET /sessions`, and a k8s watch informer are separate polish items.
-  Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`.
+- **Phase 9 slice 4 done**: live `dir` rescanning on reload.
+  `gsp_core::sniff::Sniffers` now holds its name→plugin map behind an
+  `ArcSwap` (mirroring `route_hint::RouteHints`) instead of a plain
+  `HashMap`, giving it interior mutability: every `Arc<Sniffers>` clone handed
+  to a listener worker at spawn time is the *same* instance, so
+  `Sniffers::replace(map)` is visible to every worker immediately with no
+  replumbing through `Runtime`/`ListenerManager` (unlike the snapshot swap,
+  which every worker re-reads via its own `ArcSwap<Snapshot>::load`).
+  `Sniffers::get` now returns an owned `Arc<dyn Sniffer>` (was
+  `&Arc<dyn Sniffer>`) so a caller never holds a borrow into a table that can
+  be swapped from under it — every existing call site kept working unchanged
+  since the `.and_then(|s| s.sniff(...))` chain derefs either way.
+  `crates/gsp/src/sniffer_loader.rs` split: `SnifferLoader` now holds only the
+  shared `wasmtime::Engine` + its epoch-ticker thread (built once, in
+  `SnifferLoader::new`) and exposes `scan(&SniffersConfig) ->
+  HashMap<String, Arc<dyn Sniffer>>`; `build_sniffers` (the startup path,
+  still used by `--check` and process start) is now `SnifferLoader::new` +
+  one `scan`. `main.rs` keeps the `Arc<SnifferLoader>` alive and passes it
+  (plus the live `Arc<Sniffers>`) into `reload::run`, which now takes both and
+  calls a new `rescan_sniffers` after every applied config load: a scan error
+  keeps the previous plugin set (never half-applies, same spirit as
+  discovery's last-known-good); `settings.sniffers` appearing or disappearing
+  between reloads (no loader built at startup, or vice versa) is logged as
+  needing a restart, not attempted live. `call_timeout_ms` / `max_memory_bytes`
+  stay startup-only — only the *contents* of `dir` are live, matching the
+  locked `docs/08` plan. 1 new test
+  (`sniffer_loader::tests::scan_reflects_added_and_removed_modules`, drives
+  `SnifferLoader::scan` + `Sniffers::replace` directly the way the reload task
+  does — add a module, rescan, see it; remove it, rescan, see it gone).
+  `make check` green (gsp: 12 tests now).
+- **Next**: phase 9 slices 5–7. Per the locked plan in `docs/08` Phase 9:
+  slice 5 is the first-party plugin crates (`a2s`, `minecraft`,
+  `regex-firstbytes`) under `crates/plugins/` + a `gsp-sniffer-abi` guest
+  helper crate (the write side of the ABI slice 3 defined — `alloc`/pack/
+  `RouteHint`-encode), built via `make plugins` to `wasm32-unknown-unknown`
+  (CI needs `rustup target add wasm32-unknown-unknown`); slice 6 is a
+  WASM-boundary latency bench vs. NFR N1 (real numbers for the per-call
+  instantiate cost, with the `InstancePre` / warm-instance fallbacks on
+  standby if it misses) + a `docs/07` sandbox-guarantees section; slice 7 is
+  an end-to-end test through the real loader with a compiled (not hand-WAT)
+  fixture. Per-source cap LRU eviction, `GET /sessions`, and a k8s watch
+  informer are separate polish items. Deferred: `GET /sessions` (per-session
+  registry); resolver `sticky_key`.
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip
@@ -636,7 +666,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
-| Sniffers | Loader **done** (phase 9 slice 3): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds. `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugin crates are slice 5. |
+| Sniffers | Loader **done** (phase 9 slices 3–4): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugin crates are slice 5. |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
 | External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
 | Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver`, `wasmtime`, `sha2` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |

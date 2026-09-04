@@ -61,13 +61,17 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    // A configured sniffer plugin dir must load cleanly too (phase 9).
-    let sniffers = match &cfg.sniffers {
-        Some(sc) => Arc::new(
-            sniffer_loader::build_sniffers(sc)
-                .map_err(|e| anyhow::anyhow!("settings.sniffers: {e:#}"))?,
-        ),
-        None => Arc::new(gsp_core::sniff::Sniffers::default()),
+    // A configured sniffer plugin dir must load cleanly too (phase 9). The
+    // loader (its wasmtime engine + epoch-ticker thread) is kept alive and
+    // handed to the reload task so a later `dir` rescan reuses it instead of
+    // spawning a fresh ticker thread per reload.
+    let (sniffer_loader, sniffers) = match &cfg.sniffers {
+        Some(sc) => {
+            let (loader, registry) = sniffer_loader::build_sniffers(sc)
+                .map_err(|e| anyhow::anyhow!("settings.sniffers: {e:#}"))?;
+            (Some(Arc::new(loader)), Arc::new(registry))
+        }
+        None => (None, Arc::new(gsp_core::sniff::Sniffers::default())),
     };
 
     if args.check {
@@ -91,13 +95,14 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(cfg, args.config, geo_db, sniffers))
+        .block_on(run(cfg, args.config, geo_db, sniffer_loader, sniffers))
 }
 
 async fn run(
     cfg: gsp_config::Config,
     config_path: PathBuf,
     geo_db: Option<Arc<gsp_core::GeoDb>>,
+    sniffer_loader: Option<Arc<sniffer_loader::SnifferLoader>>,
     sniffers: Arc<gsp_core::sniff::Sniffers>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
@@ -141,7 +146,7 @@ async fn run(
         snapshot,
         resolvers,
         geo_db,
-        sniffers,
+        sniffers.clone(),
         discovery,
         sources,
         cfg.workers,
@@ -150,7 +155,7 @@ async fn run(
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 
     let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
-    let reload = tokio::spawn(reload::run(config_path, handle));
+    let reload = tokio::spawn(reload::run(config_path, handle, sniffer_loader, sniffers));
 
     wait_for_shutdown().await;
     tracing::info!(
