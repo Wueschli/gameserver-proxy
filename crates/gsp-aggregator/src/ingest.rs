@@ -23,6 +23,15 @@ pub struct IngestPayload {
     /// them uniquely is the operator's responsibility, the same way it is
     /// for e.g. Prometheus scrape target labels.
     pub instance: String,
+    /// This instance's own admin API base URL (e.g. `"http://10.0.1.4:9900"`)
+    /// — self-reported, from `settings.admin.listen`. The only "backend
+    /// registry" slice 9's intent-verb fan-out needs: no separate discovery
+    /// mechanism, the aggregator just proxies to whatever URL an instance
+    /// told it to use. A `0.0.0.0`/wildcard bind isn't a reachable address
+    /// from the aggregator's side — that's a pre-existing property of the
+    /// admin API, not something this field introduces; bind it to a
+    /// concretely reachable address if the aggregator runs elsewhere.
+    pub admin_url: String,
     pub pools: Vec<PoolSummary>,
     #[serde(default)]
     pub sessions: SessionCounts,
@@ -132,6 +141,7 @@ mod tests {
     fn payload(instance: &str) -> IngestPayload {
         IngestPayload {
             instance: instance.to_string(),
+            admin_url: "http://127.0.0.1:0".to_string(),
             pools: vec![],
             sessions: SessionCounts::default(),
         }

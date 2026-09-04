@@ -28,6 +28,9 @@ use serde::Serialize;
 #[derive(Serialize)]
 struct IngestPayload {
     instance: String,
+    /// This instance's own admin API base URL — the address the aggregator
+    /// fans slice-9 intent verbs out to. See `PushConfig::admin_url`.
+    admin_url: String,
     pools: Vec<PoolSummary>,
     sessions: SessionCounts,
 }
@@ -57,6 +60,13 @@ struct SessionCounts {
 pub struct PushConfig {
     pub base_url: String,
     pub instance: String,
+    /// This instance's own admin API base URL, self-reported so the
+    /// aggregator's slice-9 intent-verb fan-out has somewhere to send calls
+    /// for this instance. Always `http://{settings.admin.listen}` — a
+    /// `0.0.0.0`/wildcard bind isn't reachable from the aggregator's side,
+    /// same pre-existing caveat any admin-API client already has, not
+    /// something this introduces.
+    pub admin_url: String,
     pub interval: Duration,
 }
 
@@ -66,6 +76,7 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
     let PushConfig {
         base_url,
         instance,
+        admin_url,
         interval,
     } = cfg;
     let client = reqwest::Client::new();
@@ -77,7 +88,7 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
 
     loop {
         ticker.tick().await;
-        let payload = build_payload(&instance, &handle);
+        let payload = build_payload(&instance, &admin_url, &handle);
         match client.post(&url).json(&payload).send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::debug!(aggregator = %base_url, "pushed a fleet-state summary")
@@ -94,7 +105,7 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
     }
 }
 
-fn build_payload(instance: &str, handle: &RuntimeHandle) -> IngestPayload {
+fn build_payload(instance: &str, admin_url: &str, handle: &RuntimeHandle) -> IngestPayload {
     let snapshot = handle.snapshot();
     let pools = snapshot
         .pools
@@ -121,6 +132,7 @@ fn build_payload(instance: &str, handle: &RuntimeHandle) -> IngestPayload {
 
     IngestPayload {
         instance: instance.to_string(),
+        admin_url: admin_url.to_string(),
         pools,
         sessions: SessionCounts { tcp, udp },
     }
@@ -147,9 +159,10 @@ listeners:
         let cfg = gsp_config::parse_str(YAML).unwrap();
         let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
 
-        let payload = build_payload("test-instance", &runtime.handle());
+        let payload = build_payload("test-instance", "http://127.0.0.1:9900", &runtime.handle());
 
         assert_eq!(payload.instance, "test-instance");
+        assert_eq!(payload.admin_url, "http://127.0.0.1:9900");
         assert_eq!(payload.pools.len(), 1);
         assert_eq!(payload.pools[0].name, "local");
         assert_eq!(payload.pools[0].backends.len(), 1);

@@ -164,6 +164,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             instance: args
                 .aggregator_instance
                 .unwrap_or_else(|| cfg.admin_listen.to_string()),
+            admin_url: format!("http://{}", cfg.admin_listen),
             interval: Duration::from_secs(args.aggregator_interval_sec),
         });
 

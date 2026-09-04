@@ -235,9 +235,47 @@ minimal non-self-referential config (`active: 0`, as expected) — logged in
 `config.example.yaml`'s job is documenting syntax, not being a runnable
 fixture).
 
-**Next**: slice 9 (intent-verb fan-out to instances — drain/undrain a
-backend, add/remove a backend, route-hint, drain an instance), slice 10
-(aggregator auth, mirroring the controller's `--auth-token`).
+**Slice 9 done**: `crates/gsp-aggregator/src/fanout.rs` — thin, stateless
+intent-verb fan-out. `IngestPayload` gained `admin_url` (self-reported by
+`gsp`, always `http://{settings.admin.listen}` — the only "backend registry"
+fan-out needs, no separate discovery). Two shapes: **targeted**
+(`POST /fleet/instances/{instance}/drain`|`undrain`, pass-through response,
+`404` unknown instance) and **broadcast** (backend add/patch/delete,
+route-hint — every known instance via a `tokio::task::JoinSet`, per-instance
+results, one bad instance never fails the rest). 9 new tests against real
+mock instance HTTP servers (not mocked responses — actual `axum::serve`
+listeners on ephemeral ports), including one using a real `Json` extractor
+specifically to catch content-negotiation issues.
+
+**A real bug found and fixed via the live smoke test**: `curl -X POST
+.../fleet/pools/local/backends -d '{"addr":"..."}'` (no `-H content-type`)
+came back `{"results":[{"status":415,...}]}` — the broadcast forwarded the
+caller's raw body but never set `Content-Type`, so a caller (or a client
+library) that omits it gets rejected by the target's own `Json` extractor
+even though the body is perfectly valid JSON. Fixed by setting
+`application/json` explicitly on every forwarded body in both `broadcast`
+and `proxy_to_instance` — these endpoints are always JSON per the phase-5
+admin API contract, so the aggregator shouldn't make every caller remember a
+header it already knows the answer to. Added a regression test using a real
+`axum::extract::Json` handler (not the raw-`Bytes` mock the other fan-out
+tests use) to actually exercise that path, since the original bug would have
+passed silently against a `Bytes`-only mock.
+
+Verified live end-to-end over real HTTP, against real `gsp`/`gsp-aggregator`
+processes: `POST /fleet/instances/demo-2/drain` → `200`, then `GET
+127.0.0.1:19961/readyz` on the real instance showed `draining` / `503`;
+`POST /fleet/pools/local/backends` (broadcast) → landed on the instance's
+real `GET /pools` output.
+
+Also confirmed, not caused by this work: `gsp-core`'s
+`resolver::tests::resolver_target_gets_a_proxy_protocol_header` failed once
+under full-workspace parallel `cargo test --all` load, passed immediately
+both in isolation and on a full-suite rerun — pre-existing timing-sensitive
+flakiness, not a regression (this session never touched `gsp-core`). Worth
+knowing if it reappears, not worth chasing now.
+
+**Next**: slice 10 — bearer-token auth on `gsp-aggregator` (`--auth-token`,
+mirroring the controller's), the last slice in phase 10+11's plan.
 
 ### Known follow-ups (none blocking)
 

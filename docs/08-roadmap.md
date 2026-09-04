@@ -456,10 +456,30 @@ controller's revision log is a follow-on once this ships.
    test-only `IngestStore::insert_state` seam to test the staleness
    threshold without a real 30s wait); verified live end-to-end over real
    HTTP.
-9. Fan-out for the phase-5 intent verbs (drain/undrain a backend, add/remove a
-   backend, route-hint, drain an instance) — a thin per-instance proxy to the
-   target's existing admin API; a fleet-wide call reports success/failure per
-   instance rather than failing outright on one bad instance.
+9. ✅ Intent-verb fan-out (`gsp-aggregator/src/fanout.rs`), thin and
+   stateless — the aggregator decides nothing, stores no intent, just relays
+   using each instance's self-reported `admin_url` (a new `IngestPayload`
+   field, `http://{settings.admin.listen}`). Two shapes: **targeted**
+   (`POST /fleet/instances/{instance}/drain`|`undrain` — draining *an*
+   instance only ever means one instance, so this passes that instance's own
+   response straight through, `404` for an unknown name) and **broadcast**
+   (`POST /fleet/pools/{pool}/backends`, `PATCH`/`DELETE
+   .../backends/{addr}`, `POST /fleet/route-hint` — no shared owner across
+   instances this release, so applying fleet-wide means calling every known
+   instance's own admin API independently via a `tokio::task::JoinSet`,
+   reporting **per-instance results**; one bad instance never fails the
+   others). 9 new tests using real mock instance HTTP servers (reachable,
+   unreachable, and a real `Json` extractor to catch content-negotiation
+   bugs) — one of them (`a_broadcast_sets_content_type_even_if_the_caller_
+   never_did`) is a regression test for a real bug the live smoke test
+   caught: the broadcast forwarded a caller's body without ever setting
+   `Content-Type`, so a caller that omitted it got `415` from the target's
+   own `Json` extractor even though the body was valid JSON — fixed by
+   setting `application/json` explicitly on every forwarded body, since
+   these endpoints are always JSON regardless of what the caller remembered
+   to send. Verified live end-to-end over real HTTP (targeted drain flipped
+   the real instance's `/readyz` to `503`; broadcast add-backend landed on
+   the instance's real `/pools`).
 10. Bearer-token auth on the aggregator's API; this also closes the "admin API
     has zero auth" gap on the proxy side (`settings.admin.auth_token`,
     checked by `admin.rs`, required by both the controller and the

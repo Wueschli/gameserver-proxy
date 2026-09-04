@@ -41,11 +41,19 @@ const STALE_AFTER_MS: u64 = 30_000;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<IngestStore>,
+    /// Shared client for `crate::fanout`'s calls out to each instance's own
+    /// admin API. `reqwest::Client` is cheap to clone (an `Arc` internally)
+    /// and reuses connections, so one lives on `AppState` rather than being
+    /// built per call.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
     pub fn new(store: Arc<IngestStore>) -> Self {
-        AppState { store }
+        AppState {
+            store,
+            http: reqwest::Client::new(),
+        }
     }
 }
 
@@ -55,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         .route("/fleet/pools", get(fleet_pools))
         .route("/fleet/sessions", get(fleet_sessions))
         .route("/fleet/healthz", get(fleet_healthz))
+        .merge(crate::fanout::router())
         .with_state(state)
 }
 
@@ -190,6 +199,7 @@ mod tests {
     fn payload_json(instance: &str) -> String {
         serde_json::to_string(&IngestPayload {
             instance: instance.to_string(),
+            admin_url: "http://127.0.0.1:0".to_string(),
             pools: vec![],
             sessions: SessionCounts { tcp: 3, udp: 7 },
         })
@@ -285,6 +295,7 @@ mod tests {
     fn full_payload(instance: &str) -> IngestPayload {
         IngestPayload {
             instance: instance.to_string(),
+            admin_url: "http://127.0.0.1:0".to_string(),
             pools: vec![PoolSummary {
                 name: "local".into(),
                 balancer: "round_robin".into(),
