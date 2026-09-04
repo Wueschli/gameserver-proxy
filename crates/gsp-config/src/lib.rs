@@ -2142,7 +2142,9 @@ fn validate_sniffers(rs: RawSniffers) -> Result<SniffersConfig, ConfigError> {
     let mut modules = Vec::with_capacity(rs.modules.len());
     for m in rs.modules {
         if m.name.trim().is_empty() {
-            return Err(Invalid("settings.sniffers.modules[].name must not be empty".into()));
+            return Err(Invalid(
+                "settings.sniffers.modules[].name must not be empty".into(),
+            ));
         }
         let hex_ok = m.sha256.len() == 64 && m.sha256.bytes().all(|b| b.is_ascii_hexdigit());
         if !hex_ok {

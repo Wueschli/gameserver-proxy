@@ -47,6 +47,28 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
 
 ---
 
+## Workflow gotcha: always run `cargo fmt --all` as its own step before checking
+
+CI failed a `cargo fmt --all --check` on Phase 9 slice 2
+(`crates/gsp-config/src/lib.rs:2142`, a `return Err(Invalid(...))` line rustfmt
+wanted wrapped) even though `make check` had reportedly passed locally before
+the commit. Root cause: `cargo fmt --all` was run once early in that session,
+then more code was added by `Edit` afterward (including the exact line that
+broke) without a second unconditional `cargo fmt --all` pass right before
+`make check`/commit. `cargo fmt --all --check` (which `make check` /
+`fmt-check` run) only *reports* diffs and exits non-zero — it never rewrites
+the file — so if the actually-unformatted state is never `cargo fmt --all`ed,
+`--check` will (correctly) keep failing, in CI even when a stale local run
+looked green. **Rule: immediately before every `make check` / commit, run
+`cargo fmt --all` (the writing form, no `--check`) as its own step, not merged
+into a pipeline you might skim past** — never assume a fmt pass from earlier
+in the session still covers edits made after it. Piping `make check` through
+`tail` also hides an early `fmt-check` failure's message even though the
+overall command still exits non-zero — don't infer "fmt passed" from tail
+output alone; check the exit code or scroll to the top of the log.
+
+---
+
 ## TL;DR
 
 - **Planning docs** (`docs/00`–`09`) are complete and in English. They are the design

@@ -104,7 +104,11 @@ client from `crates/gsp/proto/resolver.proto`.
 
 1. **Run `make check` before every commit.** CI fails on `cargo fmt` diffs and on any
    clippy warning (`-D warnings`). No exceptions, no `#[allow]` to silence a real lint
-   without a one-line justification comment.
+   without a one-line justification comment. Run `cargo fmt --all` (the writing form)
+   as its own step immediately before that `make check` / commit — a fmt pass from
+   earlier in the session does not cover edits made after it, and `--check` only
+   reports diffs, it never fixes them. See HANDOVER.md "Workflow gotcha" for a case
+   where skipping this let a `cargo fmt --all --check` failure reach CI.
 2. **No `unsafe`.** The codebase currently has zero. `socket2`/`nix` give safe
    wrappers for the syscalls we need. If `unsafe` ever becomes genuinely necessary, it
    needs a `// SAFETY:` comment *and* a note in `HANDOVER.md`.
