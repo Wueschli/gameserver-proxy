@@ -5,6 +5,7 @@
 //! reload on SIGHUP / file change, and shut down cleanly on SIGINT/SIGTERM.
 
 mod admin;
+mod aggregator_client;
 mod controller_client;
 mod discovery;
 mod procinfo;
@@ -48,6 +49,23 @@ struct Args {
     /// `--controller` too — fetches its current config and validates that.
     #[arg(long)]
     check: bool,
+
+    /// Fleet aggregator base URL (e.g. "http://127.0.0.1:9902") to push
+    /// periodic fleet-state summaries to (docs/10 "The aggregator").
+    /// Optional and independent of `--controller` — pushing state and
+    /// pulling config are unrelated axes.
+    #[arg(long)]
+    aggregator: Option<String>,
+
+    /// Self-reported instance name in aggregator pushes. Defaults to this
+    /// instance's `settings.admin.listen` address, which is already unique
+    /// per running instance.
+    #[arg(long)]
+    aggregator_instance: Option<String>,
+
+    /// Seconds between pushes to `--aggregator`.
+    #[arg(long, default_value = "10")]
+    aggregator_interval_sec: u64,
 }
 
 /// Where this process's config comes from, decided once at startup from
@@ -139,6 +157,16 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let aggregator_push = args
+        .aggregator
+        .map(|base_url| aggregator_client::PushConfig {
+            base_url,
+            instance: args
+                .aggregator_instance
+                .unwrap_or_else(|| cfg.admin_listen.to_string()),
+            interval: Duration::from_secs(args.aggregator_interval_sec),
+        });
+
     run(
         cfg,
         config_source,
@@ -146,6 +174,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         geo_db,
         sniffer_loader,
         sniffers,
+        aggregator_push,
     )
     .await
 }
@@ -157,6 +186,7 @@ async fn run(
     geo_db: Option<Arc<gsp_core::GeoDb>>,
     sniffer_loader: Option<Arc<sniffer_loader::SnifferLoader>>,
     sniffers: Arc<gsp_core::sniff::Sniffers>,
+    aggregator_push: Option<aggregator_client::PushConfig>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
@@ -233,6 +263,15 @@ async fn run(
     let fd_gauge = procinfo::spawn_fd_gauge(Duration::from_secs(5));
 
     let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
+    let aggregator = aggregator_push.map(|push_cfg| {
+        tracing::info!(
+            aggregator = %push_cfg.base_url,
+            instance = %push_cfg.instance,
+            interval_sec = push_cfg.interval.as_secs(),
+            "pushing fleet-state summaries to aggregator"
+        );
+        tokio::spawn(aggregator_client::run(push_cfg, handle.clone()))
+    });
     let reload = match config_source {
         ConfigSource::File(path) => tokio::spawn(reload::run(
             path,
@@ -260,6 +299,9 @@ async fn run(
     runtime.shutdown_with_grace(cfg.shutdown_grace).await;
     reload.abort();
     admin.abort();
+    if let Some(aggregator) = aggregator {
+        aggregator.abort();
+    }
     fd_gauge.abort();
     tracing::info!("stopped");
     Ok(())

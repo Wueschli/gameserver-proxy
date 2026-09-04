@@ -178,13 +178,37 @@ verified both, plus the happy path and an overwrite, live over real HTTP).
 CLAUDE.md's repository-layout listing gained `gsp-controller/` and
 `gsp-aggregator/` entries — a gap from slice 1, caught and fixed now.
 
-**Next**: slice 7 — `gsp` gains a push client (background task, configurable
-target + interval, a small local ring buffer so a momentary aggregator
-outage doesn't drop data, retry/backoff) that builds an `IngestPayload`
-straight from its own `Snapshot`/`ConnTracker` and posts it to
-`gsp-aggregator`. Then slice 8 (`/fleet/*` read endpoints), slice 9
-(intent-verb fan-out), slice 10 (aggregator auth, mirroring the
-controller's).
+**Slice 7 done**: `crates/gsp/src/aggregator_client.rs` — `--aggregator
+<url>` (+ `--aggregator-instance`, `--aggregator-interval-sec`, default 10s),
+independent of `--controller`. Builds an `IngestPayload` (the wire shape is
+duplicated here, not a `gsp-aggregator` dependency — same reasoning as
+`controller_client`'s hand-parsed SSE JSON) straight from the live
+`RuntimeHandle`: `snapshot().pools` for pool/backend health+state,
+`sessions()` filtered by `gsp_core::Proto` for TCP/UDP counts. Posts on a
+fixed interval via `reqwest::Client`. **Deliberately no retry buffer** — the
+roadmap's original "ring buffer" wording predates settling on `IngestStore`
+being latest-write-wins state rather than an event log; buffering old
+snapshots would let a stale replay overwrite a fresher push that already
+landed, so a failed send just logs (`Debug`-formatted — the raw
+`reqwest::Error` Display is too terse to debug from) and is superseded by
+the next tick. 1 new test. Verified live end-to-end over real HTTP.
+
+**Debugging note for next time**: an initial live test looked like every
+push was failing (`ConnectionRefused`). Root cause was the test harness, not
+the code — `config.example.yaml`'s `shutdown_grace_sec: 30` means a plain
+`timeout N gsp` doesn't kill it at `N` (SIGTERM triggers a graceful drain
+that can run up to 30s), so mismatched nested `timeout` durations let the
+aggregator die before `gsp`'s later push attempts. Fixed by using `timeout
+-s KILL` and giving the aggregator a longer lifetime than the proxy in the
+test script. Also: `pkill`/`kill` against background test processes
+intermittently produced a bare "Exit code 144" from the Bash tool in this
+session with no other output — switching to `timeout -s KILL <cmd>` wrapping
+each process (no manual `kill`/`pkill` afterward) avoided it. Worth trying
+first if a future smoke test's process cleanup misbehaves the same way.
+
+**Next**: slice 8 (`/fleet/*` read endpoints over `IngestStore`), slice 9
+(intent-verb fan-out to instances), slice 10 (aggregator auth, mirroring the
+controller's `--auth-token`).
 
 ### Known follow-ups (none blocking)
 

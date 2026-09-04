@@ -422,11 +422,25 @@ controller's revision log is a follow-on once this ships.
    session *counts*), not the full live session registry — that already
    exists per-instance (`GET /sessions`), break-glass style. 12 new tests;
    verified live over real HTTP.
-7. `gsp` gains a push client: background task, configurable target +
-   interval, a small local ring buffer so a momentary aggregator outage
-   doesn't drop data, retry/backoff. (Push, not pull — see "Fleet topology" in
-   `docs/10` for why: no inbound network path to a proxy's admin port is ever
-   needed, at any deployment size.)
+7. ✅ `gsp` gains `--aggregator <url>` (+ `--aggregator-instance`,
+   `--aggregator-interval-sec`, default 10s) — independent of `--controller`,
+   pushing state and pulling config are unrelated axes. `aggregator_client`
+   builds an `IngestPayload` straight from the live `RuntimeHandle`
+   (`snapshot().pools` for pool/backend summaries, `sessions()` filtered by
+   `Proto` for TCP/UDP counts) and `POST`s it every tick; the wire shape is
+   duplicated in `gsp` rather than adding `gsp-aggregator` as a dependency
+   (same reasoning as `controller_client` hand-parsing the controller's SSE
+   JSON instead of depending on `gsp-controller`). **No retry buffer** — a
+   deliberate deviation from this line's original wording: `IngestStore` is
+   latest-write-wins state, not an event log, so replaying an old failed push
+   after a fresher one already landed would make the aggregator's view
+   *older*; a failed push just logs and is superseded by the next tick's
+   fresher snapshot. (Push, not pull — see "Fleet topology" in `docs/10` for
+   why: no inbound network path to a proxy's admin port is ever needed, at
+   any deployment size.) 1 new test (`build_payload` against a real
+   `Runtime`); verified live end-to-end over real HTTP (`GSP_LOG=debug`
+   showed two successful pushes 2s apart, matching `--aggregator-interval-sec
+   2`).
 8. `GET /fleet/pools` / `/fleet/config` / `/fleet/healthz` / `/fleet/sessions`
    — served directly from ingested state (no fan-out RPC needed, the data
    already arrived).
