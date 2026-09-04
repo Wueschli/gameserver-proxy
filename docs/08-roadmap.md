@@ -214,21 +214,84 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   today, like `workers`).
 
 ## Phase 9 – Sniffer plugin loader
-- A separate community repository of game-protocol sniffers, loaded into the
-  proxy at runtime — not compiled in, not a fork.
-- Sandboxed execution (likely **WASM** via wasmtime/extism: no host syscalls
-  except a granted `sniff(&[u8]) -> RouteHint` ABI); bounded time / memory per
-  call; input capped at `peek_max_bytes`.
-- Config: a plugins directory + per-listener `sniffer:` name resolved against
-  the loaded set; reload picks up added/removed modules.
-- A generic `first-bytes` `regex` matcher would ship as one of these plugins
-  (precompiled, bounded `N`) rather than pulling `regex` onto the core routing
-  path.
-- Supply chain: module signing / pinning; the proxy ships a small first-party
-  set (e.g. `minecraft`, `a2s`, `sni`) built the same way, no special-casing.
-- Open question: latency of the WASM boundary vs. the NFR budget — measure
-  before committing; the out-of-process external resolver (Phase 4) is the
-  fallback if the in-process boundary is too costly.
+
+Game-protocol sniffers load into a running proxy from disk, sandboxed, never
+compiled in and never a fork. A `sniffer:` route resolves its name against the
+loaded set (today that always misses — `gsp_core::sniff::sniffer` returns `None`
+for every real name).
+
+### Locked decisions
+- **Sandbox: `wasmtime`, core module, no WASI.** A narrow ABI — the guest
+  exports `memory`, `alloc(u32) -> u32`, and
+  `sniff(ptr: u32, len: u32) -> u64` (packed `ptr<<32 | len`; `0` = not
+  recognised); the result bytes are a compact encoding of `RouteHint`. No WASI,
+  no host functions ⇒ a plugin cannot touch the filesystem, clock, or network.
+- **Time bound: epoch interruption.** A host thread calls
+  `Engine::increment_epoch()` every `call_timeout_ms`; a plugin that overruns
+  traps. (Fuel is optional on top.)
+- **Memory bound:** `StoreLimits` `max_memory` + one instance per call, from
+  `settings.sniffers.max_memory_bytes`.
+- **Host lives in the `gsp` binary.** `wasmtime` is a binary-only dep, like
+  `reqwest` / `hickory-resolver`; the `Sniffer` trait and the
+  `MatchContext.sniff` wiring stay in `gsp-core` (crate-boundary rule 7).
+- **Registry threading.** The free fn `sniff::sniffer(name)` (global, `'static`)
+  becomes an `Arc<Sniffers>` map (`HashMap<String, Arc<dyn Sniffer>>`) threaded
+  runtime → `ListenerManager` → workers, exactly like `Arc<Resolvers>` /
+  `Option<Arc<GeoDb>>`. This is the one real refactor.
+- **First-party plugins ship built, the same way:** `a2s`, `minecraft`, and a
+  generic bounded `regex-firstbytes` (keeps `regex` off the core routing path).
+  `sni` stays a native `Matcher` — it is not a sniffer.
+- **Latency is a gate, not an assumption.** Bench the WASM boundary vs. NFR N1
+  (< 0.5 ms added) before wiring it on the per-connection path. Fallbacks, in
+  order: `InstancePre` + a pooling allocator; one warm instance per worker reset
+  between calls; ultimately the out-of-process Phase-4 resolver.
+
+### Config (`settings.sniffers`)
+`dir` (\*.wasm, loaded at startup, rescanned on reload), `call_timeout_ms`,
+`max_memory_bytes`, optional `modules: [{ name, sha256 }]` for supply-chain
+pinning. Per-listener `sniffer:` is unchanged; the input is already capped at the
+route's `peek_len()` ≤ `PEEK_MAX`.
+
+### Slices
+- **Slice 1**: registry threading (pure refactor). `sniff::sniffer` global →
+  `Arc<Sniffers>` on the runtime, passed to the listener tasks (replaces the two
+  `.and_then(crate::sniff::sniffer)` call sites). Only a native test sniffer
+  registered; no `wasmtime`, no behaviour change.
+- **Slice 2**: `settings.sniffers` schema + `validate()` + `config.example.yaml`
+  + `docs/05`. Startup + reload semantics documented.
+- **Slice 3**: `WasmSniffer` in `gsp` — shared `wasmtime::Engine` (epoch on) +
+  the epoch-ticker thread; per-call `Store` with `StoreLimits`; ABI marshalling;
+  `RouteHint` decode. `build_sniffers(&Config)` scans `dir`, verifies `sha256`
+  pins. Wire into `Runtime::start_with_sniffers(...)`. Metrics:
+  `gsp_sniffer_calls_total{name,result=ok|unrecognised|timeout|trap|bad_output}`,
+  `gsp_sniffer_call_seconds` (histogram). Latency-ledger entry: one
+  instantiate + one call per connection, only on listeners with a `sniffer:`
+  route (already gated by `peek_len`).
+- **Slice 4**: reload rescans `dir` — added modules load, removed drop, changed
+  (hash) recompile; the registry is swapped like the snapshot.
+- **Slice 5**: first-party plugin crates under `crates/plugins/{a2s,minecraft,
+  regex-firstbytes}` + a tiny `gsp-sniffer-abi` helper crate (guest-side
+  `alloc` / pack / `RouteHint` encode). `make plugins` builds them to
+  `wasm32-unknown-unknown`; CI adds the target and builds + size-checks them.
+- **Slice 6**: WASM-boundary latency bench (`gsp-bench --sniffer <wasm>` or a
+  criterion bench) vs. N1; module signature / pin verification; a `docs/07`
+  "plugin sandbox guarantees" section (a sniffer is read-only, has no reply
+  path — the amplifier checklist still holds).
+- **Slice 7**: end-to-end test — compile a trivial `host-echo.wasm` fixture,
+  load it through the real loader, assert a connection routes by its hint host
+  (mirrors `sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host` but
+  via `WasmSniffer`).
+
+### Risks
+- `wasmtime` is a large dependency and adds build time; CI needs
+  `rustup target add wasm32-unknown-unknown` and an engine cache.
+- The epoch-ticker is a real background thread — record it in the threading
+  model (`docs/02`) and `HANDOVER.md`.
+- Warm-instance reuse (if per-call instantiate misses N1) must guarantee no
+  state leak between connections.
+
+- **Result**: runtime-loaded, sandboxed game-protocol sniffers; `regex`
+  first-bytes matching as a plugin, not core.
 
 ## Phase 10 – Fleet aggregation & operational Web UI
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
