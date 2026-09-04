@@ -1,0 +1,28 @@
+[package]
+name = "gsp-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gsp_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gsp-controller"
+path = "src/main.rs"
+
+[dependencies]
+sled.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

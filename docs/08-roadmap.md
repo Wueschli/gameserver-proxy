@@ -363,9 +363,13 @@ existing admin verbs, not a new durable intent store. Moving intent into the
 controller's revision log is a follow-on once this ships.
 
 ### Controller slices (`gsp-controller`, structural config distribution)
-1. Skeleton binary; Tier-1 store = an embedded KV (`sled`, ADR 20) — single
-   node, no Raft/etcd for this release. Each accepted submission gets a
-   monotonic revision.
+1. ✅ Skeleton binary + `store::Store` — Tier-1 store as an embedded KV
+   (`sled`, ADR 20), single node, no Raft/etcd for this release. `open` /
+   `current_revision` / `get` / `current` / `put`; `put` assigns the next
+   monotonic revision and persists it + the `current` pointer in one `sled`
+   transaction, then flushes. `gsp-controller` binary opens the store and
+   serves `GET /healthz` (same observability floor as `gsp`). Nothing calls
+   `POST /config` yet — that's slice 2.
 2. `POST /config`: runs the **same `validate()`** `gsp` runs, assigns a
    revision, persists it. Rejects and reports an invalid submission without
    touching the last-good revision.

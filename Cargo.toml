@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/gsp-config", "crates/gsp-core", "crates/gsp", "crates/gsp-bench"]
+members = [
+    "crates/gsp-config",
+    "crates/gsp-core",
+    "crates/gsp",
+    "crates/gsp-bench",
+    "crates/gsp-controller",
+]
 
 [workspace.package]
 version = "0.0.1"
@@ -51,6 +57,8 @@ wasmtime = { version = "48", default-features = false, features = [
 ] }
 wat = "1"
 sha2 = "0.10"
+sled = "0.34"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

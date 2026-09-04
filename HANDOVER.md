@@ -71,8 +71,25 @@ an embedded `sled` KV, single node (ADR 20, `docs/09`) — the user explicitly
 asked for a proper KV over pushing config files around. `docs/08`'s phase
 10+11 section has the full 13-slice implementation plan (controller slices
 1–5, aggregator slices 6–10, UI/tests/docs 11–13); phase 12 carries the
-deferred hierarchy/HA/intent-migration work forward as its own phase. Start
-implementation from that slice list next.
+deferred hierarchy/HA/intent-migration work forward as its own phase.
+
+**Admin GUI is served only by the root tier** (same session, added after the
+above): a GUI per region would need per-region auth/RBAC kept consistent —
+exactly what the hierarchy exists to avoid. Every `slave` tier stays a
+machine-to-machine API, reachable directly as break-glass but never as a
+served web frontend.
+
+**Slice 1 done** (2026-09-04, new crate `crates/gsp-controller`, lib
+`gsp_controller` + bin `gsp-controller`): `store::Store` wraps two `sled`
+trees (`revisions`, `meta`) — `open`, `current_revision`, `get`, `current`,
+`put` (assigns the next monotonic revision, writes it + the `current` pointer
+in one `sled` transaction, then flushes). 4 unit tests incl. a
+reopen-persists check. The binary opens the store and serves `GET /healthz`
+only — `POST /config` (slice 2) and the subscribe/change-stream endpoint
+(slice 3) aren't built yet. Workspace gained `sled` + `tempfile` (dev-dep) in
+the root `Cargo.toml`. `make check` (fmt + clippy `-D warnings` + `cargo test
+--all`) passes with the new crate in the workspace. **Next**: slice 2 —
+`POST /config` running `gsp_config::validate()` before `Store::put`.
 
 ### Known follow-ups (none blocking)
 
