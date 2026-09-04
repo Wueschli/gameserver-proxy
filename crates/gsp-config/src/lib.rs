@@ -982,8 +982,11 @@ impl Matcher {
 
 /// Extract the SNI `host_name` from a TLS ClientHello at the start of `buf`.
 /// Returns `None` if `buf` is not a ClientHello, is truncated, or carries no
-/// SNI. A ClientHello fragmented across TCP segments (so only part is in the
-/// peek buffer) yields `None` — that route then just does not match.
+/// SNI. The TCP listener reassembles a ClientHello split across TCP segments
+/// before calling this (it re-peeks until the whole first TLS record is
+/// buffered or the peek budget expires), so a `None` from a genuine truncation
+/// means the client stalled mid-handshake past the budget — that route then
+/// just does not match.
 pub fn extract_sni(buf: &[u8]) -> Option<String> {
     struct Reader<'a> {
         b: &'a [u8],

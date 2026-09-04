@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use gsp_config::ListenerConfig;
@@ -23,8 +23,15 @@ use crate::src_conns::SourceLimiter;
 
 /// How long to wait for a client's first bytes when a route needs to peek them.
 /// A client that connects but stays silent past this routes as if nothing was
-/// sent (i.e. only address / `always` routes can match).
+/// sent (i.e. only address / `always` routes can match). Also the overall
+/// budget for reassembling a TLS ClientHello split across TCP segments.
 const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Gap between re-peeks while waiting for the rest of a fragmented ClientHello.
+/// `TcpStream::peek` returns whatever is buffered *now* without waiting for more,
+/// so a pause between calls is what actually yields to the next TCP segment
+/// (rather than spinning until `PEEK_TIMEOUT`).
+const PEEK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 // Plumbing entry point: each argument is a distinct shared handle wired in by
 // `ListenerManager::spawn_group` (its only caller). Bundling them would just
@@ -167,17 +174,11 @@ pub async fn run_tcp_listener(
                     let _src_guard = src_guard;
                     let local = stream.local_addr().unwrap_or(cfg.bind);
 
-                    // Peek the first bytes only when a route needs them.
+                    // Peek the first bytes only when a route needs them,
+                    // reassembling a TLS ClientHello that spans TCP segments.
                     let peek_n = cfg.peek_len().min(gsp_config::PEEK_MAX);
                     let mut peek_buf = vec![0u8; peek_n];
-                    let first: &[u8] = if peek_n > 0 {
-                        match tokio::time::timeout(PEEK_TIMEOUT, stream.peek(&mut peek_buf)).await {
-                            Ok(Ok(k)) => &peek_buf[..k],
-                            _ => &[],
-                        }
-                    } else {
-                        &[]
-                    };
+                    let first = peek_routing_bytes(&stream, &mut peek_buf, peek_n).await;
 
                     let hint = cfg
                         .sniffer
@@ -298,5 +299,98 @@ pub async fn run_tcp_listener(
                 });
             }
         }
+    }
+}
+
+/// Peek up to `want` of the connection's first bytes for routing, without
+/// consuming them from the stream.
+///
+/// A single `TcpStream::peek` only returns what is buffered at that instant,
+/// which can be just the first TCP segment. A real TLS ClientHello frequently
+/// spans more than one segment (large ALPN / key-share / ECH extensions, or a
+/// client that writes it in pieces), and `extract_sni` needs the whole first
+/// TLS record to read the SNI. So when the first byte is a TLS handshake record
+/// (`0x16`) this re-peeks — every `PEEK_POLL`, bounded by `PEEK_TIMEOUT` — until
+/// the complete first record is buffered or `want` bytes are in hand.
+///
+/// Non-TLS first bytes keep the original single-peek behaviour: a `first_bytes`
+/// `prefix` fits inside the first segment, and the `length` window is documented
+/// (`docs/03`, `Matcher::FirstBytes`) as "what one peek returned".
+///
+/// Returns the bytes peeked (borrowing `buf`); empty if the client sent nothing
+/// within the budget.
+async fn peek_routing_bytes<'b>(stream: &TcpStream, buf: &'b mut [u8], want: usize) -> &'b [u8] {
+    if want == 0 {
+        return &[];
+    }
+    let deadline = tokio::time::Instant::now() + PEEK_TIMEOUT;
+    let mut have = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.peek(&mut buf[..want])).await {
+            // EOF, a read error, or the budget ran out: route on what we have.
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => {
+                have = n;
+                if n >= want || routing_bytes_complete(&buf[..n]) {
+                    break;
+                }
+            }
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        tokio::time::sleep(PEEK_POLL.min(left)).await;
+    }
+    &buf[..have]
+}
+
+/// Whether `buf` already holds everything routing could learn by waiting for
+/// more bytes. True unless `buf` is the start of a TLS handshake record whose
+/// declared length is not yet fully buffered.
+fn routing_bytes_complete(buf: &[u8]) -> bool {
+    match buf.first() {
+        // TLS handshake record: byte 0 = 0x16, bytes 3..5 = record length.
+        Some(&0x16) => {
+            let Some(len_bytes) = buf.get(3..5) else {
+                return false; // not even the 5-byte record header yet
+            };
+            let rec_len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]) as usize;
+            buf.len() >= 5 + rec_len
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::routing_bytes_complete;
+
+    #[test]
+    fn non_tls_first_byte_is_always_complete() {
+        assert!(routing_bytes_complete(b"GET / HTTP/1.1"));
+        assert!(routing_bytes_complete(&[0xff, 0xff, 0xff, 0xff]));
+        assert!(routing_bytes_complete(b"")); // nothing peeked yet, nothing to wait on
+    }
+
+    #[test]
+    fn tls_record_needs_the_full_first_record() {
+        // 0x16, version, u16 length = 10, then fewer than 10 body bytes.
+        assert!(!routing_bytes_complete(&[0x16, 0x03, 0x01, 0x00]));
+        assert!(!routing_bytes_complete(&[
+            0x16, 0x03, 0x01, 0x00, 0x0a, 1, 2, 3
+        ]));
+        // Header says 3 body bytes and all 3 are present.
+        assert!(routing_bytes_complete(&[
+            0x16, 0x03, 0x01, 0x00, 0x03, 1, 2, 3
+        ]));
+        // ... and trailing bytes past the first record are still "complete".
+        assert!(routing_bytes_complete(&[
+            0x16, 0x03, 0x01, 0x00, 0x03, 1, 2, 3, 4, 5
+        ]));
     }
 }

@@ -19,8 +19,10 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > route never matches until a plugin is loaded (Phase 9). The TCP path
 > `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
 > needs bytes; UDP inspects the first datagram it already holds. A ClientHello
-> split across TCP segments (only part in the peek buffer) simply does not match
-> the `sni` route.
+> split across TCP segments is reassembled: the path re-peeks every 5 ms until
+> the whole first TLS record is buffered or the 250 ms budget expires, so `sni`
+> still matches a multi-segment ClientHello. (`first-bytes` `length` on TCP is
+> still "what has been peeked so far" — a `prefix` fits in the first segment.)
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
 > healthy backends). **`dst` — two forms:** a normally-bound TCP/UDP listener sees

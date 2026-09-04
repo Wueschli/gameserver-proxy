@@ -659,8 +659,11 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `ListenerConfig::peek_len()` bytes — up to `PEEK_MAX` = 4096, i.e. an `sni`
   route peeks the full 4096 — (250 ms budget, `PEEK_TIMEOUT`) in the spawned
   per-conn task, only when a route needs bytes; UDP routes on the first datagram
-  it already holds. A silent TCP client (or a ClientHello fragmented past the
-  first segment) routes as if it sent nothing.
+  it already holds. A ClientHello split across TCP segments is reassembled (the
+  path re-peeks every 5 ms until the whole first TLS record is buffered or the
+  250 ms budget runs out), so `sni` still matches a multi-segment ClientHello. A
+  silent TCP client (or one that stalls mid-handshake past the budget) routes as
+  if it sent nothing.
 - **UDP prefix mode** (`listeners[].prefix: <cidr>`, wildcard `bind` required):
   one socket carries `IP_PKTINFO` / `IPV6_RECVPKTINFO`; the recv path uses
   `recvmsg` to read the datagram's real destination, feeds it to routing
@@ -865,7 +868,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Resolver cache uses `std::sync::Mutex<LruCache>` — a brief lock on the routing path (not held across `.await`); like `Backend::observe`, deliberate | — |
 | Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
-| `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
+| `sni` on a ClientHello split across TCP segments (single peek only; falls through) | **done** (data-plane completion, item 1 — `listener::peek_routing_bytes` re-peeks until the first TLS record is whole or the 250 ms budget expires) |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | **done** (phase 8) |
 | k8s discovery via a watch-based informer (polling now) | perf pass |
 | Live reload of `backend_sources` (startup-only now) | polish |
@@ -899,11 +902,9 @@ milestone cut where v1.3 is additive and the data-plane contract is unchanged.
 have been started, in any form — every one is still a `// later` comment or an
 unimplemented branch. Three, though, already have a partial mechanism, so they
 are cheaper than a fresh slice:
-- **Item 1 (ClientHello fragmentation)** — the peek already reads up to
-  `PEEK_MAX` = 4096 B in one `stream.peek()` (`listener.rs:174`), so a
-  ClientHello contained in the first TCP segment is handled today; only a
-  ClientHello genuinely split across segments falls through. Needs a
-  peek-retry loop for that edge case, not a rewrite.
+- **Item 1 (ClientHello fragmentation)** — **done** (see list A item 1). Was a
+  one-shot `stream.peek()`; now a bounded re-peek loop keyed off the TLS record
+  length.
 - **Item 3 (`RouteHint.reject` hard drop)** — on a UDP listener with
   `first_packet_gate: true` a `reject` hint already fails the gate ⇒ no session
   (`lib.rs:1346`). Only the TCP path and non-gated UDP still need the explicit
@@ -918,10 +919,13 @@ are cheaper than a fresh slice:
 
 **A. Real feature / correctness gaps (a production deployment will hit these):**
 
-1. **ClientHello / first-bytes split across TCP segments** — real clients
-   fragment; today the connection silently falls through to `always` /
-   `no_route`. Loop the `MSG_PEEK` until enough bytes or the 250 ms budget
-   expires. Highest-value correctness fix.
+1. ~~**ClientHello / first-bytes split across TCP segments**~~ — **DONE**
+   (`listener::peek_routing_bytes` / `routing_bytes_complete`): when the first
+   peeked byte is a TLS record and the first record is not yet whole, the TCP
+   path re-peeks every 5 ms (`PEEK_POLL`) until it is complete or the 250 ms
+   `PEEK_TIMEOUT` budget expires, then routes. Non-TLS first bytes keep the
+   single-peek behaviour. Test:
+   `tcp_forward::sni_matcher_reassembles_a_fragmented_client_hello`.
 2. **Per-plugin sniffer config** (`settings.sniffers.modules[].config` blob) —
    phase 9's own docs call `regex-firstbytes` "a template, not a generic
    engine" only because there is no per-plugin config path. Needs a
@@ -1009,9 +1013,13 @@ per `first_bytes` entry, and for an `sni` entry one pass of `extract_sni` over
 the peek buffer (bounded walk of the ClientHello, no alloc except the returned
 host `String`).
 When (and only when) a route uses `first_bytes` / `sni` / `sniffer`, the TCP
-path also does one `MSG_PEEK` (into a `peek_len()`-sized `Vec` — `PEEK_MAX` =
-4096 for `sni` / `sniffer`) with a 250 ms timeout, and clones the listener's
-`Arc<ListenerConfig>` into the per-conn task. A `sniffer` route would also run
+path also does a `MSG_PEEK` (into a `peek_len()`-sized `Vec` — `PEEK_MAX` =
+4096 for `sni` / `sniffer`) with a 250 ms total budget, and clones the
+listener's `Arc<ListenerConfig>` into the per-conn task. The peek is a single
+syscall unless the first byte is a TLS record (`0x16`) and the first record is
+not yet whole, in which case it re-peeks every 5 ms (`PEEK_POLL`) until the
+record is complete or the budget expires — bounded, no allocation per retry,
+still no lock or extra task. A `sniffer` route would also run
 the plugin once over the peeked bytes — but there are no plugins today, so
 `sniffer(name)` returns `None` and that cost is currently zero; the Phase 9
 loader must keep the parse bounded (time + memory) since it is on the

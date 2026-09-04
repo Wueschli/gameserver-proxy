@@ -384,6 +384,60 @@ listeners:
         .await;
 }
 
+/// A ClientHello that arrives split across two TCP segments (a large real-world
+/// ClientHello routinely exceeds one MSS) must still route by SNI — the listener
+/// re-peeks until the whole first TLS record is buffered.
+#[tokio::test]
+async fn sni_matcher_reassembles_a_fragmented_client_hello() {
+    let eu = marker_backend(b'E').await;
+    let lobby = marker_backend(b'L').await;
+    let proxy_addr = free_port().await;
+
+    let yaml = format!(
+        r#"
+pools:
+  - name: eu
+    targets: ["{eu}"]
+  - name: lobby
+    targets: ["{lobby}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    routes:
+      - match: {{ type: sni, host: ["*.eu.example.com"] }}
+        action: {{ pool: eu }}
+      - match: {{ type: always }}
+        action: {{ pool: lobby }}
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let hello = client_hello("frankfurt.eu.example.com");
+    // Split mid-record so a single peek can only ever see the first half.
+    let split = hello.len() / 2;
+
+    let mut c = TcpStream::connect(proxy_addr).await.unwrap();
+    c.write_all(&hello[..split]).await.unwrap();
+    c.flush().await.unwrap();
+    // Longer than one PEEK_POLL, well under the 250 ms PEEK_TIMEOUT.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    c.write_all(&hello[split..]).await.unwrap();
+    c.flush().await.unwrap();
+
+    let mut m = [0u8; 1];
+    c.read_exact(&mut m).await.unwrap();
+    assert_eq!(
+        m[0], b'E',
+        "fragmented ClientHello should still route by SNI"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
 #[tokio::test]
 async fn route_hint_overrides_the_route_list_for_a_source_ip() {
     let hinted = marker_backend(b'H').await;
