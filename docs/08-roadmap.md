@@ -503,10 +503,60 @@ now done** — the remaining slices (11–13) are the Web UI, integration tests,
 and docs polish.
 
 ### Web UI + tests
-11. Static SPA: fleet dashboard + pool/backend table + operational actions
-    (from the aggregator), config editor + revision history (from the
-    controller). No proxy admin port ever exposed to a human directly.
-12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator —
+
+Slice 11 is a **dedicated `gsp-ui` process — a BFF (backend-for-frontend),
+not a static SPA calling the controller/aggregator bearer-token APIs
+directly.** Design refinement made when actually starting it, now locked in
+`docs/10` ("The admin GUI"): the browser gets its own session-cookie login
+on `gsp-ui`, wholly separate from every machine-to-machine bearer token
+(`--auth-token`/`--instance-token`/`--aggregator-token`/
+`settings.admin.auth_token`), none of which a browser ever holds — `gsp-ui`
+holds the controller's and the aggregator's tokens itself and calls both on
+the operator's behalf. `gsp-ui` has no store and no fleet data of its own
+(nothing outlives a restart beyond active sessions) — it is not a third
+authority, it authorizes nothing itself beyond "is this a valid session." A
+React + Vite + TypeScript SPA it serves itself (`tower-http::ServeDir`), one
+process, one port for the operator. No proxy admin port, and no machine
+token, is ever exposed to a human directly.
+
+11a. `gsp-aggregator` gains `GET /fleet/subscribe` (SSE, bearer-gated like
+     the rest of `/fleet/*`) — the machine-to-machine feed `gsp-ui` (11d)
+     subscribes to for live updates: current merged fleet state on connect,
+     then a push (debounced against a burst) on every accepted `POST
+     /ingest`. Reuses the exact catch-up-then-broadcast shape
+     `gsp-controller`'s `/config/subscribe` already proved out — no new
+     pattern, applied to state instead of a revision log (so no cursor/replay
+     semantics needed, just "here's the current merged view, again").
+11b. New crate `gsp-ui` (lib + bin, no `gsp-core`/`gsp-config` dependency —
+     stays as decoupled as `gsp-aggregator` is). `--ui-password`:
+     `POST /ui/login {password}` issues a random session id (in-memory
+     store — a restart just logs everyone out, the same "ephemeral,
+     nothing durable" posture the aggregator already has), returned as an
+     `HttpOnly` cookie; `POST /ui/logout` clears it; a `require_session`
+     middleware gates everything else this process serves.
+11c. `gsp-ui` proxies reads + slice-9 operational verbs to `gsp-aggregator`
+     (`--aggregator-url`/`--aggregator-token`) — translating the browser's
+     session cookie into the aggregator's bearer token server-side. This is
+     phase 10's "operational" GUI capability level (`docs/10`): read-heavy
+     plus drain/undrain/backend-add-remove/route-hint, no structural config
+     editing yet.
+11d. `gsp-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by `gsp-ui`
+     itself subscribing to `gsp-aggregator`'s slice-11a SSE feed and relaying
+     each update — the browser never opens a connection to the aggregator
+     directly.
+11e. `gsp-ui` proxies the controller's config API too
+     (`--controller-url`/`--controller-token`): `GET`/`POST /config`,
+     revision history/diff/rollback — phase 10's "full management" GUI
+     level, now straightforward since `gsp-ui` already holds a separate
+     token per service.
+11f. Frontend: the React + Vite + TS app itself (own `package.json`, never a
+     Cargo workspace member, built via `make ui` mirroring `make plugins`'s
+     standalone-workspace pattern) — login page, fleet dashboard
+     (instance/pool/backend tables, live over 11d's WebSocket), the
+     operational actions (11c), and the config editor + revision history
+     (11e).
+12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator (+
+    1 `gsp-ui` once it exists) —
     subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial
     failure, config reject-keeps-previous.
 13. Docs: `docs/06` (new metrics/endpoints), `README.md` status block,

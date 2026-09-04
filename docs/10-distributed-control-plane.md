@@ -358,6 +358,21 @@ built to close: an operator not knowing *which* region's login is
 authoritative for a given action, and RBAC that must be kept consistent
 across every tier instead of living in one.
 
+**A dedicated `gsp-ui` process is the GUI's home — not the controller, not
+the aggregator.** The GUI needs both: reads/operational verbs from the
+aggregator, config/revisions from the controller. Bolting human login onto
+either one taxes it with a concern that isn't its own: a session store *is*
+a form of authority ("who's allowed to act"), which sits wrong on the
+aggregator (deliberately "carries no authority"); and putting the browser's
+whole surface on the controller couples presentation to Tier-1's write path
+for no reason. `gsp-ui` is a pure BFF — human session auth in front, holding
+the controller's and aggregator's own machine credentials to call each on
+the operator's behalf, authority over neither. It's the one piece of this
+picture with no "real" state of its own (no store, no fleet data, nothing
+that outlives a restart beyond active sessions), so it costs nothing to add
+as a fourth (later: a third-per-tier) always-optional process; it never
+gains its own write path around the controller.
+
 A regional tier's raw API is still reachable directly (curl / CLI, on its own
 internal network) as **break-glass** during a root outage or partition —
 the same status the phase-5 direct-per-instance admin API already has next
