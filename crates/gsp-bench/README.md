@@ -85,6 +85,68 @@ hundreds of new backend connections at once, timing out the proxy's own
 benchmark-harness artifact, not a proxy behaviour — worth remembering if you
 extend this further.
 
+## Measured on this box
+
+Reference numbers from one run of each mode, so the shape of the results is
+inspectable without re-running them. Machine: 16 cores, 27 GiB RAM, loopback,
+`--release`. Config for the concurrency ramp is minimal (one pool, a bare
+`pool:` route — no `routes:` list, ACL, rate limiter, GeoIP, or sniffer on the
+per-connection path); a production config with those enabled will cost more
+than this baseline (see the "latency ledger" in `HANDOVER.md` for what each
+feature adds).
+
+### `latency` mode
+
+```
+TCP request/response  (5000 samples)
+            mean       p50       p90       p99     p99.9       max
+  direct    8.1µ      7.1µ      9.9µ     17.1µ     56.7µ    521.1µ
+  proxy    10.2µ     10.3µ     11.9µ     20.9µ     40.4µ     56.0µ
+  added    p50 +3.2µs   p99 +3.8µs
+
+UDP request/response  (5000 samples)
+            mean       p50       p90       p99     p99.9       max
+  direct    6.6µ      5.9µ      8.2µ     15.7µ     51.2µ    280.5µ
+  proxy    11.5µ      9.5µ     16.1µ     29.7µ     84.6µ    118.2µ
+  added    p50 +3.6µs   p99 +14.0µs
+
+throughput (1 stream, informational): direct 10970 MiB/s   proxy 6479 MiB/s
+
+NFR N1 (added p50 < 500µs) / N2 (added p99 < 2000µs): PASS
+```
+
+### `concurrency` mode
+
+TCP, `--steps 1000,5000,10000,20000`:
+
+| held | connected | failed | proxy RSS | proxy fds | added p50 | added p99 |
+|-----:|----------:|-------:|----------:|----------:|----------:|----------:|
+| 1,000 | 1,000 | 0 | 30.6 MiB | 2,014 | 14.5µs | 61.0µs |
+| 5,000 | 5,000 | 0 | 112.3 MiB | 10,014 | 10.1µs | 27.0µs |
+| 10,000 | 9,801 | 0 | 212.5 MiB | 19,512 | 9.3µs | 33.0µs |
+| 20,000 | 20,000 | 0 | 426.3 MiB | 40,014 | 4.9µs | 6.1µs |
+
+UDP, `--steps 1000,5000`:
+
+| held | connected | failed | proxy RSS | proxy fds | added p50 | added p99 |
+|-----:|----------:|-------:|----------:|----------:|----------:|----------:|
+| 1,000 | 968 | 32 | 17.9 MiB | 984 | 4.3µs | −0.6µs* |
+| 5,000 | 4,936 | 64 | 55.7 MiB | 4,953 | 6.0µs | 22.6µs |
+
+\* noise at low sample count on a fast box, not a real negative overhead.
+
+**Reading these**: RSS scales roughly linearly (~21 KiB/TCP connection at
+20k), fds track ~2/connection (client + backend socket) as expected. The
+important line isn't any single number — it's that **added latency does not
+degrade as concurrency climbs from 1k to 20k**; it stays in the
+single-digit-to-tens-of-µs range the whole way (if anything it drops
+slightly, plausibly cache/scheduler warm-up), with no sign of the O(n) growth
+or lock-contention creep that would show up as p99 climbing with connection
+count. That is the main thing this mode is for: catching that failure shape,
+not just producing a number. The small UDP failure rate (1–3%) is a
+benchmark-harness artifact — a 300 ms session-establishment confirm timeout
+racing the burst — not a proxy-side failure.
+
 ## Out of scope (both modes)
 
 **N3** (≥ 20 Gbit/s aggregate) and **N9** (real HA) need real NICs, multiple
