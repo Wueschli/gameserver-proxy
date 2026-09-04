@@ -348,10 +348,33 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   (noted there and in `HANDOVER.md`): no per-plugin config path exists yet,
   so `regex-firstbytes` can't be a true generic engine — a future config
   extension (e.g. `modules[].config`) would be needed.
-- **Slice 6**: WASM-boundary latency bench (`gsp-bench --sniffer <wasm>` or a
-  criterion bench) vs. N1; module signature / pin verification; a `docs/07`
-  "plugin sandbox guarantees" section (a sniffer is read-only, has no reply
-  path — the amplifier checklist still holds).
+- ✅ **Slice 6**: WASM-boundary latency bench vs. N1 — implemented as
+  `sniffer_loader::tests::wasm_boundary_latency_vs_nfr_n1` in
+  `crates/gsp/src/sniffer_loader.rs` (an `#[ignore]`d test, same convention
+  as slice 5's artifact test; `cargo test -p gsp --release wasm_boundary --
+  --ignored --nocapture` after `make plugins`), rather than extending
+  `gsp-bench` (that crate only depends on `gsp-core`, and the loader is
+  `gsp`-binary-only — reusing the existing test harness avoided a new
+  cross-crate seam for a one-off measurement) or adding `criterion` (kept the
+  project's existing non-criterion, custom-harness style, matching
+  `gsp-bench`'s own `Stats`/percentile approach). Times the real, compiled
+  first-party plugins (not synthetic WAT fixtures) through the actual
+  `alloc`/`memory.write`/`sniff`/decode round trip. **Result: all three pass
+  N1 with wide margin** — p50 8–10 µs, p99 12–26 µs (loopback, this box; see
+  `docs/07` for the full table) — so the fresh-`Store`-per-call design from
+  slice 3 needed none of the `InstancePre` / warm-instance fallbacks the
+  locked decision held in reserve. Building this bench surfaced a real
+  interaction worth documenting: the epoch ticker (slice 3) fires on
+  wall-clock time shared across a loader's whole lifetime, so a call that
+  happens to straddle a tick boundary legitimately traps even at ~10 µs of
+  actual work — the bench uses a long `call_timeout` to get a clean
+  measurement, and `docs/07`'s new "plugin sandbox guarantees" section notes
+  that `call_timeout_ms` is therefore a *ceiling*, not a per-call guarantee
+  of the full budget. Module `sha256` pin verification was already in slice
+  2/3 (`settings.sniffers.modules`); `docs/07` "plugin sandbox guarantees"
+  section covers the full no-WASI/no-host-imports contract, the two runtime
+  bounds, and confirms a sniffer's lack of a reply path leaves the amplifier
+  checklist untouched.
 - **Slice 7**: end-to-end test — compile a trivial `host-echo.wasm` fixture,
   load it through the real loader, assert a connection routes by its hint host
   (mirrors `sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host` but

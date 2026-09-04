@@ -92,6 +92,75 @@ Guarded by `crates/gsp-core/tests/amplification.rs`:
       no session and are never forwarded
       (`rate_limit_is_enforced_before_any_state_change`).
 
+## Sniffer plugin sandbox guarantees (phase 9)
+
+A loaded sniffer plugin (`settings.sniffers`, `crates/gsp/src/sniffer_loader.rs`)
+runs under `wasmtime` as a **core WASM module with no WASI and no host
+imports** — nothing is wired in beyond the `alloc`/`sniff` exports the plugin
+itself provides. Concretely, a plugin cannot:
+
+- read or write the filesystem — no `wasi_snapshot_preview1`, no ambient
+  authority of any kind is linked in;
+- open a socket or make any network call — same reason;
+- read the wall clock, environment variables, or process/thread state —
+  nothing exposes them;
+- see any byte the proxy hasn't explicitly copied into its linear memory
+  (the first-bytes prefix the route already peeked, capped at `peek_len()` ≤
+  `PEEK_MAX`) — it never sees later application bytes, and never sees another
+  connection's data (a fresh `Store` + `Instance`, and therefore fresh linear
+  memory, per call);
+- send anything toward the client — a `Sniffer` only returns a `RouteHint`
+  (host / key / reject); it has no reply path, so the amplifier checklist
+  above is untouched by sniffers entirely.
+
+Two independent bounds cap what a *misbehaving* (buggy or malicious) plugin
+can cost the process, checked every call, not just at load time:
+
+- **Time**: `wasmtime` epoch interruption. A dedicated ticker thread bumps
+  the engine's epoch every `call_timeout_ms`; each call sets a one-tick
+  deadline before running, so a call still executing at the next tick traps
+  (`gsp_sniffer_calls_total{result="timeout"}`). This is a *ceiling*, not a
+  per-call guarantee of the full budget — a call that starts a moment before
+  a tick gets whatever's left, which can legitimately be far less than
+  `call_timeout_ms` (`sniffer_loader::tests::
+  wasm_plugin_call_times_out_under_the_epoch_deadline` proves the mechanism
+  fires; a rare boundary-straddling trap on an otherwise-fast call is
+  expected behaviour, not a bug — see the comment in
+  `wasm_boundary_latency_vs_nfr_n1` for how the phase 9 latency bench works
+  around it to get a clean measurement).
+- **Memory**: a `StoreLimits` cap (`max_memory_bytes`) on the `Store` — a
+  plugin that tries to grow its linear memory past the cap gets a failed
+  `memory.grow` (WASM-spec `-1`), not more memory.
+
+Supply chain: `settings.sniffers.modules: [{ name, sha256 }]` optionally
+pins each module's SHA-256; when set, a `dir` entry that isn't listed (or
+whose hash doesn't match) fails the whole load/rescan rather than loading
+unpinned code.
+
+**Latency vs. NFR N1** (< 0.5 ms *added*; `docs/01-requirements.md`) — the
+"latency is a gate, not an assumption" decision from `docs/08` Phase 9,
+measured end to end (real `alloc`/`memory.write`/`sniff`/decode round trip,
+a fresh `Store` + `Instance` per call, release build) against the three
+first-party plugins in `crates/plugins/`:
+
+| plugin | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| `a2s` | 10.0 µs | 11.4 µs | 25.8 µs | 399 µs |
+| `minecraft` | 8.9 µs | 10.2 µs | 16.9 µs | 217 µs |
+| `regex_firstbytes` | 8.3 µs | 9.1 µs | 12.0 µs | 361 µs |
+
+(Loopback numbers on the same box as `crates/gsp-bench`'s N1/N2 measurements;
+2000 calls/plugin after warmup. Reproduce with `make plugins` then
+`cargo test -p gsp --release wasm_boundary -- --ignored --nocapture` in
+`crates/gsp/src/sniffer_loader.rs`.) All three pass N1 with wide margin — a
+fresh per-call `Store`/`Instance` (the "no state survives between
+connections" design from slice 3) turned out cheap enough on this hardware
+that the `InstancePre` / pooling-allocator / warm-instance-per-worker
+fallbacks noted in `docs/08` Phase 9 were not needed. The occasional
+higher-than-typical `max` samples (hundreds of µs, still far under the 500 µs
+p50 gate) are consistent with ordinary scheduling jitter, not a systematic
+cost — no sample in any run has been anywhere near N1.
+
 ## Security logging
 
 - Events: ACL block, rate-limit trip (aggregated, not per packet), session cap

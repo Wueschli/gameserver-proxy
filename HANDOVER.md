@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–5 landed).
+Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–6 landed).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -474,17 +474,48 @@ output alone; check the exit code or scroll to the top of the log.
   `regex-firstbytes` cannot be a genuinely generic, runtime-configured
   matcher; that needs a config-schema extension (e.g. a
   `modules[].config` blob) that hasn't been designed yet.
-- **Next**: phase 9 slices 6–7. Per the locked plan in `docs/08` Phase 9:
-  slice 6 is a WASM-boundary latency bench vs. NFR N1 (real numbers for the
-  per-call instantiate cost — now with real plugins, not just tiny WAT
-  fixtures, to benchmark against — with the `InstancePre` / warm-instance
-  fallbacks on standby if it misses) + a `docs/07` sandbox-guarantees section;
-  slice 7 is a *proper* end-to-end test through the real loader with a
-  dedicated compiled fixture (slice 5's `#[ignore]`d test above already
-  covers most of this ground with the real first-party plugins, so slice 7
-  may end up being mostly the "un-ignore it in CI once `make plugins` runs
-  there" + a small `host-echo.wasm`-style fixture for the trivial case,
-  rather than fresh design work). Per-source cap LRU eviction, `GET
+- **Phase 9 slice 6 done**: WASM-boundary latency bench vs. NFR N1.
+  `sniffer_loader::tests::wasm_boundary_latency_vs_nfr_n1` in
+  `crates/gsp/src/sniffer_loader.rs` — an `#[ignore]`d test (same convention
+  as slice 5's artifact test) rather than a `gsp-bench` extension (that crate
+  only depends on `gsp-core`; the loader is `gsp`-binary-only, so reusing the
+  loader's own test module avoided a new cross-crate seam) or `criterion`
+  (kept the project's existing custom-harness style). Times the real,
+  compiled first-party plugins — not synthetic WAT fixtures — through the
+  actual `alloc`/`memory.write`/`sniff`/decode round trip, 2000 calls each
+  after warmup, sorted for p50/p90/p99/max, PASS/MISS vs. N1 (< 0.5 ms), same
+  reporting shape as `gsp-bench`. Run with `cargo test -p gsp --release
+  wasm_boundary -- --ignored --nocapture` after `make plugins` (release
+  matters — Cranelift codegen and the sandboxed call are both much slower
+  unoptimised).
+  **Result: p50 8–10 µs, p99 12–26 µs across all three plugins — comfortably
+  under N1**, so the fresh-`Store`-per-call design from slice 3 needs none of
+  the `InstancePre` / pooling-allocator / warm-instance fallbacks the locked
+  decision held in reserve.
+  **A real finding along the way**: the shared epoch-ticker thread (slice 3)
+  runs on wall-clock time for the whole loader's lifetime, so a call that
+  happens to straddle a tick boundary legitimately traps even though it only
+  took ~10 µs of actual work (confirmed by instrumenting — a plugin looped in
+  isolation failed deterministically at the same point every run, right
+  around one `call_timeout_ms` period of elapsed wall time). This is the
+  epoch-interruption mechanism working exactly as designed, not a bug — but
+  it means `call_timeout_ms` is a *ceiling*, not a guarantee every call gets
+  the full budget; a call starting just before a tick gets whatever's left.
+  The bench uses a long `call_timeout` to get a clean latency measurement
+  isolated from this effect (it's already covered separately by
+  `wasm_plugin_call_times_out_under_the_epoch_deadline` from slice 3).
+  New `docs/07` "Sniffer plugin sandbox guarantees" section: the full
+  no-WASI/no-host-imports contract (what a plugin provably cannot do and
+  why), the two runtime bounds (epoch timeout + `StoreLimits` memory cap)
+  with the ceiling caveat above, the `sha256` pin supply-chain check, the
+  latency table, and a note that a sniffer's lack of a reply path leaves the
+  amplifier checklist untouched.
+- **Next**: phase 9 slice 7 — a *proper* end-to-end test through the real
+  loader with a dedicated compiled fixture. Slice 5's `#[ignore]`d artifact
+  test already covers most of this ground against the real first-party
+  plugins, so slice 7 may end up being mostly "wire `make plugins` +
+  `--ignored` runs into CI" plus a small `host-echo.wasm`-style trivial
+  fixture, rather than fresh design work. Per-source cap LRU eviction, `GET
   /sessions`, and a k8s watch informer are separate polish items. Deferred:
   `GET /sessions` (per-session registry); resolver `sticky_key`; per-plugin
   config for `settings.sniffers.modules[]` (would let `regex-firstbytes`
@@ -871,10 +902,13 @@ guest function call + a `memory.data` read-back and decode — all synchronous,
 on the same spawned per-conn task (TCP) / `open_session` (UDP) that already
 pays for the peek, never on the accept loop. Bounded by
 `settings.sniffers.call_timeout_ms` (epoch interruption traps a runaway call)
-and `max_memory_bytes`. Not yet benchmarked against NFR N1 — that's slice 6;
-if the per-call instantiate cost misses it, the documented fallback order is
-`InstancePre` + a pooling allocator, then one warm instance per worker reset
-between calls.
+and `max_memory_bytes`. **Benchmarked (slice 6)**: p50 8–10 µs, p99 12–26 µs
+for the three first-party plugins (real compiled `.wasm`, release build,
+loopback on this box) — comfortably inside NFR N1's 500 µs budget, so the
+fresh-`Store`-per-call design needed none of the `InstancePre` /
+pooling-allocator / warm-instance-per-worker fallbacks that were held in
+reserve. See `docs/07` "Sniffer plugin sandbox guarantees" for the full
+table and reproduction command.
 
 **Connection draining** (`ConnTracker`): one `watch::Sender::send_modify` (a
 brief internal lock, no `.await`) on connection/session open and again on close —

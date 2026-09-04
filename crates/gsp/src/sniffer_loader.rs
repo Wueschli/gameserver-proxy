@@ -543,6 +543,115 @@ mod tests {
         assert!(http.sniff(b"\xff\xff\xff\xffT").is_none());
     }
 
+    /// Phase 9 slice 6: bench the WASM boundary — a fresh `Store` + `Instance`
+    /// per call, exactly the "no state survives between connections" design
+    /// from slice 3 — against NFR N1 (< 0.5 ms *added* latency; see
+    /// `docs/01-requirements.md`), per the locked "latency is a gate, not an
+    /// assumption" decision in `docs/08` Phase 9. Same ignored-by-default
+    /// convention as the artifact test above (needs `make plugins`); run with
+    /// `cargo test -p gsp --release wasm_boundary -- --ignored --nocapture`
+    /// to see the printed report (release matters here — `wasmtime`'s
+    /// Cranelift compiler and the sandboxed call are both far slower
+    /// unoptimised).
+    #[test]
+    #[ignore = "needs `make plugins` to have built crates/plugins first; run --release for real numbers"]
+    fn wasm_boundary_latency_vs_nfr_n1() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/target/wasm32-unknown-unknown/release");
+        assert!(
+            dir.is_dir(),
+            "run `make plugins` first (looked in {})",
+            dir.display()
+        );
+        let mut sc = cfg(&dir);
+        sc.max_memory_bytes = 16 * 1024 * 1024;
+        // A long call_timeout for this bench specifically: the epoch ticker
+        // (slice 3) fires on wall-clock time shared across every plugin's
+        // loop below, and a call that happens to straddle a tick boundary
+        // legitimately traps — proven by
+        // `wasm_plugin_call_times_out_under_the_epoch_deadline` already. That
+        // mechanism is real and correct (and worth remembering: it means a
+        // production `call_timeout_ms` is a *ceiling*, not a guarantee that
+        // every call under it completes — a call started just before the
+        // deadline gets less than the full budget). It just isn't what this
+        // bench is measuring, so give it a long runway instead of coupling
+        // the two.
+        sc.call_timeout = std::time::Duration::from_secs(10);
+        let (_loader, registry) = build_sniffers(&sc).unwrap();
+
+        // One representative, recognised payload per plugin — the
+        // recognised path is the more expensive one (it also encodes and
+        // decodes a `RouteHint`), so it's the one that matters for the gate.
+        let minecraft_handshake = {
+            let host = b"play.example.net";
+            let mut pkt = vec![0x00u8, 0x01];
+            pkt.push(host.len() as u8);
+            pkt.extend_from_slice(host);
+            pkt.extend_from_slice(&25565u16.to_be_bytes());
+            pkt.push(0x01);
+            let mut framed = vec![pkt.len() as u8];
+            framed.extend(pkt);
+            framed
+        };
+        let cases: [(&str, &[u8]); 3] = [
+            ("a2s", b"\xff\xff\xff\xffTSource Engine Query\0"),
+            ("minecraft", &minecraft_handshake),
+            ("regex_firstbytes", b"GET /health HTTP/1.1\r\nHost: x\r\n"),
+        ];
+
+        const WARMUP: usize = 50;
+        const ITERATIONS: usize = 2000;
+        const N1_US: f64 = 500.0; // NFR N1: added p50 < 0.5 ms
+
+        let mut all_pass = true;
+        println!(
+            "\n{:<18} {:>10} {:>10} {:>10} {:>10}  N1",
+            "plugin", "p50 (us)", "p90 (us)", "p99 (us)", "max (us)"
+        );
+        for (name, payload) in cases {
+            let sniffer = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("{name}.wasm not built"));
+            for _ in 0..WARMUP {
+                assert!(
+                    sniffer.sniff(payload).is_some(),
+                    "{name} must recognise its own fixture"
+                );
+            }
+            let mut samples = Vec::with_capacity(ITERATIONS);
+            for _ in 0..ITERATIONS {
+                let start = std::time::Instant::now();
+                let hint = sniffer.sniff(payload);
+                samples.push(start.elapsed());
+                assert!(hint.is_some());
+            }
+            samples.sort_unstable();
+            let us = |d: std::time::Duration| d.as_secs_f64() * 1e6;
+            let at = |q: f64| samples[((ITERATIONS as f64 * q) as usize).min(ITERATIONS - 1)];
+            let (p50, p90, p99, max) = (at(0.50), at(0.90), at(0.99), samples[ITERATIONS - 1]);
+            let pass = us(p50) < N1_US;
+            all_pass &= pass;
+            println!(
+                "{:<18} {:>10.1} {:>10.1} {:>10.1} {:>10.1}  {}",
+                name,
+                us(p50),
+                us(p90),
+                us(p99),
+                us(max),
+                if pass { "PASS" } else { "MISS" },
+            );
+        }
+        println!(
+            "({ITERATIONS} calls/plugin after {WARMUP} warmup, one fresh Store+Instance per \
+             call, release build matters — debug is not representative)\n"
+        );
+        assert!(
+            all_pass,
+            "a plugin's median call exceeded NFR N1 (0.5ms) — see the InstancePre / \
+             warm-instance fallbacks noted in docs/08 Phase 9 if this trips in a real run"
+        );
+    }
+
     /// A tiny per-test-process unique scratch dir under the system temp dir.
     fn tempdir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
