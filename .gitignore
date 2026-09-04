@@ -6,3 +6,9 @@
 # gsp-controller's default --data-dir when run from the repo root during
 # manual/local smoke testing.
 /gsp-controller-data
+
+# gsp-ui's frontend build artifacts (`make ui`) — never checked in, just
+# built locally / in CI before running gsp-ui with --static-dir.
+crates/gsp-ui/web/node_modules
+crates/gsp-ui/web/dist
+crates/gsp-ui/web/*.tsbuildinfo

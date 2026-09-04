@@ -602,12 +602,35 @@ token, is ever exposed to a human directly.
      over the full chain against a real `gsp-controller`: submit → list
      revisions → diff → rollback → `GET /api/config` correctly showing
      `X-Config-Revision: 3` (the new post-rollback revision, not a rewind).
-11f. Frontend: the React + Vite + TS app itself (own `package.json`, never a
-     Cargo workspace member, built via `make ui` mirroring `make plugins`'s
-     standalone-workspace pattern) — login page, fleet dashboard
-     (instance/pool/backend tables, live over 11d's WebSocket), the
-     operational actions (11c), and the config editor + revision history
-     (11e).
+11f. ✅ Frontend: React + Vite + TypeScript in `crates/gsp-ui/web/` (own
+     `package.json`, never a Cargo workspace member — same reasoning as
+     `crates/plugins/`; `make ui` runs `npm install && npm run build`,
+     output goes to `dist/`). `gsp-ui` gained `--static-dir` (default
+     `crates/gsp-ui/web/dist`), served as a fallback under whatever the API
+     routes don't claim, via `tower-http::services::ServeDir` (new
+     dependency). No client-side routing — one page, view state (which tab)
+     lives in React state, not the URL; nothing here needs a deep link yet.
+     `Login` (session-cookie form), `FleetView` (per-instance/pool/backend
+     table live over 11d's WebSocket, drain/undrain, backend add/patch/
+     remove, route-hint — phase 10's "operational" level), `ConfigView`
+     (editor + submit + revision history/diff/rollback — phase 10's "full
+     management" level). `src/api.ts` holds every `fetch` call; `gsp-ui`'s
+     session cookie is the only credential the browser ever sends — never a
+     bearer token, per the whole point of the `gsp-ui` redesign. Verified
+     live end-to-end with the **real built frontend** served by a **real
+     four-process fleet** (`gsp` + `gsp-controller` + `gsp-aggregator` +
+     `gsp-ui`, all running together for the first time): `index.html` and a
+     JS asset served with correct content-type, login, a config submission
+     and a fleet-pools read through the served UI's own proxy paths, and a
+     drain issued through the full chain landing for real (confirmed by the
+     instance's own `/readyz` flipping to `503`).
+
+- **Slice 11 (all of 11a-11f) is now complete.** The whole `gsp-ui` BFF —
+  session login, fleet reads/ops proxying, the live WebSocket, config
+  editing/history proxying, and the actual frontend serving all of it — has
+  been verified live end-to-end, repeatedly, against real running
+  `gsp`/`gsp-controller`/`gsp-aggregator` processes, not just against unit
+  tests.
 12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator (+
     1 `gsp-ui` once it exists) —
     subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial

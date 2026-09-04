@@ -2,14 +2,18 @@
 //! Slice 11b: session login/logout. Slice 11c: fleet reads + operational
 //! verbs proxied to `gsp-aggregator`. Slice 11d: the browser WebSocket, fed
 //! by a shared subscription to the aggregator's `/fleet/subscribe`. Slice
-//! 11e: `gsp-controller`'s config API, proxied the same way. The frontend
-//! itself (11f) isn't built yet.
+//! 11e: `gsp-controller`'s config API, proxied the same way. Slice 11f:
+//! `--static-dir` serves the built React/Vite/TS frontend (`web/`) as a
+//! fallback under every route the API doesn't claim — `gsp-ui` is the one
+//! process, one port an operator's browser ever talks to.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
+use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 use gsp_ui::api::{self, AppState};
@@ -51,6 +55,15 @@ struct Args {
     /// one (its own `--auth-token`).
     #[arg(long)]
     controller_token: Option<String>,
+
+    /// Directory holding the built frontend (`web/`'s `npm run build`
+    /// output — `make ui`). Default assumes the process runs from the repo
+    /// root, matching every other `cargo run -p ...` example in this repo.
+    /// A missing directory doesn't fail startup — requests for it just 404,
+    /// same as running `gsp-ui` for its API alone (as every test in this
+    /// crate does).
+    #[arg(long, default_value = "crates/gsp-ui/web/dist")]
+    static_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -88,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(state));
+        .merge(api::router(state))
+        .fallback_service(ServeDir::new(&args.static_dir));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-ui listening");

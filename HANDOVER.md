@@ -45,10 +45,17 @@ implementation narration lives in git history and `docs/08`, not here.
   dep, not just `gsp-core`'s). Lives in the binary, not `gsp-core` — host/ops
   observability, no data-plane seam needed. See `docs/06`.
 
-**Next**: phases 10–12 (the distributed control plane —
-[`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md)),
-which are **design only, nothing built**. Or one of the polish items below, per
-what the user wants.
+**Update (2026-09-04, later same day)**: phase 10+11 (the distributed
+control plane's single-tier PoC) is now **implemented, not just designed** —
+see the session notes immediately below for the full arc. Three new crates
+(`gsp-controller`, `gsp-aggregator`, `gsp-ui`) plus a frontend
+(`crates/gsp-ui/web/`), all 11 slices done and individually verified live
+against real running processes, up through slice 11 (the admin GUI). Only
+slice 12 (integration tests spinning up the whole fleet together) and slice
+13 (docs polish) remain before phase 10+11 is fully closed out. Phase 12
+(fleet hierarchy/HA/shared intent) and phase 13 (regional health fabric) are
+still **design only** — see
+[`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
 
 **2026-09-04 design session**: `docs/10` gained a "Fleet topology" section —
 the controller and the new aggregator are each a recursive tree of tiers (one
@@ -428,10 +435,45 @@ real `gsp-controller` — submit → `GET /api/config/revisions` → diff →
 rollback → `GET /api/config` correctly showing `X-Config-Revision: 3` (the
 post-rollback revision, not a rewind), header intact.
 
-**Next**: 11f — the actual React/Vite/TS frontend (the only sub-slice left
-in slice 11). Then slice 12 (integration tests spinning up N `gsp` +
-controller + aggregator + `gsp-ui` together) and slice 13 (docs polish:
-`docs/06`, `README.md` status block, `docs/08` status legend).
+**Slice 11f done — all of slice 11 (11a-11f) is now complete.** New
+standalone npm project `crates/gsp-ui/web/` (React + Vite + TypeScript, own
+`package.json`, never a Cargo workspace member — `make ui` builds it, see
+its own README). `gsp-ui` gained `--static-dir` (default
+`crates/gsp-ui/web/dist`), served via `tower-http::services::ServeDir`
+(new dep) as a fallback under whatever the API routes don't claim. No
+client-side routing — one page, view state lives in React state.
+
+Components: `Login` (session-cookie form), `FleetView` (live
+instance/pool/backend table over the slice-11d WebSocket, drain/undrain,
+backend add/patch/remove, route-hint), `ConfigView` (editor, submit,
+revision history/diff/rollback). `src/api.ts` centralizes every `fetch`
+call; the session cookie is the only credential the browser ever sends.
+`npm install && npm run build` (`tsc -b && vite build`) verified clean —
+TypeScript compiled with zero errors on the first real build.
+
+**Verified live end-to-end with all four services running together for the
+first time** — `gsp` + `gsp-controller` + `gsp-aggregator` + `gsp-ui`, with
+the *actual built frontend* served: `GET /` returned real `index.html`
+(`text/html`), a JS asset returned with the right content-type, login
+worked, a config submission and a fleet-pools read went through the served
+UI's own proxy paths, and a drain issued through the whole chain landed for
+real (the instance's own `/readyz` flipped to `503`). This is the complete
+picture the `gsp-ui` redesign was for, running as one coherent system, not
+four services that happen to pass their own tests.
+
+Housekeeping caught along the way: a manual smoke test earlier this session
+left a stray `gsp-controller-data/` directory in the repo root (already
+`.gitignore`d, see slice 11e's entry); this session's frontend work added
+`crates/gsp-ui/web/node_modules` and `.../dist` to `.gitignore` too, so
+neither ever gets committed by accident.
+
+**Next**: slice 12 (integration tests spinning up N `gsp` + controller +
+aggregator + `gsp-ui` together — subscribe/reconnect/freeze-on-disconnect,
+push/ingest, fan-out partial failure, config reject-keeps-previous) and
+slice 13 (docs polish: `docs/06`, `README.md` status block, `docs/08` status
+legend). **Phase 10+11's entire controller + aggregator + UI implementation
+is otherwise done** — slices 1-11 all complete and individually verified
+live.
 
 ### Known follow-ups (none blocking)
 

@@ -83,8 +83,14 @@ crates/
     auth.rs                 optional bearer-token gate (`--auth-token`) + `--instance-token` presented out to instances
   gsp-ui/                    binary — the admin GUI's BFF (phase 10+11, docs/10 "The admin GUI"); dedicated process, not hosted in the controller or aggregator; holds neither's authority, no gsp-core/gsp-config dependency
     session.rs              `SessionStore` — in-memory random session ids (ephemeral, like the aggregator's store)
-    api.rs                  POST /ui/login|logout, GET /ui/session
+    api.rs                  POST /ui/login|logout, GET /ui/session; merges aggregator_proxy/controller_proxy/ws into the session-gated route group
     auth.rs                 session-cookie gate (`require_session`) — distinct from the controller's/aggregator's bearer-token gates; the browser never holds a bearer token
+    aggregator_proxy.rs     proxies fleet reads + phase-9 operational verbs to gsp-aggregator (`--aggregator-url`/`--aggregator-token`)
+    controller_proxy.rs     proxies gsp-controller's config API (submit, revisions, diff, rollback) to gsp-controller (`--controller-url`/`--controller-token`)
+    proxy_util.rs           shared `forwardable_headers` — both proxies forward the upstream response's headers, not just status+body
+    fleet_feed.rs           single shared subscription to the aggregator's `/fleet/subscribe` SSE feed, fanned out via a broadcast channel
+    ws.rs                   GET /ws/fleet — the browser's live-updates WebSocket, fed by fleet_feed
+    web/                    standalone npm project (own package.json, never a Cargo workspace member) — the React + Vite + TS frontend; `make ui` builds it to `dist/`, served by `--static-dir`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
@@ -114,6 +120,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
+| gsp-ui frontend | `make ui` (needs Node/npm; builds `crates/gsp-ui/web/` to `dist/`, served by `gsp-ui --static-dir`; see `crates/gsp-ui/web/README.md`) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |

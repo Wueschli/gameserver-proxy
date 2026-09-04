@@ -1,0 +1,123 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 20rem;
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.app > header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #8884;
+}
+
+.app > header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.app > header nav button.active {
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+.app > header .logout {
+  margin-left: auto;
+}
+
+main {
+  padding: 1rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+th,
+td {
+  border: 1px solid #8884;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ok {
+  color: #1a7f37;
+}
+
+.down {
+  color: #c62828;
+}
+
+.stale {
+  opacity: 0.6;
+}
+
+.panel {
+  border: 1px solid #8884;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.panel form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.notice {
+  background: #8882;
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+}
+
+.error {
+  color: #c62828;
+}
+
+.config-editor {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  box-sizing: border-box;
+}
+
+.diff-view {
+  background: #8881;
+  padding: 0.5rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+}
+
+.instance-actions {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
