@@ -396,6 +396,10 @@ controller's revision log is a follow-on once this ships.
    while retrying). An invalid pushed revision is logged and skipped (cursor
    still advances — it must not be replayed forever on every reconnect), the
    same "bad reload keeps the old snapshot" rule as a file reload.
+   `--controller-token` (added later, slice 11f testing) is what `gsp`
+   presents to a `--auth-token`-protected controller — every other
+   cross-service link in this fleet has a token pairing, and this one was
+   missing until driving the real UI against a real fleet surfaced it.
 5. ✅ `GET /config/revisions` (history: revision, size, `current` flag),
    `GET /config/revisions/{revision}` (a past revision's raw text),
    `GET /config/revisions/{revision}/diff[?against=<revision>]` (a

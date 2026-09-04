@@ -33,8 +33,13 @@ const REVISION_HEADER: &str = "x-config-revision";
 /// One-shot `GET /config` — the initial revision + config text, fetched
 /// before anything else exists to build a `Snapshot` from (mirrors
 /// `gsp_config::load` in file mode).
-pub async fn fetch_current(base_url: &str) -> anyhow::Result<(u64, String)> {
-    let resp = reqwest::get(format!("{base_url}/config"))
+pub async fn fetch_current(base_url: &str, token: Option<&str>) -> anyhow::Result<(u64, String)> {
+    let mut req = reqwest::Client::new().get(format!("{base_url}/config"));
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("fetching initial config from {base_url}: {e}"))?;
     if !resp.status().is_success() {
@@ -63,6 +68,7 @@ pub async fn fetch_current(base_url: &str) -> anyhow::Result<(u64, String)> {
 #[allow(clippy::too_many_arguments)] // mirrors reload::apply_config's shape; a struct doesn't earn its keep for one call site
 pub async fn run(
     base_url: String,
+    token: Option<String>,
     since: u64,
     handle: RuntimeHandle,
     resolvers: Arc<Resolvers>,
@@ -78,6 +84,7 @@ pub async fn run(
     loop {
         match subscribe_once(
             &base_url,
+            token.as_deref(),
             &mut cursor,
             &handle,
             &resolvers,
@@ -114,6 +121,7 @@ pub async fn run(
 /// started (see the comment in `run`).
 async fn subscribe_once(
     base_url: &str,
+    token: Option<&str>,
     cursor: &mut u64,
     handle: &RuntimeHandle,
     resolvers: &Resolvers,
@@ -122,7 +130,12 @@ async fn subscribe_once(
 ) -> anyhow::Result<()> {
     let since = *cursor;
     let url = format!("{base_url}/config/subscribe?since={since}");
-    let mut resp = reqwest::get(&url)
+    let mut req = reqwest::Client::new().get(&url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let mut resp = req
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("connecting to {url}: {e}"))?;
     if !resp.status().is_success() {

@@ -45,16 +45,21 @@ async function requestText(path: string, init?: RequestInit): Promise<string> {
 
 // --- session ---
 
-export function login(password: string): Promise<void> {
-  return requestJson("/ui/login", {
+// gsp-ui's POST /ui/login and /ui/logout both return a plain-text "ok" body
+// on success (see crates/gsp-ui/src/api.rs), not JSON — requestText (not
+// requestJson) is required here, or a successful login throws trying to
+// JSON.parse("ok").
+
+export async function login(password: string): Promise<void> {
+  await requestText("/ui/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ password }),
   });
 }
 
-export function logout(): Promise<void> {
-  return requestJson("/ui/logout", { method: "POST" });
+export async function logout(): Promise<void> {
+  await requestText("/ui/logout", { method: "POST" });
 }
 
 export async function checkSession(): Promise<boolean> {

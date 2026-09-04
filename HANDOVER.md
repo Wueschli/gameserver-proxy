@@ -467,13 +467,48 @@ left a stray `gsp-controller-data/` directory in the repo root (already
 `crates/gsp-ui/web/node_modules` and `.../dist` to `.gitignore` too, so
 neither ever gets committed by accident.
 
+**Two more real bugs found and fixed while actually driving the fleet from a
+browser** (not caught by any unit test, because neither is a Rust-side
+contract violation — both are wire-shape assumptions the frontend got wrong):
+
+1. **`gsp` had no way to authenticate to `gsp-controller` at all.** Every
+   other cross-service link in this fleet has a token pairing
+   (`--aggregator-token`/`--auth-token`, `--instance-token`/
+   `settings.admin.auth_token`, `--controller-token` on `gsp-ui`) — but `gsp`
+   pulling its own config from a controller had no `--controller-token`
+   flag, so a `--auth-token`-protected controller would 401 every fetch and
+   subscribe call. Fixed: `controller_client::fetch_current` and `::run`/
+   `subscribe_once` now take an optional token and present it via
+   `bearer_auth`; `gsp` gained `--controller-token`; `ConfigSource::
+   Controller` carries the token alongside the URL so a reconnect keeps
+   using it.
+2. **The browser's login always failed with a generic "login failed."**
+   `gsp-ui`'s `POST /ui/login`/`/ui/logout` return a plain-text `"ok"` body
+   on success, but `crates/gsp-ui/web/src/api.ts`'s `login()`/`logout()`
+   called `requestJson`, which unconditionally `JSON.parse()`s a successful
+   response body — `JSON.parse("ok")` throws, and `Login.tsx`'s catch-all
+   swallowed that into a misleading error message. The backend was correct
+   the whole time (verified via `curl` before touching any frontend code).
+   Fixed by switching both to `requestText`. Verified the *exact* failure
+   with Node's `fetch` reproducing the old code path's throw, then verified
+   the fix with the same script completing `login → GET /ui/session` →
+   `{"authenticated":true}` cleanly.
+
+Both were found by actually standing up the full four-process fleet
+end-to-end for a human to click through — not by writing more unit tests
+first. Worth the reminder: **wire-shape mismatches between a Rust JSON/text
+handler and its TS caller are a real, recurring class of bug this project
+has now hit twice** (see slice 11e's header-forwarding bug for the first),
+and neither was visible from either side's own test suite in isolation —
+only from driving the two together.
+
 **Next**: slice 12 (integration tests spinning up N `gsp` + controller +
 aggregator + `gsp-ui` together — subscribe/reconnect/freeze-on-disconnect,
 push/ingest, fan-out partial failure, config reject-keeps-previous) and
 slice 13 (docs polish: `docs/06`, `README.md` status block, `docs/08` status
 legend). **Phase 10+11's entire controller + aggregator + UI implementation
 is otherwise done** — slices 1-11 all complete and individually verified
-live.
+live, now including an actual human driving the real UI in a real browser.
 
 ### Known follow-ups (none blocking)
 

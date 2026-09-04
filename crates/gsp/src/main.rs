@@ -45,6 +45,11 @@ struct Args {
     #[arg(long)]
     controller: Option<String>,
 
+    /// Bearer token to present to `--controller`, if it requires one (its
+    /// own `--auth-token`).
+    #[arg(long)]
+    controller_token: Option<String>,
+
     /// Validate the config and exit without starting anything. Works with
     /// `--controller` too — fetches its current config and validates that.
     #[arg(long)]
@@ -78,7 +83,7 @@ struct Args {
 /// variant; nothing else branches on this after `run` dispatches on it once.
 enum ConfigSource {
     File(PathBuf),
-    Controller(String),
+    Controller(String, Option<String>),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -102,10 +107,15 @@ fn main() -> anyhow::Result<()> {
 async fn async_main(args: Args) -> anyhow::Result<()> {
     let (config_source, cfg, initial_revision) = match &args.controller {
         Some(url) => {
-            let (revision, text) = controller_client::fetch_current(url).await?;
+            let (revision, text) =
+                controller_client::fetch_current(url, args.controller_token.as_deref()).await?;
             let cfg = gsp_config::parse_str(&text)
                 .map_err(|e| anyhow::anyhow!("controller {url} revision {revision}: {e}"))?;
-            (ConfigSource::Controller(url.clone()), cfg, Some(revision))
+            (
+                ConfigSource::Controller(url.clone(), args.controller_token.clone()),
+                cfg,
+                Some(revision),
+            )
         }
         None => {
             let cfg = gsp_config::load(&args.config)?;
@@ -115,7 +125,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     tracing::info!(
         source = match &config_source {
             ConfigSource::File(p) => p.display().to_string(),
-            ConfigSource::Controller(u) => u.clone(),
+            ConfigSource::Controller(u, _) => u.clone(),
         },
         listeners = cfg.listeners.len(),
         pools = cfg.pools.len(),
@@ -292,8 +302,9 @@ async fn run(
             sniffer_loader,
             sniffers,
         )),
-        ConfigSource::Controller(url) => tokio::spawn(controller_client::run(
+        ConfigSource::Controller(url, token) => tokio::spawn(controller_client::run(
             url,
+            token,
             initial_revision.unwrap_or(0),
             handle,
             resolvers,
