@@ -80,3 +80,15 @@ pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 
 /// Gauge: unix timestamp of the last successfully applied config.
 pub const CONFIG_VERSION: &str = "gsp_config_version";
+
+/// Counter. Labels: `name` (the sniffer plugin), `result` (`ok` |
+/// `unrecognised` | `timeout` | `trap` | `bad_output`). One increment per
+/// `Sniffer::sniff` call through the phase 9 WASM loader (`ok` = recognised,
+/// `unrecognised` = a clean "no match", `timeout` = the epoch-interruption
+/// deadline fired, `trap` = any other WASM trap / instantiation error,
+/// `bad_output` = the plugin returned a result the host couldn't decode).
+pub const SNIFFER_CALLS: &str = "gsp_sniffer_calls_total";
+
+/// Histogram (seconds). Labels: `name`. Wall-clock time of one `sniff` call
+/// through the WASM loader, instantiation included.
+pub const SNIFFER_CALL_SECONDS: &str = "gsp_sniffer_call_seconds";

@@ -22,9 +22,11 @@ use std::sync::Arc;
 
 use gsp_config::RouteHint;
 
-/// A read-only first-bytes inspector. Implemented by loaded plugins.
+/// A read-only first-bytes inspector. Implemented by loaded plugins. `name` is
+/// `&str`, not `&'static str`: a WASM plugin's name comes from its module file
+/// name at load time, not a compiled-in constant.
 pub trait Sniffer: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     /// Inspect the (bounded) first bytes. `None` = not recognised.
     fn sniff(&self, first: &[u8]) -> Option<RouteHint>;
 }

@@ -52,6 +52,16 @@
   connection / session cap was reached, `max_conn` / `max_udp` / `max_new_rate` =
   a process-wide `settings.limits` cap was hit
 
+### Sniffer plugins (phase 9)
+- `gsp_sniffer_calls_total{name,result}` – `result` = `ok` | `unrecognised` |
+  `timeout` | `trap` | `bad_output`; one increment per `sniff()` call through
+  the WASM loader. `timeout` = the epoch-interruption deadline
+  (`settings.sniffers.call_timeout_ms`) fired; `trap` = any other WASM trap or
+  an instantiation failure; `bad_output` = the plugin returned a result the
+  host couldn't decode as a `RouteHint`.
+- `gsp_sniffer_call_seconds{name}` (histogram) – wall-clock time of one
+  `sniff()` call, instantiation included.
+
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`
 - `gsp_resolver_cache_total{resolver,result}` – `hit|hit_negative|miss|stale|uncacheable`

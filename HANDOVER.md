@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–2 landed).
+Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–3 landed).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -372,23 +372,37 @@ output alone; check the exit code or scroll to the top of the log.
   a commented example block; `docs/05` documents the schema, a validation
   bullet, and a reload-semantics row (restart-only until slice 4's `dir`
   rescan). 6 new `gsp-config` tests.
-- **Next**: phase 9 slices 3–7 (the actual plugin loader). Per the locked plan
-  in `docs/08` Phase 9: slice 3 is `WasmSniffer` in the `gsp` binary
-  (`wasmtime`, epoch interruption, `StoreLimits`, the `alloc`/`sniff` ABI),
-  `build_sniffers(&Config)` reading `Config::sniffers` to scan `dir` +
-  verify `sha256` pins, wired via a new `Runtime::start_with_sniffers` call
-  from `main.rs` (today it always passes `Sniffers::default()`), plus
-  `gsp_sniffer_calls_total` / `gsp_sniffer_call_seconds`; slice 4 is reload
-  rescanning `dir`; slice 5 is the first-party plugin crates (`a2s`,
-  `minecraft`, `regex-firstbytes`) under `crates/plugins/` + a
-  `gsp-sniffer-abi` guest helper crate, built via `make plugins` to
+- **Phase 9 slice 3 done**: `WasmSniffer`, the real plugin loader
+  (`crates/gsp/src/sniffer_loader.rs`). Shared `wasmtime::Engine` (epoch
+  interruption on) + one epoch-ticker thread; a fresh `Store` + `Instance` per
+  call with a `StoreLimits` memory cap and a one-tick epoch deadline
+  (`settings.sniffers.call_timeout_ms`). ABI: guest exports `memory`,
+  `alloc(len) -> ptr`, `sniff(ptr,len) -> packed|0`; host marshals the peeked
+  bytes in, decodes a compact `RouteHint` (flags byte + length-prefixed UTF-8
+  strings) out — any bad pointer/length/UTF-8 is `bad_output`, never a panic.
+  `Sniffer::name` is now `&str` (was `&'static str` — a plugin's name is its
+  file stem). `build_sniffers(&SniffersConfig)` scans `dir`, verifies
+  `sha256` pins (`sha2` dep) when configured, returns a `Sniffers` registry;
+  `main.rs` calls it for both `--check` and startup and fails closed on a bad
+  plugin (same pattern as `geo_db`). New metrics
+  `gsp_sniffer_calls_total{name,result}` / `gsp_sniffer_call_seconds{name}`.
+  6 new tests in `sniffer_loader.rs`, including a hand-written WAT fixture
+  (via the `wat` dev-dep — no `wasm32-unknown-unknown` toolchain needed) that
+  proves the epoch deadline actually traps an infinite-loop plugin instead of
+  hanging. `make check` green (gsp: 11 tests now).
+- **Next**: phase 9 slices 4–7. Per the locked plan in `docs/08` Phase 9:
+  slice 4 is reload rescanning `dir` (added modules load, removed drop,
+  changed-hash recompile — swapped like the snapshot); slice 5 is the
+  first-party plugin crates (`a2s`, `minecraft`, `regex-firstbytes`) under
+  `crates/plugins/` + a `gsp-sniffer-abi` guest helper crate (the write side
+  of the ABI slice 3 defined), built via `make plugins` to
   `wasm32-unknown-unknown`; slice 6 is a WASM-boundary latency bench vs. NFR
-  N1 + a `docs/07` sandbox-guarantees section; slice 7 is an end-to-end test
-  through the real loader. `wasmtime` is a binary-only dep (like `reqwest`) —
-  `gsp-core` still has no sandboxing dependency, only the `Sniffer` trait /
-  `Sniffers` registry. Per-source cap LRU eviction, `GET /sessions`, and a k8s
-  watch informer are separate polish items. Deferred: `GET /sessions`
-  (per-session registry); resolver `sticky_key`.
+  N1 (real numbers for the per-call instantiate cost, with the `InstancePre`
+  / warm-instance fallbacks on standby if it misses) + a `docs/07`
+  sandbox-guarantees section; slice 7 is an end-to-end test through the real
+  loader with a compiled (not hand-WAT) fixture. Per-source cap LRU eviction,
+  `GET /sessions`, and a k8s watch informer are separate polish items.
+  Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`.
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip
@@ -398,8 +412,13 @@ output alone; check the exit code or scroll to the top of the log.
   path, or another input to the health flag). New ADRs 4a / 13 / 14 / 15 in
   `docs/09`; milestone cuts v1.3 (phase 9–10) and v2.0 (phase 11–12) added to
   `docs/08`.
-- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~142 tests). Needs
-  `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`).
+- **Build/verify**: `make check` (fmt + clippy `-D warnings` + ~150 tests). Needs
+  `protoc` on `PATH` (gRPC codegen in `crates/gsp/build.rs`). `wasmtime`
+  (phase 9 slice 3) is a normal `cargo` dependency — it does not need the
+  `wasm32-unknown-unknown` rustc target; that target is only needed later
+  (phase 9 slice 5) to *build* first-party plugins, not to run the loader or
+  its tests (which use the `wat` crate to assemble WASM bytes from inline text
+  at test time).
 - **Infra**: git repo, remote `github.com/Wueschli/gameserver-proxy`, branch `main`.
   `git push` works again (through slice 7); `origin/main` is current. The HTTPS
   credential helper still logs a harmless "nonexistent Windows path" warning
@@ -617,10 +636,10 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
-| Sniffers | **designed in `docs/`, plugin loader is phase 9.** |
+| Sniffers | Loader **done** (phase 9 slice 3): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds. `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugin crates are slice 5. |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
 | External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
-| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
+| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver`, `wasmtime`, `sha2` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
 
 ---
 
@@ -756,6 +775,20 @@ does one `fetch()` (DNS SRV query / Consul or k8s HTTP GET), and on a change
 snapshot rebuild reads `Discovery::get` (one `Mutex` + `Vec` clone) per pool
 with a `source`. **Zero data-path cost** — the discovered set only affects a
 pool's backend `Vec` at rebuild time, exactly like the backend overlay.
+
+**Sniffer plugins** (phase 9 slice 3, `WasmSniffer`): zero cost on any
+listener without a `sniffer:` route (the registry lookup was already there
+since slice 1 and costs one `HashMap::get`). On a listener that has one, each
+call now does one `Store::new` + `Instance::new` (fresh per call — no state
+carried between connections) + a `memory.write` of the peeked bytes + one
+guest function call + a `memory.data` read-back and decode — all synchronous,
+on the same spawned per-conn task (TCP) / `open_session` (UDP) that already
+pays for the peek, never on the accept loop. Bounded by
+`settings.sniffers.call_timeout_ms` (epoch interruption traps a runaway call)
+and `max_memory_bytes`. Not yet benchmarked against NFR N1 — that's slice 6;
+if the per-call instantiate cost misses it, the documented fallback order is
+`InstancePre` + a pooling allocator, then one warm instance per worker reset
+between calls.
 
 **Connection draining** (`ConnTracker`): one `watch::Sender::send_modify` (a
 brief internal lock, no `.await`) on connection/session open and again on close —

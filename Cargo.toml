@@ -44,6 +44,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 notify = "6"
 hickory-resolver = "0.24"
+wasmtime = { version = "48", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+] }
+wat = "1"
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

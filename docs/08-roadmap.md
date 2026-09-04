@@ -271,14 +271,34 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   lowercase). `config.example.yaml` + `docs/05` (schema block, a validation
   bullet, and a reload-semantics row — restart-only until slice 4's rescan).
   Config-only: nothing reads `Config::sniffers` yet (that's slice 3).
-- **Slice 3**: `WasmSniffer` in `gsp` — shared `wasmtime::Engine` (epoch on) +
-  the epoch-ticker thread; per-call `Store` with `StoreLimits`; ABI marshalling;
-  `RouteHint` decode. `build_sniffers(&Config)` scans `dir`, verifies `sha256`
-  pins. Wire into `Runtime::start_with_sniffers(...)`. Metrics:
-  `gsp_sniffer_calls_total{name,result=ok|unrecognised|timeout|trap|bad_output}`,
-  `gsp_sniffer_call_seconds` (histogram). Latency-ledger entry: one
-  instantiate + one call per connection, only on listeners with a `sniffer:`
-  route (already gated by `peek_len`).
+- ✅ **Slice 3**: `WasmSniffer` in `gsp` (`crates/gsp/src/sniffer_loader.rs`) —
+  a shared `wasmtime::Engine` (epoch interruption on) + one epoch-ticker thread
+  per `build_sniffers` call (`engine.increment_epoch()` every
+  `call_timeout_ms`); a fresh `Store<StoreState>` per call with a `StoreLimits`
+  memory cap (`max_memory_bytes`) and a one-tick epoch deadline. ABI: guest
+  exports `memory`, `alloc(len) -> ptr`, `sniff(ptr,len) -> packed(ptr,len)|0`;
+  host writes the input via `alloc`+`memory.write`, calls `sniff`, and decodes
+  a compact `RouteHint` encoding (flags byte + length-prefixed UTF-8 strings)
+  from the returned region — any out-of-bounds pointer/length or malformed
+  encoding is `bad_output`, never a panic. `Sniffer::name` changed
+  `&'static str` → `&str` (a WASM plugin's name comes from its file stem, not
+  a compiled-in constant). `build_sniffers(&SniffersConfig)` scans `dir` for
+  `*.wasm`, verifies each against `modules[].sha256` when pins are configured
+  (`sha2` dep), and returns a `gsp_core::sniff::Sniffers` registry; `main.rs`
+  calls it for both `--check` and startup (fails closed on a bad plugin dir,
+  same as `geo_db`) and passes the result to `Runtime::start_with_discovery`.
+  Metrics `gsp_sniffer_calls_total{name,result}` /
+  `gsp_sniffer_call_seconds{name}` (`metrics_defs.rs` + `docs/06`). Tests
+  (`crates/gsp/src/sniffer_loader.rs`, 6): the `RouteHint` decoder's happy path
+  + truncated/bad-UTF-8 rejection, an end-to-end call against a hand-written
+  WAT fixture (no `wasm32-unknown-unknown` toolchain needed — the `wat` crate
+  parses WAT text to bytes at test time, dev-dependency only), an
+  infinite-loop plugin proving the epoch deadline actually traps instead of
+  hanging the call, `build_sniffers` loading from a scratch dir, and
+  `sha256` pin enforcement (wrong pin rejected, right pin loads). Latency-ledger
+  entry still owed to slice 6's bench (per-call instantiate cost vs. NFR N1) —
+  today's cost is: one `Store`/`Instance` per call, only on listeners with a
+  `sniffer:` route (already gated by `peek_len`), never on the accept loop.
 - **Slice 4**: reload rescans `dir` — added modules load, removed drop, changed
   (hash) recompile; the registry is swapped like the snapshot.
 - **Slice 5**: first-party plugin crates under `crates/plugins/{a2s,minecraft,

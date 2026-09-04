@@ -8,6 +8,7 @@ mod admin;
 mod discovery;
 mod reload;
 mod resolver;
+mod sniffer_loader;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,15 +61,28 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    // A configured sniffer plugin dir must load cleanly too (phase 9).
+    let sniffers = match &cfg.sniffers {
+        Some(sc) => Arc::new(
+            sniffer_loader::build_sniffers(sc)
+                .map_err(|e| anyhow::anyhow!("settings.sniffers: {e:#}"))?,
+        ),
+        None => Arc::new(gsp_core::sniff::Sniffers::default()),
+    };
+
     if args.check {
         println!(
-            "config OK: {} listener(s), {} pool(s){}",
+            "config OK: {} listener(s), {} pool(s){}{}",
             cfg.listeners.len(),
             cfg.pools.len(),
             if geo_db.is_some() {
                 ", geo_db loaded"
             } else {
                 ""
+            },
+            match &cfg.sniffers {
+                Some(sc) => format!(", sniffers loaded from {}", sc.dir),
+                None => String::new(),
             },
         );
         return Ok(());
@@ -77,13 +91,14 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(cfg, args.config, geo_db))
+        .block_on(run(cfg, args.config, geo_db, sniffers))
 }
 
 async fn run(
     cfg: gsp_config::Config,
     config_path: PathBuf,
     geo_db: Option<Arc<gsp_core::GeoDb>>,
+    sniffers: Arc<gsp_core::sniff::Sniffers>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
@@ -122,7 +137,6 @@ async fn run(
 
     let snapshot: Arc<Snapshot> =
         Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
-    let sniffers = Arc::new(gsp_core::sniff::Sniffers::default());
     let runtime = Runtime::start_with_discovery(
         snapshot,
         resolvers,
