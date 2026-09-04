@@ -332,11 +332,34 @@ further signals that land during it is the fix; tested directly (a 5-push
 burst asserted to collapse into exactly one resend, with a second check that
 nothing extra follows).
 
-**Next**: 11b–11f — the `gsp-ui` crate itself (session login, proxying to
-both controller and aggregator, the WebSocket bridge to 11a) and then the
-actual React/Vite/TS frontend. Then slice 12 (integration tests spinning up
-N `gsp` + controller + aggregator + `gsp-ui` together) and slice 13 (docs
-polish: `docs/06`, `README.md` status block, `docs/08` status legend).
+**Slice 11b done**: new crate `crates/gsp-ui` (lib `gsp_ui` + bin `gsp-ui`),
+no `gsp-core`/`gsp-config` dependency. `session::SessionStore` (in-memory,
+random 256-bit hex ids via `rand`, `HashSet<String>` — new workspace dep
+`rand = "0.8"`). `api.rs`: `POST /ui/login` (`--ui-password`, `None` = open),
+`POST /ui/logout`, `GET /ui/session` (gated). `auth.rs`'s `require_session`
+mirrors the controller's/aggregator's `require_bearer` shape but checks a
+session cookie, never a bearer token — the browser is never handed one.
+Cookie handling is hand-rolled (parse `Cookie` header, build `Set-Cookie`
+manually) rather than pulling in a cookie crate for one cookie, matching
+this codebase's existing preference for hand-rolling simple well-understood
+formats. One real mistake caught before committing: the first draft of the
+router's test helper applied `require_session` to *every* route including
+`/ui/login` itself — circular (you can't gain a session at a route that
+requires one). Fixed by moving the gate/ungated split into `api::router`
+itself (mirrors `gsp-controller`'s router shape, not `gsp-aggregator::
+fanout`'s stateless-until-merged one, since here the split is per-route
+within one module, not composed from a separate module). 9 new tests.
+Verified live end-to-end over real HTTP through the whole cycle:
+unauthenticated → `401`, wrong password → `401`, right password → a cookie
+that unlocked the gated route, logout → `401` again.
+
+**Next**: 11c–11f — `gsp-ui` proxying reads + fan-out verbs to
+`gsp-aggregator` (11c), the browser-facing WebSocket fed by subscribing to
+the aggregator's `/fleet/subscribe` (11d), proxying the controller's config
+API too (11e), then the actual React/Vite/TS frontend (11f). Then slice 12
+(integration tests spinning up N `gsp` + controller + aggregator + `gsp-ui`
+together) and slice 13 (docs polish: `docs/06`, `README.md` status block,
+`docs/08` status legend).
 
 ### Known follow-ups (none blocking)
 

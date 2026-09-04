@@ -77,8 +77,14 @@ crates/
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
     auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
   gsp-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no gsp-core/gsp-config dependency, stays decoupled from the data-plane crates
-    ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts)
-    api.rs                  POST /ingest
+    ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts, self-reported `admin_url`)
+    api.rs                  POST /ingest, GET /fleet/pools|sessions|healthz|subscribe (SSE)
+    fanout.rs               intent-verb fan-out to instance admin APIs — targeted (drain/undrain) + broadcast (backend add/patch/delete, route-hint)
+    auth.rs                 optional bearer-token gate (`--auth-token`) + `--instance-token` presented out to instances
+  gsp-ui/                    binary — the admin GUI's BFF (phase 10+11, docs/10 "The admin GUI"); dedicated process, not hosted in the controller or aggregator; holds neither's authority, no gsp-core/gsp-config dependency
+    session.rs              `SessionStore` — in-memory random session ids (ephemeral, like the aggregator's store)
+    api.rs                  POST /ui/login|logout, GET /ui/session
+    auth.rs                 session-cookie gate (`require_session`) — distinct from the controller's/aggregator's bearer-token gates; the browser never holds a bearer token
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```

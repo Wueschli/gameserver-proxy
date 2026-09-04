@@ -531,13 +531,20 @@ token, is ever exposed to a human directly.
      "rebuild now," same as any other signal. 3 new tests (immediate initial
      send, resend-after-debounce, a 5-push burst collapsing into exactly one
      resend); verified live over real HTTP against a real `gsp` push loop.
-11b. New crate `gsp-ui` (lib + bin, no `gsp-core`/`gsp-config` dependency —
+11b. ✅ New crate `gsp-ui` (lib + bin, no `gsp-core`/`gsp-config` dependency —
      stays as decoupled as `gsp-aggregator` is). `--ui-password`:
-     `POST /ui/login {password}` issues a random session id (in-memory
-     store — a restart just logs everyone out, the same "ephemeral,
-     nothing durable" posture the aggregator already has), returned as an
-     `HttpOnly` cookie; `POST /ui/logout` clears it; a `require_session`
-     middleware gates everything else this process serves.
+     `POST /ui/login {password}` issues a random 256-bit session id
+     (`session::SessionStore`, in-memory — a restart just logs everyone out,
+     the same "ephemeral, nothing durable" posture the aggregator already
+     has), returned as an `HttpOnly`, `SameSite=Lax` cookie (not yet marked
+     `Secure` — noted as a gap for a TLS-fronted deployment, not silently
+     ignored); `POST /ui/logout` clears it; `GET /ui/session` (gated by the
+     new `require_session` middleware) lets the frontend check login state
+     on load. `None` (`--ui-password` omitted) leaves the UI open, consistent
+     with every other optional-auth surface in this fleet. 9 new tests;
+     verified live end-to-end over real HTTP through the whole cycle:
+     unauthenticated → `401`, wrong password → `401`, right password → a
+     cookie that unlocks the gated route, logout → `401` again.
 11c. `gsp-ui` proxies reads + slice-9 operational verbs to `gsp-aggregator`
      (`--aggregator-url`/`--aggregator-token`) — translating the browser's
      session cookie into the aggregator's bearer token server-side. This is

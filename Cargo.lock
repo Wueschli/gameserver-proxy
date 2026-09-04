@@ -1000,6 +1000,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsp-ui"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "clap",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
