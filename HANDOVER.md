@@ -549,6 +549,49 @@ output alone; check the exit code or scroll to the top of the log.
   (10–12, the distributed control plane — design only, nothing built yet;
   see `docs/10-distributed-control-plane.md`) or one of the polish items
   above, per what the user wants next.
+- **Post-phase-9 tooling: `gsp-bench` concurrency ramp (not tied to a roadmap
+  phase)**. Prompted by a direct question about whether the proxy had ever
+  been load-tested under real concurrency — it hadn't; `latency` mode runs
+  client+proxy+backend in one process/runtime, which structurally can't
+  exercise accept-queue backpressure, fd/allocator behaviour, or give an
+  honest RSS/fd reading for the proxy alone. Added a second `gsp-bench` mode,
+  `concurrency` (`crates/gsp-bench/src/concurrency.rs`, shared helpers moved
+  to a new `common.rs`): builds the real `gsp` binary (`cargo build --release
+  -p gsp`), spawns it as a genuine separate OS process against a generated
+  config, and ramps a real client-held connection count through `--steps`
+  (TCP and/or UDP), sampling the proxy child's own RSS/open-fd count
+  (`/proc/<pid>/...`, meaningful now that it's not shared with the harness's
+  own sockets) and added-latency percentiles at each step.
+  **Deliberately scoped down from the full N4/N5 targets** (see the earlier
+  conversation): reaching 500k connections needs multiple client source
+  addresses (one client process is capped by its ephemeral-port range —
+  `ip_local_port_range`, ~28k on this box) and would produce a number that
+  *looks* like NFR validation without being one — still loopback, still one
+  container. Verified working at **20,000 concurrent real TCP connections**
+  and **5,000 concurrent UDP sessions** through the real proxy process on
+  this box (RSS ~426 MiB / 40k fds at 20k TCP conns, ~21 KiB/conn; added p50
+  stayed 5–15 µs throughout the ramp, no NFR N1/N2 degradation under load).
+  **A real bug this surfaced and fixed**: the in-process echo backend used a
+  plain `TcpListener::bind`, which gets the OS default `listen()` backlog
+  (128) — once the ramp burst hundreds of new proxy→backend connects at once,
+  the *backend's* accept queue (not the proxy) became the bottleneck, timing
+  out the proxy's 300 ms `connect_timeout_ms` and flapping the backend
+  passively unhealthy (visible as `backend health changed (passive)
+  healthy=false` / `no healthy backend in pool p` in the proxy's own logs,
+  found by temporarily un-suppressing the child's stdio). Fixed by binding
+  the backend echo listener via `socket2` with an explicit backlog of 4096,
+  matching what `gsp-core`'s own `bind_reuseport_tcp` already does for real
+  listeners — new `socket2` dep for `gsp-bench` (already a workspace dep via
+  `gsp-core`). Also fixed a client-side accounting gap: the original
+  `established` counter only recorded "connect to the proxy succeeded",
+  not "still alive" — a held TCP connection now `select!`s on the stop
+  signal vs. a read (which can only fire on peer-close for a connection we
+  never write to), decrementing `established` / incrementing `failed` on an
+  unexpected death, so the reported count is a live count, not a
+  once-ever-connected count. `crates/gsp-bench/README.md` documents both
+  fixes and the scope caveats. `docs/06` capacity-planning section and this
+  entry are the only doc touches — this isn't a roadmap phase, just a direct
+  answer to "can we simulate load without dedicated hardware".
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip
@@ -836,7 +879,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Parser fuzzing (`crates/gsp-config/fuzz/`, `make fuzz`, CI job) | **done** (phase 7 slice 8) |
 | Per-source concurrent connection/session cap (`per_source`) | **done** (phase 7 slice 9) |
 | NFR N1/N2 latency harness (`crates/gsp-bench`, `make bench`) | **done** (phase 7 slice 10) |
-| NFR N3/N4/N5/N9 (aggregate throughput, 500k/1M, HA) | need dedicated hardware + a real load generator |
+| NFR N1/N2-under-load, real separate-process concurrency ramp (`gsp-bench --mode concurrency`) | **done** (post-phase-9; up to ~20k TCP / ~5k UDP verified on this box) |
+| NFR N3/N4/N5/N9 (aggregate throughput, full 500k/1M, HA) | need dedicated hardware, multiple hosts + a real load generator |
 | Per-source cap: LRU eviction of idle sessions under pressure (refuse-when-full now) | polish |
 | `panic = "abort"` in the release profile — fine, but be aware unwinding is off | — |
 

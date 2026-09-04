@@ -1,31 +1,39 @@
 //! Load / latency harness for the NFR targets in `docs/01-requirements.md`.
 //!
-//! What it measures on a single host (loopback):
+//! Two modes:
 //!
-//! - **N1 / N2** — *added* request/response latency the proxy introduces:
-//!   p50 < 0.5 ms, p99 < 2 ms. Measured as `proxy_rtt − direct_rtt` over many
-//!   sequential round-trips on one connection, optionally under load from N
-//!   extra busy connections.
-//! - **throughput** (informational) — single-stream bidirectional MB/s, direct
-//!   vs. through the proxy. Not NFR N3 (which is a ≥ 20 Gbit/s aggregate on real
-//!   NICs; use `tcpkali` / `wrk2` on dedicated hosts for that).
-//! - **idle memory** (informational, with `--connections ≥ 1000`) — this
-//!   process's RSS growth per held-open idle proxy connection, a loose proxy for
-//!   NFR N8.
+//! - **`latency`** (default) — single-host, *in-process* harness (client,
+//!   proxy and backend all share this process's tokio runtime). Measures
+//!   **N1 / N2** — *added* request/response latency the proxy introduces:
+//!   p50 < 0.5 ms, p99 < 2 ms — as `proxy_rtt − direct_rtt` over many
+//!   sequential round-trips, optionally under load from N extra busy
+//!   connections. Also reports single-stream throughput (informational, not
+//!   N3) and idle-RSS-per-connection (informational, a loose proxy for N8).
+//! - **`concurrency`** — a real, *separate-process* proxy (the actual `gsp`
+//!   binary, built `--release` and spawned as a child process) driven by a
+//!   ramp of increasingly many concurrently-held connections, reporting the
+//!   proxy child's own RSS / open-fd count and the added-latency percentiles
+//!   of a probe connection at each step. See `concurrency.rs` for why this
+//!   exists and what it does and doesn't validate.
 //!
-//! NFR N3 (throughput), N4/N5 (500k conns / 1M sessions) and N9 (HA) need
-//! hardware and a real load generator and are out of scope here — see
-//! `docs/06-operations-observability.md`.
+//! Neither mode is NFR N3 (≥ 20 Gbit/s aggregate on real NICs — loopback
+//! bandwidth exceeds this, so a local "pass" would be meaningless) or N9
+//! (HA — needs real hosts/network). See `docs/06-operations-observability.md`
+//! and this crate's `README.md`.
+
+mod common;
+mod concurrency;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
+use common::{free_addr, report, rss_kib, spawn_tcp_echo, spawn_udp_echo, tcp_rtt, udp_rtt, Stats};
 use gsp_core::{Runtime, Snapshot};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -35,149 +43,53 @@ enum Proto {
     Both,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    /// In-process added-latency harness (NFR N1/N2). Default.
+    Latency,
+    /// Separate-process concurrency ramp. See `concurrency.rs`.
+    Concurrency,
+}
+
 #[derive(Parser)]
-#[command(about = "gsp latency / load harness (NFR N1/N2)")]
+#[command(about = "gsp latency / load harness (NFR N1/N2, + a concurrency ramp)")]
 struct Args {
+    /// Which harness to run.
+    #[arg(long, value_enum, default_value = "latency")]
+    mode: Mode,
     /// Which transport(s) to measure.
     #[arg(long, value_enum, default_value = "both")]
     protocol: Proto,
-    /// Timed round-trips per measurement.
+    /// Timed round-trips per measurement (`latency` mode; also the probe
+    /// sample count per step in `concurrency` mode).
     #[arg(long, default_value_t = 20_000)]
     iterations: usize,
     /// Request/response payload size in bytes.
     #[arg(long, default_value_t = 64)]
     payload: usize,
-    /// Extra busy connections held open during the measurement (adds runtime
-    /// contention). The timed connection is separate.
+    /// `latency` mode: extra busy connections held open during the
+    /// measurement (adds runtime contention). The timed connection is
+    /// separate.
     #[arg(long, default_value_t = 0)]
     connections: usize,
     /// Worker threads for the proxy runtime (0 = one per core).
     #[arg(long, default_value_t = 1)]
     workers: usize,
+    /// `concurrency` mode: comma-separated connection-count steps to ramp
+    /// through (each step's connections stay open through the later steps).
+    /// Capped by the loopback ephemeral-port range (~28k on this host,
+    /// `cat /proc/sys/net/ipv4/ip_local_port_range`) — see `concurrency.rs`.
+    #[arg(long, default_value = "1000,5000,10000,20000")]
+    steps: String,
     /// Exit non-zero if an NFR target is missed.
     #[arg(long)]
     strict: bool,
 }
 
-struct Stats {
-    n: usize,
-    mean: Duration,
-    p50: Duration,
-    p90: Duration,
-    p99: Duration,
-    p999: Duration,
-    max: Duration,
-}
-
-impl Stats {
-    fn of(mut v: Vec<Duration>) -> Self {
-        v.sort_unstable();
-        let n = v.len();
-        let at = |q: f64| v[((n as f64 * q) as usize).min(n - 1)];
-        let sum: Duration = v.iter().sum();
-        Self {
-            n,
-            mean: sum / n as u32,
-            p50: at(0.50),
-            p90: at(0.90),
-            p99: at(0.99),
-            p999: at(0.999),
-            max: v[n - 1],
-        }
-    }
-}
-
-fn us(d: Duration) -> f64 {
-    d.as_secs_f64() * 1e6
-}
-
-fn free_addr() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-}
-
-// --------------------------------------------------------------------------
-// Backends.
-// --------------------------------------------------------------------------
-
-async fn spawn_tcp_echo() -> SocketAddr {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            let _ = s.set_nodelay(true);
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536];
-                loop {
-                    match s.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if s.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    });
-    addr
-}
-
-async fn spawn_udp_echo() -> SocketAddr {
-    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = s.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
-        while let Ok((n, peer)) = s.recv_from(&mut buf).await {
-            let _ = s.send_to(&buf[..n], peer).await;
-        }
-    });
-    addr
-}
-
-// --------------------------------------------------------------------------
-// Round-trip loops.
-// --------------------------------------------------------------------------
-
-async fn tcp_rtt(target: SocketAddr, iters: usize, payload: usize) -> Result<Vec<Duration>> {
-    let mut s = TcpStream::connect(target).await?;
-    s.set_nodelay(true)?;
-    let tx = vec![0xA5u8; payload];
-    let mut rx = vec![0u8; payload];
-    for _ in 0..1_000 {
-        s.write_all(&tx).await?;
-        s.read_exact(&mut rx).await?;
-    }
-    let mut out = Vec::with_capacity(iters);
-    for _ in 0..iters {
-        let t = Instant::now();
-        s.write_all(&tx).await?;
-        s.read_exact(&mut rx).await?;
-        out.push(t.elapsed());
-    }
-    Ok(out)
-}
-
-async fn udp_rtt(target: SocketAddr, iters: usize, payload: usize) -> Result<Vec<Duration>> {
-    let s = UdpSocket::bind("127.0.0.1:0").await?;
-    s.connect(target).await?;
-    let tx = vec![0xA5u8; payload];
-    let mut rx = vec![0u8; payload.max(1)];
-    for _ in 0..1_000 {
-        s.send(&tx).await?;
-        let _ = s.recv(&mut rx).await?;
-    }
-    let mut out = Vec::with_capacity(iters);
-    for _ in 0..iters {
-        let t = Instant::now();
-        s.send(&tx).await?;
-        let _ = s.recv(&mut rx).await?;
-        out.push(t.elapsed());
-    }
-    Ok(out)
+fn parse_steps(s: &str) -> Result<Vec<usize>> {
+    s.split(',')
+        .map(|p| p.trim().parse::<usize>().map_err(Into::into))
+        .collect()
 }
 
 /// Hold `n` connections open, each looping request/response, until `stop`.
@@ -196,7 +108,7 @@ async fn tcp_load(target: SocketAddr, n: usize, stop: Arc<tokio::sync::Notify>) 
                     _ = stop.notified() => break,
                     r = async {
                         s.write_all(&tx).await?;
-                        s.read_exact(&mut rx).await
+                        tokio::io::AsyncReadExt::read_exact(&mut s, &mut rx).await
                     } => { if r.is_err() { break; } }
                 }
             }
@@ -205,12 +117,13 @@ async fn tcp_load(target: SocketAddr, n: usize, stop: Arc<tokio::sync::Notify>) 
 }
 
 async fn throughput(target: SocketAddr, mib: usize) -> Result<f64> {
+    use tokio::io::AsyncReadExt;
     let mut s = TcpStream::connect(target).await?;
     s.set_nodelay(true)?;
     let total = mib * 1024 * 1024;
     let chunk = vec![0u8; 256 * 1024];
     let mut rx = vec![0u8; 256 * 1024];
-    let t = Instant::now();
+    let t = std::time::Instant::now();
     let (mut sent, mut recv) = (0usize, 0usize);
     while recv < total {
         if sent < total {
@@ -228,43 +141,7 @@ async fn throughput(target: SocketAddr, mib: usize) -> Result<f64> {
     Ok((total as f64 * 2.0) / secs / (1024.0 * 1024.0)) // bidirectional MiB/s
 }
 
-// --------------------------------------------------------------------------
-
-fn rss_kib() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    s.lines()
-        .find_map(|l| l.strip_prefix("VmRSS:"))
-        .and_then(|v| v.split_whitespace().next())
-        .and_then(|n| n.parse().ok())
-}
-
-fn report(label: &str, direct: &Stats, proxy: &Stats) -> (f64, f64) {
-    let add_p50 = us(proxy.p50).max(0.0) - us(direct.p50);
-    let add_p99 = us(proxy.p99) - us(direct.p99);
-    println!("\n{label}  ({} samples)", proxy.n);
-    println!(
-        "  {:<8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "", "mean", "p50", "p90", "p99", "p99.9", "max"
-    );
-    let row = |name: &str, s: &Stats| {
-        println!(
-            "  {:<8} {:>8.1}µ {:>8.1}µ {:>8.1}µ {:>8.1}µ {:>8.1}µ {:>8.1}µ",
-            name,
-            us(s.mean),
-            us(s.p50),
-            us(s.p90),
-            us(s.p99),
-            us(s.p999),
-            us(s.max)
-        );
-    };
-    row("direct", direct);
-    row("proxy", proxy);
-    println!("  added    p50 {add_p50:+.1}µs   p99 {add_p99:+.1}µs");
-    (add_p50, add_p99)
-}
-
-async fn run(args: &Args) -> Result<bool> {
+async fn run_latency(args: &Args) -> Result<bool> {
     // N1 = added p50 < 500µs, N2 = added p99 < 2000µs.
     const N1_US: f64 = 500.0;
     const N2_US: f64 = 2000.0;
@@ -356,12 +233,32 @@ async fn run(args: &Args) -> Result<bool> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let steps = parse_steps(&args.steps)?;
     let ok = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(&args))?;
+        .block_on(async {
+            match args.mode {
+                Mode::Latency => run_latency(&args).await,
+                Mode::Concurrency => concurrency::run(&args_to_concurrency(&args, steps)).await,
+            }
+        })?;
     if args.strict && !ok {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn args_to_concurrency(args: &Args, steps: Vec<usize>) -> concurrency::Args {
+    concurrency::Args {
+        protocol: match args.protocol {
+            Proto::Tcp => concurrency::Proto::Tcp,
+            Proto::Udp => concurrency::Proto::Udp,
+            Proto::Both => concurrency::Proto::Both,
+        },
+        steps,
+        probe_iterations: args.iterations.clamp(200, 2_000),
+        payload: args.payload,
+        workers: args.workers,
+    }
 }

@@ -892,6 +892,7 @@ dependencies = [
  "clap",
  "gsp-config",
  "gsp-core",
+ "socket2 0.6.5",
  "tokio",
 ]
 

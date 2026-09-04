@@ -259,11 +259,21 @@ view + web UI.
 
 ## Capacity planning / alerts
 
-- **Latency budget (NFR N1/N2):** `make bench` (`crates/gsp-bench`) measures the
-  proxy's *added* p50/p99 request→response latency on a single host and reports
-  `PASS`/`MISS` vs. `< 0.5 ms` / `< 2 ms`. Run it before/after a change to catch
-  per-connection overhead regressions. Aggregate throughput (N3), 500k conns /
-  1M sessions (N4/N5) and HA (N9) need dedicated hardware and a real load
+- **Latency budget (NFR N1/N2):** `make bench` (`crates/gsp-bench`, `latency`
+  mode) measures the proxy's *added* p50/p99 request→response latency on a
+  single host and reports `PASS`/`MISS` vs. `< 0.5 ms` / `< 2 ms`. Run it
+  before/after a change to catch per-connection overhead regressions.
+- **Concurrency ramp (partial N1/N2-under-load, informational for N4/N5):**
+  `cargo run --release -p gsp-bench -- --mode concurrency` spawns the real
+  `gsp` binary as a separate process and ramps a real held-open connection
+  count through it (`--steps`), reporting the proxy child's own RSS/fd count
+  and added-latency percentiles at each step — see
+  `crates/gsp-bench/README.md`. Reaches tens of thousands of connections on
+  one host (capped by the client's ephemeral-port range), not the full
+  500k/1M N4/N5 targets, and says nothing about N3 (loopback bandwidth
+  exceeds the 20 Gbit/s target, so it can't be validated locally) or N9 (real
+  HA). Aggregate throughput (N3), the full 500k conns / 1M sessions (N4/N5)
+  and HA (N9) still need dedicated hardware, multiple hosts, and a real load
   generator (`tcpkali`, `wrk2`, `iperf3`).
 - Alert: `gsp_worker_busy_ratio > 0.8` (5 min) → scale out.
 - Alert: `gsp_pool_backends{state="healthy"} < N_min` per pool.
