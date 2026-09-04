@@ -864,7 +864,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | **Phase 6 — done**: PROXY protocol v1/v2 (TCP) + v2-udp (first datagram); TPROXY transparent mode (TCP + UDP, v4 + v6) | **done** |
 | UDP transparent `IPV6_TRANSPARENT` on a musl / non-glibc target, and `recvmmsg` batching for the transparent recv path | perf / portability pass |
 | Resolver `sticky_key` — resolver-chosen affinity key; deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity; needs a design for how a later request recovers the key) | later |
-| `target` connections use fixed 300 ms connect / 90 s idle timeouts (`proxy::TARGET_*`) — no pool to read them from; a per-resolver knob could come later | polish |
+| `target` connections' connect / idle timeouts | **done** (data-plane completion, item 6 — `resolvers[].target_connect_timeout_ms` / `target_idle_timeout_sec`, defaults 300 ms / 90 s = `proxy::TARGET_*`, carried on `Routed::Target` via `Resolver::target_{connect,idle}_timeout`) |
 | Build now needs `protoc` (gRPC codegen in `crates/gsp/build.rs`); CI installs `protobuf-compiler` | — |
 | Resolver cache uses `std::sync::Mutex<LruCache>` — a brief lock on the routing path (not held across `.await`); like `Backend::observe`, deliberate | — |
 | Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
@@ -905,8 +905,8 @@ focused unit):
 
 1. ~~ClientHello fragmentation~~ — **done** (on `main`).
 2. ~~Item 3 — `RouteHint.reject` hard drop~~ — **done** (on `main`).
-3. **Item 6 — per-resolver `target` timeout knob.** ← *next.* Tiny config addition.
-4. **Item 5 — `weighted` balancer.** Self-contained.
+3. ~~Item 6 — per-resolver `target` timeout knob~~ — **done** (on `main`).
+4. **Item 5 — `weighted` balancer.** ← *next.* Self-contained.
 5. **Item 2 — per-plugin sniffer config**, as a deliberate two-slice unit:
    - **A2**: `settings.sniffers.modules[].config` schema + widen the guest ABI
      `sniff(in_ptr,in_len) → sniff(in_ptr,in_len,cfg_ptr,cfg_len)` +
@@ -920,8 +920,9 @@ focused unit):
    and a uniform signature (config always passed, empty slice when none) beats a
    permanent "call `configure` if the module exports it" branch and a two-class
    plugin model. Extra blast radius is mechanical and in-tree.
-6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** Larger; fold
-   the item 6 knob's config plumbing into it if not already shipped.
+6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** Larger — the
+   resolver-config plumbing item 6 added (`ResolverConfig` fields, `build_resolvers`)
+   is the shape a live reload has to re-run.
 
 Then list C polish, then list B (perf pass).
 
@@ -970,8 +971,13 @@ are cheaper than a fresh slice:
    the existing `validate → Snapshot::build → ArcSwap::store` path.
 5. **`weighted` balancer** — heterogeneous backend hardware is a normal case.
    (`first_available` can wait.)
-6. **Per-resolver `target` connect/idle timeout knob** (fixed 300 ms / 90 s
-   now) — cheap, natural to do alongside item 4.
+6. ~~**Per-resolver `target` connect/idle timeout knob**~~ — **DONE**:
+   `resolvers[].target_connect_timeout_ms` / `target_idle_timeout_sec` (defaults
+   300 ms / 90 s), carried on `Routed::Target` via new `Resolver` trait methods
+   (default = `proxy::TARGET_*`), forwarded by `CachedResolver`, set by
+   `HttpResolver` / `GrpcResolver`. Test:
+   `resolver::tests::resolver_target_carries_per_resolver_timeouts` +
+   `gsp_config::tests::parses_resolver_target_timeouts_and_rejects_zero`.
 
 **B. Dedicated performance pass (its own phase, before v1.x — the NFRs are the
 project's north star):**
@@ -1387,8 +1393,9 @@ skip the resolver).
 Target(SocketAddr) }`. A `Resolver` action with `res.target` set →
 `Routed::Target` (wins over `pool`). `proxy.rs` split: `connect_backend` +
 `pump` shared; `handle_tcp` (pool, keeps `BackendGuard::observe`) and
-`handle_tcp_target(stream, addr, TARGET_CONNECT_TIMEOUT, TARGET_IDLE_TIMEOUT)`
-(no guard). `listener_udp::open_session` builds `(backend, Option<BackendGuard>,
+`handle_tcp_target(stream, addr, connect_timeout, idle_timeout)` (no guard; the
+timeouts default to `TARGET_*` and are per-resolver configurable since the
+data-plane-completion item 6 slice). `listener_udp::open_session` builds `(backend, Option<BackendGuard>,
 idle_ms)` from the `Routed`; `Session._guard` is now `Option<BackendGuard>`;
 the sticky table is only written for pool sessions. `sticky_key` from the
 response is **not** consumed yet.

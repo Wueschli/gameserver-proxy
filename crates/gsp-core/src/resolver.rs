@@ -72,6 +72,16 @@ pub trait Resolver: Send + Sync {
     fn proxy_protocol(&self) -> ProxyProtocol {
         ProxyProtocol::None
     }
+    /// Connect / idle timeout for a `target` result (a pool-less connect, so
+    /// there is no pool to read `connect_timeout_ms` / `idle_timeout_sec`
+    /// from). Default to `TARGET_CONNECT_TIMEOUT` / `TARGET_IDLE_TIMEOUT`; the
+    /// transport clients override from `ResolverConfig`.
+    fn target_connect_timeout(&self) -> Duration {
+        crate::proxy::TARGET_CONNECT_TIMEOUT
+    }
+    fn target_idle_timeout(&self) -> Duration {
+        crate::proxy::TARGET_IDLE_TIMEOUT
+    }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError>;
 }
 
@@ -84,10 +94,13 @@ pub enum Routed {
     Pool(String),
     /// A pool-less connect to a fixed instance. `proxy_protocol` is the header
     /// form the choosing resolver configured (`ProxyProtocol::None` for a
-    /// push-hint or a direct-config target).
+    /// push-hint or a direct-config target); `connect_timeout` / `idle_timeout`
+    /// likewise come from the choosing resolver (or the `TARGET_*` defaults).
     Target {
         addr: SocketAddr,
         proxy_protocol: ProxyProtocol,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
     },
 }
 
@@ -135,6 +148,8 @@ pub async fn resolve_route(
                             Some(addr) => Routed::Target {
                                 addr,
                                 proxy_protocol: resolver.proxy_protocol(),
+                                connect_timeout: resolver.target_connect_timeout(),
+                                idle_timeout: resolver.target_idle_timeout(),
                             },
                             None => Routed::Pool(res.pool.unwrap()),
                         });
@@ -249,6 +264,12 @@ impl Resolver for CachedResolver {
     }
     fn proxy_protocol(&self) -> ProxyProtocol {
         self.inner.proxy_protocol()
+    }
+    fn target_connect_timeout(&self) -> Duration {
+        self.inner.target_connect_timeout()
+    }
+    fn target_idle_timeout(&self) -> Duration {
+        self.inner.target_idle_timeout()
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let name = self.inner.name().to_string();
@@ -431,6 +452,55 @@ listeners:
             Some(Routed::Target {
                 addr: "10.2.0.5:7777".parse().unwrap(),
                 proxy_protocol: ProxyProtocol::None,
+                connect_timeout: crate::proxy::TARGET_CONNECT_TIMEOUT,
+                idle_timeout: crate::proxy::TARGET_IDLE_TIMEOUT,
+            })
+        );
+    }
+
+    /// A resolver's per-`target` connect / idle timeouts ride onto the
+    /// `Routed::Target` (there is no pool to read them from).
+    #[tokio::test]
+    async fn resolver_target_carries_per_resolver_timeouts() {
+        struct SlowTarget;
+        #[async_trait]
+        impl Resolver for SlowTarget {
+            fn name(&self) -> &str {
+                "slow"
+            }
+            fn on_error(&self) -> OnError {
+                OnError::Reject
+            }
+            fn target_connect_timeout(&self) -> Duration {
+                Duration::from_millis(1500)
+            }
+            fn target_idle_timeout(&self) -> Duration {
+                Duration::from_secs(300)
+            }
+            async fn resolve(&self, _r: ResolveRequest) -> Result<Resolution, ResolveError> {
+                Ok(Resolution {
+                    target: Some("10.9.9.9:7777".parse().unwrap()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let lc = listener_with_resolver();
+        let mut resolvers = Resolvers::new();
+        resolvers.insert("mm".to_string(), Arc::new(SlowTarget) as Arc<dyn Resolver>);
+        let mctx = MatchContext {
+            src: "9.9.9.9:1".parse().unwrap(),
+            local: "1.1.1.1:7777".parse().unwrap(),
+            first_bytes: &[],
+            sniff: None,
+        };
+        assert_eq!(
+            resolve_route(&lc, &resolvers, &mctx, &[]).await,
+            Some(Routed::Target {
+                addr: "10.9.9.9:7777".parse().unwrap(),
+                proxy_protocol: ProxyProtocol::None,
+                connect_timeout: Duration::from_millis(1500),
+                idle_timeout: Duration::from_secs(300),
             })
         );
     }

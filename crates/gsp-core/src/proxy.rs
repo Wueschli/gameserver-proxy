@@ -14,7 +14,10 @@ use tokio::time::timeout;
 use crate::metrics_defs as m;
 use crate::pool::Pool;
 
-/// Connect / idle timeouts for a resolver `target` (no pool to read them from).
+/// Default connect / idle timeouts for a resolver `target` (no pool to read them
+/// from). Overridable per resolver via `resolvers[].target_connect_timeout_ms` /
+/// `target_idle_timeout_sec`; these are the fallback for a resolver that does not
+/// set them and for push-hint / direct-config targets.
 pub const TARGET_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const TARGET_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 

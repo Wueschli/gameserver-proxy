@@ -50,7 +50,8 @@
 >
 > **External resolver** (phase 4, slices 1–4): a top-level `resolvers:` list of
 > `{ name, type: http|grpc, endpoint, timeout_ms, on_error: reject|fallback_route|stale_ok,
-> proxy_protocol?, cache? }` and a route `action: { resolver: <name> }` (exactly
+> proxy_protocol?, target_connect_timeout_ms?, target_idle_timeout_sec?, cache? }`
+> and a route `action: { resolver: <name> }` (exactly
 > one of `pool` / `resolver` per action). The proxy `POST`s `{listener, src, dst,
 > sni?, first_bytes_b64, routing_key?}` and expects `{pool?, target?,
 > sticky_key?, ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
@@ -60,6 +61,9 @@
 > it from — so the backend still sees the real client IP; a resolver-chosen
 > *pool* uses that pool's own `proxy_protocol`. Same transport rule as pools:
 > v1/v2 need TCP listeners on that resolver's routes, v2-udp needs UDP.
+> `target_connect_timeout_ms` (default 300) / `target_idle_timeout_sec` (default
+> 90) are the connect / idle timeouts for a `target` connection or UDP session —
+> again, no pool to read them from; a resolver-chosen *pool* uses its own.
 > `fallback_route` continues the route list on failure; `reject` drops;
 > `stale_ok` serves the last (expired) cached answer if there is one, else
 > drops. Optional `cache: { key: [<part>, ...], positive_ttl_sec,
@@ -258,6 +262,8 @@ resolvers:
     endpoint: "https://matchmaker.internal:8443"
     timeout_ms: 40
     proxy_protocol: "none"     # none | v1 | v2 | v2-udp — header for a `target` result
+    target_connect_timeout_ms: 300  # connect / idle timeout for a `target` result
+    target_idle_timeout_sec: 90     #   (no pool to read them from)
     cache:
       key: ["first_bytes:0:16"]     # e.g. a session-token prefix
       positive_ttl_sec: 30
@@ -348,6 +354,8 @@ listeners:
   (otherwise a "no default" warning).
 - `proxy_protocol: v2-udp` only together with `protocol: udp` (for a pool, and
   for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
+- A resolver's `timeout_ms`, `target_connect_timeout_ms` and
+  `target_idle_timeout_sec` must all be `> 0`.
 - `transparent: true` (TCP or UDP) may not be combined with `prefix`.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with

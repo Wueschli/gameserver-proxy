@@ -66,6 +66,8 @@ pub struct HttpResolver {
     endpoint: String,
     on_error: OnError,
     proxy_protocol: ProxyProtocol,
+    target_connect_timeout: std::time::Duration,
+    target_idle_timeout: std::time::Duration,
     client: reqwest::Client,
 }
 
@@ -80,6 +82,8 @@ impl HttpResolver {
             endpoint: cfg.endpoint.clone(),
             on_error: cfg.on_error,
             proxy_protocol: cfg.proxy_protocol,
+            target_connect_timeout: cfg.target_connect_timeout,
+            target_idle_timeout: cfg.target_idle_timeout,
             client,
         })
     }
@@ -95,6 +99,12 @@ impl Resolver for HttpResolver {
     }
     fn proxy_protocol(&self) -> ProxyProtocol {
         self.proxy_protocol
+    }
+    fn target_connect_timeout(&self) -> std::time::Duration {
+        self.target_connect_timeout
+    }
+    fn target_idle_timeout(&self) -> std::time::Duration {
+        self.target_idle_timeout
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let body = WireRequest {
@@ -149,6 +159,8 @@ pub struct GrpcResolver {
     name: String,
     on_error: OnError,
     proxy_protocol: ProxyProtocol,
+    target_connect_timeout: std::time::Duration,
+    target_idle_timeout: std::time::Duration,
     channel: tonic::transport::Channel,
 }
 
@@ -162,6 +174,8 @@ impl GrpcResolver {
             name: cfg.name.clone(),
             on_error: cfg.on_error,
             proxy_protocol: cfg.proxy_protocol,
+            target_connect_timeout: cfg.target_connect_timeout,
+            target_idle_timeout: cfg.target_idle_timeout,
             channel,
         })
     }
@@ -181,6 +195,12 @@ impl Resolver for GrpcResolver {
     }
     fn proxy_protocol(&self) -> ProxyProtocol {
         self.proxy_protocol
+    }
+    fn target_connect_timeout(&self) -> std::time::Duration {
+        self.target_connect_timeout
+    }
+    fn target_idle_timeout(&self) -> std::time::Duration {
+        self.target_idle_timeout
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         let mut client = pb::resolver_client::ResolverClient::new(self.channel.clone());
@@ -297,6 +317,8 @@ mod tests {
             on_error: gsp_config::OnError::Reject,
             cache: None,
             proxy_protocol: gsp_config::ProxyProtocol::None,
+            target_connect_timeout: std::time::Duration::from_millis(300),
+            target_idle_timeout: std::time::Duration::from_secs(90),
         };
         let r = GrpcResolver::new(&rc).unwrap();
         assert_eq!(r.name(), "mm");

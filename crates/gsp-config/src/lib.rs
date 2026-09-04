@@ -439,6 +439,13 @@ struct RawResolver {
     /// resolver-chosen *pool* uses that pool's own `proxy_protocol`.
     #[serde(default)]
     proxy_protocol: ProxyProtocol,
+    /// Connect / idle timeout for a `target` result (a pool-less connect — no
+    /// pool to read `connect_timeout_ms` / `idle_timeout_sec` from). A
+    /// resolver-chosen *pool* uses that pool's own timeouts.
+    #[serde(default = "default_target_connect_timeout_ms")]
+    target_connect_timeout_ms: u64,
+    #[serde(default = "default_target_idle_timeout_sec")]
+    target_idle_timeout_sec: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +477,12 @@ fn default_resolver_type() -> String {
 }
 fn default_resolver_timeout_ms() -> u64 {
     40
+}
+fn default_target_connect_timeout_ms() -> u64 {
+    300
+}
+fn default_target_idle_timeout_sec() -> u64 {
+    90
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,6 +1161,11 @@ pub struct ResolverConfig {
     /// PROXY protocol header for a `target` result (pool-less connect). `None`
     /// for a resolver-chosen pool, which carries its own `proxy_protocol`.
     pub proxy_protocol: ProxyProtocol,
+    /// Connect / idle timeout for a `target` result (pool-less connect — no pool
+    /// to read `connect_timeout_ms` / `idle_timeout_sec` from). Default 300 ms /
+    /// 90 s.
+    pub target_connect_timeout: Duration,
+    pub target_idle_timeout: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -1682,6 +1700,12 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 r.name
             )));
         }
+        if r.target_connect_timeout_ms == 0 || r.target_idle_timeout_sec == 0 {
+            return Err(Invalid(format!(
+                "resolver {}: target_connect_timeout_ms and target_idle_timeout_sec must be > 0",
+                r.name
+            )));
+        }
         let cache = match r.cache {
             Some(c) if !c.key.is_empty() => {
                 let mut parts = Vec::with_capacity(c.key.len());
@@ -1717,6 +1741,8 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             on_error: r.on_error,
             cache,
             proxy_protocol: r.proxy_protocol,
+            target_connect_timeout: Duration::from_millis(r.target_connect_timeout_ms),
+            target_idle_timeout: Duration::from_secs(r.target_idle_timeout_sec),
         });
     }
 
@@ -3700,6 +3726,39 @@ listeners:
         ] {
             let yaml = format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n{bad}\n");
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn parses_resolver_target_timeouts_and_rejects_zero() {
+        let with_resolver = |extra: &str| {
+            format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nresolvers:\n  - {{ name: mm, endpoint: \"http://x\"{extra} }}\nlisteners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", pool: p }}\n"
+            )
+        };
+
+        // Defaults when omitted.
+        let cfg = parse_str(&with_resolver("")).unwrap();
+        assert_eq!(cfg.resolvers[0].target_connect_timeout.as_millis(), 300);
+        assert_eq!(cfg.resolvers[0].target_idle_timeout.as_secs(), 90);
+
+        // Explicit values parse.
+        let cfg = parse_str(&with_resolver(
+            ", target_connect_timeout_ms: 750, target_idle_timeout_sec: 20",
+        ))
+        .unwrap();
+        assert_eq!(cfg.resolvers[0].target_connect_timeout.as_millis(), 750);
+        assert_eq!(cfg.resolvers[0].target_idle_timeout.as_secs(), 20);
+
+        // Zero for either is rejected.
+        for bad in [
+            ", target_connect_timeout_ms: 0",
+            ", target_idle_timeout_sec: 0",
+        ] {
+            assert!(
+                parse_str(&with_resolver(bad)).is_err(),
+                "should reject: {bad}"
+            );
         }
     }
 

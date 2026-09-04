@@ -267,6 +267,8 @@ pub async fn run_tcp_listener(
                             Routed::Target {
                                 addr,
                                 proxy_protocol,
+                                connect_timeout,
+                                idle_timeout,
                             },
                             _,
                         ) => crate::proxy::handle_tcp_target(
@@ -274,8 +276,8 @@ pub async fn run_tcp_listener(
                             peer,
                             local,
                             *addr,
-                            crate::proxy::TARGET_CONNECT_TIMEOUT,
-                            crate::proxy::TARGET_IDLE_TIMEOUT,
+                            *connect_timeout,
+                            *idle_timeout,
                             tsrc,
                             *proxy_protocol,
                         )

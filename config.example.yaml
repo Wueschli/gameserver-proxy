@@ -120,6 +120,9 @@ resolvers:
                                    #   result (pool-less connect); a resolver-chosen
                                    #   pool uses that pool's own proxy_protocol.
                                    #   v1/v2 need a TCP listener, v2-udp a UDP one.
+    target_connect_timeout_ms: 300 # connect / idle timeout for a `target` result
+    target_idle_timeout_sec: 90    #   (no pool to read them from); these are the
+                                   #   defaults. A resolver-chosen pool uses its own.
     cache:                         # optional; omit for no caching
       key: ["src_ip", "first_bytes:0:16"]   # src_ip | src_ip_port | sni | routing_key | first_bytes:a:b
       positive_ttl_sec: 30         # a resolver response `ttl_sec` overrides this

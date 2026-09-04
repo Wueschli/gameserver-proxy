@@ -490,10 +490,13 @@ async fn open_session(
         Routed::Target {
             addr,
             proxy_protocol,
+            // no connect(2) handshake on a UDP upstream socket
+            connect_timeout: _,
+            idle_timeout,
         } => (
             addr,
             None,
-            crate::proxy::TARGET_IDLE_TIMEOUT.as_millis() as u64,
+            idle_timeout.as_millis() as u64,
             proxy_protocol,
             "(resolver target)".to_string(),
         ),
