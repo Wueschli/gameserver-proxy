@@ -869,6 +869,7 @@ dependencies = [
  "hickory-server",
  "metrics",
  "metrics-exporter-prometheus",
+ "nix",
  "notify",
  "prost",
  "reqwest",

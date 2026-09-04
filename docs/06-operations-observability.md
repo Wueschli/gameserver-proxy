@@ -77,6 +77,16 @@
 
 ### Proxy internals
 - `gsp_config_reload_total{result}` / `gsp_config_version` (gauge, timestamp)
+- `gsp_build_info{version,commit}` (gauge, always `1`) — set once at startup;
+  `commit` is a 12-char git SHA baked in at build time (`crates/gsp/build.rs`,
+  `"unknown"` if `.git` isn't available, e.g. a source tarball).
+- `gsp_fd_open` (gauge, no labels) — this process's open file descriptor count
+  (`/proc/self/fd` on Linux; absent elsewhere), sampled every 5 s by a small
+  background task (`crates/gsp/src/procinfo.rs`), independent of the
+  health-check sweep.
+- `gsp_fd_limit` (gauge, no labels) — this process's `RLIMIT_NOFILE` soft
+  limit (`getrlimit`, via `nix`), sampled once at startup (it doesn't change
+  at runtime).
 
 **Added RTT**: no built-in RTT SLO metric exists yet — `make bench`'s added
 p50/p99 (vs. NFR N1/N2) is the closest thing today, measured out-of-band, not
@@ -87,14 +97,6 @@ exported as a `/metrics` series. See "Planned / not yet built" below.
 Documented here as real future work, not implemented — none of these exist in
 `metrics_defs.rs` today, so don't expect them on `/metrics` yet:
 
-- **`gsp_build_info{version,commit}`** — worth building soon; cheap (one gauge
-  set once at startup from `CARGO_PKG_VERSION` + a build-time git SHA) and
-  needed to correlate a metric shift with a deploy.
-- **`gsp_fd_open` / `gsp_fd_limit`** — worth building soon; the sampling logic
-  already exists in `gsp-bench --mode concurrency` (external `/proc/<pid>/fd`
-  reads) and just needs moving in-process onto the existing health-check sweep.
-  Answers the failure mode this proxy is most exposed to (fd exhaustion under
-  a connection flood).
 - **`gsp_resolver_latency_seconds{resolver}`**, **`gsp_session_setup_seconds{listener,phase}`**,
   **`gsp_worker_busy_ratio{worker}`** — plausible finer-grained latency /
   saturation instrumentation, deferred until a real debugging need shows the
@@ -260,10 +262,8 @@ Size an instance by the **scarcest** of:
   measured knee and alert before it.
 - **Concurrent sessions / FDs.** ~1 FD per client + 1 per upstream, plus the
   per-session buffers (2×64 KB UDP, 2×32 KB TCP). Set `max_connections` /
-  `max_udp_sessions` under the file-descriptor `ulimit` with headroom. No
-  in-process `gsp_fd_open`/`gsp_fd_limit` metric exists yet (planned, see
-  "Planned / not yet built" above) — for now, watch fd usage externally
-  (`/proc/<pid>/fd`, same technique `gsp-bench --mode concurrency` uses).
+  `max_udp_sessions` under the file-descriptor `ulimit` with headroom; watch
+  `gsp_fd_open` against `gsp_fd_limit`.
 - **Bandwidth.** Single-stream throughput is near line rate (the pump is a
   buffered copy); the limit is NIC / softirq. Spread interrupts (RSS) and run
   `workers` = cores.
@@ -274,8 +274,9 @@ Size an instance by the **scarcest** of:
 
 Per-instance panels: `gsp_active_connections` / `gsp_active_udp_sessions`,
 `gsp_listener_connections_total` rate by `result`, `gsp_bytes_total` rate,
-`gsp_connection_duration_seconds` p50/p99. (No worker-level busy-ratio panel
-yet — that metric is planned, not implemented; see above.)
+`gsp_connection_duration_seconds` p50/p99, `gsp_fd_open` vs. `gsp_fd_limit`.
+(No worker-level busy-ratio panel yet — that metric is planned, not
+implemented; see above.)
 Fleet roll-ups: `sum by (pool) (gsp_pool_backends{state="healthy"})`,
 `sum(rate(gsp_filter_blocked_total[5m])) by (filter)`,
 `sum(rate(gsp_discovery_refresh_total{result!="ok"}[15m])) by (pool,kind)`.
@@ -318,6 +319,6 @@ view + web UI.
 - Alert: `gsp_pool_backends{state="healthy"} < N_min` per pool.
 - Alert: `gsp_datagrams_dropped_total` rate > 0 (buffers too small / overload).
 - Alert: `gsp_resolver_requests_total{result!="ok"}` share > 1%.
-- Once built (see "Planned / not yet built" above): worker-busy-ratio,
-  fd-open-vs-limit, and session-setup-latency alerts, mirroring the three
-  removed above.
+- Alert: `gsp_fd_open / gsp_fd_limit > 0.8`.
+- Once built (see "Planned / not yet built" above): worker-busy-ratio and
+  session-setup-latency alerts.

@@ -96,3 +96,17 @@ pub const SNIFFER_CALLS: &str = "gsp_sniffer_calls_total";
 /// Histogram (seconds). Labels: `name`. Wall-clock time of one `sniff` call
 /// through the WASM loader, instantiation included.
 pub const SNIFFER_CALL_SECONDS: &str = "gsp_sniffer_call_seconds";
+
+/// Gauge. Labels: `version`, `commit`. Always `1`; set once at startup so the
+/// labels themselves carry the build identity for correlating a metric shift
+/// with a deploy.
+pub const BUILD_INFO: &str = "gsp_build_info";
+
+/// Gauge, no labels. The process's own open file descriptor count, sampled on
+/// the health-check sweep interval (`/proc/self/fd` on Linux; absent
+/// elsewhere).
+pub const FD_OPEN: &str = "gsp_fd_open";
+
+/// Gauge, no labels. The process's `RLIMIT_NOFILE` soft limit, sampled once at
+/// startup (it does not change at runtime).
+pub const FD_LIMIT: &str = "gsp_fd_limit";

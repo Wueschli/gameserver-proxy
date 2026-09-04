@@ -36,6 +36,14 @@ implementation narration lives in git history and `docs/08`, not here.
   in `docs/01-requirements.md`, written down at project start and never
   carried into a phase or deferred-work note until a documentation audit
   caught the gap — closed out right after, see `docs/08` Phase 3.
+- **Build/fd metrics** — `gsp_build_info{version,commit}` (gauge, set once at
+  startup; `commit` baked in by `crates/gsp/build.rs` via `git rev-parse`),
+  `gsp_fd_open` (sampled every 5 s by `crates/gsp/src/procinfo.rs`, a small
+  detached background task, `/proc/self/fd` on Linux) and `gsp_fd_limit`
+  (`RLIMIT_NOFILE` soft limit via `nix::sys::resource::getrlimit`, sampled
+  once — `nix` gained the `resource` feature, now also a direct `gsp`-binary
+  dep, not just `gsp-core`'s). Lives in the binary, not `gsp-core` — host/ops
+  observability, no data-plane seam needed. See `docs/06`.
 
 **Next**: phases 10–12 (the distributed control plane —
 [`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md)),
@@ -212,6 +220,7 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/src/sniffer_loader.rs` | `SnifferLoader` (shared `wasmtime::Engine` + epoch-ticker thread) + `scan(&SniffersConfig)`; `WasmSniffer`; `build_sniffers` = `new` + one `scan`. |
 | `crates/gsp/src/discovery.rs` | `DnsSrvSource` (`hickory-resolver`), `ConsulSource` / `KubernetesSource` (`reqwest`), `DiscoveryFactory`. |
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
+| `crates/gsp/src/procinfo.rs` | `gsp_build_info` / `gsp_fd_open` / `gsp_fd_limit` — build identity + a small detached `/proc/self/fd` sampling task. |
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
 | `crates/plugins/` | Standalone workspace (own `[workspace]`): `gsp-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `gsp` / `gsp-core`. |
 | `crates/gsp-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `gsp` process, connection-count ramp, `/proc` RSS/fd sampling). |

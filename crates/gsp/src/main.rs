@@ -6,6 +6,7 @@
 
 mod admin;
 mod discovery;
+mod procinfo;
 mod reload;
 mod resolver;
 mod sniffer_loader;
@@ -164,6 +165,20 @@ async fn run(
     );
     let handle = runtime.handle();
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
+    // Build identity + fd headroom (docs/06 "Planned / not yet built", now
+    // built): version/commit are fixed for the process lifetime, so
+    // `gsp_build_info` and `gsp_fd_limit` are set once; `gsp_fd_open` needs a
+    // live sample, hence the periodic task.
+    metrics::gauge!(
+        gsp_core::metrics_defs::BUILD_INFO,
+        "version" => env!("CARGO_PKG_VERSION"),
+        "commit" => env!("GSP_GIT_SHA"),
+    )
+    .set(1.0);
+    if let Some(limit) = procinfo::fd_limit() {
+        metrics::gauge!(gsp_core::metrics_defs::FD_LIMIT).set(limit as f64);
+    }
+    let fd_gauge = procinfo::spawn_fd_gauge(Duration::from_secs(5));
 
     let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
     let reload = tokio::spawn(reload::run(
@@ -183,6 +198,7 @@ async fn run(
     runtime.shutdown_with_grace(cfg.shutdown_grace).await;
     reload.abort();
     admin.abort();
+    fd_gauge.abort();
     tracing::info!("stopped");
     Ok(())
 }

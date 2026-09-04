@@ -213,8 +213,10 @@ listeners:
   # dynamically-picked port from a shared range (e.g. Agones-style
   # `hostPort` ranges) or subdomain-per-port routing (scheme B, docs/03).
   # Capped at 1024 ports/range; mutually exclusive with `prefix`.
+  # (Kept small on purpose: each port in the range gets a real socket per
+  # worker — see `settings.workers` above — so a wide range adds up fast.)
   - name: match-port-range
-    bind: "0.0.0.0:28000-28009"
+    bind: "0.0.0.0:28000-28001"
     protocol: udp
     routes:
       # Only 28000 is routed; a datagram on any other port in the range has

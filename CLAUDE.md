@@ -69,6 +69,7 @@ crates/
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
     discovery.rs             DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8)
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9)
+    procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
