@@ -309,7 +309,7 @@ output alone; check the exit code or scroll to the top of the log.
   bucket — TCP holds the guard in the per-conn task, UDP stores it on `Session`
   (drops on eviction). `m::FILTER_BLOCKED` gains `src_conn_ip` / `src_conn_net`.
   `GET /config` shows `per_source=ip:N,net:N`. **No LRU eviction under pressure**
-  — a full source is simply refused until the idle sweep / connection close
+  — a full source is simply refused until idle eviction / connection close
   frees a slot (noted in `docs/07`).
 - **Phase 7 slice 10 done — phase 7 complete**: `crates/gsp-bench` (new
   workspace member, `gsp-bench` → `gsp-core`, tool only). `make bench`
@@ -631,10 +631,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   `(client, dst)` (dst = `None` unless prefix mode); one upstream socket
   `connect(2)`-ed to the chosen backend per session plus a reply-pump task;
   `src_ip` / `src_ip_port` **backend affinity** via a per-worker sticky table;
-  **idle-timeout eviction** (1 s sweep, `idle_timeout_sec` from the pool, read
-  once at session creation) that releases the `BackendGuard`; **amplification
-  guard** — the proxy never sends to a client without an established
-  session.
+  **idle-timeout eviction** (single-level timing wheel, 1 s slots,
+  `idle_timeout_sec` from the pool, read once at session creation) that releases
+  the `BackendGuard`; **amplification guard** — the proxy never sends to a
+  client without an established session.
 - **Per-listener route rule list** (`listeners[].routes`, priority-ordered, first
   match wins; `action: { pool }`). Matchers: `always`; `client_cidr` (source IP,
   hand-rolled CIDR in `gsp-config` — no `ipnet` dep); `dst` (destination IP —
@@ -834,7 +834,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Data/control split | Data plane only reads the snapshot; `reload.rs` is the only writer. |
 | LB / health | `AtomicBool` healthy flag, `rise`/`fall` streaks under a short `Mutex`, `AtomicUsize` active count. `BackendGuard` RAII for the session slot + passive health. |
 | Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `weighted` (weighted round-robin: one atomic tick indexes the cumulative-weight line; pool `weights` map, default 1), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
-| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. Ingress `recvmmsg`-batched (ADR 18); `sendmmsg` egress + timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
+| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), single-level timing-wheel idle expiry (`IdleWheel`, 1 s slots — ADR 19). Ingress `recvmmsg`-batched (ADR 18); `sendmmsg` egress deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
 | Sniffers | Loader **done** (phase 9 slices 3–5): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) + the `gsp-sniffer-abi` guest helper live in the standalone `crates/plugins/` workspace, `make plugins`. Per-plugin config (ADR 16a): the guest `sniff` export takes `(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[].config` is a string marshalled into a second linear-memory region on every call (`WasmSniffer` holds it; the `gsp-core` trait is unchanged). |
@@ -851,7 +851,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `splice()` zero-copy TCP fast path | **done** (perf pass, ADR 17) — `proxy::pump` splices `socket → pipe → socket` on Linux (`nix` `zerocopy` feature); buffered `try_read`/`try_write` fallback on non-Linux / `pipe2` failure; half-close via `socket2` `SockRef::shutdown(Write)`. Test: `tcp_forward::splice_forwards_a_large_stream_and_propagates_half_close` (4 MiB round-trip + half-close). |
 | UDP ingress `recvmmsg` batching | **done** (perf pass, ADR 18) — one `recvmmsg` per readiness wakeup pulls up to `RECV_BATCH`=16 datagrams into a per-worker `RecvBatch`; non-Linux keeps one `recvmsg`. Test: `udp_forward::forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg`. |
 | UDP `sendmmsg` egress batching (reply pump + upstream forward) | perf pass — follow-up (per-session reply buffers would 16× RSS; deferred) |
-| UDP idle expiry via a timing wheel (1 s sweep now) | perf pass |
+| UDP idle expiry via a timing wheel | **done** (perf pass, ADR 19) — `IdleWheel`, 512 one-second slots; lazy activity refresh (per-datagram path only bumps `last_ms`), re-file on tick. O(slot) per tick vs the old O(sessions) `retain`. Tests: `udp_forward::{idle_timeout_evicts_the_session_and_frees_the_backend_slot, an_active_session_survives_past_its_idle_window_then_expires}`. |
 | UDP sticky-affinity table: LRU eviction (hard cap + wholesale clear now) | polish |
 | `consistent_hash` balancer | **done** (phase 3 slice 3) |
 | `consistent_hash` used to retire the UDP per-worker sticky table | polish |
@@ -1043,10 +1043,22 @@ project's north star):**
      one `send` per datagram. Deferred as a follow-up: per-session reply
      buffers of `RECV_BATCH` × `MAX_DATAGRAM` would 16× the per-session RSS, so
      it needs a smaller batch buffer or per-datagram alloc — its own decision.
-   - **UDP idle expiry via a timing wheel** — still a 1 s full-scan sweep per
-     worker.
+   - ~~**UDP idle expiry via a timing wheel**~~ — **done** (ADR 19).
+     `IdleWheel`: 512 one-second slots, a session filed in its deadline slot;
+     a tick drains one slot, evicting genuinely-idle sessions and re-filing the
+     rest (activity moved the deadline, or `idle_ms` > the ~9 min span). The
+     per-datagram path is unchanged (still just the `last_ms` atomic bump). Tick
+     cost O(slot + re-files) instead of O(sessions). Tests:
+     `udp_forward::{idle_timeout_evicts_the_session_and_frees_the_backend_slot,
+     an_active_session_survives_past_its_idle_window_then_expires}`.
 8. **`IPV6_TRANSPARENT` on musl / non-glibc** — pull in here if shipping Alpine
-   containers.
+   containers. Needs a musl build env (no musl target installed in this
+   environment). HANDOVER note: `set_ip_transparent` already calls
+   `socket2` 0.6's `set_ip_transparent_v6` unconditionally with no `target_env`
+   guard, so it may already work — build + smoke-test before writing code.
+
+**After slice 7's items land, the perf pass leaves only `sendmmsg` egress
+batching (its own decision, see above) and the musl port (slice 8).**
 
 **C. Cheap polish / docs (fold into A or B):**
 
@@ -1306,9 +1318,10 @@ pool / health / cap machinery with per-client sessions. Key files:
 
 First-cut simplifications, each a drop-in replacement later (see the deferred
 table and ADR 9): ~~plain `recv_from`/`send`~~ ingress is now `recvmmsg`-batched
-(perf pass, ADR 18) — `sendmmsg` egress still pending; a 1 s idle sweep instead
-of a timing wheel; the sticky-affinity table is bounded by a hard cap and
-cleared wholesale (no LRU); ICMP port-unreachable just ends the reply pump.
+(perf pass, ADR 18) — `sendmmsg` egress still pending; ~~a 1 s idle sweep~~ idle
+expiry is now a single-level timing wheel (`IdleWheel`, ADR 19); the
+sticky-affinity table is bounded by a hard cap and cleared wholesale (no LRU);
+ICMP port-unreachable just ends the reply pump.
 `consistent_hash` was **not** added (still `round_robin` / `least_conn`).
 
 Reload contract held: a reload rebuilds pools; live UDP sessions keep running
@@ -1615,7 +1628,7 @@ listener/health tasks — detached conn tasks are killed by the process exit tha
 follows. `main.rs` calls `shutdown_with_grace(cfg.shutdown_grace)`.
 
 UDP: the recv loop no longer returns immediately on the signal — it sets a local
-`draining` flag, keeps pumping established sessions and running the idle sweep,
+`draining` flag, keeps pumping established sessions and running the idle-eviction wheel,
 refuses new sessions (`gsp_datagrams_dropped_total{reason="draining"}`), and
 returns once `sessions.is_empty()`. So `t.await` in `shutdown_with_grace` blocks
 on real UDP drain, and the outer `timeout` + `abort()` is the backstop.
@@ -1778,7 +1791,7 @@ first datagram only (`Cow::Owned`); the plain `send(first)` becomes
 | `crates/gsp-core/src/overlay.rs` | `BackendOverlay` — runtime `POST`/`DELETE` backend add/remove edits (`Mutex<HashMap<pool, {added,removed}>>`), layered on the file `targets` at rebuild via `effective_targets`. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer + `rr` index + `hash_on`, `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health/active/streaks/`check_kind` + `AdminState` — `admin_state` / `set_admin_state` / `takes_new_sessions`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does first-bytes peek + route match + pool lookup, then metrics + logs. |
-| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client, Option<SocketAddr> dst)` session table, sticky affinity, idle sweep, per-session upstream socket + reply pump. `UdpMode` recv: prefix = `recvmsg_dst` + `IP_PKTINFO` + `sendmsg_pktinfo` reply; transparent = `recvmsg_dst` + `IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket. |
+| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker recv loop, `(client, Option<SocketAddr> dst)` session table, sticky affinity, timing-wheel idle expiry, per-session upstream socket + reply pump. `UdpMode` recv: prefix = `recvmsg_dst` + `IP_PKTINFO` + `sendmsg_pktinfo` reply; transparent = `recvmsg_dst` + `IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket. |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `sniffer(name)` registry (empty; `#[cfg(test)]` `test-host`) + `warn_if_missing`. The seam for the Phase 9 plugin loader — no built-in sniffers. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — the `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`). Lock-free read. |
 | `crates/gsp-core/src/drain.rs` | `ConnTracker` / `ConnGuard` — `watch<usize>` count of live TCP conns + UDP sessions; `wait_idle()` for graceful shutdown. `DEFAULT_SHUTDOWN_GRACE`. |

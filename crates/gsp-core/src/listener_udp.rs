@@ -23,9 +23,11 @@
 //! [`RECV_BATCH`] datagrams per wakeup (see [`RecvBatch`]); non-Linux and the
 //! per-session reply pump still do one datagram per syscall.
 //!
+//! Idle expiry is a single-level timing wheel ([`IdleWheel`], 1 s slots) —
+//! O(slot) work per tick instead of an O(sessions) scan.
+//!
 //! v0 simplifications still open (see `HANDOVER.md`, "Phase 2"):
 //! - the reply pump and the upstream forward are not `sendmmsg`-batched;
-//! - idle expiry by a 1 s sweep, not a timing wheel;
 //! - one spawned reply task per session (recorded in the latency ledger);
 //! - the stickiness table is bounded by a hard cap and cleared wholesale when
 //!   exceeded (no LRU).
@@ -66,8 +68,8 @@ use crate::util::now_ms;
 
 /// Max datagram we will relay in either direction.
 const MAX_DATAGRAM: usize = 64 * 1024;
-/// Idle-eviction sweep cadence.
-const SWEEP_PERIOD: Duration = Duration::from_secs(1);
+/// Idle-eviction timing-wheel tick cadence (also the eviction granularity).
+const WHEEL_TICK: Duration = Duration::from_secs(1);
 /// Hard cap on the per-worker stickiness table; cleared wholesale when hit.
 const STICKY_MAX: usize = 65_536;
 
@@ -168,8 +170,9 @@ pub async fn run_udp_listener(
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
     let mut sticky: HashMap<StickyKey, SocketAddr> = HashMap::new();
     let mut rbatch = RecvBatch::new();
-    let mut sweep = interval(SWEEP_PERIOD);
-    sweep.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut wheel = IdleWheel::new();
+    let mut wheel_tick = interval(WHEEL_TICK);
+    wheel_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Once set (by the shutdown signal), no new sessions are opened; the task
     // keeps pumping existing sessions until they idle out, then returns. The
@@ -191,20 +194,8 @@ pub async fn run_udp_listener(
                     );
                 }
             }
-            _ = sweep.tick() => {
-                let now = now_ms();
-                let before = sessions.len();
-                sessions.retain(|(client, _), s| {
-                    let alive = now.saturating_sub(s.last_ms.load(Ordering::Relaxed)) < s.idle_ms;
-                    if !alive {
-                        tracing::debug!(
-                            listener = %cfg.name, %client, backend = %s.backend,
-                            "udp session idle-evicted"
-                        );
-                    }
-                    alive
-                });
-                let evicted = before - sessions.len();
+            _ = wheel_tick.tick() => {
+                let evicted = wheel.tick(&cfg.name, now_ms(), &mut sessions);
                 if evicted > 0 {
                     metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                         .decrement(evicted as f64);
@@ -325,6 +316,8 @@ pub async fn run_udp_listener(
                     };
                     match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, data).await {
                         Ok(session) => {
+                            let now = now_ms();
+                            wheel.schedule(key, now + session.idle_ms, now);
                             sessions.insert(key, session);
                             metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                                 .increment(1.0);
@@ -561,6 +554,73 @@ fn dst_from_cmsg(
             Some(SocketAddr::new(IpAddr::V6(ip), u16::from_be(a.sin6_port)))
         }
         _ => None,
+    }
+}
+
+/// Number of 1-second slots in [`IdleWheel`]. A session whose idle timeout
+/// exceeds this span is simply re-checked every `WHEEL_SLOTS` seconds until it
+/// actually expires.
+const WHEEL_SLOTS: usize = 512;
+
+/// A single-level timing wheel for UDP session idle expiry, replacing an
+/// O(sessions) `retain` scan every second with O(slot) work.
+///
+/// Each session is filed in the slot for the second its idle deadline falls in.
+/// A tick advances the hand one slot and drains it: an entry whose session's
+/// live `last_ms` shows it is genuinely idle is evicted; one that a datagram
+/// refreshed (or whose `idle_ms` outran the wheel span) is re-filed at its new
+/// deadline. The per-datagram hot path is untouched — it still only bumps the
+/// atomic `last_ms`. Exactly one wheel entry exists per live session.
+struct IdleWheel {
+    slots: Vec<Vec<SessionKey>>,
+    hand: usize,
+}
+
+impl IdleWheel {
+    fn new() -> Self {
+        Self {
+            slots: (0..WHEEL_SLOTS).map(|_| Vec::new()).collect(),
+            hand: 0,
+        }
+    }
+
+    /// File `key` in the slot for `deadline_ms`, at least one slot ahead so it is
+    /// never processed on the current tick.
+    fn schedule(&mut self, key: SessionKey, deadline_ms: u64, now: u64) {
+        let secs_ahead = (deadline_ms.saturating_sub(now) / 1000) as usize;
+        let ahead = secs_ahead.clamp(1, WHEEL_SLOTS - 1);
+        let slot = (self.hand + ahead) % WHEEL_SLOTS;
+        self.slots[slot].push(key);
+    }
+
+    /// Advance one slot; evict genuinely-idle sessions, re-file the rest. Returns
+    /// the number evicted (for the `ACTIVE_UDP_SESSIONS` gauge).
+    fn tick(
+        &mut self,
+        listener: &str,
+        now: u64,
+        sessions: &mut HashMap<SessionKey, Session>,
+    ) -> usize {
+        self.hand = (self.hand + 1) % WHEEL_SLOTS;
+        let due = std::mem::take(&mut self.slots[self.hand]);
+        let mut evicted = 0;
+        for key in due {
+            let Some(s) = sessions.get(&key) else {
+                continue; // session already gone by another path
+            };
+            let deadline = s.last_ms.load(Ordering::Relaxed) + s.idle_ms;
+            if now >= deadline {
+                tracing::debug!(
+                    listener = %listener, client = %key.0, backend = %s.backend,
+                    "udp session idle-evicted"
+                );
+                sessions.remove(&key);
+                evicted += 1;
+            } else {
+                self.schedule(key, deadline, now);
+            }
+        }
+        evicted
     }
 }
 

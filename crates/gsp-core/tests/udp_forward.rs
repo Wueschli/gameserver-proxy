@@ -234,6 +234,71 @@ listeners:
 }
 
 #[tokio::test]
+async fn an_active_session_survives_past_its_idle_window_then_expires() {
+    let backend = echo_backend(7).await;
+    let proxy_addr = free_udp_addr();
+    // idle_timeout 1s; one slot — a second client only gets in once the first
+    // session is evicted, so "B still refused" proves A is still alive.
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    idle_timeout_sec: 1
+    per_backend: {{ max_sessions: 1 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    a.connect(proxy_addr).await.unwrap();
+    let mut buf = [0u8; 32];
+
+    // Keep A busy for ~2.5s — well past the 1s idle window. The timing wheel
+    // must re-file it on every tick instead of evicting it.
+    for _ in 0..8 {
+        a.send(b"a").await.unwrap();
+        let n = tokio::time::timeout(Duration::from_millis(500), a.recv(&mut buf))
+            .await
+            .expect("active session must keep round-tripping")
+            .unwrap();
+        assert_eq!(&buf[..n], &[7, b'a']);
+        tokio::time::sleep(Duration::from_millis(320)).await;
+    }
+
+    // Still holding the only slot: a new client is refused.
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    b.connect(proxy_addr).await.unwrap();
+    b.send(b"b").await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), b.recv(&mut buf))
+            .await
+            .is_err(),
+        "the still-active session A must not have been idle-evicted"
+    );
+
+    // Stop sending; within a couple of ticks A is evicted and B gets through.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    b.send(b"b").await.unwrap();
+    let n = tokio::time::timeout(Duration::from_millis(500), b.recv(&mut buf))
+        .await
+        .expect("slot should free once A goes idle")
+        .unwrap();
+    assert_eq!(&buf[..n], &[7, b'b']);
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
 async fn first_bytes_prefix_routes_to_its_pool() {
     let query = echo_backend(b'Q').await;
     let game = echo_backend(b'G').await;
