@@ -37,15 +37,25 @@ pub struct AggregatorTarget {
     pub token: Option<String>,
 }
 
+/// Where `crate::controller_proxy` sends its calls, and the bearer token it
+/// presents there — a separate secret from `gsp-aggregator`'s, same
+/// reasoning as [`AggregatorTarget`].
+#[derive(Clone)]
+pub struct ControllerTarget {
+    pub base_url: String,
+    pub token: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub ui_password: Option<Arc<str>>,
     pub sessions: Arc<SessionStore>,
-    /// Shared client for proxying out to the aggregator (slice 11c) and,
-    /// later, the controller (slice 11e). Cheap to clone (an `Arc`
-    /// internally), reuses connections.
+    /// Shared client for proxying out to the aggregator (slice 11c) and the
+    /// controller (slice 11e). Cheap to clone (an `Arc` internally), reuses
+    /// connections.
     pub http: reqwest::Client,
     pub aggregator: Option<AggregatorTarget>,
+    pub controller: Option<ControllerTarget>,
     /// The live bridge to the aggregator's `/fleet/subscribe` feed
     /// ([`crate::fleet_feed`], slice 11d) — `None` when no aggregator is
     /// configured at all, same as `aggregator` being `None`.
@@ -59,12 +69,18 @@ impl AppState {
             sessions: Arc::new(SessionStore::new()),
             http: reqwest::Client::new(),
             aggregator: None,
+            controller: None,
             fleet_feed: None,
         }
     }
 
     pub fn with_aggregator(mut self, base_url: String, token: Option<String>) -> Self {
         self.aggregator = Some(AggregatorTarget { base_url, token });
+        self
+    }
+
+    pub fn with_controller(mut self, base_url: String, token: Option<String>) -> Self {
+        self.controller = Some(ControllerTarget { base_url, token });
         self
     }
 
@@ -76,12 +92,13 @@ impl AppState {
 
 /// `/ui/login` and `/ui/logout` must be reachable *without* a session (that
 /// would be circular); everything else this process serves — `/ui/session`,
-/// `crate::aggregator_proxy`'s routes, and `crate::ws`'s WebSocket — is
-/// gated by [`crate::auth::require_session`].
+/// `crate::aggregator_proxy`'s and `crate::controller_proxy`'s routes, and
+/// `crate::ws`'s WebSocket — is gated by [`crate::auth::require_session`].
 pub fn router(state: AppState) -> Router {
     let gated = Router::new()
         .route("/ui/session", get(session_status))
         .merge(crate::aggregator_proxy::router())
+        .merge(crate::controller_proxy::router())
         .merge(crate::ws::router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

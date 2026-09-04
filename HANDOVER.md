@@ -399,12 +399,39 @@ crate): real `gsp` → real `gsp-aggregator` (SSE) → real `gsp-ui`
 (`fleet_feed`) → a real WebSocket client, watching five live pushes arrive
 in real time as `gsp` kept pushing on its 1s interval.
 
-**Next**: 11e — `gsp-ui` proxying the controller's config API
-(`--controller-url`/`--controller-token`: `GET`/`POST /config`, revision
-history/diff/rollback). Then 11f (the actual React/Vite/TS frontend), slice
-12 (integration tests spinning up N `gsp` + controller + aggregator +
-`gsp-ui` together), and slice 13 (docs polish: `docs/06`, `README.md` status
-block, `docs/08` status legend).
+**Slice 11e done**: new `crates/gsp-ui/src/controller_proxy.rs`, same shape
+as `aggregator_proxy` — proxies the controller's config API
+(`--controller-url`/`--controller-token`). Notable difference from the
+aggregator proxy: the controller's `POST /config` handler takes a plain
+`String`, not JSON, so the body is forwarded byte-for-byte with no
+content-type forced on it; the diff route also forwards the incoming query
+string (`?against=`) via `axum::extract::RawQuery`.
+
+**A real bug found and fixed by a test, not by inspection**: writing
+`get_config_proxies_to_the_controller` (asserting `X-Config-Revision`
+survived the `gsp-ui` hop) failed immediately — every proxy helper in this
+fleet (`aggregator_proxy::proxy`, `controller_proxy::proxy`, and
+`gsp-aggregator`'s own `fanout::proxy_to_instance`) was built passing only
+`(status, body)` into `into_response()`, silently dropping every response
+header from the upstream service. Fixed with a new
+`gsp-ui/src/proxy_util.rs::forwardable_headers` (strips only
+`connection`/`transfer-encoding`/`content-length` — the ones that describe
+*this* hop's framing, not the content — forwards everything else verbatim),
+applied to both `gsp-ui` proxies, plus the equivalent fix and a regression
+test in `gsp-aggregator::fanout`. Worth remembering: **a thin pass-through
+proxy needs an explicit test asserting a header survives the hop** —
+status+body tests alone don't catch this class of bug, as proven here across
+three independent call sites that all had it.
+
+6 new tests. Verified live end-to-end over the full real chain: `gsp-ui` →
+real `gsp-controller` — submit → `GET /api/config/revisions` → diff →
+rollback → `GET /api/config` correctly showing `X-Config-Revision: 3` (the
+post-rollback revision, not a rewind), header intact.
+
+**Next**: 11f — the actual React/Vite/TS frontend (the only sub-slice left
+in slice 11). Then slice 12 (integration tests spinning up N `gsp` +
+controller + aggregator + `gsp-ui` together) and slice 13 (docs polish:
+`docs/06`, `README.md` status block, `docs/08` status legend).
 
 ### Known follow-ups (none blocking)
 

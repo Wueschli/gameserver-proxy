@@ -2,3 +2,7 @@
 **/*.rs.bk
 *.pdb
 .env
+
+# gsp-controller's default --data-dir when run from the repo root during
+# manual/local smoke testing.
+/gsp-controller-data

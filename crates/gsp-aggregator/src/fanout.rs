@@ -150,8 +150,9 @@ async fn proxy_to_instance(
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
+            let headers = forwardable_headers(resp.headers());
             let body = resp.bytes().await.unwrap_or_default();
-            (status, body).into_response()
+            (status, headers, body).into_response()
         }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -161,6 +162,24 @@ async fn proxy_to_instance(
         )
             .into_response(),
     }
+}
+
+/// The upstream response's headers, minus the hop-by-hop ones that don't
+/// make sense to forward verbatim (`axum` recomputes `content-length` for
+/// the body we actually send; `connection`/`transfer-encoding` describe
+/// *this* hop's framing, not the content). Everything else passes through,
+/// so a caller reading a response header from this fan-out sees exactly
+/// what the target instance sent.
+fn forwardable_headers(upstream: &axum::http::HeaderMap) -> axum::http::HeaderMap {
+    let mut headers = upstream.clone();
+    for h in [
+        axum::http::header::CONNECTION,
+        axum::http::header::TRANSFER_ENCODING,
+        axum::http::header::CONTENT_LENGTH,
+    ] {
+        headers.remove(h);
+    }
+    headers
 }
 
 #[derive(Serialize)]
@@ -315,6 +334,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes, "draining\n".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn drain_forwards_the_instances_response_headers_too() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = Router::new().route(
+            "/admin/drain",
+            post(|| async { ([("x-drain-note", "graceful")], "draining\n") }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("proxy-1", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/instances/proxy-1/drain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("x-drain-note").unwrap(), "graceful");
     }
 
     #[tokio::test]

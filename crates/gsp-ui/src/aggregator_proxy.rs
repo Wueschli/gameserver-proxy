@@ -156,8 +156,9 @@ async fn proxy(
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
+            let headers = crate::proxy_util::forwardable_headers(resp.headers());
             let body = resp.bytes().await.unwrap_or_default();
-            (status, body).into_response()
+            (status, headers, body).into_response()
         }
         Err(e) => (
             StatusCode::BAD_GATEWAY,

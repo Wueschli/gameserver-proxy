@@ -580,11 +580,28 @@ token, is ever exposed to a human directly.
      the full five-hop chain with a throwaway probe client: real `gsp` →
      real `gsp-aggregator` (SSE) → real `gsp-ui` (`fleet_feed`) → a
      WebSocket client, watching live pushes arrive in real time.
-11e. `gsp-ui` proxies the controller's config API too
-     (`--controller-url`/`--controller-token`): `GET`/`POST /config`,
-     revision history/diff/rollback — phase 10's "full management" GUI
-     level, now straightforward since `gsp-ui` already holds a separate
-     token per service.
+11e. ✅ `gsp-ui` proxies the controller's config API too
+     (`--controller-url`/`--controller-token`, new `controller_proxy.rs`):
+     `GET`/`POST /api/config`, `GET /api/config/revisions(+/{rev}(/diff))`,
+     `POST /api/config/rollback/{rev}` — phase 10's "full management" GUI
+     level, straightforward since `gsp-ui` already holds a separate token
+     per service. The controller's `POST /config` body is raw YAML text
+     (its handler takes a plain `String`, not JSON), forwarded byte-for-byte
+     with no content-type forced on it, unlike the JSON bodies
+     `aggregator_proxy` forwards. The diff route forwards the incoming
+     query string (`?against=`) via `axum::extract::RawQuery` onto the
+     proxied URL. 6 new tests. **Found and fixed a real bug along the way**:
+     both proxy helpers (here and in `aggregator_proxy`, plus
+     `gsp-aggregator`'s own `fanout::proxy_to_instance`) forwarded only
+     status + body, silently dropping every response header — caught
+     immediately by a test asserting `X-Config-Revision` survived the hop,
+     which it didn't. Fixed with a shared `proxy_util::forwardable_headers`
+     (strips only the hop-by-hop headers `connection`/`transfer-encoding`/
+     `content-length`, forwards everything else verbatim) and a matching
+     fix + regression test in `gsp-aggregator`. Verified live end-to-end
+     over the full chain against a real `gsp-controller`: submit → list
+     revisions → diff → rollback → `GET /api/config` correctly showing
+     `X-Config-Revision: 3` (the new post-rollback revision, not a rewind).
 11f. Frontend: the React + Vite + TS app itself (own `package.json`, never a
      Cargo workspace member, built via `make ui` mirroring `make plugins`'s
      standalone-workspace pattern) — login page, fleet dashboard

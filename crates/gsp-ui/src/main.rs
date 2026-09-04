@@ -1,9 +1,9 @@
 //! `gsp-ui` binary — see `lib.rs` for the design pointer and slice plan.
 //! Slice 11b: session login/logout. Slice 11c: fleet reads + operational
 //! verbs proxied to `gsp-aggregator`. Slice 11d: the browser WebSocket, fed
-//! by a shared subscription to the aggregator's `/fleet/subscribe`.
-//! Proxying `gsp-controller`'s config API (11e) and the frontend itself
-//! (11f) aren't built yet.
+//! by a shared subscription to the aggregator's `/fleet/subscribe`. Slice
+//! 11e: `gsp-controller`'s config API, proxied the same way. The frontend
+//! itself (11f) isn't built yet.
 
 use std::net::SocketAddr;
 
@@ -41,6 +41,16 @@ struct Args {
     /// one (its own `--auth-token`).
     #[arg(long)]
     aggregator_token: Option<String>,
+
+    /// `gsp-controller` base URL (e.g. "http://127.0.0.1:9901") that
+    /// structural-config actions proxy to. Omitted: those routes return 503.
+    #[arg(long)]
+    controller_url: Option<String>,
+
+    /// Bearer token this UI presents to `--controller-url`, if it requires
+    /// one (its own `--auth-token`).
+    #[arg(long)]
+    controller_token: Option<String>,
 }
 
 #[tokio::main]
@@ -66,9 +76,13 @@ async fn main() -> anyhow::Result<()> {
         )));
         state = state.with_fleet_feed(feed);
     }
+    if let Some(controller_url) = args.controller_url {
+        state = state.with_controller(controller_url, args.controller_token);
+    }
     tracing::info!(
         login_required,
         aggregator_configured = state.aggregator.is_some(),
+        controller_configured = state.controller.is_some(),
         "gsp-ui starting"
     );
 

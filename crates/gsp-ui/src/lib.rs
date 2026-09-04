@@ -20,12 +20,16 @@
 //! fleet reads + the slice-9 operational verbs, proxied to `gsp-aggregator`.
 //! Slice 11d ([`fleet_feed`] + [`ws`]): a single shared subscription to the
 //! aggregator's `/fleet/subscribe` SSE feed, fanned out to every connected
-//! browser over `GET /ws/fleet`. Slice 11e (proxying the controller's config
-//! API) isn't built yet; slice 11f is the actual frontend.
+//! browser over `GET /ws/fleet`. Slice 11e ([`controller_proxy`]): the
+//! controller's config API (submit, revision history/diff, rollback) —
+//! phase 10's "full management" GUI level. Slice 11f (the actual frontend)
+//! isn't built yet.
 
 pub mod aggregator_proxy;
 pub mod api;
 pub mod auth;
+pub mod controller_proxy;
 pub mod fleet_feed;
+mod proxy_util;
 pub mod session;
 pub mod ws;
