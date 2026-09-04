@@ -502,6 +502,14 @@ has now hit twice** (see slice 11e's header-forwarding bug for the first),
 and neither was visible from either side's own test suite in isolation —
 only from driving the two together.
 
+**User feedback after clicking through the real UI**: functional for a first
+version, but not a finished admin UI — just the PoC it was scoped as. Logged
+as a tracked, deliberately-deferred future item in `docs/08-roadmap.md`
+("Later / optional" → "`gsp-ui` frontend overhaul") rather than picked up
+now: every backend path the UI drives is real and tested, only the
+presentation layer (styling, confirmations on destructive actions, loading
+states, routing) needs a real pass later.
+
 **Next**: slice 12 (integration tests spinning up N `gsp` + controller +
 aggregator + `gsp-ui` together — subscribe/reconnect/freeze-on-disconnect,
 push/ingest, fan-out partial failure, config reject-keeps-previous) and

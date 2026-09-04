@@ -635,6 +635,15 @@ token, is ever exposed to a human directly.
   been verified live end-to-end, repeatedly, against real running
   `gsp`/`gsp-controller`/`gsp-aggregator` processes, not just against unit
   tests.
+- **The 11f frontend itself is a functional PoC, not a finished operator
+  UI** (confirmed by the user actually clicking through it in a browser) —
+  every backend path it drives is real and solid, but the UI layer is
+  deliberately bare: no styling/design pass, no confirmation dialogs before
+  a destructive action (drain, remove-backend fire immediately), no loading
+  states beyond a bare "loading…", no client-side routing, plain unstyled
+  tables and forms. **A real frontend overhaul is future, separate work** —
+  tracked under "Later / optional" below — deliberately deferred rather than
+  polished now, since it doesn't block anything else in this phase.
 12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator (+
     1 `gsp-ui` once it exists) —
     subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial
@@ -694,6 +703,16 @@ Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
   the phase 10–13 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
+- **`gsp-ui` frontend overhaul** — phase 10+11 slice 11f shipped a
+  functional PoC (every backend path real and tested), not a finished
+  operator UI: no design/styling pass, no confirmation dialogs before a
+  destructive action, no loading states beyond a bare notice, no
+  client-side routing. A real pass needs an actual design decision (which
+  component library / design system, if any), confirmation flows for
+  drain/remove-backend/rollback, better error surfacing than a single
+  notice line, and probably a routing library once there's more than one
+  page's worth of state. Explicitly deferred — doesn't block phase 10+11
+  closing out (slices 12–13) or phase 12.
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).
