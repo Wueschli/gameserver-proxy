@@ -15,11 +15,13 @@
 //! sessions (same "ephemeral by design" posture `gsp-aggregator` already
 //! has).
 //!
-//! Slice 11b (this module set): [`session::SessionStore`] +
-//! `POST /ui/login`/`/ui/logout` ([`api`]) + [`auth::require_session`].
-//! Slices 11c–11e (proxying to the aggregator and controller, the WebSocket
-//! bridge) aren't built yet; slice 11f is the actual frontend.
+//! Slice 11b: [`session::SessionStore`] + `POST /ui/login`/`/ui/logout`
+//! ([`api`]) + [`auth::require_session`]. Slice 11c ([`aggregator_proxy`]):
+//! fleet reads + the slice-9 operational verbs, proxied to `gsp-aggregator`.
+//! Slice 11d (the WebSocket bridge) and 11e (proxying the controller's
+//! config API) aren't built yet; slice 11f is the actual frontend.
 
+pub mod aggregator_proxy;
 pub mod api;
 pub mod auth;
 pub mod session;

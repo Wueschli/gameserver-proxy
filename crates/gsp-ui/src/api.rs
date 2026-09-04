@@ -28,10 +28,24 @@ use crate::session::SessionStore;
 /// deployment should add it. Tracked as a known gap, not silently ignored.
 pub const SESSION_COOKIE: &str = "gsp_ui_session";
 
+/// Where `crate::aggregator_proxy` sends its calls, and the bearer token it
+/// presents there — a separate secret from `gsp-controller`'s (`docs/10`:
+/// `gsp-ui` holds each service's own credential, never conflates them).
+#[derive(Clone)]
+pub struct AggregatorTarget {
+    pub base_url: String,
+    pub token: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub ui_password: Option<Arc<str>>,
     pub sessions: Arc<SessionStore>,
+    /// Shared client for proxying out to the aggregator (slice 11c) and,
+    /// later, the controller (slice 11e). Cheap to clone (an `Arc`
+    /// internally), reuses connections.
+    pub http: reqwest::Client,
+    pub aggregator: Option<AggregatorTarget>,
 }
 
 impl AppState {
@@ -39,17 +53,25 @@ impl AppState {
         AppState {
             ui_password: ui_password.map(Arc::from),
             sessions: Arc::new(SessionStore::new()),
+            http: reqwest::Client::new(),
+            aggregator: None,
         }
+    }
+
+    pub fn with_aggregator(mut self, base_url: String, token: Option<String>) -> Self {
+        self.aggregator = Some(AggregatorTarget { base_url, token });
+        self
     }
 }
 
 /// `/ui/login` and `/ui/logout` must be reachable *without* a session (that
-/// would be circular); `/ui/session` is gated by
-/// [`crate::auth::require_session`]. Later slices' proxied routes join the
-/// gated half.
+/// would be circular); everything else this process serves — `/ui/session`
+/// plus `crate::aggregator_proxy`'s routes — is gated by
+/// [`crate::auth::require_session`].
 pub fn router(state: AppState) -> Router {
     let gated = Router::new()
         .route("/ui/session", get(session_status))
+        .merge(crate::aggregator_proxy::router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::require_session,

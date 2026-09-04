@@ -545,12 +545,23 @@ token, is ever exposed to a human directly.
      verified live end-to-end over real HTTP through the whole cycle:
      unauthenticated → `401`, wrong password → `401`, right password → a
      cookie that unlocks the gated route, logout → `401` again.
-11c. `gsp-ui` proxies reads + slice-9 operational verbs to `gsp-aggregator`
-     (`--aggregator-url`/`--aggregator-token`) — translating the browser's
-     session cookie into the aggregator's bearer token server-side. This is
-     phase 10's "operational" GUI capability level (`docs/10`): read-heavy
-     plus drain/undrain/backend-add-remove/route-hint, no structural config
-     editing yet.
+11c. ✅ `gsp-ui` proxies reads + slice-9 operational verbs to
+     `gsp-aggregator` (`--aggregator-url`/`--aggregator-token`) — a new
+     `aggregator_proxy.rs`, thin and stateless like `gsp-aggregator::fanout`
+     it calls through to: `GET /api/fleet/pools`/`sessions`/`healthz`,
+     `POST /api/fleet/instances/{instance}/drain`|`undrain`, backend
+     add/patch/delete, route-hint. Translates the browser's session cookie
+     into the aggregator's bearer token server-side — the browser never
+     holds it. `503` if no `--aggregator-url` was configured at all, `502`
+     if it was but couldn't be reached, both handled cleanly (no panic). This
+     is phase 10's "operational" GUI capability level (`docs/10`):
+     read-heavy plus these verbs, no structural config editing yet. 6 new
+     tests (incl. a real mock-aggregator round-trip proving the token and
+     request body are forwarded correctly). Verified live end-to-end over
+     the real four-hop chain: unauthenticated browser call → `401`; logged
+     in → `GET /api/fleet/pools` showed the real pushed data; a drain
+     through the full `gsp-ui → gsp-aggregator → gsp` path landed for real,
+     confirmed by the instance's own `/readyz` flipping to `503`.
 11d. `gsp-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by `gsp-ui`
      itself subscribing to `gsp-aggregator`'s slice-11a SSE feed and relaying
      each update — the browser never opens a connection to the aggregator

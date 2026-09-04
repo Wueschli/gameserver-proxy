@@ -353,10 +353,28 @@ Verified live end-to-end over real HTTP through the whole cycle:
 unauthenticated → `401`, wrong password → `401`, right password → a cookie
 that unlocked the gated route, logout → `401` again.
 
-**Next**: 11c–11f — `gsp-ui` proxying reads + fan-out verbs to
-`gsp-aggregator` (11c), the browser-facing WebSocket fed by subscribing to
-the aggregator's `/fleet/subscribe` (11d), proxying the controller's config
-API too (11e), then the actual React/Vite/TS frontend (11f). Then slice 12
+**Slice 11c done**: new `crates/gsp-ui/src/aggregator_proxy.rs` — thin,
+stateless proxy for fleet reads and the slice-9 operational verbs to
+`gsp-aggregator` (`--aggregator-url`/`--aggregator-token`), mirroring
+`gsp-aggregator::fanout`'s own shape (same "route definitions only, no
+`.with_state()`" pattern, merged into `api::router`'s gated group). `503`
+cleanly for "no aggregator configured," `502` cleanly for "configured but
+unreachable" — both covered by tests, no panics. 6 new tests, including a
+real mock-aggregator (`axum::serve` on an ephemeral port, not a mocked
+response) proving the bearer token and request body both forward correctly.
+
+Verified live end-to-end over the **real four-hop chain** — not per
+component: `curl` (as the browser) → `gsp-ui` (session auth) → real
+`gsp-aggregator` (bearer auth) → real `gsp`'s admin API (its own bearer
+auth). Unauthenticated browser call → `401`; logged in → `GET
+/api/fleet/pools` returned the real pushed fleet data; a drain issued
+through the full chain landed for real, confirmed by the instance's own
+`GET /readyz` flipping to `503`. This is the whole point of the `gsp-ui`
+redesign proven working, not just each piece in isolation.
+
+**Next**: 11d–11f — the browser-facing WebSocket fed by subscribing to the
+aggregator's `/fleet/subscribe` (11d), proxying the controller's config API
+too (11e), then the actual React/Vite/TS frontend (11f). Then slice 12
 (integration tests spinning up N `gsp` + controller + aggregator + `gsp-ui`
 together) and slice 13 (docs polish: `docs/06`, `README.md` status block,
 `docs/08` status legend).
