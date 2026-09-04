@@ -318,10 +318,36 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   half-applies); `settings.sniffers` appearing/disappearing between reloads is
   logged as needing a restart, matching `docs/05`. Engine params
   (`call_timeout_ms`/`max_memory_bytes`) are still startup-only.
-- **Slice 5**: first-party plugin crates under `crates/plugins/{a2s,minecraft,
-  regex-firstbytes}` + a tiny `gsp-sniffer-abi` helper crate (guest-side
-  `alloc` / pack / `RouteHint` encode). `make plugins` builds them to
-  `wasm32-unknown-unknown`; CI adds the target and builds + size-checks them.
+- ✅ **Slice 5**: first-party plugin crates, a standalone workspace
+  `crates/plugins/` (own `[workspace]`, like `crates/gsp-config/fuzz` — never
+  a dependency of `gsp`/`gsp-core`, so `make check` needs no wasm target).
+  `gsp-sniffer-abi`: the guest-side write half of the ABI slice 3 defined —
+  `alloc(len)` delegating to the module's own global allocator (not a
+  hand-rolled bump pointer, so it never collides with the plugin's own
+  allocations), `encode(&Hint) -> Vec<u8>` (pure, unit-testable on any host)
+  and `emit_hint` (places `encode`'s bytes via `alloc`, packs the
+  `(ptr<<32)|len` result). Three plugins, each `crate-type = ["cdylib",
+  "lib"]` so `recognise()` is a plain testable native fn and `sniff` is a
+  thin `#[no_mangle] extern "C"` wrapper: `a2s` (Source-engine query packets,
+  `0xFFFFFFFF` + a query-type byte, tags `key: "a2s"` — no hostname to
+  extract); `minecraft` (parses the protocol ≥ 1.7 Handshake's `server
+  address` field — the same virtual-host trick BungeeCord/Velocity use —
+  strips a Forge `\0FML\0` suffix, lower-cases); `regex-firstbytes` (a
+  **template**, not a generic engine — the config schema has no per-plugin
+  parameters yet, so a runtime pattern can't be handed in; hard-codes an
+  HTTP/1.x request-line matcher to demonstrate the bounded shape the roadmap
+  describes). `make plugins` (native `cargo test --workspace` +
+  `--release --target wasm32-unknown-unknown` build, ~17–21 KiB per module
+  with `opt-level=z, lto, panic=abort, strip`); new CI job `plugins`
+  (installs the wasm32 target, native tests, wasm build, size print). 13 new
+  native unit tests across the four crates, plus one `#[ignore]`d integration
+  test in `gsp`'s own `sniffer_loader.rs` that loads the *actual built*
+  `.wasm` files and drives each through the real `wasmtime` loader end to end
+  (`cargo test -p gsp plugin_artifacts -- --ignored`, after `make plugins`).
+  `crates/plugins/README.md` has the build/install walkthrough. Known gap
+  (noted there and in `HANDOVER.md`): no per-plugin config path exists yet,
+  so `regex-firstbytes` can't be a true generic engine — a future config
+  extension (e.g. `modules[].config`) would be needed.
 - **Slice 6**: WASM-boundary latency bench (`gsp-bench --sniffer <wasm>` or a
   criterion bench) vs. N1; module signature / pin verification; a `docs/07`
   "plugin sandbox guarantees" section (a sniffer is read-only, has no reply

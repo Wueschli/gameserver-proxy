@@ -1,0 +1,13 @@
+[package]
+name = "a2s"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gsp sniffer plugin: recognises Source-engine A2S query packets."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }

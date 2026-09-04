@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test build run fuzz bench help
+.PHONY: check fmt lint test build run fuzz bench plugins help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -42,6 +42,13 @@ fuzz:
 		mkdir -p fuzz/corpus/$$t; \
 		cargo +nightly fuzz run $$t fuzz/corpus/$$t fuzz/seeds/$$t -- -max_total_time=$(FUZZ_TIME) || exit 1; \
 	done
+
+## plugins: build the first-party sniffer plugins to wasm32-unknown-unknown
+## (needs `rustup target add wasm32-unknown-unknown`); see crates/plugins/README.md
+plugins:
+	cd crates/plugins && cargo test --workspace
+	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p regex-firstbytes
+	@echo "built:" crates/plugins/target/wasm32-unknown-unknown/release/*.wasm
 
 ## help: list targets
 help:

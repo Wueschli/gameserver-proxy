@@ -64,6 +64,7 @@ crates/
     resolver.rs             HttpResolver (reqwest) + build_resolvers(&Config)
     reload.rs               SIGHUP + file-watch → rebuild snapshot → atomic swap
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
+  plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
 
 Dependency direction: `gsp` → `gsp-core` → `gsp-config` (`gsp-bench` → `gsp-core`
@@ -90,6 +91,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Test | `cargo test --all` |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
+| Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |

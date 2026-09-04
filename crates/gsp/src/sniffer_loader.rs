@@ -491,6 +491,58 @@ mod tests {
         assert!(registry.get("other").is_none());
     }
 
+    /// Loads the real first-party plugins (`crates/plugins/`) built by
+    /// `make plugins` and drives each one through this crate's own loader —
+    /// not just the plugin's own native `recognise()` unit tests, but the
+    /// actual `alloc`/`memory.write`/`sniff`/decode round trip through
+    /// `wasmtime`. Ignored by default: it needs
+    /// `crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` to
+    /// exist, which `cargo test -p gsp` alone does not build. Run with
+    /// `cargo test -p gsp plugin_artifacts -- --ignored` after `make plugins`.
+    #[test]
+    #[ignore = "needs `make plugins` to have built crates/plugins first"]
+    fn first_party_plugin_artifacts_recognise_their_protocols() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/target/wasm32-unknown-unknown/release");
+        assert!(
+            dir.is_dir(),
+            "run `make plugins` first (looked in {})",
+            dir.display()
+        );
+        // A real plugin's std allocator wants more than the 1 MiB `cfg()`
+        // gives synthetic WAT fixtures above — use the config default.
+        let mut sc = cfg(&dir);
+        sc.max_memory_bytes = 16 * 1024 * 1024;
+        let (_loader, registry) = build_sniffers(&sc).unwrap();
+
+        let a2s = registry.get("a2s").expect("a2s.wasm not built");
+        let hint = a2s
+            .sniff(b"\xff\xff\xff\xffTSource Engine Query\0")
+            .unwrap();
+        assert_eq!(hint.key.as_deref(), Some("a2s"));
+        assert!(a2s.sniff(b"not a2s at all").is_none());
+
+        let minecraft = registry.get("minecraft").expect("minecraft.wasm not built");
+        // A minimal handshake: len, id=0x00, protocol=1, "play.example.net", port, next_state=1.
+        let mut pkt = vec![0x00, 0x01];
+        let host = b"play.example.net";
+        pkt.push(host.len() as u8);
+        pkt.extend_from_slice(host);
+        pkt.extend_from_slice(&25565u16.to_be_bytes());
+        pkt.push(0x01);
+        let mut framed = vec![pkt.len() as u8];
+        framed.extend(pkt);
+        let hint = minecraft.sniff(&framed).unwrap();
+        assert_eq!(hint.host.as_deref(), Some("play.example.net"));
+
+        let http = registry
+            .get("regex_firstbytes")
+            .expect("regex_firstbytes.wasm not built");
+        let hint = http.sniff(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap();
+        assert_eq!(hint.key.as_deref(), Some("http"));
+        assert!(http.sniff(b"\xff\xff\xff\xffT").is_none());
+    }
+
     /// A tiny per-test-process unique scratch dir under the system temp dir.
     fn tempdir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
