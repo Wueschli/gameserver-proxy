@@ -66,6 +66,15 @@ pub const PROXY_PROTOCOL_HEADERS: &str = "gsp_proxy_protocol_headers_total";
 /// `max_udp` / `max_new_rate` = a process-wide `settings.limits` cap was hit.
 pub const FILTER_BLOCKED: &str = "gsp_filter_blocked_total";
 
+/// Counter. Labels: `pool`, `kind` (`dns_srv` | `consul` | `kubernetes`),
+/// `result` (`ok` | `empty` | `error`). One increment per backend-discovery
+/// refresh attempt. `empty` / `error` keep the last-known-good backend set.
+pub const DISCOVERY_REFRESH: &str = "gsp_discovery_refresh_total";
+
+/// Gauge. Labels: `pool`. Backend addresses returned by the pool's discovery
+/// source at its last successful refresh.
+pub const DISCOVERY_BACKENDS: &str = "gsp_discovery_backends";
+
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "gsp_config_reload_total";
 

@@ -1,7 +1,24 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-03 (**phases 0–7 complete**). Filter chain: per-listener radix-trie `allow` / `deny`
+Last updated: 2026-09-04 (**phases 0–8 complete**).
+Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
+`pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
+into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
+(polled Endpoints). `gsp-core::discovery` owns the HTTP-free seam — `trait
+BackendSource` (level-triggered `fetch → Vec<SocketAddr>`), a `Discovery`
+last-known-good cache, and `refresh_loop` (one control-plane task per source on
+`refresh_interval_sec`); concrete adapters (`DnsSrvSource` via
+`hickory-resolver`, `ConsulSource` / `KubernetesSource` via `reqwest`) live in
+the `gsp` binary, injected into `Runtime::start_with_discovery`. A refresh feeds
+`Snapshot::build_with_sources` via the reload task (one snapshot writer);
+precedence `discovered set (or file seed) ∪ overlay-added − overlay-removed`,
+then health / admin state. An errored / empty refresh keeps the previous set
+(never clears the pool) + `gsp_discovery_refresh_total{pool,kind,result}` /
+`gsp_discovery_backends{pool}`. HA operations chapter expanded in `docs/06`
+(anycast vs. L4 LB, per-instance capacity, dashboards & alerts). Deferred: k8s
+watch informer; live reload of `backend_sources` (startup-only, like `workers`).
+Filter chain: per-listener radix-trie `allow` / `deny`
 CIDR lists + an optional MaxMind GeoIP `geo: { allow, deny }` country filter + a
 per-listener `rate_limit` token bucket (per source IP and per /24 / /64) + a
 per-listener `per_source` concurrent connection/session cap + process-wide
@@ -308,8 +325,8 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   targets and direct-config targets carry `ProxyProtocol::None` ⇒ no header (as
   before). Tests: `resolver::resolver_target_gets_a_proxy_protocol_header`
   (e2e), gsp-config parse + two transport-mismatch rejections.
-- **Next**: phase 8 (discovery & scaling). Per-source cap LRU eviction and
-  `GET /sessions` are polish items.
+- **Next**: phase 9 (sniffer plugin loader). Per-source cap LRU eviction,
+  `GET /sessions`, and a k8s watch informer are polish items.
   Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
   sniffer plugin loader (Phase 9).
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
@@ -539,10 +556,11 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
-| Discovery adapters, sniffers | **designed in `docs/`, not yet built.** |
+| Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
+| Sniffers | **designed in `docs/`, plugin loader is phase 9.** |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
 | External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
-| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
+| Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
 
 ---
 
@@ -580,7 +598,9 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | polish |
-| Backend discovery adapters (DNS SRV, K8s, Consul) | phase 8 |
+| Backend discovery adapters (DNS SRV, K8s, Consul) | **done** (phase 8) |
+| k8s discovery via a watch-based informer (polling now) | perf pass |
+| Live reload of `backend_sources` (startup-only now) | polish |
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
@@ -668,6 +688,14 @@ config is unchanged.
 **Backend overlay** (`POST`/`DELETE` backend): touched only during a snapshot
 rebuild (`effective_targets`, one `Mutex` lock + a small `Vec` per pool). Zero
 data-path cost.
+
+**Backend discovery** (`backend_sources`, phase 8): control-plane only. One
+`refresh_loop` task per dynamic source wakes on its `refresh_interval_sec`,
+does one `fetch()` (DNS SRV query / Consul or k8s HTTP GET), and on a change
+`Discovery::store` (one `Mutex` + sort/dedup) + `reload.notify_one()`. The
+snapshot rebuild reads `Discovery::get` (one `Mutex` + `Vec` clone) per pool
+with a `source`. **Zero data-path cost** — the discovered set only affects a
+pool's backend `Vec` at rebuild time, exactly like the backend overlay.
 
 **Connection draining** (`ConnTracker`): one `watch::Sender::send_modify` (a
 brief internal lock, no `.await`) on connection/session open and again on close —

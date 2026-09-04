@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use gsp_config::{Config, GlobalLimits, ListenerConfig};
 
+use crate::discovery::Discovery;
 use crate::overlay::BackendOverlay;
 use crate::pool::Pool;
 
@@ -37,12 +38,33 @@ impl Snapshot {
         prev: Option<&Snapshot>,
         overlay: &BackendOverlay,
     ) -> Arc<Self> {
+        Self::build_with_sources(cfg, prev, overlay, &Discovery::new())
+    }
+
+    /// The full rebuild path (phase 8). For a pool with a `source`, the base
+    /// target list is its discovered set from `discovery` (falling back to the
+    /// file `targets` seed until the first successful refresh); pools without a
+    /// source use their file `targets`. That base is then run through the
+    /// [`BackendOverlay`], and finally [`Pool::new`] carries health / admin
+    /// state across from `prev` by address.
+    pub fn build_with_sources(
+        cfg: &Config,
+        prev: Option<&Snapshot>,
+        overlay: &BackendOverlay,
+        discovery: &Discovery,
+    ) -> Arc<Self> {
         let pools = cfg
             .pools
             .iter()
             .map(|pc| {
                 let prev_pool = prev.and_then(|s| s.pools.get(&pc.name));
-                let targets = overlay.effective_targets(&pc.name, &pc.targets);
+                let base = match &pc.source {
+                    Some(_) => discovery
+                        .get(&pc.name)
+                        .unwrap_or_else(|| pc.targets.clone()),
+                    None => pc.targets.clone(),
+                };
+                let targets = overlay.effective_targets(&pc.name, &base);
                 let pc = if targets == pc.targets {
                     pc.clone()
                 } else {

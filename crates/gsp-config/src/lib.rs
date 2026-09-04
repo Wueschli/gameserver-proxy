@@ -40,6 +40,8 @@ struct RawConfig {
     #[serde(default)]
     settings: RawSettings,
     #[serde(default)]
+    backend_sources: Vec<RawBackendSource>,
+    #[serde(default)]
     pools: Vec<RawPool>,
     #[serde(default)]
     resolvers: Vec<RawResolver>,
@@ -121,7 +123,13 @@ fn default_admin_listen() -> String {
 #[serde(deny_unknown_fields)]
 struct RawPool {
     name: String,
+    /// Static backend list. Mutually exclusive with `source`.
+    #[serde(default)]
     targets: Vec<String>,
+    /// Name of a `backend_sources[]` entry that discovers this pool's backends.
+    /// Mutually exclusive with `targets`.
+    #[serde(default)]
+    source: Option<String>,
     #[serde(default)]
     balancer: Balancer,
     /// `consistent_hash` only: which part of the client address is the hash key.
@@ -146,6 +154,50 @@ fn default_connect_timeout_ms() -> u64 {
 
 fn default_idle_timeout_sec() -> u64 {
     90
+}
+
+/// A named backend discovery source (phase 8). Level-triggered: an adapter
+/// returns the *current* address set for the pool; the runtime diffs it against
+/// the live set. `static` is resolved to the pool's `targets` at validation
+/// time; the other kinds get a control-plane refresh task in `gsp-core`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBackendSource {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    /// How often the refresh task re-queries the source (dynamic kinds only).
+    #[serde(default = "default_source_refresh_sec")]
+    refresh_interval_sec: u64,
+    /// `static` only: the fixed address list.
+    #[serde(default)]
+    targets: Vec<String>,
+    /// `dns_srv` only: the SRV record to resolve (port comes from the record).
+    #[serde(default)]
+    record: Option<String>,
+    /// `consul` / `kubernetes` only: the service name.
+    #[serde(default)]
+    service: Option<String>,
+    /// `consul` only: base URL of the Consul HTTP API.
+    #[serde(default)]
+    consul_addr: Option<String>,
+    /// `consul` only: restrict to service instances carrying this tag.
+    #[serde(default)]
+    tag: Option<String>,
+    /// `kubernetes` only: the namespace (default `default`).
+    #[serde(default)]
+    namespace: Option<String>,
+    /// `kubernetes` only: pick this named port from the Endpoints subset;
+    /// absent ⇒ the first port.
+    #[serde(default)]
+    port_name: Option<String>,
+    /// `kubernetes` only: API server base URL (default the in-cluster address).
+    #[serde(default)]
+    api: Option<String>,
+}
+
+fn default_source_refresh_sec() -> u64 {
+    15
 }
 
 #[derive(Debug, Deserialize)]
@@ -1098,10 +1150,52 @@ pub struct HealthCheck {
     pub fall: u32,
 }
 
+/// A resolved dynamic backend discovery source attached to a pool (phase 8).
+/// `static` sources are folded into `PoolConfig::targets` and never appear here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceConfig {
+    /// The `backend_sources[].name` (for logs / the `source` metric label).
+    pub name: String,
+    pub kind: SourceKind,
+    /// Control-plane refresh cadence.
+    pub refresh_interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceKind {
+    /// Resolve an SRV record; the port comes from each record.
+    DnsSrv { record: String },
+    /// Consul health API: passing instances of a service.
+    Consul {
+        service: String,
+        addr: String,
+        tag: Option<String>,
+    },
+    /// Kubernetes Endpoints of a service (polled).
+    Kubernetes {
+        namespace: String,
+        service: String,
+        port_name: Option<String>,
+        api: String,
+    },
+}
+
+/// Internal: a `backend_sources[]` entry after validation — either folded to a
+/// fixed list (`static`) or a runtime source spec (dynamic kinds).
+enum ResolvedSource {
+    Static(Vec<SocketAddr>),
+    Dynamic(SourceConfig),
+}
+
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     pub name: String,
+    /// Static targets, or the discovery *seed* (empty until first refresh) when
+    /// `source` is set.
     pub targets: Vec<SocketAddr>,
+    /// `Some` ⇒ backends are discovered by a control-plane refresh task; the
+    /// discovered set replaces `targets` in every snapshot rebuild.
+    pub source: Option<SourceConfig>,
     pub balancer: Balancer,
     /// `Some` iff `balancer == ConsistentHash`: the hash key selector.
     pub hash_on: Option<HashOn>,
@@ -1232,25 +1326,159 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         ))
     })?;
 
+    // Resolve `backend_sources`. A `static` source becomes a fixed address list;
+    // the dynamic kinds become a `SourceConfig` for the runtime refresh task.
+    let mut source_names = BTreeSet::new();
+    let mut sources: std::collections::HashMap<String, ResolvedSource> =
+        std::collections::HashMap::with_capacity(raw.backend_sources.len());
+    for s in raw.backend_sources {
+        if !source_names.insert(s.name.clone()) {
+            return Err(Invalid(format!(
+                "duplicate backend_sources name: {}",
+                s.name
+            )));
+        }
+        if s.refresh_interval_sec == 0 {
+            return Err(Invalid(format!(
+                "backend_sources {}: refresh_interval_sec must be > 0",
+                s.name
+            )));
+        }
+        let refresh_interval = Duration::from_secs(s.refresh_interval_sec);
+        let resolved = match s.kind.as_str() {
+            "static" => {
+                if s.targets.is_empty() {
+                    return Err(Invalid(format!(
+                        "backend_sources {}: type static needs a non-empty targets list",
+                        s.name
+                    )));
+                }
+                let mut addrs = Vec::with_capacity(s.targets.len());
+                for t in &s.targets {
+                    addrs.push(t.parse().map_err(|_| {
+                        Invalid(format!(
+                            "backend_sources {}: target is not a valid socket address: {t}",
+                            s.name
+                        ))
+                    })?);
+                }
+                ResolvedSource::Static(addrs)
+            }
+            "dns_srv" => {
+                let record = s.record.clone().ok_or_else(|| {
+                    Invalid(format!(
+                        "backend_sources {}: type dns_srv needs `record`",
+                        s.name
+                    ))
+                })?;
+                if record.is_empty() {
+                    return Err(Invalid(format!(
+                        "backend_sources {}: `record` must not be empty",
+                        s.name
+                    )));
+                }
+                ResolvedSource::Dynamic(SourceConfig {
+                    name: s.name.clone(),
+                    kind: SourceKind::DnsSrv { record },
+                    refresh_interval,
+                })
+            }
+            "consul" => {
+                let service = s.service.clone().ok_or_else(|| {
+                    Invalid(format!(
+                        "backend_sources {}: type consul needs `service`",
+                        s.name
+                    ))
+                })?;
+                ResolvedSource::Dynamic(SourceConfig {
+                    name: s.name.clone(),
+                    kind: SourceKind::Consul {
+                        service,
+                        addr: s
+                            .consul_addr
+                            .clone()
+                            .unwrap_or_else(|| "http://127.0.0.1:8500".to_string()),
+                        tag: s.tag.clone(),
+                    },
+                    refresh_interval,
+                })
+            }
+            "kubernetes" => {
+                let service = s.service.clone().ok_or_else(|| {
+                    Invalid(format!(
+                        "backend_sources {}: type kubernetes needs `service`",
+                        s.name
+                    ))
+                })?;
+                ResolvedSource::Dynamic(SourceConfig {
+                    name: s.name.clone(),
+                    kind: SourceKind::Kubernetes {
+                        namespace: s.namespace.clone().unwrap_or_else(|| "default".to_string()),
+                        service,
+                        port_name: s.port_name.clone(),
+                        api: s
+                            .api
+                            .clone()
+                            .unwrap_or_else(|| "https://kubernetes.default.svc".to_string()),
+                    },
+                    refresh_interval,
+                })
+            }
+            other => {
+                return Err(Invalid(format!(
+                    "backend_sources {}: unknown type {other:?} \
+                     (static | dns_srv | consul | kubernetes)",
+                    s.name
+                )))
+            }
+        };
+        sources.insert(s.name, resolved);
+    }
+
     let mut pool_names = BTreeSet::new();
     let mut pools = Vec::with_capacity(raw.pools.len());
     for p in raw.pools {
         if !pool_names.insert(p.name.clone()) {
             return Err(Invalid(format!("duplicate pool name: {}", p.name)));
         }
-        if p.targets.is_empty() {
-            return Err(Invalid(format!("pool {} has no targets", p.name)));
-        }
-        let mut targets = Vec::with_capacity(p.targets.len());
-        for t in &p.targets {
-            let addr = t.parse().map_err(|_| {
-                Invalid(format!(
-                    "pool {}: target is not a valid socket address: {t}",
+        // Backends come from either a static `targets` list or a named `source`.
+        let (targets, source) = match &p.source {
+            Some(_) if !p.targets.is_empty() => {
+                return Err(Invalid(format!(
+                    "pool {}: `targets` and `source` are mutually exclusive",
                     p.name
-                ))
-            })?;
-            targets.push(addr);
-        }
+                )))
+            }
+            Some(src_name) => match sources.get(src_name) {
+                None => {
+                    return Err(Invalid(format!(
+                        "pool {}: unknown backend_sources name: {src_name}",
+                        p.name
+                    )))
+                }
+                Some(ResolvedSource::Static(addrs)) => (addrs.clone(), None),
+                Some(ResolvedSource::Dynamic(sc)) => (Vec::new(), Some(sc.clone())),
+            },
+            None => {
+                if p.targets.is_empty() {
+                    return Err(Invalid(format!(
+                        "pool {}: needs `targets` or `source`",
+                        p.name
+                    )));
+                }
+                let mut targets = Vec::with_capacity(p.targets.len());
+                for t in &p.targets {
+                    let addr = t.parse().map_err(|_| {
+                        Invalid(format!(
+                            "pool {}: target is not a valid socket address: {t}",
+                            p.name
+                        ))
+                    })?;
+                    targets.push(addr);
+                }
+                (targets, None)
+            }
+        };
         if p.connect_timeout_ms == 0 {
             return Err(Invalid(format!(
                 "pool {}: connect_timeout_ms must be > 0",
@@ -1343,6 +1571,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         pools.push(PoolConfig {
             name: p.name,
             targets,
+            source,
             balancer: p.balancer,
             hash_on,
             connect_timeout: Duration::from_millis(p.connect_timeout_ms),
@@ -3397,5 +3626,151 @@ listeners:
         let all_v4 = CidrSet::build(&[Cidr::parse("0.0.0.0/0").unwrap()]);
         assert!(all_v4.contains("1.2.3.4".parse().unwrap()));
         assert!(!all_v4.contains("::1".parse().unwrap()));
+    }
+
+    // -----------------------------------------------------------------------
+    // backend_sources (phase 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn static_source_folds_into_pool_targets() {
+        let yaml = r#"
+backend_sources:
+  - name: eu
+    type: static
+    targets: ["10.1.0.1:7777", "10.1.0.2:7777"]
+pools:
+  - { name: p, source: eu }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(
+            cfg.pools[0].targets,
+            vec![
+                "10.1.0.1:7777".parse().unwrap(),
+                "10.1.0.2:7777".parse().unwrap()
+            ]
+        );
+        assert!(cfg.pools[0].source.is_none());
+    }
+
+    #[test]
+    fn dynamic_source_attaches_to_the_pool_with_an_empty_seed() {
+        let yaml = r#"
+backend_sources:
+  - name: us
+    type: dns_srv
+    record: "_game._udp.us.example.com"
+    refresh_interval_sec: 10
+pools:
+  - { name: p, source: us }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.pools[0].targets.is_empty());
+        let sc = cfg.pools[0].source.as_ref().unwrap();
+        assert_eq!(sc.name, "us");
+        assert_eq!(sc.refresh_interval, Duration::from_secs(10));
+        assert!(matches!(
+            &sc.kind,
+            SourceKind::DnsSrv { record } if record == "_game._udp.us.example.com"
+        ));
+    }
+
+    #[test]
+    fn consul_and_kubernetes_sources_apply_defaults() {
+        let yaml = r#"
+backend_sources:
+  - { name: c, type: consul, service: game }
+  - { name: k, type: kubernetes, service: match }
+pools:
+  - { name: pc, source: c }
+  - { name: pk, source: k }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: pc }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        let by = |n: &str| {
+            cfg.pools
+                .iter()
+                .find(|p| p.name == n)
+                .unwrap()
+                .source
+                .clone()
+                .unwrap()
+        };
+        assert!(matches!(
+            by("pc").kind,
+            SourceKind::Consul { addr, tag: None, .. } if addr == "http://127.0.0.1:8500"
+        ));
+        assert!(matches!(
+            by("pk").kind,
+            SourceKind::Kubernetes { namespace, api, port_name: None, .. }
+                if namespace == "default" && api == "https://kubernetes.default.svc"
+        ));
+    }
+
+    #[test]
+    fn rejects_targets_and_source_together() {
+        let yaml = r#"
+backend_sources: [{ name: s, type: static, targets: ["10.0.0.1:1"] }]
+pools:
+  - { name: p, targets: ["127.0.0.1:1"], source: s }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_pool_with_neither_targets_nor_source() {
+        let yaml = r#"
+pools:
+  - { name: p }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+        assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_source_reference_and_bad_source_specs() {
+        // unknown reference
+        assert!(parse_str(
+            r#"
+pools: [{ name: p, source: nope }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
+        // dns_srv without `record`
+        assert!(parse_str(
+            r#"
+backend_sources: [{ name: s, type: dns_srv }]
+pools: [{ name: p, source: s }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
+        // refresh_interval_sec: 0
+        assert!(parse_str(
+            r#"
+backend_sources: [{ name: s, type: consul, service: g, refresh_interval_sec: 0 }]
+pools: [{ name: p, source: s }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
+        // unknown type
+        assert!(parse_str(
+            r#"
+backend_sources: [{ name: s, type: etcd, service: g }]
+pools: [{ name: p, source: s }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
     }
 }

@@ -415,6 +415,7 @@ mod tests {
         PoolConfig {
             name: "t".into(),
             targets: targets.iter().map(|s| s.parse().unwrap()).collect(),
+            source: None,
             balancer,
             hash_on: matches!(balancer, Balancer::ConsistentHash).then_some(HashOn::SrcIp),
             connect_timeout: Duration::from_millis(300),

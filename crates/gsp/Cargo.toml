@@ -29,9 +29,11 @@ axum.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 notify.workspace = true
+hickory-resolver.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+hickory-server = { version = "0.24", features = ["testing"] }

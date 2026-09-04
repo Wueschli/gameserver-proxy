@@ -5,11 +5,13 @@
 //! reload on SIGHUP / file change, and shut down cleanly on SIGINT/SIGTERM.
 
 mod admin;
+mod discovery;
 mod reload;
 mod resolver;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -85,12 +87,43 @@ async fn run(
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
-    let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
     let resolvers = Arc::new(resolver::build_resolvers(&cfg)?);
     if !resolvers.is_empty() {
         tracing::info!(count = resolvers.len(), "external resolvers ready");
     }
-    let runtime = Runtime::start_with_geo(snapshot, resolvers, geo_db, cfg.workers);
+
+    // Backend discovery (phase 8): build one source per pool with a `source`,
+    // do a best-effort initial fetch so the first snapshot has real backends,
+    // then let the runtime run a refresh task per source.
+    let discovery = Arc::new(gsp_core::Discovery::new());
+    let sources = discovery::build_sources(&cfg)?;
+    if !sources.is_empty() {
+        tracing::info!(count = sources.len(), "backend discovery sources ready");
+        for s in &sources {
+            match tokio::time::timeout(Duration::from_secs(5), s.fetch()).await {
+                Ok(Ok(addrs)) if !addrs.is_empty() => {
+                    discovery.store(s.pool(), addrs);
+                }
+                Ok(Ok(_)) => tracing::warn!(
+                    pool = s.pool(),
+                    "initial discovery returned no addresses; starting from the seed"
+                ),
+                Ok(Err(e)) => tracing::warn!(
+                    pool = s.pool(), error = %e,
+                    "initial discovery failed; starting from the seed"
+                ),
+                Err(_) => tracing::warn!(
+                    pool = s.pool(),
+                    "initial discovery timed out; starting from the seed"
+                ),
+            }
+        }
+    }
+
+    let snapshot: Arc<Snapshot> =
+        Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
+    let runtime =
+        Runtime::start_with_discovery(snapshot, resolvers, geo_db, discovery, sources, cfg.workers);
     let handle = runtime.handle();
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 

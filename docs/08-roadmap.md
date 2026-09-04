@@ -186,10 +186,32 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: hardened against common L4/7 abuse; per-connection overhead
   measurable via `make bench`.
 
-## Phase 8 – Discovery & scaling (week 19–20)
-- `BackendSource` adapters: DNS SRV, Kubernetes Endpoints, Consul.
-- HA docs: anycast/L4 LB in front, capacity planning, dashboards & alerts.
+## Phase 8 – Discovery & scaling (week 19–20) ✅
+- ✅ `BackendSource` seam in `gsp-core` (`discovery.rs`: trait + `Discovery`
+  last-known-good cache + `refresh_loop`), concrete adapters in the `gsp` binary
+  (`discovery.rs`: `DnsSrvSource` via `hickory-resolver`, `ConsulSource` /
+  `KubernetesSource` via `reqwest`). Same HTTP-free seam as resolvers.
+- ✅ **Level-triggered**: a source returns the current address set; the runtime
+  diffs it against the live set. One control-plane refresh task per source
+  (`refresh_interval_sec`), never on the data path (zero data-path cost —
+  latency ledger).
+- ✅ Fed through the existing snapshot rebuild
+  (`Snapshot::build_with_sources` ← `reload::apply`): one snapshot writer.
+  Precedence: `discovered set (or file seed) ∪ overlay-added − overlay-removed`,
+  then health / admin state.
+- ✅ Degrade to last-known-good: an errored / empty refresh keeps the previous
+  set (never clears the pool) + `gsp_discovery_refresh_total{result}` /
+  `gsp_discovery_backends`.
+- ✅ Config: top-level `backend_sources:` list referenced by `pools[].source`
+  (exactly one of `targets` / `source`). `static` is folded into the pool's
+  targets at load time.
+- ✅ k8s uses **polling** (`GET .../endpoints/<svc>` with the in-pod SA token +
+  CA). Deferred: a watch-based informer (fewer API calls, faster convergence).
+- ✅ HA operations chapter in `docs/06` — anycast vs. L4 LB, capacity planning
+  per instance, dashboards & alerts.
 - **Result**: dynamic backend fleets, horizontal scaling.
+- Deferred: k8s watch informer; per-`backend_sources` live reload (startup-only
+  today, like `workers`).
 
 ## Phase 9 – Sniffer plugin loader
 - A separate community repository of game-protocol sniffers, loaded into the

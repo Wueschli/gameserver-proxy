@@ -16,7 +16,9 @@
 
 > **Implemented subset (roadmap phase 2 + phase 3 routing, partial).**
 > `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
-> (no `backend_sources`); `balancer: round_robin | least_conn | consistent_hash`
+> or a `pools[].source` naming a `backend_sources[]` entry
+> (`static` / `dns_srv` / `consul` / `kubernetes`, flat fields,
+> `refresh_interval_sec`); `balancer: round_robin | least_conn | consistent_hash`
 > (scalar, not an object) — `consistent_hash` also reads a pool-level
 > `hash_on: src_ip | src_ip_port` (default `src_ip`), rejected on the other
 > balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
@@ -171,20 +173,33 @@ filters:
     new_per_sec: 50
     burst: 100
 
-# backend sources
+# backend sources (phase 8) — a pool takes its backends from `targets:` OR a
+# named `source:`, never both. Level-triggered: the adapter returns the current
+# address set; the runtime diffs it against the live set. A refresh that errors
+# or returns empty keeps the last-known-good set. `static` is folded into the
+# pool's targets at load time; the dynamic kinds each get one control-plane
+# refresh task (never on the data path).
 backend_sources:
   - name: static-eu
     type: static
     targets: ["10.1.0.11:7777", "10.1.0.12:7777"]
   - name: k8s-match
-    type: kubernetes_endpoints
-    namespace: "games"
+    type: kubernetes            # polls GET .../endpoints/<service>
     service: "match-server"
-    port_name: "game"
+    namespace: "games"          # default: "default"
+    port_name: "game"           # optional; else the subset's first port
+    api: "https://kubernetes.default.svc"   # default; SA token + CA read in-pod
+    refresh_interval_sec: 10
+  - name: consul-eu
+    type: consul               # GET /v1/health/service/<service>?passing=true
+    service: "match-server"
+    consul_addr: "http://127.0.0.1:8500"    # default
+    tag: "prod"                # optional
+    refresh_interval_sec: 10
   - name: srv-us
-    type: dns_srv
+    type: dns_srv              # resolves the SRV record; port from the record
     record: "_game._udp.us.internal.example.com"
-    refresh_sec: 10
+    refresh_interval_sec: 10
 
 # pools
 pools:
@@ -306,7 +321,9 @@ listeners:
 
 ## Validation rules (excerpt)
 
-- Every `pool.source` must point to a `backend_sources[].name`.
+- A pool needs exactly one of `targets:` / `source:`; `source` must point to a
+  `backend_sources[].name`. `refresh_interval_sec >= 1`. `dns_srv` needs
+  `record`; `consul` / `kubernetes` need `service`.
 - Every `action.pool` / `action.resolver` must exist.
 - Every listener needs at least one route; the last route should be `always`
   (otherwise a "no default" warning).

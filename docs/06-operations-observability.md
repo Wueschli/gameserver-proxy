@@ -33,6 +33,14 @@
   resolver `target` connection (the header form comes from the resolver's
   `proxy_protocol:`)
 
+### Backend discovery (phase 8)
+- `gsp_discovery_refresh_total{pool,kind,result}` – `kind` =
+  `dns_srv|consul|kubernetes`; `result` = `ok|empty|error`. One per refresh
+  attempt. `empty` / `error` keep the last-known-good backend set (the pool is
+  never cleared by a failed refresh).
+- `gsp_discovery_backends{pool}` (gauge) – addresses returned by the pool's
+  source at its last successful refresh.
+
 ### Security / filter chain
 - `gsp_filter_blocked_total{listener,filter}` – `filter` = `acl` | `geo` |
   `rate_ip` | `rate_net` | `src_conn_ip` | `src_conn_net` | `max_conn` |
@@ -165,8 +173,10 @@ rest; affected sessions reconnect.
   `consul-template` / Ansible) and let file-watch pick it up in seconds. The
   structural config is hot-reloaded; validate-before-swap keeps a bad file from
   taking an instance down.
-- **Backend membership** should come from phase-8 discovery (DNS SRV / Consul /
-  k8s Endpoints), not per-instance file edits.
+- **Backend membership** comes from phase-8 discovery (`backend_sources`: DNS SRV
+  / Consul / k8s Endpoints), not per-instance file edits. Every instance runs the
+  same source config and converges independently; a source outage freezes the
+  set at last-known-good rather than draining a pool fleet-wide.
 - **Operator intent** (drain / add / remove a backend, route hints) is applied
   per instance via each instance's admin API and is **not persisted or
   fleet-synced today** — fan it out yourself, and re-apply after a restart.
@@ -176,11 +186,66 @@ rest; affected sessions reconnect.
 - Aggregate `/metrics` and `/pools` in Prometheus; there is no built-in
   fleet-wide view.
 
-Phase 8 adds a proper HA operations chapter (anycast vs. NLB, capacity per
-instance, the dashboard / alert set). The v2 distributed control plane
+### Fronting layer: anycast vs. L4 load balancer
+
+| | **BGP anycast** (same VIP announced from every site) | **L4 LB / NLB** (per-region VIP, flow hashing) |
+|---|---|---|
+| Client → nearest site | routing decides; no extra hop | DNS / GeoDNS picks the region; one LB hop |
+| Instance loss | BGP withdraw (hold-timer seconds); flows rehash to another instance | LB health check fails (1–3 intervals); flows rehash |
+| Flow stability | ECMP must be **per-flow consistent** (resilient hashing) or TCP breaks on any member change | LB provides this; UDP needs "sticky" / per-flow tables |
+| `transparent: true` | works only if replies return via the same instance — usually means anycast for the return path too, or SNAT | works if the LB is DSR or the backend routes replies back through the LB/instance |
+| Best for | UDP-heavy, latency-critical, multi-region | single region, TCP, teams already running an NLB |
+
+Rules of thumb: prefer **PROXY protocol over `transparent`** whenever the fronting
+layer may rehash a live flow (anycast reconvergence, LB scaling) — a rehashed TCP
+flow that lands on a new instance is a reconnect either way, but PROXY protocol
+keeps client-IP preservation working without a symmetric return path. Keep UDP
+idle timeouts short (tens of seconds) so a moved client re-establishes quickly.
+
+### Capacity planning per instance
+
+Size an instance by the **scarcest** of:
+
+- **New-session rate.** Each new TCP connection / UDP session does one
+  `Pool::acquire`, one upstream `connect(2)`, one task spawn (see the latency
+  ledger in `HANDOVER.md`). Load-test with `gsp-bench --connections` and
+  `tcpkali`; set `settings.limits.max_new_sessions_per_sec` to ~70 % of the
+  measured knee and alert before it.
+- **Concurrent sessions / FDs.** ~1 FD per client + 1 per upstream, plus the
+  per-session buffers (2×64 KB UDP, 2×32 KB TCP). Set `max_connections` /
+  `max_udp_sessions` under the file-descriptor `ulimit` with headroom; watch
+  `gsp_fd_open / gsp_fd_limit`.
+- **Bandwidth.** Single-stream throughput is near line rate (the pump is a
+  buffered copy); the limit is NIC / softirq. Spread interrupts (RSS) and run
+  `workers` = cores.
+- **Headroom for failover.** With N instances behind the fronting layer, plan so
+  any single instance loss leaves the rest below ~75 % on every axis above.
+
+### Dashboards & alerts
+
+Per-instance panels: `gsp_active_connections` / `gsp_active_udp_sessions`,
+`gsp_listener_connections_total` rate by `result`, `gsp_worker_busy_ratio`,
+`gsp_bytes_total` rate, `gsp_connection_duration_seconds` p50/p99.
+Fleet roll-ups: `sum by (pool) (gsp_pool_backends{state="healthy"})`,
+`sum(rate(gsp_filter_blocked_total[5m])) by (filter)`,
+`sum(rate(gsp_discovery_refresh_total{result!="ok"}[15m])) by (pool,kind)`.
+
+Alerts (in addition to the list below):
+
+- `gsp_discovery_refresh_total{result!="ok"}` continuously for > 3 refresh
+  intervals on a pool → the source is down and the pool is frozen at
+  last-known-good.
+- `gsp_discovery_backends` drops > 50 % between scrapes → a bad discovery result;
+  cross-check against `gsp_pool_backends{state="healthy"}`.
+- `count(up{job="gsp"}) < N_expected` → an instance is gone; confirm the fronting
+  layer took its VIP / member out.
+- `gsp_config_version` stale (not advancing) across a rollout → file-watch or
+  SIGHUP not reaching that instance.
+
+The v2 distributed control plane
 ([10-distributed-control-plane.md](10-distributed-control-plane.md)) removes the
-"fan it out yourself" / "re-apply after restart" caveats and adds a single
-fleet view + web UI.
+"fan it out yourself" / "re-apply after restart" caveats and adds a single fleet
+view + web UI.
 
 ## Capacity planning / alerts
 

@@ -26,7 +26,7 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–6 complete** (resolver `sticky_key` and
+**Roadmap phases 1–8 complete** (resolver `sticky_key` and
 `GET /sessions` deferred). TCP and UDP
 listener → backend pool forwarding with:
 
@@ -82,8 +82,19 @@ listener → backend pool forwarding with:
   amplifier checklist in `docs/07` is covered by `tests/amplification.rs`, the
   peek/config parsers have `cargo-fuzz` harnesses (`make fuzz`), and `make bench`
   (`crates/gsp-bench`) checks the added-latency budget (NFR N1/N2)
+- backend discovery (phase 8): a top-level `backend_sources:` list referenced by
+  `pools[].source` — `static`, `dns_srv` (SRV), `consul` (health API) or
+  `kubernetes` (Endpoints, polled). Level-triggered: each dynamic source has one
+  control-plane refresh task that returns the *current* address set, diffed
+  into the same snapshot rebuild as file reload / overlay edits; an errored or
+  empty refresh keeps the last-known-good set (`gsp_discovery_refresh_total`,
+  `gsp_discovery_backends`). Adapters live in the binary; `gsp-core` keeps the
+  HTTP-free `BackendSource` seam
 
-**Phases 1–7 complete** (`sticky_key` and `GET /sessions` deferred). Phase 7
+**Phases 1–8 complete** (`sticky_key` and `GET /sessions` deferred). Phase 8
+(discovery & scaling): the `backend_sources` adapters above plus an HA
+operations chapter in `docs/06` (anycast vs. L4 LB, per-instance capacity,
+dashboards & alerts). Phase 7
 (security & hardening): the filter chain above, plus an amplifier-checklist test
 suite, `cargo-fuzz` harnesses for the peek/config parsers, and a `make bench`
 latency harness for NFR N1/N2. Phase 5

@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
+use crate::discovery::{BackendSource, Discovery};
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
@@ -26,10 +27,14 @@ pub struct Runtime {
     /// in-flight sessions keep running.
     draining: Arc<AtomicBool>,
     overlay: Arc<BackendOverlay>,
+    /// Last-known-good discovered backend sets, consulted by every snapshot
+    /// rebuild for pools with a `source`.
+    discovery: Arc<Discovery>,
     listeners: Arc<ListenerManager>,
     reload_requested: Arc<Notify>,
     shutdown_tx: watch::Sender<bool>,
-    /// The health-checker task. Listener tasks live in `listeners`.
+    /// The health-checker task plus one refresh task per discovery source.
+    /// Listener tasks live in `listeners`.
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -43,6 +48,7 @@ pub struct RuntimeHandle {
     conns: Arc<ConnTracker>,
     draining: Arc<AtomicBool>,
     overlay: Arc<BackendOverlay>,
+    discovery: Arc<Discovery>,
     listeners: Arc<ListenerManager>,
     reload_requested: Arc<Notify>,
 }
@@ -92,6 +98,13 @@ impl RuntimeHandle {
         &self.overlay
     }
 
+    /// The last-known-good discovered backend sets. The reload task passes this
+    /// to [`Snapshot::build_with_sources`] so a rebuild picks up the newest
+    /// discovery results.
+    pub fn discovery(&self) -> &Arc<Discovery> {
+        &self.discovery
+    }
+
     /// Ask the reload task to rebuild the snapshot (after an overlay edit).
     pub fn request_reload(&self) {
         self.reload_requested.notify_one();
@@ -132,6 +145,29 @@ impl Runtime {
         initial: Arc<Snapshot>,
         resolvers: Arc<Resolvers>,
         geo: Option<Arc<GeoDb>>,
+        workers: usize,
+    ) -> Self {
+        Self::start_with_discovery(
+            initial,
+            resolvers,
+            geo,
+            Arc::new(Discovery::new()),
+            Vec::new(),
+            workers,
+        )
+    }
+
+    /// Like [`Runtime::start_with_geo`], plus backend discovery (phase 8):
+    /// `discovery` holds the last-known-good address sets and `sources` get one
+    /// control-plane [`refresh_loop`](crate::discovery::refresh_loop) task each.
+    /// The caller (the `gsp` binary) builds the concrete sources and does a
+    /// best-effort initial fetch into `discovery` before `initial` is built.
+    pub fn start_with_discovery(
+        initial: Arc<Snapshot>,
+        resolvers: Arc<Resolvers>,
+        geo: Option<Arc<GeoDb>>,
+        discovery: Arc<Discovery>,
+        sources: Vec<Arc<dyn BackendSource>>,
         workers: usize,
     ) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
@@ -176,6 +212,14 @@ impl Runtime {
                 crate::health::run(snap, &mut sd).await;
             }));
         }
+        for source in sources {
+            let discovery = discovery.clone();
+            let reload = reload_requested.clone();
+            let mut sd = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                crate::discovery::refresh_loop(source, discovery, reload, &mut sd).await;
+            }));
+        }
 
         Self {
             snapshot,
@@ -183,6 +227,7 @@ impl Runtime {
             conns,
             draining,
             overlay,
+            discovery,
             listeners,
             reload_requested,
             shutdown_tx,
@@ -197,6 +242,7 @@ impl Runtime {
             conns: self.conns.clone(),
             draining: self.draining.clone(),
             overlay: self.overlay.clone(),
+            discovery: self.discovery.clone(),
             listeners: self.listeners.clone(),
             reload_requested: self.reload_requested.clone(),
         }

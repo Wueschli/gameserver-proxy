@@ -68,10 +68,11 @@ async fn apply(path: &Path, handle: &RuntimeHandle) {
         Ok(cfg) => {
             let prev = handle.current();
             let listeners_changed = cfg.listeners != prev.listeners;
-            handle.store(Snapshot::build_with_overlay(
+            handle.store(Snapshot::build_with_sources(
                 &cfg,
                 Some(&prev),
                 handle.backend_overlay(),
+                handle.discovery(),
             ));
             metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
             metrics::gauge!(m::CONFIG_VERSION).set(unix_now());

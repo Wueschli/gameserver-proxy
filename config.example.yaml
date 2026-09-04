@@ -21,11 +21,44 @@ settings:
   # The proxy fails startup / --check if it can't be opened. Startup-only.
   # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
 
+# Backend discovery (phase 8). A named source hands a pool its backend set
+# instead of a static `targets:` list. Level-triggered: the adapter returns the
+# *current* address set and the runtime diffs it against the live one. A refresh
+# that errors or comes back empty keeps the last-known-good set (never clears the
+# pool) + gsp_discovery_refresh_total{result="error"|"empty"}. Each dynamic
+# source gets one control-plane refresh task (never on the data path).
+#   type: static      — a fixed reusable list (folded into the pool at load time)
+#   type: dns_srv      — resolve an SRV record; port comes from the record
+#   type: consul       — passing instances of a Consul service (HTTP API)
+#   type: kubernetes   — Endpoints of a Service (polled; SA token + CA in-pod)
+backend_sources:
+  - name: local-static
+    type: static
+    targets: ["127.0.0.1:9001", "127.0.0.1:9002"]
+  # - name: us-fleet
+  #   type: dns_srv
+  #   record: "_game._udp.us.internal.example.com"
+  #   refresh_interval_sec: 15
+  # - name: consul-game
+  #   type: consul
+  #   service: "game-server"
+  #   consul_addr: "http://127.0.0.1:8500"   # default
+  #   tag: "prod"                            # optional
+  #   refresh_interval_sec: 10
+  # - name: k8s-match
+  #   type: kubernetes
+  #   service: "match-server"
+  #   namespace: "games"                     # default: "default"
+  #   port_name: "game"                      # optional; else the subset's first port
+  #   api: "https://kubernetes.default.svc"  # default
+  #   refresh_interval_sec: 10
+
 pools:
+  # A pool takes its backends from either `targets:` or `source:` (not both).
+  # Here the backends come from the `local-static` source above; swap in a
+  # dynamic source (dns_srv / consul / kubernetes) with no other change.
   - name: local
-    targets:
-      - "127.0.0.1:9001"
-      - "127.0.0.1:9002"
+    source: local-static
     balancer: round_robin        # round_robin | least_conn | consistent_hash
     connect_timeout_ms: 300
     idle_timeout_sec: 90
@@ -219,6 +252,9 @@ listeners:
 
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
+# Discovered backend sets are refreshed by their own tasks and folded into the
+#   same snapshot rebuild (discovery set ∪ overlay-added − overlay-removed, then
+#   health / admin state). `backend_sources` themselves are startup-only.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
 #   protocol / routes / affinity / prefix / freebind / transparent / route_hint
 #   / allow / deny / rate_limit / per_source / first_packet_gate / geo.

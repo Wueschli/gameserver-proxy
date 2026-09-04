@@ -8,6 +8,7 @@
 //! feedback, per-worker UDP session tables with `src_ip` affinity, and hot
 //! reload via an atomic snapshot swap.
 
+pub mod discovery;
 pub mod drain;
 pub mod geo;
 pub mod health;
@@ -30,6 +31,7 @@ pub mod sniff;
 pub mod src_conns;
 mod util;
 
+pub use discovery::{refresh_loop, BackendSource, Discovery};
 pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
