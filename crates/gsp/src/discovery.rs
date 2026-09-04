@@ -451,12 +451,12 @@ mod tests {
 
     #[tokio::test]
     async fn dns_srv_source_resolves_targets_to_addresses() {
-        use std::sync::Arc;
         use hickory_server::authority::{Catalog, ZoneType};
         use hickory_server::proto::rr::rdata::{A, SRV};
         use hickory_server::proto::rr::{LowerName, Name, RData, Record};
         use hickory_server::store::in_memory::InMemoryAuthority;
         use hickory_server::ServerFuture;
+        use std::sync::Arc;
 
         let origin = Name::from_ascii("example.com.").unwrap();
         let mut auth = InMemoryAuthority::empty(origin.clone(), ZoneType::Primary, false);

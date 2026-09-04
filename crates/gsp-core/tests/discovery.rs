@@ -121,10 +121,10 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let (sd_tx, mut sd_rx) = watch::channel(false);
 
     let source = ScriptedSource::new(vec![
-        Ok(vec![addr("10.0.0.1:7777")]),                       // first refresh
+        Ok(vec![addr("10.0.0.1:7777")]), // first refresh
         Ok(vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")]), // grew
-        Err(anyhow::anyhow!("source down")),                    // must not clear
-        Ok(Vec::new()),                                         // empty must not clear
+        Err(anyhow::anyhow!("source down")), // must not clear
+        Ok(Vec::new()),                  // empty must not clear
     ]);
 
     let src_dyn: Arc<dyn BackendSource> = source.clone();
