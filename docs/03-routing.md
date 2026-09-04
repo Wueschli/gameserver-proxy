@@ -25,7 +25,8 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > still "what has been peeked so far" — a `prefix` fits in the first segment.)
 > The `consistent_hash` balancer is implemented (`balancer: consistent_hash`,
 > pool-level `hash_on: src_ip | src_ip_port`; rendezvous/HRW hash over the
-> healthy backends). **`dst` — two forms:** a normally-bound TCP/UDP listener sees
+> healthy backends); so is `weighted` (`balancer: weighted` + a `weights:` map).
+> **`dst` — two forms:** a normally-bound TCP/UDP listener sees
 > only its own bind IP (useful across addresses the host serves separately; TCP
 > can bind a non-local address with `freebind: true`). A UDP listener with
 > `prefix: <cidr>` runs in **prefix mode** — one wildcard socket with
@@ -48,8 +49,10 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > `src_ip_port` / `sni` / `routing_key` / `first_bytes:a:b`). Only
 > `Resolution.sticky_key` is unused (deferred — it overlaps the request-keyed
 > cache and the existing affinity mechanisms).
-> Still pending elsewhere: the TCP side of prefix binding beyond `freebind`, the
-> sniffer loader, and the `weighted` / `first_available` balancers.
+> Still pending elsewhere: the TCP side of prefix binding beyond `freebind` and
+> the `first_available` balancer. The `weighted` balancer is implemented
+> (`balancer: weighted` + a `weights:` map of `"ip:port"` → share, default 1) —
+> weighted round-robin over the healthy set, one atomic tick per selection.
 > Regex-over-first-bytes is folded into the Phase 9 plugin layer, not a
 > `first-bytes` sub-form. A listener with a bare `pool:` is normalised to one
 > `always` route.
@@ -149,9 +152,9 @@ short-lived `src_ip → pool` mapping.
 |----------|-----|
 | `round_robin` | equivalent stateless backends |
 | `least_conn` | long-lived sessions of uneven duration |
-| `weighted` | heterogeneous hardware / canary (`weight: 1` vs `weight: 20`) |
+| `weighted` | heterogeneous hardware / canary; `weights: { "ip:port": N }`, default 1, weighted round-robin |
 | `consistent_hash` | affinity without a sticky table; hash key = client IP or routing key |
-| `first_available` | active/passive, a backend fills up to its cap, then the next |
+| `first_available` | active/passive, a backend fills up to its cap, then the next *(not yet implemented)* |
 
 ## Session affinity
 

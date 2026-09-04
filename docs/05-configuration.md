@@ -18,10 +18,11 @@
 > `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
 > or a `pools[].source` naming a `backend_sources[]` entry
 > (`static` / `dns_srv` / `consul` / `kubernetes`, flat fields,
-> `refresh_interval_sec`); `balancer: round_robin | least_conn | consistent_hash`
-> (scalar, not an object) — `consistent_hash` also reads a pool-level
-> `hash_on: src_ip | src_ip_port` (default `src_ip`), rejected on the other
-> balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
+> `refresh_interval_sec`); `balancer: round_robin | least_conn | consistent_hash
+> | weighted` (scalar, not an object) — `consistent_hash` also reads a pool-level
+> `hash_on: src_ip | src_ip_port` (default `src_ip`), and `weighted` a pool-level
+> `weights: { "ip:port": N }` map (weight `>= 1`, default 1), each rejected on the
+> other balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
 > `expect_hex_prefix` for `udp_probe`; `per_backend.max_sessions`; and
 > `proxy_protocol: none | v1 | v2 | v2-udp` (scalar). `v1`/`v2` are TCP-only,
 > `v2-udp` UDP-only; the form must match the transport of the listeners that
@@ -369,6 +370,8 @@ listeners:
 - A listener `geo` filter requires `settings.geo_db`, a non-empty `allow` or
   `deny`, and 2-letter country codes; the DB file must open at startup / `--check`.
 - `consistent_hash` requires `hash_on`.
+- `weights` is accepted only with `balancer: weighted`; every key must parse as
+  `ip:port` and every value must be `>= 1`.
 - `settings.sniffers.dir` must not be empty; `call_timeout_ms` /
   `max_memory_bytes` must be `>= 1`; each `modules[].sha256` must be a 64-char
   hex digest and `name` must not be empty.

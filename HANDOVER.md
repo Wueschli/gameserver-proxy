@@ -674,6 +674,8 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   (safe wrappers — no `unsafe`; ADR 10). **TCP `freebind: true`** sets
   `IP_FREEBIND` / `IPV6_FREEBIND` on the bind socket.
 - **Balancers**: `round_robin`, `least_conn` (counts UDP sessions too),
+  `weighted` (weighted round-robin — pool `weights: { "ip:port": N }`, default 1,
+  works with a discovered `source:` too),
   `consistent_hash` (rendezvous/HRW hash of the client key — pool `hash_on:
   src_ip | src_ip_port` — over the healthy backends; `acquire()` with no client
   key falls back to round-robin). TCP passes `peer`; UDP passes the client addr
@@ -824,7 +826,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Config | Immutable `Snapshot` behind `arc_swap::ArcSwap`. `serde_yaml` (deprecated but working; revisit if it breaks). |
 | Data/control split | Data plane only reads the snapshot; `reload.rs` is the only writer. |
 | LB / health | `AtomicBool` healthy flag, `rise`/`fall` streaks under a short `Mutex`, `AtomicUsize` active count. `BackendGuard` RAII for the session slot + passive health. |
-| Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
+| Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `weighted` (weighted round-robin: one atomic tick indexes the cumulative-weight line; pool `weights` map, default 1), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
@@ -845,7 +847,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP sticky-affinity table: LRU eviction (hard cap + wholesale clear now) | polish |
 | `consistent_hash` balancer | **done** (phase 3 slice 3) |
 | `consistent_hash` used to retire the UDP per-worker sticky table | polish |
-| `weighted` / `first_available` balancers | later |
+| `weighted` balancer | **done** (data-plane completion, item 5 — `balancer: weighted` + pool `weights: { "ip:port": N }`, weighted round-robin in `Pool::acquire_for`) |
+| `first_available` balancer | later |
 | UDP ICMP port-unreachable as an explicit passive health signal | **done** (pre-phase-8 cleanup) |
 | Listener add / remove / rebind at runtime | **done** (phase 5 slice 5) |
 | Tracked connection drain with a grace period on shutdown | **done** (phase 5 slice 2) |
@@ -906,8 +909,8 @@ focused unit):
 1. ~~ClientHello fragmentation~~ — **done** (on `main`).
 2. ~~Item 3 — `RouteHint.reject` hard drop~~ — **done** (on `main`).
 3. ~~Item 6 — per-resolver `target` timeout knob~~ — **done** (on `main`).
-4. **Item 5 — `weighted` balancer.** ← *next.* Self-contained.
-5. **Item 2 — per-plugin sniffer config**, as a deliberate two-slice unit:
+4. ~~Item 5 — `weighted` balancer~~ — **done** (on `main`).
+5. **Item 2 — per-plugin sniffer config** ← *next*, as a deliberate two-slice unit:
    - **A2**: `settings.sniffers.modules[].config` schema + widen the guest ABI
      `sniff(in_ptr,in_len) → sniff(in_ptr,in_len,cfg_ptr,cfg_len)` +
      `WasmSniffer` carries the blob + all three first-party plugins take the
@@ -969,7 +972,14 @@ are cheaper than a fresh slice:
 4. **Live reload of `resolvers:` and `backend_sources:`** — both startup-only
    today; a proxy that advertises zero-downtime reload should fold these into
    the existing `validate → Snapshot::build → ArcSwap::store` path.
-5. **`weighted` balancer** — heterogeneous backend hardware is a normal case.
+5. ~~**`weighted` balancer**~~ — **DONE**: `balancer: weighted` + pool
+   `weights: { "ip:port": N }` (weight `>= 1`, default 1, `weighted`-only),
+   weighted round-robin over the healthy set in `Pool::acquire_for` (one atomic
+   tick into the cumulative-weight line). Works with a discovered `source:`.
+   Tests: `pool::tests::weighted_distributes_new_sessions_by_weight` /
+   `weighted_falls_through_when_the_heavier_backend_is_full` /
+   `weighted_without_a_weights_map_is_plain_round_robin` +
+   `gsp_config::tests::parses_weighted_pool_and_rejects_bad_weights`.
    (`first_available` can wait.)
 6. ~~**Per-resolver `target` connect/idle timeout knob**~~ — **DONE**:
    `resolvers[].target_connect_timeout_ms` / `target_idle_timeout_sec` (defaults
@@ -1375,7 +1385,8 @@ pulls in `serde`.
 
 **Phase 3 is complete.** Remaining routing work is deliberately elsewhere:
 `external` resolver = phase 4; sniffer loader + `first_bytes` `regex` (as a
-plugin) = phase 9; `weighted` / `first_available` balancers = later.
+plugin) = phase 9; `weighted` balancer shipped later (data-plane completion);
+`first_available` balancer = later.
 
 ## Phase 4 — external routing logic
 

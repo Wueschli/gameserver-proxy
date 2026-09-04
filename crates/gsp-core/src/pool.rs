@@ -94,9 +94,13 @@ pub struct Backend {
     check_interval: Duration,
     check_timeout: Duration,
     max_sessions: Option<usize>,
+    /// Relative share for `Balancer::Weighted` (>= 1); `1` for every other
+    /// balancer.
+    weight: u32,
 }
 
 impl Backend {
+    #[allow(clippy::too_many_arguments)] // one caller (`Pool::new`); a struct would just move the list
     fn new(
         addr: SocketAddr,
         pool: Arc<str>,
@@ -104,6 +108,7 @@ impl Backend {
         max_sessions: Option<usize>,
         initially_healthy: bool,
         initial_state: AdminState,
+        weight: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
             addr,
@@ -119,6 +124,7 @@ impl Backend {
             check_interval: hc.interval,
             check_timeout: hc.timeout,
             max_sessions,
+            weight,
         })
     }
 
@@ -282,6 +288,7 @@ impl Pool {
                     cfg.max_sessions,
                     carried_healthy,
                     carried_state,
+                    cfg.weights.get(&addr).copied().unwrap_or(1),
                 )
             })
             .collect();
@@ -358,6 +365,27 @@ impl Pool {
                 }
                 None => round_robin(&mut healthy),
             },
+            // Weighted round-robin: one atomic tick indexes into the cumulative
+            // weight line of the healthy set, then rotate so the chosen backend
+            // leads (capacity fall-through then walks the others in their
+            // existing order). Blocky rather than interleaved — fine for the
+            // handful of backends a pool holds.
+            Balancer::Weighted => {
+                let total: u64 = healthy.iter().map(|b| b.weight as u64).sum();
+                if total > 0 {
+                    let mut pos = self.rr.fetch_add(1, Ordering::Relaxed) as u64 % total;
+                    let mut idx = 0;
+                    for (i, b) in healthy.iter().enumerate() {
+                        let w = b.weight as u64;
+                        if pos < w {
+                            idx = i;
+                            break;
+                        }
+                        pos -= w;
+                    }
+                    healthy.rotate_left(idx);
+                }
+            }
         }
 
         for b in healthy {
@@ -389,6 +417,7 @@ fn strategy_str(b: Balancer) -> &'static str {
         Balancer::RoundRobin => "round_robin",
         Balancer::LeastConn => "least_conn",
         Balancer::ConsistentHash => "consistent_hash",
+        Balancer::Weighted => "weighted",
     }
 }
 
@@ -418,6 +447,7 @@ mod tests {
             source: None,
             balancer,
             hash_on: matches!(balancer, Balancer::ConsistentHash).then_some(HashOn::SrcIp),
+            weights: std::collections::HashMap::new(),
             connect_timeout: Duration::from_millis(300),
             idle_timeout: Duration::from_secs(90),
             proxy_protocol: ProxyProtocol::None,
@@ -444,6 +474,52 @@ mod tests {
         );
         let seq: Vec<u16> = (0..6).map(|_| p.acquire().unwrap().addr().port()).collect();
         assert_eq!(seq, vec![1, 2, 3, 1, 2, 3]);
+    }
+
+    #[test]
+    fn weighted_distributes_new_sessions_by_weight() {
+        let mut cfg = pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::Weighted, None);
+        cfg.weights = [
+            ("127.0.0.1:1".parse().unwrap(), 3),
+            ("127.0.0.1:2".parse().unwrap(), 1),
+        ]
+        .into_iter()
+        .collect();
+        let p = Pool::new(&cfg, None);
+
+        let (mut n1, mut n2) = (0, 0);
+        for _ in 0..80 {
+            // guard drops each iteration — `weighted` ignores the active count,
+            // so the ratio is purely the configured weights
+            match p.acquire().unwrap().addr().port() {
+                1 => n1 += 1,
+                2 => n2 += 1,
+                other => panic!("unexpected backend port {other}"),
+            }
+        }
+        assert_eq!((n1, n2), (60, 20), "3:1 weight ⇒ 3:1 sessions");
+    }
+
+    #[test]
+    fn weighted_falls_through_when_the_heavier_backend_is_full() {
+        let mut cfg = pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::Weighted, Some(1));
+        cfg.weights = [("127.0.0.1:1".parse().unwrap(), 10)].into_iter().collect();
+        let p = Pool::new(&cfg, None);
+
+        let _g1 = p.acquire().unwrap(); // weight 10 ⇒ :1 is picked and now full
+        let g2 = p.acquire().unwrap(); // :1 still picked by weight, full ⇒ fall through
+        assert_eq!(g2.addr().port(), 2);
+    }
+
+    #[test]
+    fn weighted_without_a_weights_map_is_plain_round_robin() {
+        // every backend defaults to weight 1
+        let p = Pool::new(
+            &pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::Weighted, None),
+            None,
+        );
+        let seq: Vec<u16> = (0..4).map(|_| p.acquire().unwrap().addr().port()).collect();
+        assert_eq!(seq, vec![1, 2, 1, 2]);
     }
 
     #[test]

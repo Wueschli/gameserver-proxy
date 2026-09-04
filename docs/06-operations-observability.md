@@ -27,7 +27,7 @@
 - `gsp_backend_connect_errors_total{pool,backend,kind}` – `kind` = `timeout|refused|unreachable`
 - `gsp_healthcheck_total{pool,backend,result}`
 - `gsp_lb_selections_total{pool,strategy,result}` – `strategy` =
-  `round_robin|least_conn|consistent_hash`; `result` = `ok|no_backend|at_capacity`
+  `round_robin|least_conn|consistent_hash|weighted`; `result` = `ok|no_backend|at_capacity`
 - `gsp_route_hints_applied_total{listener}` – a `POST /route-hint` entry decided
   routing for a connection / UDP session
 - `gsp_proxy_protocol_headers_total{pool,version}` – `version` = `v1|v2|v2-udp`; a

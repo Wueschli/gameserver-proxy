@@ -41,7 +41,10 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 - **Data structures**: `hashbrown` (session map), `slab`, `ip_network_table` / an LPM
   trie for ACLs. Consistent hashing is a hand-rolled rendezvous (HRW) hash over the
   healthy backends (`std` `DefaultHasher`) — no `hashring` dependency; the backend
-  set is tiny, so HRW's linear scan is cheaper than maintaining a ring.
+  set is tiny, so HRW's linear scan is cheaper than maintaining a ring. `weighted`
+  is likewise a plain weighted round-robin over the cumulative-weight line (one
+  atomic tick per selection, no smooth-WRR per-backend state) — blocky ordering is
+  fine at this backend-set size.
 - **Config**: `serde` + `serde_yaml`, `figment` for env overlay, `notify` for file
   watch.
 - **Snapshot swap**: `arc-swap`.

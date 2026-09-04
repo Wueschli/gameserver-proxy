@@ -174,6 +174,10 @@ struct RawPool {
     /// `consistent_hash` only: which part of the client address is the hash key.
     #[serde(default)]
     hash_on: Option<HashOn>,
+    /// `weighted` only: `"ip:port"` → weight (>= 1). A backend (static or
+    /// discovered) not listed here weighs `1`.
+    #[serde(default)]
+    weights: std::collections::HashMap<String, u32>,
     #[serde(default = "default_connect_timeout_ms")]
     connect_timeout_ms: u64,
     #[serde(default = "default_idle_timeout_sec")]
@@ -551,6 +555,10 @@ pub enum Balancer {
     /// that backend's share moves when the set changes. Key selected by the
     /// pool's `hash_on` (`src_ip` default).
     ConsistentHash,
+    /// Round-robin biased by a per-backend `weight` (from the pool's `weights`
+    /// map; any backend not listed there weighs `1`). A backend weighing `3`
+    /// receives three times the new sessions of a backend weighing `1`.
+    Weighted,
 }
 
 /// Listener transport.
@@ -1286,6 +1294,9 @@ pub struct PoolConfig {
     pub balancer: Balancer,
     /// `Some` iff `balancer == ConsistentHash`: the hash key selector.
     pub hash_on: Option<HashOn>,
+    /// `balancer == Weighted` only (empty otherwise): backend address → weight
+    /// (>= 1). A backend not present weighs `1`.
+    pub weights: std::collections::HashMap<SocketAddr, u32>,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub health_check: HealthCheck,
@@ -1655,12 +1666,36 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             (_, None) => None,
         };
 
+        if !p.weights.is_empty() && p.balancer != Balancer::Weighted {
+            return Err(Invalid(format!(
+                "pool {}: weights applies only to balancer weighted",
+                p.name
+            )));
+        }
+        let mut weights = std::collections::HashMap::with_capacity(p.weights.len());
+        for (addr, w) in &p.weights {
+            if *w == 0 {
+                return Err(Invalid(format!(
+                    "pool {}: weight for {addr} must be >= 1",
+                    p.name
+                )));
+            }
+            let sa: SocketAddr = addr.parse().map_err(|_| {
+                Invalid(format!(
+                    "pool {}: weights key {addr:?} is not an ip:port",
+                    p.name
+                ))
+            })?;
+            weights.insert(sa, *w);
+        }
+
         pools.push(PoolConfig {
             name: p.name,
             targets,
             source,
             balancer: p.balancer,
             hash_on,
+            weights,
             connect_timeout: Duration::from_millis(p.connect_timeout_ms),
             idle_timeout: Duration::from_secs(p.idle_timeout_sec),
             health_check: HealthCheck {
@@ -2639,6 +2674,39 @@ listeners:
     pool: p
 "#;
         assert!(parse_str(yaml).is_err());
+    }
+
+    #[test]
+    fn parses_weighted_pool_and_rejects_bad_weights() {
+        let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1", "127.0.0.1:2"]
+    balancer: weighted
+    weights: { "127.0.0.1:1": 3, "127.0.0.1:2": 1 }
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert_eq!(cfg.pools[0].balancer, Balancer::Weighted);
+        assert_eq!(
+            cfg.pools[0].weights.get(&"127.0.0.1:1".parse().unwrap()),
+            Some(&3)
+        );
+
+        let bad = |extra: &str, bal: &str| {
+            format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n    balancer: {bal}\n    {extra}\nlisteners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", pool: p }}\n"
+            )
+        };
+        // weights with a non-weighted balancer
+        assert!(parse_str(&bad(r#"weights: { "127.0.0.1:1": 2 }"#, "round_robin")).is_err());
+        // weight of zero
+        assert!(parse_str(&bad(r#"weights: { "127.0.0.1:1": 0 }"#, "weighted")).is_err());
+        // weights key that isn't an ip:port
+        assert!(parse_str(&bad(r#"weights: { "not-an-addr": 2 }"#, "weighted")).is_err());
     }
 
     #[test]

@@ -70,7 +70,12 @@ pools:
   # dynamic source (dns_srv / consul / kubernetes) with no other change.
   - name: local
     source: local-static
-    balancer: round_robin        # round_robin | least_conn | consistent_hash
+    balancer: round_robin        # round_robin | least_conn | consistent_hash | weighted
+    # weighted only: "ip:port" -> relative share (>= 1); a backend not listed
+    # here weighs 1. Works with a discovered `source:` too (match by address).
+    # weights:
+    #   "127.0.0.1:9001": 3
+    #   "127.0.0.1:9002": 1
     connect_timeout_ms: 300
     idle_timeout_sec: 90
     # Prepend a PROXY protocol header so the backend sees the real client
