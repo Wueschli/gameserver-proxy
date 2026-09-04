@@ -895,6 +895,25 @@ Suggested sequencing: one "data-plane completion" phase (list A + C) → one
 "perf pass" phase (list B) → then phases 10–12. This matches the `docs/08`
 milestone cut where v1.3 is additive and the data-plane contract is unchanged.
 
+**Verification (checked against the code at `34867bf`)**: none of these items
+have been started, in any form — every one is still a `// later` comment or an
+unimplemented branch. Three, though, already have a partial mechanism, so they
+are cheaper than a fresh slice:
+- **Item 1 (ClientHello fragmentation)** — the peek already reads up to
+  `PEEK_MAX` = 4096 B in one `stream.peek()` (`listener.rs:174`), so a
+  ClientHello contained in the first TCP segment is handled today; only a
+  ClientHello genuinely split across segments falls through. Needs a
+  peek-retry loop for that edge case, not a rewrite.
+- **Item 3 (`RouteHint.reject` hard drop)** — on a UDP listener with
+  `first_packet_gate: true` a `reject` hint already fails the gate ⇒ no session
+  (`lib.rs:1346`). Only the TCP path and non-gated UDP still need the explicit
+  drop (`lib.rs:956` — a `reject` hint there just makes the `sniffer` route not
+  match).
+- **Item 8 (`IPV6_TRANSPARENT` on musl)** — `set_ip_transparent` already calls
+  `socket2` 0.6's `set_ip_transparent_v6` unconditionally (`net.rs:138`), with
+  no `target_env` guard. This may already work on musl; start with a build +
+  smoke test before assuming code is needed.
+
 ### Do NOW — to call the single-instance proxy "finished"
 
 **A. Real feature / correctness gaps (a production deployment will hit these):**
