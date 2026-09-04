@@ -324,27 +324,40 @@ listeners:
 
   # Raw UDP with no protocol hint: subdomain by destination IP (see docs/03 scheme A)
   - name: raw-udp
-    bind: "[2001:db8:ace:1::]/64:7777"   # prefix bind, one socket
+    bind: "[::]:7777"                     # wildcard bind, one socket
     protocol: udp
-    recv_dst_addr: true                   # enable IPV6_RECVPKTINFO / IP_PKTINFO
-    freebind: true                        # ip_nonlocal_bind / IP_FREEBIND
+    prefix: "2001:db8:ace:1::/64"         # enables IP_PKTINFO / IPV6_RECVPKTINFO;
+                                           # routes by the real per-datagram destination
     routes:
-      - match: { type: dst, cidr: "2001:db8:ace:1::1/128" }   # survival.example.net
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::1/128"] }   # survival.example.net
         action: { pool: match-eu }
-      - match: { type: dst, cidr: "2001:db8:ace:1::2/128" }   # creative.example.net
+      - match: { type: dst, cidrs: ["2001:db8:ace:1::2/128"] }   # creative.example.net
         action: { pool: match-us }
       - match: { type: always }
         action: { reject: true }          # unknown destination IP -> drop
     affinity: { hash_on: src_ip }
 
-  # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port
-  - name: raw-udp-v4
-    bind: "0.0.0.0:30000-30099"
+  # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port.
+  # A listener socket binds to exactly one port today — the port-range bind
+  # (requirement F1.4, one listener spawning a socket per port across a range)
+  # is planned but not yet built, see HANDOVER.md — so at real scale this
+  # needs one listener per port; `port` below is a *route matcher* (it does
+  # support a "lo-hi" range, but only within one listener's routes, not as a
+  # bind address).
+  - name: raw-udp-eu
+    bind: "0.0.0.0:30001"
     protocol: udp
     routes:
-      - match: { type: port, eq: 30001 }
+      - match: { type: port, ports: [30001] }
         action: { pool: match-eu }
-      - match: { type: port, eq: 30002 }
+      - match: { type: always }
+        action: { reject: true }
+
+  - name: raw-udp-us
+    bind: "0.0.0.0:30002"
+    protocol: udp
+    routes:
+      - match: { type: port, ports: [30002] }
         action: { pool: match-us }
       - match: { type: always }
         action: { reject: true }
@@ -356,8 +369,10 @@ listeners:
   `backend_sources[].name`. `refresh_interval_sec >= 1`. `dns_srv` needs
   `record`; `consul` / `kubernetes` need `service`.
 - Every `action.pool` / `action.resolver` must exist.
-- Every listener needs at least one route; the last route should be `always`
-  (otherwise a "no default" warning).
+- Every listener needs at least one route. There is currently no warning for a
+  route list with no trailing `always` — an unmatched connection/datagram is
+  silently dropped (`no_route`); a "did you forget a catch-all route?" lint is
+  a plausible small future addition, not built today.
 - `proxy_protocol: v2-udp` only together with `protocol: udp` (for a pool, and
   for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
 - A resolver's `timeout_ms`, `target_connect_timeout_ms` and
@@ -381,10 +396,19 @@ listeners:
   `max_memory_bytes` must be `>= 1`; each `modules[].sha256` must be a 64-char
   hex digest and `name` must not be empty; a `modules[].config`, if given, must
   be non-empty.
-- `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
-  destination address per packet/connection is unknown); a prefix bind requires
-  `freebind: true` and a prefix routed to the host.
-- `match.type: port` is only meaningful with a range bind (`:30000-30099`).
+- `match.type: dst` needs the destination address to be known: on TCP it comes
+  from `getsockname()` for free; on UDP it needs either `transparent: true`
+  (any dest) or `prefix: <cidr>` (dest within that prefix) on the listener —
+  there is no separate `recv_dst_addr` flag, `prefix`/`transparent` themselves
+  turn on the recv path. `freebind` is TCP-only and is rejected together with
+  `prefix` (a UDP prefix listener needs the routed prefix reachable to the
+  host, not `IP_FREEBIND`).
+- `match.type: port` matches the destination port of the accepting socket; its
+  own `ports:` list supports a `"lo-hi"` range. A *listener's* `bind` address
+  is always a single port today — a port-range bind (spawning one socket per
+  port in a configured range under one listener) is a real, planned
+  requirement (F1.4 in `docs/01-requirements.md`) that hasn't been built yet;
+  see the follow-up in `HANDOVER.md` / `docs/08` Phase 3.
 - Bind addresses must not overlap between listeners (same IP:port:proto); a prefix
   bind must not cover a single bind address of another listener.
 - Numeric ranges: timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.

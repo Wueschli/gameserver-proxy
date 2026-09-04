@@ -134,8 +134,11 @@ make fuzz                   # parser fuzz targets (needs nightly + cargo-fuzz)
 cargo run -p gsp -- --config config.example.yaml --check   # validate only
 ```
 
-Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
-`/pools`. Log level via `GSP_LOG` (e.g. `GSP_LOG=debug`).
+Admin endpoints (default `127.0.0.1:9900`): `GET /healthz` `/readyz` `/metrics`
+`/pools` `/config` `/sessions`; `POST /route-hint` `/admin/drain`
+`/admin/undrain`; `POST` / `DELETE /pools/{pool}/backends[/{addr}]`;
+`PATCH /pools/{pool}/backends/{addr}` (set backend admin state). Log level via
+`GSP_LOG` (e.g. `GSP_LOG=debug`).
 
 ## Workspace layout
 
@@ -150,8 +153,8 @@ Admin endpoints (default `127.0.0.1:9900`): `/healthz`, `/readyz`, `/metrics`,
 
 - [`CLAUDE.md`](CLAUDE.md) — working agreement, guardrails, "when you touch X also
   touch Y" (written for AI agents; doubles as the contributor reference).
-- [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, deferred items, and
-  the concrete plan for the next slice (phase 2, UDP).
+- [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, and what's
+  deferred / next.
 
 ## License
 

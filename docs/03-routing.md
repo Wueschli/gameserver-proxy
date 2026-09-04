@@ -82,8 +82,13 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 Always matches. For default/catch-all rules.
 
 ### `port`
-For port-range listeners: the destination port selects the pool
-(`30000–30099 → pool-a`).
+The destination port (of the *listener's own* bound socket) selects the pool;
+`ports:` accepts a `"lo-hi"` range too, though on a single-port listener that
+only matters if the range happens to include that one port. The real
+`30000–30099 → pool-a` split this matcher is meant for needs a *port-range
+listener* — one config entry binding a whole range across many sockets
+(F1.4). That part is planned but not yet built — see `HANDOVER.md`. Until
+then, achieve the same split with one listener per port.
 
 ### `dst` (destination IP / prefix of the incoming packet)
 The address the client sent to — **not** from the payload but from the socket.
@@ -94,7 +99,7 @@ proxy distinguishes on `dst`. See the section
 Data-path requirement: receive on a whole prefix with **one** socket (`IP_PKTINFO` /
 `IPV6_RECVPKTINFO`), see [04](04-transport-and-client-ip.md).
 
-### `client-cidr`
+### `client_cidr`
 Source IP in a CIDR list. Uses: internal testers to a staging pool, region roughly by
 IP block, partner ranges. Also for the launcher/push resolver (section below):
 short-lived `src_ip → pool` mapping.
@@ -106,7 +111,7 @@ short-lived `src_ip → pool` mapping.
   unchanged. Peek only.
 - Cost: one `MSG_PEEK`, a minimal parser (no OpenSSL required).
 
-### `first-bytes` (TCP or UDP first datagram)
+### `first_bytes` (TCP or UDP first datagram)
 - `prefix`: exact byte/string prefix (`hex:` or `ascii:` notation).
 - `regex`: regex over the first `N` bytes (precompiled, `N` bounded).
 - `length`: datagram length within a range (coarse heuristic, e.g. query vs.
@@ -207,7 +212,8 @@ schemes, used alone or combined:
 - Where the game/protocol supports it, an **SRV record** hands out host+port
   (`_game._udp.survival.example.net SRV 0 0 30001 edge.example.net`). Otherwise the
   launcher / server-browser config carries the port.
-- Proxy: a port-range listener + `port` matcher (`30001 → pool-survival`).
+- Proxy: a port-range listener (F1.4, **not yet built** — see `HANDOVER.md`;
+  today, one plain listener per port) + `port` matcher (`30001 → pool-survival`).
 - Limits: some clients hard-code the port; restrictive client firewalls; SRV support
   is rare outside a few protocols.
 
@@ -302,3 +308,7 @@ listener raw-udp-v4
     route 2: port 30002 → pool creative
     route 3: always     → reject
 ```
+(Pseudo-code — the `bind: "0.0.0.0:30000-30099/udp"` single-listener-range
+shorthand is F1.4, **not built yet** (`HANDOVER.md`); today this needs one
+real listener per port, each with its own `port` route. See `docs/05` for the
+actual YAML shape.)

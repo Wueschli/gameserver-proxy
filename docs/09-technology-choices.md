@@ -33,25 +33,40 @@
 Plan: v1 on `tokio` with a thread-per-core layout (`SO_REUSEPORT`, a LocalSet per
 worker). An io_uring backend as a later optimization behind an IO abstraction.
 
-## Key libraries (Rust, proposed)
+## Key libraries (Rust)
+
+As-built, not the original pre-implementation shortlist — several items below
+were planned to use an external crate and shipped as a small hand-rolled
+equivalent instead, once the actual shape of the problem (tiny backend sets,
+one map per worker, no need for a general-purpose engine) made the extra
+dependency not worth it. Still-open v2 choices are marked as such.
 
 - **Sockets/syscalls**: `socket2` 0.6 (bind options incl. `IP_FREEBIND`,
   `IP_TRANSPARENT` v4/v6 via `SockRef`), `nix` (`IP_PKTINFO` / `IP_ORIGDSTADDR`
   recv + reply cmsgs; `recvmmsg` UDP ingress — ADR 18; `splice` TCP pump — ADR
   17). `sendmmsg` UDP egress still to do.
-- **Data structures**: `hashbrown` (session map), `slab`, `ip_network_table` / an LPM
-  trie for ACLs. Consistent hashing is a hand-rolled rendezvous (HRW) hash over the
-  healthy backends (`std` `DefaultHasher`) — no `hashring` dependency; the backend
-  set is tiny, so HRW's linear scan is cheaper than maintaining a ring. `weighted`
-  is likewise a plain weighted round-robin over the cumulative-weight line (one
-  atomic tick per selection, no smooth-WRR per-backend state) — blocky ordering is
-  fine at this backend-set size.
-- **Config**: `serde` + `serde_yaml`, `figment` for env overlay, `notify` for file
-  watch.
+- **Data structures**: plain `std::collections::HashMap` for the UDP session
+  table (worker-local, no sharding needed — `hashbrown` was considered but adds
+  nothing at this scale). ACLs are a hand-rolled binary radix trie over address
+  bits (`gsp_config::CidrSet`) rather than the `ip_network_table` crate — kept
+  the `gsp-config` "serde + thiserror only" dependency rule intact. Consistent
+  hashing is a hand-rolled rendezvous (HRW) hash over the healthy backends
+  (`std` `DefaultHasher`) — no `hashring` dependency; the backend set is tiny,
+  so HRW's linear scan is cheaper than maintaining a ring. `weighted` is
+  likewise a plain weighted round-robin over the cumulative-weight line (one
+  atomic tick per selection, no smooth-WRR per-backend state) — blocky ordering
+  is fine at this backend-set size.
+- **Config**: `serde` + `serde_yaml`, `notify` for file watch. No env-var
+  overlay exists (the `figment` idea from the original plan was dropped —
+  the YAML file + `SIGHUP`/watch reload covers the actual need).
 - **Snapshot swap**: `arc-swap`.
-- **Rate limit**: `governor` (GCRA token bucket).
+- **Rate limit**: a hand-rolled token bucket (`gsp_core::ratelimit`, a
+  `Mutex<HashMap<key, Bucket>>`, monotonic refill) rather than `governor` — one
+  bucket type, two key shapes (per-IP / per-net), not worth a general GCRA
+  dependency.
 - **Metrics**: `metrics` + `metrics-exporter-prometheus`.
-- **Tracing**: `tracing` + `opentelemetry`.
+- **Tracing**: `tracing` + `tracing-subscriber`. No `opentelemetry` exporter —
+  `/metrics` (Prometheus) is the only telemetry sink today.
 - **Resolver**: `reqwest` (HTTP) + `tonic`/`prost` (gRPC), both in the `gsp`
   binary only; `gsp-core` defines the `Resolver` trait. gRPC codegen via
   `tonic-build` at build time (needs `protoc`).
@@ -59,10 +74,15 @@ worker). An io_uring backend as a later optimization behind an IO abstraction.
 - **Distributed control plane (v2, ch. 10)**: Tier-1 store — embedded Raft
   (`openraft`) *or* an `etcd` client *or* git, decision deferred; Tier-2 health
   gossip — `foca` (SWIM) or a hand-rolled `(instance, backend)` LWW-CRDT sync.
-  All in `gsp-controller` / the `gsp` binary, never `gsp-core`.
-- **PROXY protocol**: `ppp` or a small custom v2 implementation.
-- **Tests**: `criterion` (bench), `cargo-fuzz` (parsers), custom load tools
-  (`udp-flood-gen`, `conn-storm`).
+  All in `gsp-controller` / the `gsp` binary, never `gsp-core`. **Not built
+  yet** (phases 10–12, design only).
+- **PROXY protocol**: a small custom v1/v2 encoder (`gsp_core::proxy_protocol`)
+  — no `ppp` dependency; write-only (the proxy never parses an inbound header)
+  made the hand-rolled version simpler than adopting a parsing-capable crate.
+- **Tests**: a custom `Stats`/percentile harness (`gsp-bench`) rather than
+  `criterion` — matches the project's own latency-ledger reporting shape
+  instead of criterion's statistical-comparison model; `cargo-fuzz` for the
+  untrusted-input parsers (`crates/gsp-config/fuzz/`).
 
 ## Platform
 

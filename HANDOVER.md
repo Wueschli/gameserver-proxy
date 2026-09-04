@@ -35,6 +35,7 @@ what the user wants.
 
 | Item | Notes |
 |------|-------|
+| Listener port-range bind (requirement F1.4, `docs/01-requirements.md`) | never implemented and — until a documentation audit caught it — never even tracked as deferred; a `RawListener.bind` is one `SocketAddr`, there's no "spawn a socket per port in a range" mechanism. Needed for dedicated-server fleets that dynamically pick a port per match (Agones-style `hostPort` ranges, Source/UE auto-incrementing ports) and for scheme B at real scale; today's workaround is one `listeners[]` entry per port. See `docs/08` Phase 3. |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |

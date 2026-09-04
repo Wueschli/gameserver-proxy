@@ -3,18 +3,24 @@
 ## Metrics (Prometheus)
 
 ### Listener / connections
-- `gsp_listener_connections_total{listener,protocol,result}` – `result` =
-  `accepted|denied_acl|denied_ratelimit|no_route|resolver_error|sniffer_reject`
-  (`sniffer_reject`: a `sniffer` plugin returned a `reject` hint for the first
-  bytes; the connection is dropped before routing)
-- `gsp_active_connections{listener,protocol}` (gauge)
+- `gsp_listener_connections_total{listener,result}` – `result` =
+  `accepted|no_route|sniffer_reject` (`sniffer_reject`: a `sniffer` plugin
+  returned a `reject` hint for the first bytes; the connection is dropped
+  before routing). ACL / rate-limit / geo / cap rejections do **not** get a
+  `result` value here — they increment `gsp_filter_blocked_total` instead
+  (see "Security / filter chain" below), and a resolver miss/error is folded
+  into `no_route` rather than its own value. No `protocol` label — split by
+  `listener` name instead (a listener has one fixed protocol).
+- `gsp_active_connections{listener}` (gauge) — no `protocol` label.
 - `gsp_active_udp_sessions{listener}` (gauge)
-- `gsp_connection_duration_seconds{listener,pool}` (histogram)
-- `gsp_session_setup_seconds{listener,pool,phase}` – `phase` = `peek|route|resolve|connect`
+- `gsp_connection_duration_seconds{listener}` (histogram) — no `pool` label
+  (a connection's pool can change across a reload; the listener is stable).
+- `gsp_session_setup_seconds{listener,phase}` — **planned, not implemented**;
+  see "Planned / not yet built" below.
 
 ### Throughput
-- `gsp_bytes_total{listener,pool,dir}` – `dir` = `c2s|s2c`
-- `gsp_packets_total{listener,pool,dir}` (UDP) — v0 emits `{listener,dir}` only
+- `gsp_bytes_total{listener,dir}` – `dir` = `c2s|s2c`. No `pool` label.
+- `gsp_packets_total{listener,dir}` (UDP). No `pool` label.
 - `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
   `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject`
   (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`;
@@ -68,19 +74,38 @@
 ### Resolver
 - `gsp_resolver_requests_total{resolver,result}` – `ok|empty|timeout|error`
 - `gsp_resolver_cache_total{resolver,result}` – `hit|hit_negative|miss|stale|uncacheable`
-- `gsp_resolver_latency_seconds{resolver}` (histogram)
-- `gsp_resolver_cache{resolver,state}` – hits/misses/entries/evictions
 
 ### Proxy internals
 - `gsp_config_reload_total{result}` / `gsp_config_version` (gauge, timestamp)
-- `gsp_worker_busy_ratio{worker}`
-- `gsp_buffer_pool_exhausted_total`
-- `gsp_fd_open` / `gsp_fd_limit`
-- `gsp_build_info{version,commit}`
 
-**Added RTT** is the key SLO metric: from `session_setup_seconds` + an optional
-periodic synthetic ping (proxy→backend) and, if sniffers/resolvers provide latency
-data, a client→proxy estimate.
+**Added RTT**: no built-in RTT SLO metric exists yet — `make bench`'s added
+p50/p99 (vs. NFR N1/N2) is the closest thing today, measured out-of-band, not
+exported as a `/metrics` series. See "Planned / not yet built" below.
+
+### Planned / not yet built
+
+Documented here as real future work, not implemented — none of these exist in
+`metrics_defs.rs` today, so don't expect them on `/metrics` yet:
+
+- **`gsp_build_info{version,commit}`** — worth building soon; cheap (one gauge
+  set once at startup from `CARGO_PKG_VERSION` + a build-time git SHA) and
+  needed to correlate a metric shift with a deploy.
+- **`gsp_fd_open` / `gsp_fd_limit`** — worth building soon; the sampling logic
+  already exists in `gsp-bench --mode concurrency` (external `/proc/<pid>/fd`
+  reads) and just needs moving in-process onto the existing health-check sweep.
+  Answers the failure mode this proxy is most exposed to (fd exhaustion under
+  a connection flood).
+- **`gsp_resolver_latency_seconds{resolver}`**, **`gsp_session_setup_seconds{listener,phase}`**,
+  **`gsp_worker_busy_ratio{worker}`** — plausible finer-grained latency /
+  saturation instrumentation, deferred until a real debugging need shows the
+  existing aggregate metrics (`gsp_resolver_requests_total`,
+  `gsp-bench`'s added-latency numbers) aren't enough to explain a slowdown.
+  Not worth the hot-path cost speculatively.
+- ~~`gsp_resolver_cache{resolver,state}`~~ / ~~`gsp_buffer_pool_exhausted_total`~~
+  — dropped from the plan: the former was a duplicate of
+  `gsp_resolver_cache_total` above (typo'd as a second metric), the latter
+  described a buffer-pool architecture that was never built (per-worker fixed
+  buffers replaced it early on — see `docs/09` "Key libraries").
 
 ## Connection logs (structured, JSON)
 
@@ -146,9 +171,12 @@ carried in the PROXY v2 TLV if the backend should correlate it.
 
 ## Backend health checks
 
-- **Active**: `tcp_connect` / `udp_probe` (send/expect bytes) / `http` (sidecar port).
-  Parameters: `interval`, `timeout`, `rise`, `fall`. Checks run in the control plane,
-  the result → a new snapshot.
+- **Active**: `tcp_connect` / `udp_probe` (send/expect bytes). Parameters:
+  `interval`, `timeout`, `rise`, `fall`. Checks run in the control plane, the
+  result → a new snapshot.
+  An `http` kind (ping a sidecar health port) is **planned, not implemented** —
+  `HealthCheckKind` only has `TcpConnect`/`UdpProbe` today; deferred until a
+  real backend that exposes an HTTP health endpoint needs it.
 - **Passive**: the data path reports `connect refused/timeout`, early RST, ICMP
   unreachable. After `n` errors within `t` seconds → backend `unhealthy` (faster than
   the active check).
@@ -232,8 +260,10 @@ Size an instance by the **scarcest** of:
   measured knee and alert before it.
 - **Concurrent sessions / FDs.** ~1 FD per client + 1 per upstream, plus the
   per-session buffers (2×64 KB UDP, 2×32 KB TCP). Set `max_connections` /
-  `max_udp_sessions` under the file-descriptor `ulimit` with headroom; watch
-  `gsp_fd_open / gsp_fd_limit`.
+  `max_udp_sessions` under the file-descriptor `ulimit` with headroom. No
+  in-process `gsp_fd_open`/`gsp_fd_limit` metric exists yet (planned, see
+  "Planned / not yet built" above) — for now, watch fd usage externally
+  (`/proc/<pid>/fd`, same technique `gsp-bench --mode concurrency` uses).
 - **Bandwidth.** Single-stream throughput is near line rate (the pump is a
   buffered copy); the limit is NIC / softirq. Spread interrupts (RSS) and run
   `workers` = cores.
@@ -243,8 +273,9 @@ Size an instance by the **scarcest** of:
 ### Dashboards & alerts
 
 Per-instance panels: `gsp_active_connections` / `gsp_active_udp_sessions`,
-`gsp_listener_connections_total` rate by `result`, `gsp_worker_busy_ratio`,
-`gsp_bytes_total` rate, `gsp_connection_duration_seconds` p50/p99.
+`gsp_listener_connections_total` rate by `result`, `gsp_bytes_total` rate,
+`gsp_connection_duration_seconds` p50/p99. (No worker-level busy-ratio panel
+yet — that metric is planned, not implemented; see above.)
 Fleet roll-ups: `sum by (pool) (gsp_pool_backends{state="healthy"})`,
 `sum(rate(gsp_filter_blocked_total[5m])) by (filter)`,
 `sum(rate(gsp_discovery_refresh_total{result!="ok"}[15m])) by (pool,kind)`.
@@ -284,9 +315,9 @@ view + web UI.
   HA). Aggregate throughput (N3), the full 500k conns / 1M sessions (N4/N5)
   and HA (N9) still need dedicated hardware, multiple hosts, and a real load
   generator (`tcpkali`, `wrk2`, `iperf3`).
-- Alert: `gsp_worker_busy_ratio > 0.8` (5 min) → scale out.
 - Alert: `gsp_pool_backends{state="healthy"} < N_min` per pool.
 - Alert: `gsp_datagrams_dropped_total` rate > 0 (buffers too small / overload).
 - Alert: `gsp_resolver_requests_total{result!="ok"}` share > 1%.
-- Alert: `gsp_fd_open / gsp_fd_limit > 0.8`.
-- Alert: `session_setup_seconds` p99 over SLO.
+- Once built (see "Planned / not yet built" above): worker-busy-ratio,
+  fd-open-vs-limit, and session-setup-latency alerts, mirroring the three
+  removed above.

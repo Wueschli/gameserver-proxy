@@ -112,7 +112,11 @@ struct, the rest is shared).
   contention.
 - Each session is pinned to its accepting worker (thread-local session table → no
   locks in the UDP path).
-- Control-plane tasks on their own small thread pool.
+- Control-plane tasks (health checks, reload, discovery refresh, admin API) run
+  as ordinary tasks on the **same** shared multi-thread `tokio` runtime as the
+  data plane, not a separate pool — simpler than the originally-planned split,
+  and safe because control-plane work never blocks (rule: it may be slow, but
+  never blocking-syscall slow) and never touches the hot path's locks.
 - One dedicated OS thread (not a tokio task) for the sniffer plugin engine's
   epoch ticker — a `wasmtime::Engine::increment_epoch` heartbeat that arms the
   per-call timeout for WASM sniffers. Spawned once with the `SnifferLoader`, runs

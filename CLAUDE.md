@@ -35,34 +35,41 @@ Cargo.toml                  workspace (resolver 2, edition 2021)
 rust-toolchain.toml         pins stable
 config.example.yaml         reduced v0 config schema
 Makefile                    make check / test / run / fmt / lint
-docs/                       the plan (00–09) — source of truth for design
+docs/                       the plan (00–10) — source of truth for design
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
     fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
   gsp-core/                 data plane
-    snapshot.rs            immutable `Snapshot` (listeners + pools) behind ArcSwap
-    pool.rs                 `Pool`, `Backend` (health + active count), `BackendGuard`
+    snapshot.rs            immutable `Snapshot` (listeners + pools + sources + resolvers) behind ArcSwap
+    pool.rs                 `Pool`, `Backend` (health + active count + AdminState), `BackendGuard`
     listener.rs             TCP accept loop (one task per worker, SO_REUSEPORT)
     listener_udp.rs         UDP recv loop + worker-local session table + reply pump
+    listeners.rs            `ListenerManager` — runtime listener add/remove/rebind, reconciled by name on reload
     proxy.rs                per-connection byte pump (+ PROXY protocol header write)
     proxy_protocol.rs       PROXY protocol v1/v2 header encoder (write-only)
-    sniff.rs                sniffer API seam (trait + registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
-    resolver.rs             external resolver seam: trait Resolver + resolve_pool (the async route walk); transports live in gsp
+    sniff.rs                sniffer API seam (trait + ArcSwap-backed registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
+    resolver.rs             external resolver seam: trait Resolver + resolve_route (the async route walk), ArcSwap-backed registry; transports live in gsp
+    discovery.rs            `BackendSource` seam + `Discovery` last-known-good cache + refresh_loop (Phase 8)
+    sources.rs              `SourceManager` — runtime `backend_sources:` reconcile on reload (discovery analogue of ListenerManager)
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
     health.rs               active health-check sweep task (tcp_connect + udp_probe)
     ratelimit.rs            per-listener token-bucket rate limiter (src_ip + /24 / /64)
     src_conns.rs            per-listener concurrent per-source connection / session cap
     limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)
     geo.rs                  optional MaxMind GeoIP country lookup (GeoDb) for the geo filter
-    runtime.rs              owns listener + health tasks + route-hint table, holds the ArcSwap
+    drain.rs                `ConnTracker`/`ConnGuard` — live connection/session count + registry for graceful shutdown and GET /sessions
+    overlay.rs              `BackendOverlay` — runtime POST/DELETE backend edits, layered on the file config
+    runtime.rs              owns listener + health + source-manager tasks + route-hint table, holds the ArcSwap
     net.rs                  socket helpers (SO_REUSEPORT bind, IP_PKTINFO, IP_FREEBIND, IP_TRANSPARENT / TPROXY)
     metrics_defs.rs         canonical metric names — ALL metric names live here
     util.rs                 tiny helpers (monotonic now_ms)
   gsp/                       binary
     main.rs                 CLI, tracing, runtime bring-up, shutdown
-    admin.rs                axum admin API: GET /healthz /readyz /metrics /pools, POST /route-hint
-    resolver.rs             HttpResolver (reqwest) + build_resolvers(&Config)
-    reload.rs               SIGHUP + file-watch → rebuild snapshot → atomic swap
+    admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
+    resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
+    discovery.rs             DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8)
+    sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9)
+    reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
@@ -128,7 +135,8 @@ client from `crates/gsp/proto/resolver.proto`.
 6. **All metric names go in `crates/gsp-core/src/metrics_defs.rs`** as `pub const`,
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
-7. **Crate boundaries:** `gsp-config` depends only on `serde` + `thiserror`.
+7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_yaml` +
+   `thiserror`.
    `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `gsp-core`, the HTTP/gRPC clients in `gsp`.

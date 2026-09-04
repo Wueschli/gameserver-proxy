@@ -13,9 +13,11 @@
   immediately.
 - **Upstream connect**: non-blocking, `connect_timeout`. `TCP_NODELAY` set; the
   client's options are not "inherited" but set from config.
-- **Data pump**: Linux `splice()` (socket→pipe→socket, zero-copy). Fallback: two
-  directional buffers (32–64 KB each) with `readv/writev`. `SO_RCVBUF`/`SO_SNDBUF`
-  configurable.
+- **Data pump**: Linux `splice()` (socket→pipe→socket, zero-copy — ADR 17).
+  Fallback (non-Linux, or a `pipe2` failure): one 32 KiB buffer per direction,
+  `try_read`/`try_write`. Pipe size and `SO_RCVBUF`/`SO_SNDBUF` use the kernel
+  defaults — not exposed as config; the simpler fixed-default path covered
+  every case actually hit so far.
 - **Half-close**: propagate `shutdown(SHUT_WR)` in one direction, keep the other
   direction running until it too closes.
 - **Timeouts**: connect, idle (no byte in either direction), optional max-lifetime.
@@ -27,7 +29,9 @@
 UDP has no connection — the proxy builds the "session" concept itself.
 
 - **Session key**: `(src_ip, src_port, dst_ip, dst_port)` (the 4-tuple).
-- **Receive**: `recvmmsg()` in batches on `SO_REUSEPORT` sockets, one loop per worker.
+- **Receive**: `recvmmsg()` in batches (fixed at 16 datagrams/syscall,
+  `RECV_BATCH` — not config-exposed, ADR 18) on `SO_REUSEPORT` sockets, one loop
+  per worker.
 - **Receiving on a whole prefix** (for `dst` routing for games with no protocol hint,
   see [03](03-routing.md)): the listener does **not** bind a socket per destination IP
   but one wildcard socket and enables `IP_PKTINFO` / `IPV6_RECVPKTINFO`. Per datagram
@@ -139,16 +143,22 @@ client gets replies straight from the backend IP and the connection stalls.
   client IP or gets it elsewhere (in the game login token). Documented default
   behavior.
 
-## Socket tuning (starting values, override via config)
+## Socket tuning (as built — kernel defaults, not config knobs)
+
+None of these ended up as config options: every socket uses the OS default
+buffer/pipe sizes, and the batch size is a compile-time constant. Simpler than
+the originally-planned per-parameter config surface, and nothing so far has
+needed to override a kernel default.
 
 | Parameter | TCP | UDP |
 |-----------|-----|-----|
 | `SO_REUSEPORT` | on (sharding) | on (sharding) |
-| `SO_RCVBUF` / `SO_SNDBUF` | 256 KB | 4–8 MB (avoid loss on bursts) |
+| `SO_RCVBUF` / `SO_SNDBUF` | kernel default | kernel default |
 | `TCP_NODELAY` | on | – |
-| `SO_BUSY_POLL` | optional | optional (latency ↓, CPU ↑) |
-| `recvmmsg`/`sendmmsg` batch | – | 32–64 |
-| pipe size for `splice` | 256 KB | – |
+| `SO_BUSY_POLL` | not used | not used |
+| `recvmmsg` ingress batch | – | 16 (`RECV_BATCH`, fixed) |
+| `sendmmsg` egress batch | – | not implemented yet — still one `send` per datagram (see `docs/08`/`HANDOVER.md` follow-ups) |
+| pipe size for `splice` | kernel default | – |
 
 ## OS limits
 
