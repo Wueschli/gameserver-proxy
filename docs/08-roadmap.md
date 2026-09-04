@@ -412,8 +412,16 @@ controller's revision log is a follow-on once this ships.
    `config.example.yaml`).
 
 ### Aggregator slices (`gsp-aggregator`, fleet view + operational verbs)
-6. Skeleton binary; `POST /ingest` accepts a periodic push from a proxy (pool
-   state, health, session summary).
+6. ✅ Skeleton binary (new crate, no `gsp-core`/`gsp-config` dependency — the
+   aggregator stays fully decoupled from the data-plane crates) +
+   `POST /ingest`. `ingest::IngestStore`: an in-memory, latest-write-wins
+   map keyed by self-reported `instance` — deliberately never persisted,
+   see the "stateless and ephemeral by design" note in the crate's `lib.rs`
+   (an aggregator restart loses nothing that isn't about to be re-pushed on
+   the next tick). Payload is a summary (pool/backend health + admin state,
+   session *counts*), not the full live session registry — that already
+   exists per-instance (`GET /sessions`), break-glass style. 12 new tests;
+   verified live over real HTTP.
 7. `gsp` gains a push client: background task, configurable target +
    interval, a small local ring buffer so a momentary aggregator outage
    doesn't drop data, retry/backoff. (Push, not pull — see "Fleet topology" in

@@ -6,6 +6,7 @@ members = [
     "crates/gsp",
     "crates/gsp-bench",
     "crates/gsp-controller",
+    "crates/gsp-aggregator",
 ]
 
 [workspace.package]

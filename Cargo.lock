@@ -923,6 +923,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsp-aggregator"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gsp-bench"
 version = "0.0.1"
 dependencies = [

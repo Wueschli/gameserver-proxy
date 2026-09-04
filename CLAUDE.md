@@ -71,6 +71,14 @@ crates/
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9)
     procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
+    controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
+  gsp-controller/            binary — Tier-1 config distribution (phase 10+11, docs/10 "The controller"; single standalone node, no HA/hierarchy yet)
+    store.rs                `Store` — embedded sled KV (ADR 20): revisions + current-pointer trees, catch-up range scan
+    api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
+    auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
+  gsp-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no gsp-core/gsp-config dependency, stays decoupled from the data-plane crates
+    ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts)
+    api.rs                  POST /ingest
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```

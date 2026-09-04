@@ -154,10 +154,37 @@ the changed `max_connections` line; rolled back to revision 1 and confirmed
 `GET /config`'s `X-Config-Revision` became `3` (a new revision, not a
 rewind) with revision 1's exact content.
 
-**All 5 controller slices (1–5) are now done.** **Next**: the aggregator
-slices (6–10 in `docs/08` phase 10+11) — `gsp-aggregator` skeleton +
-`POST /ingest`, `gsp`'s push client, `/fleet/*` read endpoints, and
-intent-verb fan-out.
+**All 5 controller slices (1–5) are now done.**
+
+**Slice 6 done**: new crate `crates/gsp-aggregator` (lib `gsp_aggregator` +
+bin `gsp-aggregator`) — deliberately **no `gsp-core`/`gsp-config`
+dependency**, the aggregator stays fully decoupled from the data-plane
+crates (unlike `gsp-controller`, which needs `gsp-config::parse_str` to
+validate submissions). `ingest::IngestStore` is a plain in-memory
+`RwLock<HashMap<instance, InstanceState>>`, latest-write-wins, **never
+persisted** — that's the actual design, not a shortcut: every fact the
+aggregator holds is a proxy's own state, re-pushed on the next tick, so
+restarting it loses nothing durable (see the "stateless and ephemeral by
+design" note in the crate's `lib.rs`). `IngestPayload` is a summary — pool/
+backend health + admin state, session *counts* — not the full live session
+registry (`GET /sessions` already exists per-instance for that,
+break-glass style). `POST /ingest` validates only that `instance` is
+non-empty (`400`); a malformed body is rejected by axum's `Json` extractor
+itself (`422` for valid-JSON-wrong-shape, `400` for invalid JSON syntax —
+verified both, plus the happy path and an overwrite, live over real HTTP).
+12 new tests (4 store, 8 API). `GET /healthz` served the same way as
+`gsp`/`gsp-controller`.
+
+CLAUDE.md's repository-layout listing gained `gsp-controller/` and
+`gsp-aggregator/` entries — a gap from slice 1, caught and fixed now.
+
+**Next**: slice 7 — `gsp` gains a push client (background task, configurable
+target + interval, a small local ring buffer so a momentary aggregator
+outage doesn't drop data, retry/backoff) that builds an `IngestPayload`
+straight from its own `Snapshot`/`ConnTracker` and posts it to
+`gsp-aggregator`. Then slice 8 (`/fleet/*` read endpoints), slice 9
+(intent-verb fan-out), slice 10 (aggregator auth, mirroring the
+controller's).
 
 ### Known follow-ups (none blocking)
 
