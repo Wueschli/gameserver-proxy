@@ -32,6 +32,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::sniff::Sniffers;
 use crate::src_conns::SourceLimiter;
 
 struct Group {
@@ -63,6 +64,7 @@ pub struct ListenerManager {
     resolvers: Arc<Resolvers>,
     limits: Arc<GlobalLimits>,
     geo: Option<Arc<GeoDb>>,
+    sniffers: Arc<Sniffers>,
     workers: usize,
     groups: Mutex<HashMap<String, Group>>,
 }
@@ -76,6 +78,7 @@ impl ListenerManager {
         resolvers: Arc<Resolvers>,
         limits: Arc<GlobalLimits>,
         geo: Option<Arc<GeoDb>>,
+        sniffers: Arc<Sniffers>,
         workers: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -85,6 +88,7 @@ impl ListenerManager {
             resolvers,
             limits,
             geo,
+            sniffers,
             workers,
             groups: Mutex::new(HashMap::new()),
         })
@@ -106,6 +110,7 @@ impl ListenerManager {
             let src_limiter = src_limiter.clone();
             let limits = self.limits.clone();
             let geo = self.geo.clone();
+            let sniffers = self.sniffers.clone();
             let lc = cfg.clone();
             let mut sd = stop_rx.clone();
             tasks.push(tokio::spawn(async move {
@@ -121,6 +126,7 @@ impl ListenerManager {
                             src_limiter,
                             limits,
                             geo,
+                            sniffers,
                             worker_id,
                             &mut sd,
                         )
@@ -137,6 +143,7 @@ impl ListenerManager {
                             src_limiter,
                             limits,
                             geo,
+                            sniffers,
                             worker_id,
                             &mut sd,
                         )

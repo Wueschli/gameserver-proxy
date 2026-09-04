@@ -18,6 +18,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::sniff::Sniffers;
 use crate::src_conns::SourceLimiter;
 
 /// How long to wait for a client's first bytes when a route needs to peek them.
@@ -39,6 +40,7 @@ pub async fn run_tcp_listener(
     src_limiter: Arc<SourceLimiter>,
     limits: Arc<GlobalLimits>,
     geo: Option<Arc<GeoDb>>,
+    sniffers: Arc<Sniffers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -49,7 +51,7 @@ pub async fn run_tcp_listener(
         cfg.freebind,
         cfg.transparent,
     )?)?;
-    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
+    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref(), &sniffers);
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
@@ -152,6 +154,7 @@ pub async fn run_tcp_listener(
                 let cfg = cfg.clone();
                 let hints = hints.clone();
                 let resolvers = resolvers.clone();
+                let sniffers = sniffers.clone();
                 let conn_guard = conns.track();
 
                 tokio::spawn(async move {
@@ -179,7 +182,7 @@ pub async fn run_tcp_listener(
                     let hint = cfg
                         .sniffer
                         .as_deref()
-                        .and_then(crate::sniff::sniffer)
+                        .and_then(|n| sniffers.get(n))
                         .and_then(|s| s.sniff(first));
                     let mctx = gsp_config::MatchContext {
                         src: peer,

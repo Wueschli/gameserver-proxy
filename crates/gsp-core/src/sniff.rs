@@ -8,56 +8,71 @@
 //!
 //! **There are no built-in sniffers.** Game-specific parsing is deliberately
 //! *not* compiled into the proxy: it belongs in separately maintained plugins,
-//! loaded at runtime. That loader (sandboxed — likely WASM — with a community
-//! plugin repo) is a later roadmap phase; what lives here now is only the
-//! contract it will implement, plus the wiring that feeds a hint into routing.
-//! A `sniffer:` route therefore never matches today (it logs a warning at
-//! listener start) unless a test provides one.
+//! loaded at runtime by the Phase 9 loader (`gsp` binary, `wasmtime` — see
+//! `docs/08` Phase 9). What lives here is the contract plugins implement (the
+//! [`Sniffer`] trait), the [`Sniffers`] registry the loader populates, and the
+//! wiring that feeds a hint into routing. A `sniffer:` route never matches on
+//! an empty registry (it logs a warning at listener start).
 //!
 //! Sniffers are read-only: they never see later bytes and never write. See
 //! `docs/03`, `CLAUDE.md` "agnostic core".
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use gsp_config::RouteHint;
 
-/// A read-only first-bytes inspector. Implemented by loaded plugins (future);
-/// the proxy binary ships none.
+/// A read-only first-bytes inspector. Implemented by loaded plugins.
 pub trait Sniffer: Send + Sync {
     fn name(&self) -> &'static str;
     /// Inspect the (bounded) first bytes. `None` = not recognised.
     fn sniff(&self, first: &[u8]) -> Option<RouteHint>;
 }
 
-/// Resolve a sniffer by its configured name. Returns `None` for every real
-/// name until the plugin loader lands; a `#[cfg(test)]` build also knows
-/// `"test-host"` (see the tests below) so the seam stays exercised.
-pub fn sniffer(name: &str) -> Option<&'static dyn Sniffer> {
-    match name {
-        #[cfg(test)]
-        "test-host" => Some(&tests::TestHost),
-        _ => None,
+/// The live set of loaded sniffers, keyed by their configured name. Built once
+/// at startup (and rescanned on reload, Phase 9 slice 4) by the `gsp` binary's
+/// plugin loader; threaded `Runtime` → `ListenerManager` → listener workers,
+/// the same seam as `Resolvers` / `Option<Arc<GeoDb>>`. The default (and, until
+/// the loader lands, only) registry is empty.
+#[derive(Default)]
+pub struct Sniffers {
+    map: HashMap<String, Arc<dyn Sniffer>>,
+}
+
+impl Sniffers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, sniffer: Arc<dyn Sniffer>) {
+        self.map.insert(sniffer.name().to_string(), sniffer);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn Sniffer>> {
+        self.map.get(name)
     }
 }
 
 /// Log a warning if `listener` routes on a sniffer name that resolves to
-/// nothing — those routes can never match until the plugin is loaded.
-pub fn warn_if_missing(listener: &str, name: Option<&str>) {
+/// nothing in `sniffers` — those routes can never match until the plugin is
+/// loaded.
+pub fn warn_if_missing(listener: &str, name: Option<&str>, sniffers: &Sniffers) {
     if let Some(name) = name {
-        if sniffer(name).is_none() {
+        if sniffers.get(name).is_none() {
             tracing::warn!(
                 %listener, sniffer = %name,
-                "no such sniffer loaded — `sniffer` routes on this listener will never match \
-                 (plugin loading is a later roadmap phase)"
+                "no such sniffer loaded — `sniffer` routes on this listener will never match"
             );
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Minimal stand-in for a real plugin: `b"HOST:<name>\n..."` → that host.
-    pub(super) struct TestHost;
+    pub(crate) struct TestHost;
     impl Sniffer for TestHost {
         fn name(&self) -> &'static str {
             "test-host"
@@ -73,12 +88,20 @@ mod tests {
         }
     }
 
+    /// A registry with just `test-host`, for tests that exercise the seam.
+    pub(crate) fn test_registry() -> Sniffers {
+        let mut s = Sniffers::new();
+        s.register(Arc::new(TestHost));
+        s
+    }
+
     #[test]
     fn registry_has_no_builtins_but_knows_the_test_sniffer() {
-        assert!(sniffer("minecraft").is_none());
-        assert!(sniffer("sni").is_none());
-        assert!(sniffer("nope").is_none());
-        assert_eq!(sniffer("test-host").unwrap().name(), "test-host");
+        let s = test_registry();
+        assert!(s.get("minecraft").is_none());
+        assert!(s.get("sni").is_none());
+        assert!(s.get("nope").is_none());
+        assert_eq!(s.get("test-host").unwrap().name(), "test-host");
     }
 
     #[test]
@@ -91,7 +114,7 @@ mod tests {
     }
 
     /// End to end: listener → sniffer → `MatchContext.sniff` → route. Lives here
-    /// (not in `tests/`) so it can reach the `#[cfg(test)]` `test-host` sniffer.
+    /// (not in `tests/`) so it can reach the `test-host` sniffer.
     #[tokio::test]
     async fn sniffer_matcher_routes_a_connection_by_hint_host() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,8 +166,13 @@ listeners:
 "#
         );
         let cfg = gsp_config::parse_str(&yaml).unwrap();
-        let runtime =
-            crate::Runtime::start(crate::Snapshot::from_config(&cfg), Default::default(), 1);
+        let runtime = crate::Runtime::start_with_sniffers(
+            crate::Snapshot::from_config(&cfg),
+            Default::default(),
+            None,
+            Arc::new(test_registry()),
+            1,
+        );
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let mark = |host: &'static str| async move {

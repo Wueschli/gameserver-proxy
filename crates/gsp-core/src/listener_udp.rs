@@ -56,6 +56,7 @@ use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::sniff::Sniffers;
 use crate::src_conns::{SourceGuard, SourceLimiter};
 use crate::util::now_ms;
 
@@ -138,6 +139,7 @@ pub async fn run_udp_listener(
     src_limiter: Arc<SourceLimiter>,
     limits: Arc<GlobalLimits>,
     geo: Option<Arc<GeoDb>>,
+    sniffers: Arc<Sniffers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -149,7 +151,7 @@ pub async fn run_udp_listener(
         UdpMode::Plain
     };
     let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, mode)?)?);
-    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref());
+    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref(), &sniffers);
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
@@ -311,7 +313,7 @@ pub async fn run_udp_listener(
                         continue;
                     }
                 };
-                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sock, &mut sticky, src_guard, limit_guard, client, dst, &buf[..n]).await {
+                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, &buf[..n]).await {
                     Ok(session) => {
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -428,6 +430,7 @@ async fn open_session(
     hints: &Arc<RouteHints>,
     conns: &Arc<ConnTracker>,
     resolvers: &Arc<Resolvers>,
+    sniffers: &Arc<Sniffers>,
     down: &Arc<UdpSocket>,
     sticky: &mut HashMap<StickyKey, SocketAddr>,
     src_guard: SourceGuard,
@@ -441,7 +444,7 @@ async fn open_session(
     let hint = cfg
         .sniffer
         .as_deref()
-        .and_then(crate::sniff::sniffer)
+        .and_then(|n| sniffers.get(n))
         .and_then(|s| s.sniff(first));
     let mctx = gsp_config::MatchContext {
         src: client,

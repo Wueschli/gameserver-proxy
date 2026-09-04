@@ -122,8 +122,16 @@ async fn run(
 
     let snapshot: Arc<Snapshot> =
         Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
-    let runtime =
-        Runtime::start_with_discovery(snapshot, resolvers, geo_db, discovery, sources, cfg.workers);
+    let sniffers = Arc::new(gsp_core::sniff::Sniffers::default());
+    let runtime = Runtime::start_with_discovery(
+        snapshot,
+        resolvers,
+        geo_db,
+        sniffers,
+        discovery,
+        sources,
+        cfg.workers,
+    );
     let handle = runtime.handle();
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 

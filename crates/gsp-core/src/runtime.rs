@@ -17,6 +17,7 @@ use crate::overlay::BackendOverlay;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
+use crate::sniff::Sniffers;
 
 pub struct Runtime {
     snapshot: Arc<ArcSwap<Snapshot>>,
@@ -147,25 +148,48 @@ impl Runtime {
         geo: Option<Arc<GeoDb>>,
         workers: usize,
     ) -> Self {
+        Self::start_with_sniffers(
+            initial,
+            resolvers,
+            geo,
+            Arc::new(Sniffers::default()),
+            workers,
+        )
+    }
+
+    /// Like [`Runtime::start_with_geo`], with a preloaded sniffer plugin
+    /// registry for listeners with a `sniffer:` route (phase 9). Empty by
+    /// default — no sniffers ship in the binary; the `gsp` binary's plugin
+    /// loader builds the registry.
+    pub fn start_with_sniffers(
+        initial: Arc<Snapshot>,
+        resolvers: Arc<Resolvers>,
+        geo: Option<Arc<GeoDb>>,
+        sniffers: Arc<Sniffers>,
+        workers: usize,
+    ) -> Self {
         Self::start_with_discovery(
             initial,
             resolvers,
             geo,
+            sniffers,
             Arc::new(Discovery::new()),
             Vec::new(),
             workers,
         )
     }
 
-    /// Like [`Runtime::start_with_geo`], plus backend discovery (phase 8):
+    /// Like [`Runtime::start_with_sniffers`], plus backend discovery (phase 8):
     /// `discovery` holds the last-known-good address sets and `sources` get one
     /// control-plane [`refresh_loop`](crate::discovery::refresh_loop) task each.
     /// The caller (the `gsp` binary) builds the concrete sources and does a
     /// best-effort initial fetch into `discovery` before `initial` is built.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_discovery(
         initial: Arc<Snapshot>,
         resolvers: Arc<Resolvers>,
         geo: Option<Arc<GeoDb>>,
+        sniffers: Arc<Sniffers>,
         discovery: Arc<Discovery>,
         sources: Vec<Arc<dyn BackendSource>>,
         workers: usize,
@@ -200,6 +224,7 @@ impl Runtime {
             resolvers,
             limits,
             geo,
+            sniffers,
             worker_count,
         );
         listeners.start_all(&initial);

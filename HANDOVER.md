@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**).
+Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slice 1 landed).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -325,10 +325,34 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   targets and direct-config targets carry `ProxyProtocol::None` ⇒ no header (as
   before). Tests: `resolver::resolver_target_gets_a_proxy_protocol_header`
   (e2e), gsp-config parse + two transport-mismatch rejections.
-- **Next**: phase 9 (sniffer plugin loader). Per-source cap LRU eviction,
-  `GET /sessions`, and a k8s watch informer are polish items.
-  Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`; the
-  sniffer plugin loader (Phase 9).
+- **Phase 9 slice 1 done**: sniffer registry threading (pure refactor, no
+  behaviour change). `gsp_core::sniff::Sniffers` — a
+  `HashMap<String, Arc<dyn Sniffer>>` registry (`register` / `get`) replacing
+  the old global `sniff::sniffer(name)` fn. Held as `Arc<Sniffers>` on
+  `Runtime` and threaded `ListenerManager::new` → `spawn_group` →
+  `run_tcp_listener` / `run_udp_listener` → (UDP) `open_session`, exactly like
+  `Arc<Resolvers>` / `Option<Arc<GeoDb>>`. `warn_if_missing` now takes the
+  registry. New `Runtime::start_with_sniffers(initial, resolvers, geo,
+  sniffers, workers)` (between `start_with_geo` and `start_with_discovery`,
+  which grew a `sniffers` param — `gsp/src/main.rs` passes
+  `Sniffers::default()`, i.e. still no built-ins). Tests that need the seam
+  build a small registry (`sniff::tests::test_registry()`, holds `test-host`)
+  instead of relying on a global match arm.
+- **Next**: phase 9 slices 2–7 (the actual plugin loader). Per the locked plan
+  in `docs/08` Phase 9: slice 2 is `settings.sniffers` config schema
+  (`dir`, `call_timeout_ms`, `max_memory_bytes`, `modules[].sha256`); slice 3
+  is `WasmSniffer` in the `gsp` binary (`wasmtime`, epoch interruption,
+  `StoreLimits`, the `alloc`/`sniff` ABI) + `gsp_sniffer_calls_total` /
+  `gsp_sniffer_call_seconds`; slice 4 is reload rescanning `dir`; slice 5 is
+  the first-party plugin crates (`a2s`, `minecraft`, `regex-firstbytes`) under
+  `crates/plugins/` + a `gsp-sniffer-abi` guest helper crate, built via
+  `make plugins` to `wasm32-unknown-unknown`; slice 6 is a WASM-boundary
+  latency bench vs. NFR N1 + a `docs/07` sandbox-guarantees section; slice 7
+  is an end-to-end test through the real loader. `wasmtime` is a binary-only
+  dep (like `reqwest`) — `gsp-core` still has no sandboxing dependency, only
+  the `Sniffer` trait / `Sniffers` registry. Per-source cap LRU eviction,
+  `GET /sessions`, and a k8s watch informer are separate polish items.
+  Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`.
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip

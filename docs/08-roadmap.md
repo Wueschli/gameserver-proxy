@@ -253,10 +253,16 @@ pinning. Per-listener `sniffer:` is unchanged; the input is already capped at th
 route's `peek_len()` ≤ `PEEK_MAX`.
 
 ### Slices
-- **Slice 1**: registry threading (pure refactor). `sniff::sniffer` global →
-  `Arc<Sniffers>` on the runtime, passed to the listener tasks (replaces the two
-  `.and_then(crate::sniff::sniffer)` call sites). Only a native test sniffer
-  registered; no `wasmtime`, no behaviour change.
+- ✅ **Slice 1**: registry threading (pure refactor). `sniff::sniffer` global fn →
+  `gsp_core::sniff::Sniffers` (a `HashMap<String, Arc<dyn Sniffer>>` registry,
+  `register`/`get`), held as `Arc<Sniffers>` on `Runtime` /
+  `ListenerManager` and threaded to every listener worker exactly like
+  `Arc<Resolvers>` / `Option<Arc<GeoDb>>` (`Runtime::start_with_sniffers`,
+  `ListenerManager::new` gained the param, `run_tcp_listener` /
+  `run_udp_listener` / `open_session` too). `warn_if_missing` now takes the
+  registry. No built-in sniffers register in production
+  (`Sniffers::default()` is empty); tests build a registry with `test-host`.
+  No behaviour change, no `wasmtime`.
 - **Slice 2**: `settings.sniffers` schema + `validate()` + `config.example.yaml`
   + `docs/05`. Startup + reload semantics documented.
 - **Slice 3**: `WasmSniffer` in `gsp` — shared `wasmtime::Engine` (epoch on) +
