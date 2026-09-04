@@ -302,12 +302,41 @@ pushed data; unauthenticated instance `GET /pools` → `401`; a fan-out drain
 through the aggregator (which had to present `--instance-token` correctly)
 → `200`, confirmed real by the instance's own `/readyz` flipping to `503`.
 
-**Next**: slices 11–13 — the static SPA (fleet dashboard + operational
-actions from the aggregator, config editor + revision history from the
-controller), integration tests spinning up N `gsp` + 1 controller + 1
-aggregator together, and docs polish (`docs/06`, `README.md` status block,
-`docs/08` status legend). Slice 11 needs one real decision first: plain
-HTML/JS vs. a lightweight framework for the SPA — ask before starting it.
+**Slice 11 redesigned before writing code** (design session, not yet fully
+built): the user pushed back twice, correctly. First: hosting the GUI's
+session login in `gsp-aggregator` taxes it with a concern outside its design
+(a session store *is* a form of authority; the aggregator is explicitly
+designed to carry none), and slice 11f (config editing) would need the
+aggregator to proxy into the controller, inverting the natural authority
+direction. Then: rather than attach the GUI to whichever service turns out
+more convenient (the controller, matching `docs/10`'s original words about
+where auth/RBAC/audit belong), the user chose to build it right from the
+start as **a fourth, dedicated `gsp-ui` process** — a pure BFF holding both
+the controller's and the aggregator's own machine credentials, authorizing
+nothing itself beyond "is this a valid session," no store, no fleet data of
+its own. `docs/10` "The admin GUI" and `docs/08` slice 11 (now 11a–11f) were
+rewritten to match; framework choice locked in: React + Vite + TypeScript,
+single shared `--ui-password` (session cookie), a WebSocket for live updates
+rather than the browser polling.
+
+**Slice 11a done**: `gsp-aggregator` gained `GET /fleet/subscribe` — see
+`docs/08` for the mechanics. Reused the controller's SSE pattern exactly (a
+`broadcast::Sender` fired by `POST /ingest`, a spawned worker doing
+send-then-tail, turned into `Event`s by the route handler) with one addition
+worth remembering if this pattern gets reused again: **debouncing**. A
+revision log has no reason to debounce (each revision is distinct, wanted
+individually); a *state* feed does — a burst of near-simultaneous pushes
+across a fleet would otherwise trigger one rebuild+send per push instead of
+one for the whole burst. `SUBSCRIBE_DEBOUNCE` (150 ms) plus draining any
+further signals that land during it is the fix; tested directly (a 5-push
+burst asserted to collapse into exactly one resend, with a second check that
+nothing extra follows).
+
+**Next**: 11b–11f — the `gsp-ui` crate itself (session login, proxying to
+both controller and aggregator, the WebSocket bridge to 11a) and then the
+actual React/Vite/TS frontend. Then slice 12 (integration tests spinning up
+N `gsp` + controller + aggregator + `gsp-ui` together) and slice 13 (docs
+polish: `docs/06`, `README.md` status block, `docs/08` status legend).
 
 ### Known follow-ups (none blocking)
 

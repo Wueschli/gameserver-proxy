@@ -19,17 +19,33 @@
 //! needs `controller_client` and `aggregator_client` to share state inside
 //! `gsp` that today are deliberately independent ("unrelated axes", slice
 //! 7's doc comment), not because it doesn't matter.
+//!
+//! `GET /fleet/subscribe` (slice 11a) is the machine-to-machine feed
+//! `gsp-ui` subscribes to for live updates: current merged fleet state (the
+//! same shape as combining `/fleet/pools` + `/fleet/sessions` + a `stale`
+//! flag) on connect, then again on every accepted `POST /ingest` — debounced
+//! against a burst of pushes landing close together. Reuses the exact
+//! catch-up-then-broadcast SSE shape `gsp-controller`'s `/config/subscribe`
+//! already proved out, applied to *state* instead of a revision log, so
+//! there's no cursor/replay semantics to get right: a lagged subscriber just
+//! gets the *current* view on its next tick, same as a fresh connect would.
 
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 
-use crate::ingest::{IngestPayload, IngestStore, PoolSummary};
+use crate::ingest::{IngestPayload, IngestStore, PoolSummary, SessionCounts};
 use crate::util::now_ms;
 
 /// How long since an instance's last push before `/fleet/healthz` calls it
@@ -37,6 +53,16 @@ use crate::util::now_ms;
 /// generous enough to absorb one missed tick without false-flagging a
 /// perfectly healthy instance.
 const STALE_AFTER_MS: u64 = 30_000;
+
+/// How long `/fleet/subscribe` waits after a signal before rebuilding and
+/// sending the fleet view, draining any further signals that land in that
+/// window — coalesces a burst of near-simultaneous pushes (a whole fleet's
+/// push interval lining up) into one rebuild instead of one per instance.
+const SUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Capacity of the ingest-update broadcast — generous for a control plane
+/// (pushes are seconds apart, not a hot path).
+const UPDATES_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,15 +80,20 @@ pub struct AppState {
     /// calls *into* this aggregator, the other is what this aggregator
     /// presents *out* to instances that require `settings.admin.auth_token`.
     pub instance_token: Option<String>,
+    /// Fires (with no payload — subscribers rebuild the view themselves from
+    /// `store`) on every accepted `POST /ingest`, for `/fleet/subscribe`.
+    pub updates: broadcast::Sender<()>,
 }
 
 impl AppState {
     pub fn new(store: Arc<IngestStore>) -> Self {
+        let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
             http: reqwest::Client::new(),
             auth_token: None,
             instance_token: None,
+            updates,
         }
     }
 
@@ -83,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         .route("/fleet/pools", get(fleet_pools))
         .route("/fleet/sessions", get(fleet_sessions))
         .route("/fleet/healthz", get(fleet_healthz))
+        .route("/fleet/subscribe", get(subscribe_fleet))
         .merge(crate::fanout::router())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -112,6 +144,10 @@ async fn ingest(State(state): State<AppState>, Json(payload): Json<IngestPayload
     }
     let instance = payload.instance.clone();
     state.store.ingest(payload);
+    // No subscribers connected right now is not an error — the state is
+    // durably held in `store` regardless; a subscriber that connects later
+    // just gets it in its initial view.
+    let _ = state.updates.send(());
     tracing::debug!(instance, "ingested a push from a proxy instance");
     StatusCode::OK.into_response()
 }
@@ -201,10 +237,90 @@ async fn fleet_healthz(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(out)).into_response()
 }
 
+#[derive(Serialize)]
+struct FleetInstanceView {
+    instance: String,
+    last_seen_ms_ago: u64,
+    stale: bool,
+    pools: Vec<PoolSummary>,
+    sessions: SessionCounts,
+}
+
+/// The merged view `/fleet/subscribe` sends — everything the three plain
+/// `GET /fleet/*` endpoints report, combined into one payload so `gsp-ui`
+/// doesn't need three separate subscriptions.
+fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
+    let now = now_ms();
+    store
+        .snapshot()
+        .into_iter()
+        .map(|s| {
+            let age = now.saturating_sub(s.received_at_ms);
+            FleetInstanceView {
+                instance: s.payload.instance,
+                last_seen_ms_ago: age,
+                stale: age > STALE_AFTER_MS,
+                pools: s.payload.pools,
+                sessions: s.payload.sessions,
+            }
+        })
+        .collect()
+}
+
+/// `GET /fleet/subscribe` — see the module doc. Spawns
+/// [`subscribe_fleet_worker`] to do the actual send-then-tail work and turns
+/// its output into SSE `Event`s, keeping the worker's logic (the part worth
+/// testing) free of any HTTP/SSE framing — same split `gsp-controller`'s
+/// `subscribe`/`subscribe_worker` uses.
+async fn subscribe_fleet(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = mpsc::channel(4);
+    let updates = state.updates.subscribe();
+    tokio::spawn(subscribe_fleet_worker(state.store, updates, tx));
+
+    let events = ReceiverStream::new(rx)
+        .map(|view| Ok(Event::default().data(serde_json::to_string(&view).unwrap_or_default())));
+    Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+/// Sends the current fleet view immediately, then again every time `updates`
+/// fires — debounced by [`SUBSCRIBE_DEBOUNCE`] so a burst of near-
+/// simultaneous pushes across a fleet collapses into one rebuild. A
+/// [`broadcast::error::RecvError::Lagged`] just means "rebuild now" too:
+/// there's no history to replay, only ever a current view, so falling behind
+/// the notification channel loses nothing a fresh rebuild doesn't already
+/// fix.
+async fn subscribe_fleet_worker(
+    store: Arc<IngestStore>,
+    mut updates: broadcast::Receiver<()>,
+    tx: mpsc::Sender<Vec<FleetInstanceView>>,
+) {
+    if tx.send(fleet_view(&store)).await.is_err() {
+        return;
+    }
+
+    loop {
+        match updates.recv().await {
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                tokio::time::sleep(SUBSCRIBE_DEBOUNCE).await;
+                // Drain anything else that landed during the debounce
+                // window so it doesn't trigger a second, redundant rebuild
+                // right behind this one.
+                while updates.try_recv().is_ok() {}
+                if tx.send(fleet_view(&store)).await.is_err() {
+                    return;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingest::{InstanceState, SessionCounts};
+    use crate::ingest::InstanceState;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -450,5 +566,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn subscribe_worker_sends_the_current_view_immediately() {
+        let store = Arc::new(IngestStore::new());
+        store.ingest(full_payload("proxy-1"));
+
+        let (updates_tx, updates_rx) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_fleet_worker(store, updates_rx, tx));
+
+        let view = rx.recv().await.unwrap();
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].instance, "proxy-1");
+        assert_eq!(view[0].sessions.tcp, 5);
+        let _ = updates_tx; // keep the sender alive for the worker's lifetime
+    }
+
+    #[tokio::test]
+    async fn subscribe_worker_resends_after_an_update_once_debounced() {
+        let store = Arc::new(IngestStore::new());
+        store.ingest(full_payload("proxy-1"));
+
+        let (updates_tx, updates_rx) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_fleet_worker(store.clone(), updates_rx, tx));
+
+        // Initial view.
+        assert_eq!(rx.recv().await.unwrap().len(), 1);
+
+        // A second instance pushes; the worker must pick it up after
+        // debouncing, without the test needing to know the exact delay.
+        store.ingest(full_payload("proxy-2"));
+        updates_tx.send(()).unwrap();
+
+        let view = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("worker should resend well within the debounce + margin")
+            .unwrap();
+        assert_eq!(view.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_updates_collapses_into_one_resend() {
+        let store = Arc::new(IngestStore::new());
+        store.ingest(full_payload("proxy-1"));
+
+        let (updates_tx, updates_rx) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_fleet_worker(store.clone(), updates_rx, tx));
+        assert_eq!(rx.recv().await.unwrap().len(), 1); // initial view
+
+        // Five near-simultaneous pushes/signals — the debounce should
+        // collapse these into exactly one resend, not five.
+        for i in 0..5 {
+            store.ingest(full_payload(&format!("proxy-burst-{i}")));
+            updates_tx.send(()).unwrap();
+        }
+
+        let view = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.len(), 6, "one instance plus the five burst instances");
+
+        // Nothing else should arrive — the burst was one rebuild, not five.
+        let extra = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+        assert!(
+            extra.is_err(),
+            "no second resend should follow the debounced one"
+        );
     }
 }

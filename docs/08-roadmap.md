@@ -519,14 +519,18 @@ React + Vite + TypeScript SPA it serves itself (`tower-http::ServeDir`), one
 process, one port for the operator. No proxy admin port, and no machine
 token, is ever exposed to a human directly.
 
-11a. `gsp-aggregator` gains `GET /fleet/subscribe` (SSE, bearer-gated like
+11a. ✅ `gsp-aggregator` gains `GET /fleet/subscribe` (SSE, bearer-gated like
      the rest of `/fleet/*`) — the machine-to-machine feed `gsp-ui` (11d)
-     subscribes to for live updates: current merged fleet state on connect,
-     then a push (debounced against a burst) on every accepted `POST
-     /ingest`. Reuses the exact catch-up-then-broadcast shape
-     `gsp-controller`'s `/config/subscribe` already proved out — no new
-     pattern, applied to state instead of a revision log (so no cursor/replay
-     semantics needed, just "here's the current merged view, again").
+     subscribes to for live updates: current merged fleet state
+     (`FleetInstanceView` — pools + sessions + a `stale` flag, one entry per
+     instance) on connect, then a resend, debounced 150 ms against a burst,
+     on every accepted `POST /ingest`. Reuses the exact
+     catch-up-then-broadcast shape `gsp-controller`'s `/config/subscribe`
+     already proved out, applied to *state* instead of a revision log — no
+     cursor/replay semantics needed, a `Lagged` subscriber just means
+     "rebuild now," same as any other signal. 3 new tests (immediate initial
+     send, resend-after-debounce, a 5-push burst collapsing into exactly one
+     resend); verified live over real HTTP against a real `gsp` push loop.
 11b. New crate `gsp-ui` (lib + bin, no `gsp-core`/`gsp-config` dependency —
      stays as decoupled as `gsp-aggregator` is). `--ui-password`:
      `POST /ui/login {password}` issues a random session id (in-memory
