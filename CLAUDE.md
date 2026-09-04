@@ -191,57 +191,15 @@ client from `crates/gsp/proto/resolver.proto`.
 
 ## Roadmap position
 
-Phase 3 (routing intelligence) shipped: a priority-ordered
-`routes:` list with `always` / `client_cidr` / `dst` / `port` / `first_bytes`
-(`prefix` + `length`) / `sni` matchers, the `consistent_hash` balancer
-(rendezvous hash, pool `hash_on`), the UDP `prefix:` listener (one wildcard
-`IP_PKTINFO` socket per routed prefix, via `nix` — still zero `unsafe`) + TCP
-`freebind:`, the sniffer API **seam** (`gsp_core::sniff` — trait + `sniffer`
-matcher, **no built-in sniffers**; the loader is Phase 9), and the
-`POST /route-hint` push resolver (per-listener `route_hint: true`).
+**Roadmap phases 0–9 are complete**, plus a data-plane-completion pass (live
+reload of `resolvers:`/`backend_sources:`, `weighted` balancer, per-plugin
+sniffer config, `GET /sessions`, ClientHello reassembly) and a perf pass
+(`splice(2)` TCP pump, `recvmmsg` UDP ingress batching, timing-wheel UDP idle
+expiry). Phases 10–12 (fleet aggregation, global config/intent store, regional
+health gossip) are **design only** — see
+[`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
 
-Phase 4 (external resolver): HTTP + gRPC transports,
-`pool` + `target` results, `on_error` (`reject`/`fallback_route`/`stale_ok`),
-TTL'd LRU cache. Phase 5 (operability): connection draining with a grace period,
-runtime listener add/remove/rebind, `draining` / `disabled` backend states, full
-CRUD admin API. Deferred: `Resolution.sticky_key`, `GET /sessions`.
-
-**Phases 0–6 done.** Phase 6 (client-IP preservation): per-pool
-`proxy_protocol: none | v1 | v2 | v2-udp` writes a PROXY protocol header to the
-upstream TCP connection (v1/v2) or the first datagram of each UDP session
-(v2-udp); and `transparent: true` on a TCP **or UDP** listener is Linux TPROXY —
-`IP_TRANSPARENT` listen socket, original destination read per connection /
-datagram, client-`ip:port`-bound upstream socket, and (UDP) a per-session
-`IP_TRANSPARENT` reply socket bound to the original destination. `socket2` is on
-0.6. Setup docs in `docs/04`.
-
-**Phase 7 (security & hardening) — complete.** Slice 1: per-listener
-`allow` / `deny` CIDR filter chain (`gsp_config::Acl` on `ListenerConfig::acl`),
-checked on the client source IP before routing (TCP accept + UDP first datagram);
-`deny` wins, a non-empty `allow` is default-deny. Slice 2: per-listener
-`rate_limit: { per_ip, per_net }` token bucket (`gsp_config::RateLimit` →
-`gsp_core::ratelimit::RateLimiter`, one per listener shared across workers) on
-new connections / new UDP sessions, checked after the ACL; `per_net` keyed by
-/24 (v4) / /64 (v6). Slice 3: process-wide `settings.limits`
-(`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`, startup-only)
-→ `gsp_core::limits::GlobalLimits` (atomic counters + a new-session token bucket,
-RAII `LimitGuard`), refused before allocation. Blocked ⇒ silent drop +
-`gsp_filter_blocked_total{listener,filter="acl"|"rate_ip"|"rate_net"|"max_conn"|"max_udp"|"max_new_rate"}`.
-Slice 4: UDP `first_packet_gate: true` — a session opens only when the first
-datagram is positively recognised (non-`reject` sniffer hint or a matching
-`first_bytes` route: `ListenerConfig::first_packet_recognised`), checked before
-the `route_hint` lookup; else `gsp_datagrams_dropped_total{reason="first_packet_gate"}`.
-Slice 5: automated amplifier-checklist tests
-(`crates/gsp-core/tests/amplification.rs`; `docs/07` checklist ticked). Slice 6:
-`gsp_config::CidrSet` radix trie backs `Acl::permits`. Slice 7: optional GeoIP
-filter — `settings.geo_db` + per-listener `geo: { allow, deny }` (ISO codes),
-`gsp_config::GeoAcl` decision + `gsp_core::geo::GeoDb` (dep `maxminddb`,
-loaded once via `Runtime::start_with_geo`), checked after the CIDR ACL, fails
-closed. Slice 8: `cargo-fuzz` harnesses in `crates/gsp-config/fuzz/`
-(`extract_sni`, `route_match`, `parse_config`) — `make fuzz` (needs nightly +
-`cargo-fuzz`), nightly CI job. Slice 9: per-listener `per_source:
-{ max_per_ip, max_per_net }` concurrent connection/session cap
-(`gsp_core::src_conns::SourceLimiter`, RAII `SourceGuard`), checked after
-`rate_limit`. Slice 10: `crates/gsp-bench` — a latency/load harness (`make
-bench`) that measures the proxy's *added* p50/p99 vs. NFR N1 (< 0.5 ms) / N2
-(< 2 ms). **Phase 7 is complete.** See `HANDOVER.md` and `docs/08`.
+For what shipped, what's deferred, and per-feature latency cost, see
+[`HANDOVER.md`](HANDOVER.md); for the full phase-by-phase plan and status,
+[`docs/08-roadmap.md`](docs/08-roadmap.md); for locked architectural decisions,
+the ADR table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md).
