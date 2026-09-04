@@ -375,15 +375,27 @@ controller's revision log is a follow-on once this ships.
    (`422`, error body) and leaves the current revision untouched on an
    invalid submission. `GET /config` returns the current revision's raw text
    + an `X-Config-Revision` header (`404` before the first submission).
-3. Subscribe endpoint: on connect, a full snapshot + revision cursor, then a
-   change stream (SSE or long-poll — no need for anything fancier at one
-   node) of later revisions.
-4. `gsp` gains `config_source: file | controller`. `controller` mode replaces
-   the file watch with a subscribe client (in the `gsp` binary, same seam as
-   resolvers/discovery — never `gsp-core`) feeding the **existing**
-   `validate() → Snapshot::build → ArcSwap::store` path. On disconnect: keep
-   serving the last snapshot, reconnect with backoff from the last cursor —
-   freeze-on-last-known-good, not clear.
+3. ✅ `GET /config/subscribe?since=<revision>`: SSE. Sends the catch-up range
+   (`Store::revisions_after(since)`) then tails a `broadcast::Sender<u64>`
+   fed by `submit_config`; a lagging subscriber (a `RecvError::Lagged`) just
+   re-runs the catch-up query from wherever it left off — `Store` never
+   forgets a revision, so there is no delivery state on the writer side
+   (`docs/10` principle 5). 5 new tests, incl. one that forces a lag and
+   confirms no revision is skipped.
+4. ✅ `gsp` gains `--controller <url>` (mutually exclusive with `--config` via
+   clap `conflicts_with`). `controller_client::fetch_current` does the
+   initial `GET /config` (mirrors `gsp_config::load` in file mode);
+   `controller_client::run` then holds the subscribe connection and feeds
+   every accepted revision through a new shared `reload::apply_config` (the
+   rebuild/reconcile tail `reload::apply` and the controller path both call —
+   only how the `Config` was obtained differs). On disconnect: reconnect with
+   capped exponential backoff (500 ms → 30 s) from the last-applied cursor;
+   the last-applied snapshot keeps running the whole time
+   (freeze-on-last-known-good, never clear — verified live: killing the
+   controller mid-session left the proxy serving traffic on its last config
+   while retrying). An invalid pushed revision is logged and skipped (cursor
+   still advances — it must not be replayed forever on every reconnect), the
+   same "bad reload keeps the old snapshot" rule as a file reload.
 5. Revision history + diff + one-key rollback endpoints; minimal auth (bearer
    token) on the controller's API.
 

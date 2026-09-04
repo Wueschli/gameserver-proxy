@@ -65,6 +65,22 @@ impl Store {
         Ok(self.get(rev)?.map(|bytes| (rev, bytes)))
     }
 
+    /// Every revision strictly after `since`, oldest first — the catch-up
+    /// range a subscriber replays before switching to the live tail. `sled`
+    /// keys sort by byte order, and `encode_rev` is big-endian, so a plain
+    /// range scan is already revision order.
+    pub fn revisions_after(&self, since: u64) -> Result<Vec<(u64, RevisionBytes)>, StoreError> {
+        use std::ops::Bound;
+
+        let mut out = Vec::new();
+        let range = (Bound::Excluded(encode_rev(since)), Bound::Unbounded);
+        for item in self.revisions.range::<[u8; 8], _>(range) {
+            let (k, v) = item?;
+            out.push((decode_rev(&k), v.to_vec()));
+        }
+        Ok(out)
+    }
+
     /// Accepts a new revision: assigns the next monotonic number, persists
     /// the bytes and moves the `current` pointer in one `sled` transaction
     /// (across both trees), then flushes — a crash can lose the very last
@@ -141,6 +157,33 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         store.put(b"config: one".to_vec()).unwrap();
         assert!(store.get(9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn revisions_after_returns_the_catch_up_range_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let rev1 = store.put(b"one".to_vec()).unwrap();
+        let rev2 = store.put(b"two".to_vec()).unwrap();
+        let rev3 = store.put(b"three".to_vec()).unwrap();
+
+        let all = store.revisions_after(0).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                (rev1, b"one".to_vec()),
+                (rev2, b"two".to_vec()),
+                (rev3, b"three".to_vec())
+            ]
+        );
+
+        let tail = store.revisions_after(rev1).unwrap();
+        assert_eq!(
+            tail,
+            vec![(rev2, b"two".to_vec()), (rev3, b"three".to_vec())]
+        );
+
+        assert!(store.revisions_after(rev3).unwrap().is_empty());
     }
 
     #[test]

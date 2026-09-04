@@ -100,8 +100,39 @@ bad-reload-keeps-the-old-snapshot rule as the proxy, one hop earlier.
 the real `config.example.yaml`. 3 new tests (7 total in the crate).
 `gsp-config` is now a `gsp-controller` dependency; `tower` added as a
 gsp-controller dev-dependency for the in-module `axum` router tests (mirrors
-`gsp`'s own in-module admin HTTP tests). **Next**: slice 3 — the subscribe/
-change-stream endpoint, and `gsp` gaining `config_source: file | controller`.
+`gsp`'s own in-module admin HTTP tests).
+
+**Slice 3 done**: `GET /config/subscribe?since=<revision>` (SSE) on
+`gsp-controller` — catch-up range from `Store::revisions_after` then a live
+tail off a `broadcast::Sender<u64>` `submit_config` feeds; a lagging
+subscriber just re-runs the catch-up query, so `Store` (never forgets a
+revision) is the only source of truth, no delivery state on the writer side.
+5 new tests incl. a forced-lag one. `gsp` gained `--controller <url>`
+(`conflicts_with` `--config`); `main.rs` now loads its first config (file or
+`controller_client::fetch_current`'s `GET /config`) inside `block_on`, since
+the controller path needs an async HTTP call before anything else exists.
+`reload::apply` split into itself (file read) + a new `pub(crate)
+apply_config` (validated-`Config` → rebuild/reconcile) so both the file
+reload and `controller_client::run`'s pushed revisions share one pipeline.
+`controller_client::run` holds the SSE connection, reconnects with capped
+exponential backoff (500 ms → 30 s) from the last-*applied* cursor (not
+where the connection started — a bug caught by the live smoke test below and
+fixed: the cursor is now threaded through by `&mut` so a mid-stream error
+doesn't roll it back and force a pointless replay). An invalid pushed
+revision is logged, skipped, and still advances the cursor (must not replay
+forever). Verified live end-to-end (not just unit tests): started
+`gsp-controller`, submitted `config.example.yaml`, started
+`gsp --controller <url>` and confirmed it came up and served `/healthz`,
+pushed a second revision and watched `gsp` log
+`configuration reloaded source=controller revision 2`, then killed the
+controller and confirmed `gsp` kept running on its last config while
+retrying with growing backoff (`cursor=2` correctly, post-fix). Workspace
+gained `tokio-stream` (gsp-controller's SSE stream wrapper) and reqwest's
+`stream` feature (gsp's `Response::chunk()`).
+
+**Next**: slice 5 — revision history + diff + one-key rollback endpoints,
+plus minimal bearer-token auth on the controller's API (`docs/08` phase
+10+11); then the aggregator slices (6–10).
 
 ### Known follow-ups (none blocking)
 

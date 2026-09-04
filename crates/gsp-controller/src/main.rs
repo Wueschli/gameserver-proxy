@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(AppState { store }));
+        .merge(api::router(AppState::new(store)));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

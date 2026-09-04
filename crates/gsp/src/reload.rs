@@ -95,46 +95,73 @@ async fn apply(
 ) {
     match gsp_config::load(path) {
         Ok(cfg) => {
-            let prev = handle.current();
-            let listeners_changed = cfg.listeners != prev.listeners;
-            let resolvers_changed = cfg.resolvers != prev.resolvers;
-            let next = Snapshot::build_with_sources(
-                &cfg,
-                Some(&prev),
-                handle.backend_overlay(),
-                handle.discovery(),
-            );
-            let sources_changed = next.sources != prev.sources;
-            handle.store(next);
-            metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
-            metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
-            if listeners_changed {
-                let (running, stopped) = handle.reconcile_listeners().await;
-                tracing::info!(
-                    running, stopped,
-                    "listener definitions changed; listeners reconciled (added / removed / rebound)"
-                );
-            }
-            if sources_changed {
-                let (running, stopped) = handle.reconcile_sources().await;
-                tracing::info!(
-                    running,
-                    stopped,
-                    "backend_sources changed; discovery refresh tasks reconciled \
-                     (added / removed / restarted)"
-                );
-            }
-            if resolvers_changed {
-                rebuild_resolvers(&cfg, resolvers);
-            }
-            rescan_sniffers(&cfg, sniffer_loader, sniffers);
-            tracing::info!(config = %path.display(), "configuration reloaded");
+            apply_config(
+                cfg,
+                handle,
+                resolvers,
+                sniffer_loader,
+                sniffers,
+                &format!("file {}", path.display()),
+            )
+            .await
         }
         Err(e) => {
             metrics::counter!(m::CONFIG_RELOAD, "result" => "failed").increment(1);
             tracing::error!(error = %e, "config reload failed; keeping current configuration");
         }
     }
+}
+
+/// Rebuilds the snapshot from an already-parsed-and-validated [`gsp_config::Config`]
+/// and reconciles everything that reads it — the shared tail of a file
+/// reload (`apply`, above) and a controller-pushed revision
+/// (`controller_client::run`, phase 10+11 slice 3). Splitting this out means
+/// both triggers get the exact same rebuild/reconcile behavior; only how the
+/// `Config` was obtained (and validated — the caller ran `gsp_config::load` /
+/// `parse_str` before this) differs.
+pub(crate) async fn apply_config(
+    cfg: gsp_config::Config,
+    handle: &RuntimeHandle,
+    resolvers: &Resolvers,
+    sniffer_loader: Option<&SnifferLoader>,
+    sniffers: &Sniffers,
+    source_desc: &str,
+) {
+    let prev = handle.current();
+    let listeners_changed = cfg.listeners != prev.listeners;
+    let resolvers_changed = cfg.resolvers != prev.resolvers;
+    let next = Snapshot::build_with_sources(
+        &cfg,
+        Some(&prev),
+        handle.backend_overlay(),
+        handle.discovery(),
+    );
+    let sources_changed = next.sources != prev.sources;
+    handle.store(next);
+    metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
+    metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
+    if listeners_changed {
+        let (running, stopped) = handle.reconcile_listeners().await;
+        tracing::info!(
+            running,
+            stopped,
+            "listener definitions changed; listeners reconciled (added / removed / rebound)"
+        );
+    }
+    if sources_changed {
+        let (running, stopped) = handle.reconcile_sources().await;
+        tracing::info!(
+            running,
+            stopped,
+            "backend_sources changed; discovery refresh tasks reconciled \
+             (added / removed / restarted)"
+        );
+    }
+    if resolvers_changed {
+        rebuild_resolvers(&cfg, resolvers);
+    }
+    rescan_sniffers(&cfg, sniffer_loader, sniffers);
+    tracing::info!(source = %source_desc, "configuration reloaded");
 }
 
 /// Rebuild the external-resolver clients from the new `resolvers:` and swap the

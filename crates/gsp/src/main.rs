@@ -5,6 +5,7 @@
 //! reload on SIGHUP / file change, and shut down cleanly on SIGINT/SIGTERM.
 
 mod admin;
+mod controller_client;
 mod discovery;
 mod procinfo;
 mod reload;
@@ -28,12 +29,33 @@ use gsp_core::{Runtime, Snapshot};
 )]
 struct Args {
     /// Path to the YAML config file.
-    #[arg(short, long, default_value = "config.yaml")]
+    #[arg(
+        short,
+        long,
+        default_value = "config.yaml",
+        conflicts_with = "controller"
+    )]
     config: PathBuf,
 
-    /// Validate the config and exit without starting anything.
+    /// Fleet controller base URL (e.g. "http://127.0.0.1:9901") to pull
+    /// structural config from instead of `--config`'s file (docs/10 "The
+    /// controller"). Phase 10+11 PoC: one standalone controller, no HA or
+    /// hierarchy yet — see docs/08-roadmap.md phase 10+11.
+    #[arg(long)]
+    controller: Option<String>,
+
+    /// Validate the config and exit without starting anything. Works with
+    /// `--controller` too — fetches its current config and validates that.
     #[arg(long)]
     check: bool,
+}
+
+/// Where this process's config comes from, decided once at startup from
+/// `Args`. `reload`/`controller_client` each own the live-update side of one
+/// variant; nothing else branches on this after `run` dispatches on it once.
+enum ConfigSource {
+    File(PathBuf),
+    Controller(String),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,9 +67,33 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = gsp_config::load(&args.config)?;
+    // Fetching from a controller needs an async runtime, so config loading
+    // itself now happens inside `block_on` rather than before it (file mode
+    // is unaffected — `gsp_config::load` is still a plain sync read).
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> anyhow::Result<()> {
+    let (config_source, cfg, initial_revision) = match &args.controller {
+        Some(url) => {
+            let (revision, text) = controller_client::fetch_current(url).await?;
+            let cfg = gsp_config::parse_str(&text)
+                .map_err(|e| anyhow::anyhow!("controller {url} revision {revision}: {e}"))?;
+            (ConfigSource::Controller(url.clone()), cfg, Some(revision))
+        }
+        None => {
+            let cfg = gsp_config::load(&args.config)?;
+            (ConfigSource::File(args.config.clone()), cfg, None)
+        }
+    };
     tracing::info!(
-        config = %args.config.display(),
+        source = match &config_source {
+            ConfigSource::File(p) => p.display().to_string(),
+            ConfigSource::Controller(u) => u.clone(),
+        },
         listeners = cfg.listeners.len(),
         pools = cfg.pools.len(),
         "configuration loaded"
@@ -93,15 +139,21 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(cfg, args.config, geo_db, sniffer_loader, sniffers))
+    run(
+        cfg,
+        config_source,
+        initial_revision,
+        geo_db,
+        sniffer_loader,
+        sniffers,
+    )
+    .await
 }
 
 async fn run(
     cfg: gsp_config::Config,
-    config_path: PathBuf,
+    config_source: ConfigSource,
+    initial_revision: Option<u64>,
     geo_db: Option<Arc<gsp_core::GeoDb>>,
     sniffer_loader: Option<Arc<sniffer_loader::SnifferLoader>>,
     sniffers: Arc<gsp_core::sniff::Sniffers>,
@@ -181,13 +233,23 @@ async fn run(
     let fd_gauge = procinfo::spawn_fd_gauge(Duration::from_secs(5));
 
     let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
-    let reload = tokio::spawn(reload::run(
-        config_path,
-        handle,
-        resolvers,
-        sniffer_loader,
-        sniffers,
-    ));
+    let reload = match config_source {
+        ConfigSource::File(path) => tokio::spawn(reload::run(
+            path,
+            handle,
+            resolvers,
+            sniffer_loader,
+            sniffers,
+        )),
+        ConfigSource::Controller(url) => tokio::spawn(controller_client::run(
+            url,
+            initial_revision.unwrap_or(0),
+            handle,
+            resolvers,
+            sniffer_loader,
+            sniffers,
+        )),
+    };
 
     wait_for_shutdown().await;
     tracing::info!(
