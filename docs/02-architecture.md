@@ -112,6 +112,11 @@ struct, the rest is shared).
 - Each session is pinned to its accepting worker (thread-local session table → no
   locks in the UDP path).
 - Control-plane tasks on their own small thread pool.
+- One dedicated OS thread (not a tokio task) for the sniffer plugin engine's
+  epoch ticker — a `wasmtime::Engine::increment_epoch` heartbeat that arms the
+  per-call timeout for WASM sniffers. Spawned once with the `SnifferLoader`, runs
+  for the process lifetime, does no I/O. Absent when no `settings.sniffers` is
+  configured.
 - Memory: per-worker pre-reserved buffer pools; session structs from a slab allocator
   to avoid fragmentation.
 
