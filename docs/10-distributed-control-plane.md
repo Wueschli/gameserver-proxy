@@ -10,6 +10,20 @@ below is either an **additional writer** feeding the same validated `Snapshot`
 swap, or an **additional input** to the same per-backend health flag. The hot
 path gains no network call and no lock.
 
+The controller and aggregator are each a **recursive tree of tiers** (one
+tier per failure domain, down to as small as one instance), so the same
+design covers a single-instance install and a globally distributed fleet with
+no separate mechanism per size — see "Fleet topology" below. Control (Tier 1)
+pulls root → leaf with a static `standalone`/`slave` role per tier; the
+aggregator pushes leaf → root with a homogeneous schema at every hop.
+**Locked for the first release** (phase 10+11 in `docs/08-roadmap.md`): one
+`standalone` controller tier + one aggregator tier, `replicas: 1` each, no
+`slave` role, no HA, no adoption, operator intent stays per-instance as it is
+today (only structural config moves into the controller). The hierarchy,
+intra-tier HA, adoption, and shared intent are phase 12 — a real, already
+fully designed extension, deliberately built *after* something works
+end-to-end, not before.
+
 ---
 
 ## Why
@@ -179,41 +193,173 @@ This removes both failure modes: one flapping instance cannot poison the pool
 
 ---
 
+## Fleet topology: aggregation and control form the same hierarchy, opposite directions
+
+The goal is a single design that scales unmodified from one instance to a
+globally distributed fleet — not a different mechanism per size. Both new
+components generalize into a **tree of tiers** (a tier is typically a failure
+domain / region, but can be as small as one instance):
+
+- **Aggregation (metrics, health, session/pool views) is `Push`, leaf → root.**
+  Each proxy pushes its own state up to its tier's aggregator; each
+  aggregator, in turn, pushes (or is pulled — see below) a merged view up to
+  its parent aggregator, if it has one. The schema is homogeneous: a parent
+  aggregator's input (a child proxy, or a child aggregator's merged view)
+  looks the same either way, so the merge logic is the same function applied
+  recursively — no distinction between "a leaf" and "a subtree" at the
+  parent's level.
+  - **Why push, not pull, here** (a deliberate exception to principle 5): pull
+    would require every parent to hold a network route *down* to every leaf,
+    which is the reachability problem the whole hierarchy exists to avoid — a
+    proxy behind restrictive egress-only networking, NAT, or in a partner's
+    network can push out without ever accepting an inbound admin connection
+    from anywhere, including its own tier's aggregator. The cost: every
+    proxy/aggregator carries a small outbound client with retry/backoff and a
+    short local buffer so a momentary parent hiccup doesn't drop a push.
+  - Losing the parent link degrades to **"my local aggregator still has the
+    full local view; the parent's view of me goes stale/absent."** No data
+    loss below the cut, no effect on the data plane anywhere.
+
+- **Control (structural config + operator intent, Tier 1) is `Pull`, root →
+  leaf**, unchanged from the single-tier design above except generalized to N
+  hops: a proxy subscribes to its tier's controller (full snapshot + cursor,
+  then a change stream); a `slave` controller subscribes to its parent the
+  same way and relays what it receives to everything under it. This is
+  principle 5 applied recursively, not a new mechanism.
+
+### Controller role: `standalone` vs. `slave` — a static, install-time fact
+
+Every controller tier is configured, not elected, into one of two roles:
+
+- **`standalone`** — a root authority. It accepts writes directly (config API,
+  intent API) and is the top of its own subtree. A single-instance deployment
+  is a `standalone` controller with no children and no parent — the
+  degenerate case falls out for free, no special-casing.
+- **`slave`** — has a parent (`parent_addr` + a token). It never accepts a
+  write directly; every write it receives from below is forwarded up, and it
+  relays the parent's revision stream to everything below it. If it loses the
+  parent, it **freezes on last-known-good** — exactly the existing Tier-1 rule
+  ("a control-plane outage freezes state, it never clears it"), now applying
+  at every hop, not just proxy-to-single-controller.
+
+The role is **never inferred from connectivity.** A `slave` losing its parent
+does not, and must not, promote itself to `standalone` — that is precisely how
+two regions would end up independently accepting conflicting intent for the
+same fact during a network partition rather than a real failure (violates
+principle 2, "one authority per fact"). Promotion is only ever an explicit
+operator action (see Adoption, below).
+
+### Intra-tier HA is an orthogonal knob
+
+`standalone`/`slave` answers "does this tier have a parent." It says nothing
+about how many processes back that tier. Separately, every tier picks a
+**replica count**:
+
+- **1 node** — fine for a single proxy or a small region that accepts
+  freezing (not losing — the last-good state is still served) on that one
+  node's failure.
+- **A small consensus group (Raft/etcd-style)** — for a tier that must keep
+  *accepting new writes* (if `standalone`) or *stay live for its children*
+  (if `slave`) through a single node loss. This is the same mechanism either
+  way; a `standalone` root cluster and a `slave` regional cluster both run
+  the same consensus group internally, they just differ in whether accepted
+  writes originate locally or get forwarded to a parent.
+
+So a deployment picks two independent settings per tier —
+`role: standalone | slave` × `replicas: 1..N` — never a fixed shape baked into
+the software. A lone proxy: `standalone` + 1. A globally distributed fleet: a
+`standalone` Raft group at the root, `slave` groups (sized to taste) at each
+region.
+
+### Adoption (deferred — not in the phase 10/11 slices)
+
+Turning a `standalone` tier into a `slave` of a newly-introduced parent — e.g.
+an operator adding a higher tier's address + token in the admin UI after the
+fact, rather than at install time — is a one-time, operator-triggered role
+flip, not a new mechanism: the child starts the same subscribe flow (full
+snapshot + cursor + change stream) against the new parent that any `slave`
+uses from boot. Two correctness details to solve *when this is built*, not
+now:
+
+- The child's own revision history must not outrank the parent's once
+  adopted — post-adoption, the parent is the sole authority for every fact the
+  child used to originate itself.
+- Adoption should require the child to be quiescent (caught up, nothing
+  in-flight) before the flip, so a write doesn't get reordered across the
+  transition.
+
+---
+
 ## The controller (`gsp-controller`)
 
-A **new, optional service**. Proxies never talk to each other through it — it is
-the Tier-1 writer, the fleet's read aggregator, and the GUI's only backend.
+A **new, optional service**, deployed as one tier per the topology above (root
+`standalone`, or `slave` under a parent tier). Proxies never talk to each
+other through it — it is the Tier-1 writer for its subtree, and (transitively)
+the GUI's route to any fact in the fleet.
 
-- **Owns the Tier-1 store** — embedded (Raft in the controller), or backed by
-  etcd / a SQL DB / a git repo. This is an ADR-level choice, deferred (see Open
-  questions).
-- **Config API.** Submit a full or partial config; the controller runs the
-  **same `validate()`** the proxy does, assigns a revision, publishes. History,
-  diff, one-key rollback, staged / canary rollout (a subset of instances take a
-  revision first).
+- **Owns its tier's Tier-1 store** — embedded (Raft in the controller), or
+  backed by etcd / a SQL DB / a git repo. This is an ADR-level choice,
+  deferred (see Open questions). A `slave` tier's store is a materialized
+  replica of what its parent relays, not an independently-written store.
+- **Config API** (accepted only at a `standalone` tier, or forwarded up by a
+  `slave`). Submit a full or partial config; the controller runs the **same
+  `validate()`** the proxy does, assigns a revision, publishes down its
+  subtree. History, diff, one-key rollback, staged / canary rollout (a subset
+  of instances take a revision first).
 - **Intent API.** The phase-5 admin verbs (`drain backend`, add / remove
-  backend, `route-hint`, …) but fleet-wide and persisted — each writes a Tier-1
-  revision instead of poking one instance. Direct per-instance admin stays as
-  break-glass.
-- **Read aggregation.** Fans `GET /config`, `/pools`, `/metrics`, `/healthz` out
-  to all instances (or scrapes them) and merges — the single fleet view.
+  backend, `route-hint`, …) but fleet-wide (within the tier's subtree) and
+  persisted — each writes a Tier-1 revision instead of poking one instance.
+  Direct per-instance admin stays as break-glass.
 - **Auth / RBAC / audit log live here.** The proxies' own admin APIs stay
-  internal-only and are locked to the controller's identity (or its network).
-- **HA.** Run N controllers behind a leader lock for *writes*; reads and the
-  Tier-1 fan-out are stateless. A controller outage stops *changes*, not the
-  data plane — instances serve their replicas.
+  internal-only and are locked to their controller's identity (or its
+  network); a `slave` controller's link to its parent carries its own
+  token, independent of any proxy-facing credential.
+- **HA** is the intra-tier replica-count knob above: N controllers in one
+  tier behind a leader lock for writes originating at that tier; reads are
+  stateless. A whole tier's outage stops *changes for its subtree*, not the
+  data plane — every instance under it serves its last replica.
+
+---
+
+## The aggregator (`gsp-aggregator`)
+
+A **new, optional, stateless service**, one instance (or a small horizontally-
+replicated group — no consensus needed, it holds no durable state) per tier.
+It is the Tier-2-adjacent read path: fleet view + fan-out for the phase-5
+operational verbs, entirely separate from the controller's Tier-1 write path.
+
+- **Ingests pushes** from its tier's proxies and from any child aggregators
+  (a tier's aggregator is itself a valid "leaf" to its parent aggregator — the
+  homogeneous-schema point above).
+- **Serves the merged view** for its own tier immediately (`GET /fleet/*`),
+  and separately pushes (or is pulled, if a deployment prefers that at the
+  top where reachability isn't a constraint) that merged view to its parent,
+  if it has one.
+- **Fans out the phase-5 intent verbs** (drain, add/remove backend,
+  route-hint, drain an instance) to every instance in its subtree at once,
+  reporting partial success per instance rather than failing the whole call.
+- Carries **no authority** — it never decides anything, only observes and
+  relays observations up, and relays operator intent verbs down to the
+  instances that actually hold the atomics. The controller (Tier 1) is the
+  only place a *decision* is durably recorded.
 
 ---
 
 ## The admin GUI
 
-A pure client of the controller. Two capability levels, shippable in order:
+A pure client of the **nearest tier's controller + aggregator** — an operator
+(or a controller/GUI hosted in any failure domain) gets the full fleet view
+from whichever tier is closest, not from one fixed global endpoint. Two
+capability levels, shippable in order:
 
-1. **Operational** — needs no Tier-1 store. Fleet-wide view + the phase-5 verbs,
-   via a thin stateless aggregator. This is roadmap **Phase 10** and is the
-   "Web UI for the admin API" listed in chapter 08's *Later / optional*.
+1. **Operational** — needs no Tier-1 store. Fleet-wide view + the phase-5
+   verbs, via the stateless aggregator hierarchy. This is roadmap **Phase 10**
+   and is the "Web UI for the admin API" listed in chapter 08's *Later /
+   optional*. A first deployment is a single aggregator tier — the hierarchy
+   above is what a deployment grows into with more regions, not a
+   prerequisite for phase 10's first release.
 2. **Full management** — structural config editing, revision history, rollback,
-   diff, RBAC. Needs Tier 1 + the controller. Roadmap **Phase 11**.
+   diff, RBAC. Needs Tier 1 + the controller hierarchy. Roadmap **Phase 11**.
 
 No proxy admin port is ever exposed to a human; the GUI carries all
 authentication and authorization.
@@ -222,13 +368,16 @@ authentication and authorization.
 
 ## Failure behaviour
 
-| Component down | Data plane | Config changes | Health accuracy |
-|----------------|-----------|----------------|-----------------|
-| Tier-1 store / all controllers | unaffected — serves last replica | frozen | unaffected |
-| Tier-2 fabric (a domain) | unaffected | unaffected | falls back to each instance's own checks |
-| a single proxy instance | LB / anycast routes around it | n/a | its Tier-2 records age out of the domain view |
-| partition `domain ↔ controller` | the domain keeps running on its last replica | that domain frozen | intra-domain health still gossips |
-| partition splitting a domain | both halves keep running | — | each half reaches quorum among itself; may diverge until healed (acceptable — health is advisory + locally checked) |
+| Component down | Data plane | Config changes | Health accuracy | Fleet view |
+|----------------|-----------|----------------|-----------------|------------|
+| Tier-1 store / all controllers | unaffected — serves last replica | frozen | unaffected | unaffected (aggregator is a separate path) |
+| a `slave` controller tier | that subtree's proxies keep last replica | frozen for that subtree only; other subtrees unaffected | unaffected | unaffected |
+| a `slave`/child aggregator tier | unaffected | unaffected | unaffected | that subtree's data ages out of the *parent's* view; the subtree's own local view is still fully served |
+| Tier-2 fabric (a domain) | unaffected | unaffected | falls back to each instance's own checks | unaffected |
+| a single proxy instance | LB / anycast routes around it | n/a | its Tier-2 records age out of the domain view | ages out of its tier's aggregator view |
+| partition `domain ↔ parent controller` | the domain keeps running on its last replica | that domain frozen | intra-domain health still gossips | domain still fully self-servable via its local controller/aggregator |
+| partition `domain ↔ parent aggregator` | unaffected | unaffected | unaffected | domain still fully self-servable locally; only the parent's rolled-up view is missing that domain |
+| partition splitting a domain | both halves keep running | — | each half reaches quorum among itself; may diverge until healed (acceptable — health is advisory + locally checked) | each half's local aggregator/controller still serves that half |
 
 ---
 
@@ -266,3 +415,17 @@ authentication and authorization.
   membership from k8s / Consul / DNS, the controller's intent surface shrinks to
   *overrides* on top of discovery. Confirm the precedence order
   (discovery ∪ overlay − removed, then admin state) and where it is evaluated.
+- **Adoption flow** (a `standalone` tier becoming a `slave` post-install, via
+  the admin UI): revision-history reconciliation and a quiescence
+  precondition before the role flip — see "Adoption" above. Not needed for
+  phases 10/11's first release; pick this up when a real multi-region
+  deployment needs it.
+- **Aggregator push transport**: a bespoke small protocol (HTTP + a batched
+  JSON body, simplest, consistent with the rest of the admin API) vs. an
+  existing wire format (OTLP for metrics-shaped data) — the OTLP path buys
+  interop with existing collectors but the fleet/pool/session view isn't
+  metrics-shaped, so a bespoke shape is likely still needed alongside it.
+- **Push buffering bound**: how much history a proxy/aggregator holds locally
+  when its parent link is down before it starts dropping — a fixed ring
+  buffer sized in the same spirit as the existing recv-buffer caps
+  (`docs/06`), not unbounded growth.

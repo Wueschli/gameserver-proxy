@@ -50,6 +50,30 @@ implementation narration lives in git history and `docs/08`, not here.
 which are **design only, nothing built**. Or one of the polish items below, per
 what the user wants.
 
+**2026-09-04 design session**: `docs/10` gained a "Fleet topology" section —
+the controller and the new aggregator are each a recursive tree of tiers (one
+per failure domain, down to a single instance), not a single global service.
+Control (Tier 1) pulls root→leaf with a static `standalone`/`slave` role per
+tier (never inferred from connectivity — that would split-brain a partition);
+the aggregator pushes leaf→root with a homogeneous schema at every hop
+(chosen over pull specifically to avoid needing a network route down to every
+proxy). Intra-tier HA (1 node vs. a Raft/etcd group) is an orthogonal setting
+from the role. Adoption (flipping a `standalone` tier to `slave` post-install
+via the admin UI) is noted but explicitly deferred.
+
+**Locked scope for the first release** (`docs/08` phase 10+11, now merged
+into one PoC-sized phase): one `standalone` controller + one aggregator,
+`replicas: 1` each, no `slave` role, no HA, no adoption. Operator intent
+(backend overlay/admin-state, route hints) **stays per-instance** as it is
+today — only structural config moves into the controller for this release;
+moving intent into the controller's revision log is phase 12. Tier-1 store is
+an embedded `sled` KV, single node (ADR 20, `docs/09`) — the user explicitly
+asked for a proper KV over pushing config files around. `docs/08`'s phase
+10+11 section has the full 13-slice implementation plan (controller slices
+1–5, aggregator slices 6–10, UI/tests/docs 11–13); phase 12 carries the
+deferred hierarchy/HA/intent-migration work forward as its own phase. Start
+implementation from that slice list next.
+
 ### Known follow-ups (none blocking)
 
 | Item | Notes |

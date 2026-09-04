@@ -343,47 +343,104 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   language, so it is a genuinely runtime-configured bounded matcher and not the
   hard-coded HTTP template.
 
-## Phase 10 – Fleet aggregation & operational Web UI
+## Phase 10+11 (merged) – PoC: single controller + single aggregator
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
-("The admin GUI", level 1). **No new source of truth**, nothing on the data
-path.
-- A stateless aggregator (a mode of `gsp-controller`, or a small `gsp-aggregator`):
-  fan `GET /config` / `/pools` / `/metrics` / `/healthz` out to a configured or
-  discovered instance list and merge — the single fleet view.
-- Fan-out for the phase-5 intent verbs (drain / add / remove a backend,
-  `route-hint`, drain an instance) to every instance at once.
-- Web UI over that: fleet dashboard, pool / backend table, per-instance health,
-  the operational actions. Read-heavy; **no structural config editing**.
-- Auth (bearer / OIDC) on the aggregator + UI; each proxy's admin API is locked
-  to the aggregator's identity / network.
-- Not solved here: intent still evaporates on instance restart, and is not
-  guaranteed consistent across the fleet (Phase 11).
-- **Result**: one screen to watch and operate the whole fleet.
+("Fleet topology", "The controller", "The aggregator", "The admin GUI"). This
+is the **first working release** of the two new services, deliberately
+scoped down from the full design: **one `standalone` controller tier, one
+aggregator tier, `replicas: 1` on each, no `slave` role, no HA, no adoption
+flow.** Those are real, already-designed extensions (see `docs/10`) but are
+explicitly a *later* release, not part of this one — ship something that
+works end-to-end first. **No change to the hot path or the `Snapshot`
+invariant** in either slice group.
 
-## Phase 11 – Global config & intent store + controller
+**Scope call locked for this release**: operator intent (backend
+overlay/admin-state, route hints) stays exactly as it is today — per-instance,
+via the existing admin API — and does **not** move into the controller yet.
+The controller in this release owns **structural config only**. The
+aggregator's intent fan-out (below) is a thin proxy to each instance's
+existing admin verbs, not a new durable intent store. Moving intent into the
+controller's revision log is a follow-on once this ships.
+
+### Controller slices (`gsp-controller`, structural config distribution)
+1. Skeleton binary; Tier-1 store = an embedded KV (`sled`, ADR 20) — single
+   node, no Raft/etcd for this release. Each accepted submission gets a
+   monotonic revision.
+2. `POST /config`: runs the **same `validate()`** `gsp` runs, assigns a
+   revision, persists it. Rejects and reports an invalid submission without
+   touching the last-good revision.
+3. Subscribe endpoint: on connect, a full snapshot + revision cursor, then a
+   change stream (SSE or long-poll — no need for anything fancier at one
+   node) of later revisions.
+4. `gsp` gains `config_source: file | controller`. `controller` mode replaces
+   the file watch with a subscribe client (in the `gsp` binary, same seam as
+   resolvers/discovery — never `gsp-core`) feeding the **existing**
+   `validate() → Snapshot::build → ArcSwap::store` path. On disconnect: keep
+   serving the last snapshot, reconnect with backoff from the last cursor —
+   freeze-on-last-known-good, not clear.
+5. Revision history + diff + one-key rollback endpoints; minimal auth (bearer
+   token) on the controller's API.
+
+### Aggregator slices (`gsp-aggregator`, fleet view + operational verbs)
+6. Skeleton binary; `POST /ingest` accepts a periodic push from a proxy (pool
+   state, health, session summary).
+7. `gsp` gains a push client: background task, configurable target +
+   interval, a small local ring buffer so a momentary aggregator outage
+   doesn't drop data, retry/backoff. (Push, not pull — see "Fleet topology" in
+   `docs/10` for why: no inbound network path to a proxy's admin port is ever
+   needed, at any deployment size.)
+8. `GET /fleet/pools` / `/fleet/config` / `/fleet/healthz` / `/fleet/sessions`
+   — served directly from ingested state (no fan-out RPC needed, the data
+   already arrived).
+9. Fan-out for the phase-5 intent verbs (drain/undrain a backend, add/remove a
+   backend, route-hint, drain an instance) — a thin per-instance proxy to the
+   target's existing admin API; a fleet-wide call reports success/failure per
+   instance rather than failing outright on one bad instance.
+10. Bearer-token auth on the aggregator's API; this also closes the "admin API
+    has zero auth" gap on the proxy side (`settings.admin.auth_token`,
+    checked by `admin.rs`, required by both the controller and the
+    aggregator's per-instance calls).
+
+### Web UI + tests
+11. Static SPA: fleet dashboard + pool/backend table + operational actions
+    (from the aggregator), config editor + revision history (from the
+    controller). No proxy admin port ever exposed to a human directly.
+12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator —
+    subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial
+    failure, config reject-keeps-previous.
+13. Docs: `docs/06` (new metrics/endpoints), `README.md` status block,
+    `docs/08` status legend, `HANDOVER.md`.
+
+- **Result**: one controller to distribute config to a fleet, persistently and
+  with an audit trail, and one aggregator to view and operate that fleet from
+  one screen — a real, working v2 release. The `standalone`/`slave`
+  hierarchy, intra-tier HA, adoption, and moving intent into the controller
+  are the next release on top of this, not blocking it.
+
+## Phase 12 – Fleet hierarchy, HA, and shared intent
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
-(Tier 1 + "The controller"). First release with **cross-instance shared config
-and intent** — supersedes ADR 4 for config/intent (never for sessions).
-- `gsp-controller`: owns the Tier-1 ordered / versioned / durable store (backing
-  store per a new ADR — embed / etcd / git).
-- `gsp` grows `config_source: file | store | file+store` and a store
-  subscription client (in the binary, not `gsp-core` — same seam as resolvers):
-  subscribe → full snapshot + cursor → change stream → feed the **existing**
-  `validate() → Snapshot::build → ArcSwap::store` path. Invalid revision ⇒
-  reject + keep previous, like a bad file reload.
+("Fleet topology", "Adoption"). Builds on phase 10+11's single-tier PoC —
+additive, no rework of what shipped there.
+- `standalone` / `slave` role per controller and aggregator tier (static,
+  install-time, never inferred from connectivity) so a deployment can nest
+  regions under a root tier.
+- Intra-tier HA: a Raft/etcd-backed multi-replica group per tier (controller)
+  and a horizontally-replicated stateless group per tier (aggregator) — an
+  orthogonal setting from the role, per-tier.
 - Operator intent (backend overlay, admin state, route hints, resolver pins)
-  moves into the store; a restarted instance recovers it. The phase-5 admin
-  verbs become "controller writes a revision"; direct per-instance admin stays
-  as break-glass.
-- Controller config API: `validate()`, revisions, history, diff, one-key
-  rollback, staged / canary rollout.
-- Web UI gains structural editing + revision history + RBAC.
-- Controller HA: N replicas, leader lock for writes; an outage freezes changes,
-  not traffic.
-- **Result**: manage the whole fleet's configuration from one place,
-  persistently, with an audit trail.
+  moves into the controller's revision log, fleet-wide and persisted across
+  restarts; the phase-5 admin verbs become "controller writes a revision",
+  direct per-instance admin stays as break-glass.
+- Staged / canary rollout (a subset of instances/tiers take a revision
+  first). RBAC on the controller/aggregator APIs.
+- Adoption flow: an admin-UI action that flips a running `standalone` tier to
+  `slave` under a newly-configured parent, reconciling its revision history
+  and subtree.
+- **Result**: the design in `docs/10` fully realized — config/intent
+  consistent and durable across an arbitrarily large, regionally structured
+  fleet, with no single point of failure at any tier.
 
-## Phase 12 – Regional health fabric
+## Phase 13 – Regional health fabric
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 (Tier 2). Advisory, rebuildable, off the data path.
 - `failure_domain` / `region` identity per instance (`settings`, or discovered)
@@ -403,7 +460,7 @@ Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 ## Later / optional
 - QUIC-CID-aware sniffer & session keying.
 - Cross-instance session handover (shared *session* state) — still out of scope;
-  the Phase 11–12 control plane shares config and health, never sessions.
+  the phase 10–13 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
 
@@ -412,8 +469,10 @@ Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 - **v1.0**: + phase 3–5 (routing, resolver, zero-downtime).
 - **v1.1**: + phase 6–7 (client IP, hardening).
 - **v1.2**: + phase 8 (discovery, HA operations docs).
-- **v1.3**: + phase 9–10 (sniffer plugin loader; fleet view & operational Web
+- **v1.3**: + phase 9–10+11 (sniffer plugin loader; single-controller +
+  single-aggregator PoC — fleet config distribution & operational Web
   UI). Both additive — the data-plane contract is unchanged.
-- **v2.0**: + phase 11–12 (global config / intent control plane; regional health
-  fabric). First release with cross-instance shared state, for config and health
-  only — see [10-distributed-control-plane.md](10-distributed-control-plane.md).
+- **v2.0**: + phase 12–13 (fleet hierarchy / HA / shared intent; regional
+  health fabric) — the multi-region, no-single-point-of-failure realization of
+  the phase 10+11 PoC — see
+  [10-distributed-control-plane.md](10-distributed-control-plane.md).
