@@ -162,7 +162,13 @@ pub async fn run_tcp_listener(
                 let hints = hints.clone();
                 let resolvers = resolvers.clone();
                 let sniffers = sniffers.clone();
-                let conn_guard = conns.track();
+                let local = stream.local_addr().unwrap_or(cfg.bind);
+                let conn_guard = conns.track(crate::drain::SessionMeta {
+                    proto: crate::drain::Proto::Tcp,
+                    listener: listener_name.clone(),
+                    peer,
+                    local,
+                });
 
                 tokio::spawn(async move {
                     // Held for the whole connection so a graceful shutdown waits
@@ -172,7 +178,6 @@ pub async fn run_tcp_listener(
                     let _limit_guard = limit_guard;
                     // Releases the per-source concurrent slot on task exit.
                     let _src_guard = src_guard;
-                    let local = stream.local_addr().unwrap_or(cfg.bind);
 
                     // Peek the first bytes only when a route needs them,
                     // reassembling a TLS ClientHello that spans TCP segments.
@@ -279,11 +284,13 @@ pub async fn run_tcp_listener(
                             *connect_timeout,
                             *idle_timeout,
                             tsrc,
+                            &_conn_guard,
                             *proxy_protocol,
                         )
                         .await,
                         (_, Some(pool)) => {
-                            crate::proxy::handle_tcp(stream, peer, local, tsrc, pool).await
+                            crate::proxy::handle_tcp(stream, peer, local, tsrc, &_conn_guard, pool)
+                                .await
                         }
                         _ => unreachable!("pool route always resolves a pool above"),
                     };

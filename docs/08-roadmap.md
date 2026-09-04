@@ -102,8 +102,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   draining are dropped (`reason="draining"`).
 - ✅ **Slice 5**: runtime listener add / remove / rebind — `ListenerManager`
   owns one task group per listener; a reload reconciles them by name (`SO_REUSEPORT`
-  makes a same-bind rebind gapless). `GET /sessions` is the only deferred bit
-  (needs a per-session registry).
+  makes a same-bind rebind gapless).
+- ✅ `GET /sessions` — live connection / session registry on the connection
+  tracker (`id → {proto, listener, peer, local, pool, backend, age}`), exposed
+  as a filterable plaintext admin endpoint. *(data-plane completion, list C)*
 - ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.
 
@@ -418,8 +420,8 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
   measured inside NFR N1; `regex` first-bytes matching lives in an optional
   plugin, never in core. Known follow-ups, not blocking:
-  per-source cap LRU eviction, `GET /sessions`, a k8s discovery watch
-  informer — see `HANDOVER.md`.
+  per-source cap LRU eviction, a k8s discovery watch informer — see
+  `HANDOVER.md`. (`GET /sessions` since landed — data-plane completion.)
 - ✅ **Post-phase-9 (data-plane completion)**: per-plugin config. ADR 16a
   widens the guest ABI to
   `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[]`

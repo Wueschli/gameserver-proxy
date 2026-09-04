@@ -124,8 +124,15 @@ carried in the PROXY v2 TLV if the backend should correlate it.
   drained. Returns `draining` (503) after `POST /admin/drain`.
 - `GET /metrics` – Prometheus.
 - `GET /config` – plaintext view of the active snapshot (listeners + pools +
-  `draining` / `active_conns`). Implemented (phase 5). `GET /pools`,
-  `GET /sessions?listener=&src=&pool=` – introspection (`/sessions` not yet).
+  `draining` / `active_conns`). Implemented (phase 5). `GET /pools` – per-pool
+  backend list with health / `state=` / active count.
+- `GET /sessions[?listener=&pool=&proto=tcp|udp&src=<ip>]` – plaintext list of
+  every live proxied connection / UDP session: id, transport, listener, client
+  (`peer=`) and local (`local=`) address, chosen `pool=` / `backend=`, and
+  `age=`. Backed by a small `id → metadata` registry on the connection tracker
+  (one brief lock per connection at open / close, nothing on the per-byte path).
+  Point-in-time; the optional query params filter by exact `listener` / `pool`,
+  transport, or source IP. Implemented.
 - `POST /admin/drain` / `POST /admin/undrain` – take this instance out of / back
   into LB rotation by flipping `readyz`, without stopping the data path.
   Implemented (phase 5).
@@ -136,7 +143,6 @@ carried in the PROXY v2 TLV if the backend should correlate it.
   remove the backend from new-session selection (including UDP affinity)
   immediately; existing sessions keep running. Carried across a config reload by
   address. `GET /pools` shows the current `state=` per backend.
-- `/sessions` is not yet implemented.
 
 ## Backend health checks
 

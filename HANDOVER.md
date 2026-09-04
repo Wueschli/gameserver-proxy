@@ -34,7 +34,8 @@ Phase 5:
 `enabled` / `draining` / `disabled` backend states + `PATCH /pools/{p}/backends/{addr}`;
 tracked connection draining with `shutdown_grace_sec` on SIGINT/SIGTERM;
 `POST /admin/drain` + `GET /config`; runtime backend CRUD; runtime listener
-add/remove/rebind. `GET /sessions` is the only deferred bit.
+add/remove/rebind. (`GET /sessions` landed later — data-plane completion,
+list C.)
 Phase 6 slices 1–2: per-pool `proxy_protocol: none | v1 | v2 | v2-udp` prepends a
 PROXY protocol header to the upstream TCP connection (v1/v2) or the first
 datagram of each UDP session (v2-udp) — `gsp_core::proxy_protocol`.
@@ -1021,9 +1022,19 @@ project's north star):**
 
 **C. Cheap polish / docs (fold into A or B):**
 
-9. **epoch-ticker thread in `docs/02`** threading-model table — trivial doc pass.
-10. **`GET /sessions`** introspection — single-instance operability, and phase 10's
-    Web UI will want it. Small per-session registry.
+9. ~~**epoch-ticker thread in `docs/02`** threading-model list~~ — **done** (on
+   `main`): noted as a dedicated non-tokio OS thread (`gsp-sniffer-epoch`),
+   absent without `settings.sniffers`.
+10. ~~**`GET /sessions`** introspection~~ — **done** (on `main`):
+    `ConnTracker` gained an `id → {proto, listener, peer, local, pool, backend,
+    since}` registry alongside its `watch<usize>` counter (a brief `Mutex` at
+    `track` / drop / `set_target` — once per connection, never per byte).
+    TCP fills `pool`/`backend` via `ConnGuard::set_target` from `proxy::handle_tcp`
+    once the backend is picked; UDP fills them at `Session` creation. Exposed as
+    `RuntimeHandle::sessions()` and the filterable plaintext admin endpoint
+    `GET /sessions[?listener=&pool=&proto=&src=]`. Tests:
+    `drain::tests::sessions_reflects_live_entries_and_set_target`,
+    `tcp_forward::sessions_registry_lists_a_live_connection_with_its_pool_and_backend`.
 11. **Reload debounce widening** (only coalesces within one 200 ms window) — low
     priority, low cost.
 12. **LRU eviction for the UDP sticky table and the per-source cap**

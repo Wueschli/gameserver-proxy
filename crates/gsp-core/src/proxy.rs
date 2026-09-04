@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::drain::ConnGuard;
 use crate::metrics_defs as m;
 use crate::pool::Pool;
 
@@ -39,10 +40,12 @@ pub async fn handle_tcp(
     client_addr: SocketAddr,
     client_local: SocketAddr,
     transparent_source: Option<SocketAddr>,
+    conn: &ConnGuard,
     pool: &Pool,
 ) -> anyhow::Result<ConnOutcome> {
     let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
+    conn.set_target(Some(pool.name.as_ref()), backend_addr);
 
     let mut backend =
         match connect_backend(backend_addr, pool.connect_timeout, transparent_source).await {
@@ -99,8 +102,10 @@ pub async fn handle_tcp_target(
     connect_timeout: Duration,
     idle_timeout: Duration,
     transparent_source: Option<SocketAddr>,
+    conn: &ConnGuard,
     proxy_protocol: gsp_config::ProxyProtocol,
 ) -> anyhow::Result<ConnOutcome> {
+    conn.set_target(Some("(resolver target)"), target);
     let mut backend = connect_backend(target, connect_timeout, transparent_source).await?;
 
     let hdr = match proxy_protocol {

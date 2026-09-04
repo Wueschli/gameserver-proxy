@@ -93,7 +93,8 @@ struct, the rest is shared).
 
 ### 7. Admin API
 - `GET /config` (active snapshot, plaintext — implemented, phase 5), `GET /pools`,
-  `GET /sessions?...` (`/sessions` planned)
+  `GET /sessions[?listener=&pool=&proto=&src=]` (live connection / session list —
+  implemented)
 - `POST /admin/drain` / `POST /admin/undrain` (flip `readyz` for the LB —
   implemented, phase 5)
 - `PATCH /pools/{p}/backends/{addr} {state: enabled|draining|disabled}`,

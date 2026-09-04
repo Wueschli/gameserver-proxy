@@ -556,6 +556,66 @@ async fn shutdown_drains_in_flight_connections_then_returns_early() {
 }
 
 #[tokio::test]
+async fn sessions_registry_lists_a_live_connection_with_its_pool_and_backend() {
+    // Slow-echo backend: keeps the connection open while we inspect the registry.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let baddr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 64];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let proxy = free_port().await;
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{baddr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(handle.sessions().is_empty());
+
+    let mut c = TcpStream::connect(proxy).await.unwrap();
+    c.write_all(b"ping").await.unwrap();
+    // Let the accept task route and pick a backend.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let live = handle.sessions();
+    assert_eq!(live.len(), 1, "one live session expected");
+    let e = &live[0];
+    assert_eq!(e.proto, gsp_core::Proto::Tcp);
+    assert_eq!(e.listener, "l");
+    assert_eq!(e.pool.as_deref(), Some("p"));
+    assert_eq!(e.backend, Some(baddr));
+    assert_eq!(e.peer, c.local_addr().unwrap());
+    assert_eq!(handle.active_conns(), 1);
+
+    drop(c);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        handle.sessions().is_empty(),
+        "session drops out of the registry when the connection closes"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
 async fn admin_drain_flips_readiness_without_stopping_the_data_path() {
     let a = marker_backend(b'A').await;
     let proxy = free_port().await;

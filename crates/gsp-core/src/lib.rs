@@ -32,7 +32,7 @@ pub mod src_conns;
 mod util;
 
 pub use discovery::{refresh_loop, BackendSource, Discovery};
-pub use drain::{ConnGuard, ConnTracker, DEFAULT_SHUTDOWN_GRACE};
+pub use drain::{ConnGuard, ConnTracker, Proto, SessionInfo, SessionMeta, DEFAULT_SHUTDOWN_GRACE};
 pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
 pub use listeners::ListenerManager;

@@ -26,8 +26,7 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–9 complete** (resolver `sticky_key` and
-`GET /sessions` deferred). TCP and UDP
+**Roadmap phases 1–9 complete** (resolver `sticky_key` deferred). TCP and UDP
 listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
@@ -57,7 +56,8 @@ listener → backend pool forwarding with:
 - graceful shutdown: `SIGINT`/`SIGTERM` stops accepting and drains in-flight TCP
   connections + UDP sessions, bounded by `settings.shutdown_grace_sec` (default 30)
 - instance drain: `POST /admin/drain` / `POST /admin/undrain` flip `readyz` for an
-  upstream LB without stopping the data path; `GET /config` dumps the live snapshot
+  upstream LB without stopping the data path; `GET /config` dumps the live
+  snapshot and `GET /sessions` lists live connections / UDP sessions
 - runtime backend CRUD: `POST` / `DELETE /pools/{p}/backends[/{addr}]` add or remove
   a backend at runtime; the edits are layered on the file config and survive a reload
 - runtime listener reconfig: a reload spawns added listeners, stops removed ones and
@@ -100,7 +100,7 @@ listener → backend pool forwarding with:
   template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
   real plugins, loopback) — see `docs/07`
 
-**Phases 1–9 complete** (`sticky_key` and `GET /sessions` deferred). Phase 9
+**Phases 1–9 complete** (`sticky_key` deferred). Phase 9
 (sniffer plugin loader): the WASM sandbox above, plus `crates/plugins/` and
 its `README.md`. Phase 8
 (discovery & scaling): the `backend_sources` adapters above plus an HA

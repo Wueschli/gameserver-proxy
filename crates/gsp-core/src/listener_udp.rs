@@ -567,7 +567,7 @@ async fn open_session(
         hdr.extend_from_slice(first);
         metrics::counter!(
             m::PROXY_PROTOCOL_HEADERS,
-            "pool" => pool_label,
+            "pool" => pool_label.clone(),
             "version" => proxy_protocol.label(),
         )
         .increment(1);
@@ -615,6 +615,13 @@ async fn open_session(
     );
 
     tracing::debug!(listener = %cfg.name, %client, ?dst, %backend, "udp session opened");
+    let conn_guard = conns.track(crate::drain::SessionMeta {
+        proto: crate::drain::Proto::Udp,
+        listener: cfg.name.clone(),
+        peer: client,
+        local,
+    });
+    conn_guard.set_target(Some(pool_label.as_str()), backend);
     Ok(Session {
         upstream,
         last_ms,
@@ -622,7 +629,7 @@ async fn open_session(
         idle_ms,
         health,
         _guard: guard,
-        _conn_guard: conns.track(),
+        _conn_guard: conn_guard,
         _limit_guard: limit_guard,
         _src_guard: src_guard,
         _reply_sock: reply_sock,

@@ -128,6 +128,12 @@ impl RuntimeHandle {
     pub fn active_conns(&self) -> usize {
         self.conns.active()
     }
+
+    /// A point-in-time list of every live connection / session, for
+    /// `GET /sessions`.
+    pub fn sessions(&self) -> Vec<crate::drain::SessionInfo> {
+        self.conns.sessions()
+    }
 }
 
 impl Runtime {

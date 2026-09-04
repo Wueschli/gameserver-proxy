@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, patch, post},
@@ -34,6 +34,7 @@ pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: Prometh
             patch(patch_backend).delete(delete_backend),
         )
         .route("/config", get(config))
+        .route("/sessions", get(sessions))
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
@@ -180,6 +181,52 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
                 b.active(),
             ));
         }
+    }
+    out
+}
+
+/// `GET /sessions[?listener=&pool=&proto=tcp|udp&src=<ip>]` — a plaintext list
+/// of every live proxied connection / UDP session (id, transport, listener,
+/// client / local address, chosen pool and backend, age). The query params
+/// filter the list (exact match on `listener` / `pool`, transport on `proto`,
+/// source IP on `src`). Point-in-time; a session already gone by the time you
+/// read this is simply absent.
+#[derive(Deserialize)]
+struct SessionsQuery {
+    listener: Option<String>,
+    pool: Option<String>,
+    proto: Option<String>,
+    src: Option<String>,
+}
+
+async fn sessions(
+    State(s): State<AdminState>,
+    Query(q): Query<SessionsQuery>,
+) -> impl IntoResponse {
+    let src = q.src.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
+    let mut list = s.runtime.sessions();
+    list.retain(|e| {
+        q.listener.as_deref().is_none_or(|l| l == e.listener)
+            && q.pool
+                .as_deref()
+                .is_none_or(|p| Some(p) == e.pool.as_deref())
+            && q.proto.as_deref().is_none_or(|p| p == e.proto.as_str())
+            && src.is_none_or(|ip| ip == e.peer.ip())
+    });
+    list.sort_by_key(|e| e.id);
+    let mut out = format!("sessions={}\n", list.len());
+    for e in &list {
+        out.push_str(&format!(
+            "  {}\t{}\t{}\tpeer={}\tlocal={}\tpool={}\tbackend={}\tage={:.1}s\n",
+            e.id,
+            e.proto.as_str(),
+            e.listener,
+            e.peer,
+            e.local,
+            e.pool.as_deref().unwrap_or("-"),
+            e.backend.map_or_else(|| "-".to_string(), |a| a.to_string()),
+            e.age.as_secs_f64(),
+        ));
     }
     out
 }
