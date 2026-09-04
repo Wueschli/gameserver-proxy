@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–6 landed).
+Last updated: 2026-09-04 (**phases 0–9 complete**).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -510,16 +510,45 @@ output alone; check the exit code or scroll to the top of the log.
   with the ceiling caveat above, the `sha256` pin supply-chain check, the
   latency table, and a note that a sniffer's lack of a reply path leaves the
   amplifier checklist untouched.
-- **Next**: phase 9 slice 7 — a *proper* end-to-end test through the real
-  loader with a dedicated compiled fixture. Slice 5's `#[ignore]`d artifact
-  test already covers most of this ground against the real first-party
-  plugins, so slice 7 may end up being mostly "wire `make plugins` +
-  `--ignored` runs into CI" plus a small `host-echo.wasm`-style trivial
-  fixture, rather than fresh design work. Per-source cap LRU eviction, `GET
-  /sessions`, and a k8s watch informer are separate polish items. Deferred:
-  `GET /sessions` (per-session registry); resolver `sticky_key`; per-plugin
-  config for `settings.sniffers.modules[]` (would let `regex-firstbytes`
-  become genuinely generic).
+- **Phase 9 slice 7 done — phase 9 complete**: end-to-end test through the
+  real loader.
+  `sniffer_loader::tests::end_to_end_connection_routes_by_a_real_wasm_plugins_hint`
+  compiles the same `HOST_SNIFFER_WAT` fixture slice 3's own tests use (inline
+  via the `wat` crate — no `wasm32-unknown-unknown` toolchain needed), writes
+  it to a scratch dir as `host-echo.wasm`, and has `build_sniffers` load it
+  the *real* way (a directory scan, not a hand-built `WasmSniffer`), then
+  drives a live `Runtime` + a real TCP connection routed by the plugin's
+  returned hint host — mirrors
+  `sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host` (the
+  native-sniffer version from slice 1) but through the whole WASM path. Not
+  `#[ignore]`d — runs in every normal `cargo test -p gsp` / `make check`.
+  **A small gotcha it caught while writing it**: `HOST_SNIFFER_WAT` takes
+  *everything after* `HOST:` as the hostname (documented in its own comment)
+  rather than stopping at a `\n` like the native `TestHost` sniffer does — an
+  initial version of this test sent `HOST:<host>\nrest` (matching the native
+  sniffer's test payload shape) and got a host of `"<host>\nrest"` back,
+  which then failed to match the route's `host:` pattern and silently fell
+  through to the `always` route. Fixed by sending a bare `HOST:<host>` with
+  no trailing bytes, with a comment on why — the fixture's behaviour is by
+  design, not a bug, but it's easy to trip over by analogy with the native
+  fixture.
+  **CI wiring**: the `plugins` job now also installs `protoc` and, after
+  building the wasm modules, runs `cargo test -p gsp --release -- --ignored
+  --nocapture` — so slice 5's artifact round-trip test and slice 6's N1
+  latency bench are both enforced on every push/PR, not just documented as
+  locally reproducible.
+  `docs/08` Phase 9 marked **complete**: 3 risks resolved (CI wasm-target
+  install — done; epoch-ticker thread — documented in `docs/07`; warm-instance
+  reuse — turned out unnecessary, slice 6 measured comfortably inside N1).
+  Known follow-ups, not blocking: per-source cap LRU eviction, `GET
+  /sessions`, a k8s discovery watch informer, resolver `sticky_key`, and
+  per-plugin configuration (`settings.sniffers.modules[]` growing a config
+  blob) — the last one would let `regex-firstbytes` become a genuinely
+  generic engine instead of the hard-coded HTTP template it is today.
+- **Next**: phase 9 is done. Pick up from `docs/08`'s remaining phases
+  (10–12, the distributed control plane — design only, nothing built yet;
+  see `docs/10-distributed-control-plane.md`) or one of the polish items
+  above, per what the user wants next.
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip

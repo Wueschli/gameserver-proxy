@@ -31,12 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/plugins
+          workspaces: |
+            crates/plugins
+            .
       - name: Native unit tests
         working-directory: crates/plugins
         run: cargo test --workspace
@@ -46,6 +50,11 @@ jobs:
       - name: Size check (informational)
         working-directory: crates/plugins
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm
+      - name: Load the built plugins through the real gsp loader (phase 9 slices 5–7)
+        # Runs the #[ignore]d gsp tests that need crates/plugins built above:
+        # the end-to-end artifact test and the WASM-boundary latency bench
+        # vs. NFR N1 (release matters for real numbers — see docs/07).
+        run: cargo test -p gsp --release -- --ignored --nocapture
 
   fuzz:
     runs-on: ubuntu-latest

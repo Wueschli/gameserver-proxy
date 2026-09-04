@@ -652,6 +652,108 @@ mod tests {
         );
     }
 
+    /// Phase 9 slice 7: end to end through the *real* loader — not a native
+    /// `Sniffer` impl handed to the registry directly (that's
+    /// `gsp_core::sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host`),
+    /// but a `host-echo.wasm` compiled from [`HOST_SNIFFER_WAT`] by
+    /// [`build_sniffers`] scanning a directory, exactly as `settings.
+    /// sniffers.dir` would at real startup, then a live TCP connection routed
+    /// by the hint that plugin returns. No `#[ignore]` needed — `wat::parse_str`
+    /// builds the fixture inline, so this test needs neither
+    /// `wasm32-unknown-unknown` nor `make plugins`.
+    #[tokio::test]
+    async fn end_to_end_connection_routes_by_a_real_wasm_plugins_hint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let dir = tempdir();
+        std::fs::write(
+            dir.join("host-echo.wasm"),
+            wat::parse_str(HOST_SNIFFER_WAT).unwrap(),
+        )
+        .unwrap();
+        let (_loader, registry) = build_sniffers(&cfg(&dir)).unwrap();
+        let sniffers = std::sync::Arc::new(registry);
+
+        // Two backends, each writing an identifying byte on connect — same
+        // shape as the native-sniffer test this mirrors.
+        async fn marker(tag: u8) -> std::net::SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = l.accept().await {
+                    tokio::spawn(async move {
+                        let _ = s.write_all(&[tag]).await;
+                        let mut buf = [0u8; 64];
+                        while let Ok(n) = s.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        let survival = marker(b'S').await;
+        let lobby = marker(b'L').await;
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let yaml = format!(
+            r#"
+pools:
+  - name: survival
+    targets: ["{survival}"]
+  - name: lobby
+    targets: ["{lobby}"]
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - match: {{ type: sniffer, sniffer: host-echo, host: ["survival.example.net"] }}
+        action: {{ pool: survival }}
+      - match: {{ type: always }}
+        action: {{ pool: lobby }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let runtime = gsp_core::Runtime::start_with_sniffers(
+            gsp_core::Snapshot::from_config(&cfg),
+            Default::default(),
+            None,
+            sniffers,
+            1,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mark = |host: &'static str| async move {
+            let mut c = TcpStream::connect(proxy).await.unwrap();
+            // Unlike the native `TestHost` sniffer in `gsp_core::sniff::tests`
+            // (which stops at the first `\n`), `HOST_SNIFFER_WAT` is a
+            // minimal fixture that takes *everything after* `HOST:` as the
+            // host — by design, see its doc comment. So this payload carries
+            // no trailing bytes past the hostname.
+            c.write_all(format!("HOST:{host}").as_bytes())
+                .await
+                .unwrap();
+            let mut m = [0u8; 1];
+            c.read_exact(&mut m).await.unwrap();
+            m[0]
+        };
+
+        assert_eq!(mark("survival.example.net").await, b'S');
+        assert_eq!(mark("creative.example.net").await, b'L');
+
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
+    }
+
     /// A tiny per-test-process unique scratch dir under the system temp dir.
     fn tempdir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(

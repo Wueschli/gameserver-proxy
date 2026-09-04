@@ -26,7 +26,7 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–8 complete** (resolver `sticky_key` and
+**Roadmap phases 1–9 complete** (resolver `sticky_key` and
 `GET /sessions` deferred). TCP and UDP
 listener → backend pool forwarding with:
 
@@ -45,7 +45,7 @@ listener → backend pool forwarding with:
   `client_cidr` (source IP), `dst` (destination IP), `port` (destination port),
   `first_bytes` (prefix and/or length of the first bytes) and `sni` (host from
   the peeked, non-terminated TLS ClientHello) matchers — plus a `sniffer`
-  matcher whose plugins load later (see roadmap Phase 9)
+  matcher backed by the sandboxed WASM plugin loader (phase 9, below)
 - UDP `prefix:` listeners — one wildcard `IP_PKTINFO` socket serves a whole
   routed prefix, routing by the real per-datagram destination and replying from
   it; TCP `freebind:`
@@ -90,8 +90,19 @@ listener → backend pool forwarding with:
   empty refresh keeps the last-known-good set (`gsp_discovery_refresh_total`,
   `gsp_discovery_backends`). Adapters live in the binary; `gsp-core` keeps the
   HTTP-free `BackendSource` seam
+- sniffer plugin loader (phase 9): `settings.sniffers: { dir, call_timeout_ms,
+  max_memory_bytes, modules }` loads `*.wasm` modules — sandboxed `wasmtime`
+  (no WASI, no host imports, epoch-interruption time bound + a `StoreLimits`
+  memory bound), rescanned live on every config reload. Two first-party
+  plugins ship as a separate `crates/plugins/` workspace (`make plugins`):
+  `a2s` (Source-engine query recognition) and `minecraft` (virtual-host
+  extraction from the protocol handshake), plus a `regex-firstbytes`
+  template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
+  real plugins, loopback) — see `docs/07`
 
-**Phases 1–8 complete** (`sticky_key` and `GET /sessions` deferred). Phase 8
+**Phases 1–9 complete** (`sticky_key` and `GET /sessions` deferred). Phase 9
+(sniffer plugin loader): the WASM sandbox above, plus `crates/plugins/` and
+its `README.md`. Phase 8
 (discovery & scaling): the `backend_sources` adapters above plus an HA
 operations chapter in `docs/06` (anycast vs. L4 LB, per-instance capacity,
 dashboards & alerts). Phase 7

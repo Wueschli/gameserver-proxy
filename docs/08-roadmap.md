@@ -375,21 +375,45 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   section covers the full no-WASI/no-host-imports contract, the two runtime
   bounds, and confirms a sniffer's lack of a reply path leaves the amplifier
   checklist untouched.
-- **Slice 7**: end-to-end test — compile a trivial `host-echo.wasm` fixture,
-  load it through the real loader, assert a connection routes by its hint host
-  (mirrors `sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host` but
-  via `WasmSniffer`).
+- ✅ **Slice 7 — phase 9 complete**: end-to-end test — a trivial
+  `host-echo.wasm` fixture (compiled inline from WAT via the `wat` crate, no
+  `wasm32-unknown-unknown` toolchain needed — the same `HOST_SNIFFER_WAT`
+  fixture slice 3's own tests already used), loaded through the *real*
+  `build_sniffers` directory scan (not a hand-constructed `WasmSniffer`),
+  driving a live `Runtime` and a real TCP connection routed by the plugin's
+  hint host
+  (`sniffer_loader::tests::end_to_end_connection_routes_by_a_real_wasm_plugins_hint`
+  — mirrors `sniff::tests::sniffer_matcher_routes_a_connection_by_hint_host`,
+  slice 1's native-sniffer version, but through the whole WASM path instead).
+  Not `#[ignore]`d — it needs neither `make plugins` nor the wasm target,
+  so it runs in the normal `cargo test -p gsp` / `make check` pass, unlike
+  slices 5–6's artifact/latency tests (which need the real compiled
+  first-party plugins). Those two *are* now wired into CI: the `plugins` job
+  installs `protoc` too and, after building the wasm modules, runs
+  `cargo test -p gsp --release -- --ignored --nocapture` — so the artifact
+  round-trip and the N1 latency gate are both enforced on every push/PR, not
+  just documented as reproducible locally.
 
 ### Risks
 - `wasmtime` is a large dependency and adds build time; CI needs
-  `rustup target add wasm32-unknown-unknown` and an engine cache.
-- The epoch-ticker is a real background thread — record it in the threading
-  model (`docs/02`) and `HANDOVER.md`.
-- Warm-instance reuse (if per-call instantiate misses N1) must guarantee no
-  state leak between connections.
+  `rustup target add wasm32-unknown-unknown` and an engine cache — done
+  (`plugins` CI job, `Swatinem/rust-cache` on both workspaces).
+- The epoch-ticker is a real background thread — recorded in `HANDOVER.md`
+  (slice 3) and `docs/07`'s sandbox-guarantees section (slice 6), including
+  the "it's a ceiling, not a guarantee" caveat slice 6 uncovered. Not yet
+  added to `docs/02`'s threading model table — worth a follow-up doc pass.
+- Warm-instance reuse: **not needed** — slice 6 measured the fresh-per-call
+  design comfortably inside NFR N1 (p50 8–10 µs, real first-party plugins),
+  so this risk didn't materialise. Left documented in case a future,
+  heavier plugin changes that calculus.
 
-- **Result**: runtime-loaded, sandboxed game-protocol sniffers; `regex`
-  first-bytes matching as a plugin, not core.
+- **Result — phase 9 complete**: runtime-loaded, sandboxed game-protocol
+  sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
+  measured inside NFR N1; `regex` first-bytes matching lives in an optional
+  plugin, never in core. Known follow-ups, not blocking: per-plugin
+  configuration (would let `regex-firstbytes` become a true generic engine),
+  per-source cap LRU eviction, `GET /sessions`, a k8s discovery watch
+  informer — see `HANDOVER.md`.
 
 ## Phase 10 – Fleet aggregation & operational Web UI
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
