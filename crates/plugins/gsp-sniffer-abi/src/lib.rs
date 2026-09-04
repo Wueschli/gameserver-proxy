@@ -13,11 +13,16 @@
 //! ```
 //!
 //! A plugin crate only needs three things: depend on this crate, implement
-//! `#[no_mangle] pub extern "C" fn sniff(ptr: u32, len: u32) -> i64` calling
-//! [`input`] to borrow what the host wrote and [`emit_hint`] /
-//! [`NOT_RECOGNISED`] to return, and declare `crate-type = ["cdylib"]`. This
-//! crate re-exports [`alloc`] as the module's `alloc` export — a plugin does
-//! not implement its own.
+//! `#[no_mangle] pub extern "C" fn sniff(in_ptr: u32, in_len: u32, cfg_ptr: u32,
+//! cfg_len: u32) -> i64` calling [`input`] to borrow the peeked bytes the host
+//! wrote, [`config`] to borrow this module's `settings.sniffers.modules[].config`
+//! string (empty when unset), and [`emit_hint`] / [`NOT_RECOGNISED`] to return,
+//! and declare `crate-type = ["cdylib"]`. This crate re-exports [`alloc`] as the
+//! module's `alloc` export — a plugin does not implement its own.
+//!
+//! The host writes the config region with the same `alloc` + copy it uses for
+//! the input, immediately before each `sniff` call; `cfg_len` is `0` (and
+//! `cfg_ptr` meaningless) when the module has no configured `config`.
 //!
 //! No I/O, no host imports: everything here is pure byte munging over the
 //! module's own linear memory, matching the sandbox guarantee that a plugin
@@ -47,15 +52,29 @@ pub extern "C" fn alloc(len: u32) -> u32 {
     ptr as u32
 }
 
-/// Borrow the bytes the host wrote at `(ptr, len)` as a `&[u8]`.
+/// Borrow the peeked bytes the host wrote at `(ptr, len)` as a `&[u8]`.
 ///
 /// # Safety
 /// The caller (a plugin's own `sniff` export) must pass through exactly the
-/// `(ptr, len)` wasmtime called `sniff` with — a region the host allocated
-/// via this module's own [`alloc`] and filled with exactly `len` bytes
-/// immediately before the call, per the documented ABI.
+/// `(in_ptr, in_len)` wasmtime called `sniff` with — a region the host
+/// allocated via this module's own [`alloc`] and filled with exactly `len`
+/// bytes immediately before the call, per the documented ABI.
 pub unsafe fn input<'a>(ptr: u32, len: u32) -> &'a [u8] {
+    if len == 0 {
+        return &[]; // ptr may be 0 (alloc(0) -> 0); never form a slice from it
+    }
     std::slice::from_raw_parts(ptr as *const u8, len as usize)
+}
+
+/// Borrow this module's configured `config` string bytes at `(ptr, len)`, or
+/// `&[]` when the module has no `settings.sniffers.modules[].config` (the host
+/// passes `cfg_len == 0`). Same marshalling as [`input`].
+///
+/// # Safety
+/// As [`input`]: pass through exactly the `(cfg_ptr, cfg_len)` the host called
+/// `sniff` with.
+pub unsafe fn config<'a>(ptr: u32, len: u32) -> &'a [u8] {
+    input(ptr, len)
 }
 
 /// A recognised result, mirroring `gsp_config::RouteHint`'s three fields.

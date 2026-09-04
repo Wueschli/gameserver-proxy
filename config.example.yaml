@@ -21,9 +21,11 @@ settings:
   # The proxy fails startup / --check if it can't be opened. Startup-only.
   # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
   # Sniffer plugin loader (phase 9). Absent => no plugins load; a `sniffer:`
-  # route never matches. `dir` is scanned for *.wasm modules at startup.
-  # `modules:` optionally pins each module's SHA-256 (supply-chain check) —
-  # a module not listed there, or whose hash doesn't match, is refused.
+  # route never matches. `dir` is scanned for *.wasm modules at startup and
+  # rescanned on every reload. `modules:` optionally pins each module's
+  # SHA-256 (supply-chain check) — a module not listed there, or whose hash
+  # doesn't match, is refused. A module's optional `config` string is handed
+  # to that plugin on every call (the plugin parses it itself).
   # sniffers:
   #   dir: "/etc/gsp/sniffers"
   #   call_timeout_ms: 20        # epoch-interrupted if a plugin overruns this
@@ -31,6 +33,9 @@ settings:
   #   modules:
   #     - name: a2s
   #       sha256: "..."
+  #     - name: regex_firstbytes
+  #       sha256: "..."
+  #       config: "^GET /"       # opaque to the loader; the plugin's own format
 
 # Backend discovery (phase 8). A named source hands a pool its backend set
 # instead of a static `targets:` list. Level-triggered: the adapter returns the

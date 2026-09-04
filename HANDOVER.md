@@ -377,9 +377,11 @@ output alone; check the exit code or scroll to the top of the log.
   interruption on) + one epoch-ticker thread; a fresh `Store` + `Instance` per
   call with a `StoreLimits` memory cap and a one-tick epoch deadline
   (`settings.sniffers.call_timeout_ms`). ABI: guest exports `memory`,
-  `alloc(len) -> ptr`, `sniff(ptr,len) -> packed|0`; host marshals the peeked
-  bytes in, decodes a compact `RouteHint` (flags byte + length-prefixed UTF-8
-  strings) out — any bad pointer/length/UTF-8 is `bad_output`, never a panic.
+  `alloc(len) -> ptr`, `sniff(ptr,len) -> packed|0` (widened later to
+  `sniff(in_ptr, in_len, cfg_ptr, cfg_len)` by ADR 16a — per-plugin config);
+  host marshals the peeked bytes in, decodes a compact `RouteHint` (flags byte +
+  length-prefixed UTF-8 strings) out — any bad pointer/length/UTF-8 is
+  `bad_output`, never a panic.
   `Sniffer::name` is now `&str` (was `&'static str` — a plugin's name is its
   file stem). `build_sniffers(&SniffersConfig)` scans `dir`, verifies
   `sha256` pins (`sha2` dep) when configured, returns a `Sniffers` registry;
@@ -468,12 +470,12 @@ output alone; check the exit code or scroll to the top of the log.
   every real plugin at `Instance::new` — the shipped `config.example.yaml`
   default (16 MiB) is comfortably above this, but it's worth remembering when
   hand-picking a tighter cap.
-  **Known limitation** (noted in the plugin README and `docs/08`): there is
-  no per-plugin configuration path in `settings.sniffers` /
-  the `sniffer` route matcher today — a plugin is addressed only by name — so
-  `regex-firstbytes` cannot be a genuinely generic, runtime-configured
-  matcher; that needs a config-schema extension (e.g. a
-  `modules[].config` blob) that hasn't been designed yet.
+  **Known limitation at the time** — since resolved by the data-plane-completion
+  "per-plugin config" slice (ADR 16a): there was no per-plugin configuration
+  path, so `regex-firstbytes` could not be a genuinely runtime-configured
+  matcher. `settings.sniffers.modules[]` now carries an optional `config` string
+  handed to the plugin via the widened `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`
+  ABI.
 - **Phase 9 slice 6 done**: WASM-boundary latency bench vs. NFR N1.
   `sniffer_loader::tests::wasm_boundary_latency_vs_nfr_n1` in
   `crates/gsp/src/sniffer_loader.rs` — an `#[ignore]`d test (same convention
@@ -541,10 +543,10 @@ output alone; check the exit code or scroll to the top of the log.
   install — done; epoch-ticker thread — documented in `docs/07`; warm-instance
   reuse — turned out unnecessary, slice 6 measured comfortably inside N1).
   Known follow-ups, not blocking: per-source cap LRU eviction, `GET
-  /sessions`, a k8s discovery watch informer, resolver `sticky_key`, and
-  per-plugin configuration (`settings.sniffers.modules[]` growing a config
-  blob) — the last one would let `regex-firstbytes` become a genuinely
-  generic engine instead of the hard-coded HTTP template it is today.
+  /sessions`, a k8s discovery watch informer, resolver `sticky_key`.
+  (Per-plugin configuration — `settings.sniffers.modules[].config` + the
+  widened `sniff` ABI — shipped later, in the data-plane-completion pass; see
+  ADR 16a.)
 - **Next**: phase 9 is done. Pick up from `docs/08`'s remaining phases
   (10–12, the distributed control plane — design only, nothing built yet;
   see `docs/10-distributed-control-plane.md`) or one of the polish items
@@ -830,7 +832,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
-| Sniffers | Loader **done** (phase 9 slices 3–5): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugins (`a2s`, `minecraft`, `regex-firstbytes` template) + the `gsp-sniffer-abi` guest helper live in the standalone `crates/plugins/` workspace, `make plugins`. |
+| Sniffers | Loader **done** (phase 9 slices 3–5): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) + the `gsp-sniffer-abi` guest helper live in the standalone `crates/plugins/` workspace, `make plugins`. Per-plugin config (ADR 16a): the guest `sniff` export takes `(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[].config` is a string marshalled into a second linear-memory region on every call (`WasmSniffer` holds it; the `gsp-core` trait is unchanged). |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
 | External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
 | Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver`, `wasmtime`, `sha2` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
@@ -910,13 +912,19 @@ focused unit):
 2. ~~Item 3 — `RouteHint.reject` hard drop~~ — **done** (on `main`).
 3. ~~Item 6 — per-resolver `target` timeout knob~~ — **done** (on `main`).
 4. ~~Item 5 — `weighted` balancer~~ — **done** (on `main`).
-5. **Item 2 — per-plugin sniffer config** ← *next*, as a deliberate two-slice unit:
-   - **A2**: `settings.sniffers.modules[].config` schema + widen the guest ABI
-     `sniff(in_ptr,in_len) → sniff(in_ptr,in_len,cfg_ptr,cfg_len)` +
-     `WasmSniffer` carries the blob + all three first-party plugins take the
-     two new args (a2s / minecraft ignore them). Needs a new ADR in `docs/09`.
-   - **A3**: `regex-firstbytes` consumes its config to become a genuinely
-     generic bounded matcher (drops the hard-coded HTTP template).
+5. **Item 2 — per-plugin sniffer config**, a two-slice unit:
+   - ~~**A2**~~ — **done** (on `main`): `settings.sniffers.modules[].config`
+     schema (+ `SnifferModulePin.config`, `validate_sniffers`), the widened
+     guest ABI `sniff(in_ptr, in_len, cfg_ptr, cfg_len)` (host `alloc`s + writes
+     both regions; `gsp_sniffer_abi::config()` on the guest side), `WasmSniffer`
+     carries the config bytes and `scan()` fills them from the pin, all three
+     first-party plugins take the two new args (a2s / minecraft ignore them),
+     ADR 16a. Tests: `sniffer_loader::tests::{wasm_plugin_receives_its_config,
+     build_sniffers_wires_module_config_through_the_scan}` +
+     `gsp_config` config-parse/reject cases.
+   - **A3** ← *next*: `regex-firstbytes` consumes its config to become a
+     genuinely runtime-configured bounded matcher (drops the hard-coded HTTP
+     template).
    **ABI decision (locked here)**: *widen `sniff`*, not an optional `configure`
    export. The sniffer ABI is a third-party contract that freezes at 1.0; there
    are zero external plugins today, so the clean break is at its cheapest now,
@@ -956,12 +964,9 @@ are cheaper than a fresh slice:
    `PEEK_TIMEOUT` budget expires, then routes. Non-TLS first bytes keep the
    single-peek behaviour. Test:
    `tcp_forward::sni_matcher_reassembles_a_fragmented_client_hello`.
-2. **Per-plugin sniffer config** (`settings.sniffers.modules[].config` blob) —
-   phase 9's own docs call `regex-firstbytes` "a template, not a generic
-   engine" only because there is no per-plugin config path. Needs a
-   config-schema extension (`gsp-config` + `validate()` + `config.example.yaml`
-   + `docs/05`) and threading the blob to `WasmSniffer`. Two slices (A2 / A3)
-   + a new ADR — see "Execution order" above for the locked ABI decision.
+2. **Per-plugin sniffer config** (`settings.sniffers.modules[].config` blob).
+   **A2 done** (schema + widened ABI + `WasmSniffer` config + ADR 16a);
+   **A3 next** (`regex-firstbytes` consumes it). See "Execution order" above.
 3. ~~**`RouteHint.reject` → hard drop**~~ — **DONE**: `gsp-core` drops a
    rejected connection (`listener.rs`) / first datagram (`listener_udp.rs`,
    before the gate and the push hint) instead of falling through to `always`.

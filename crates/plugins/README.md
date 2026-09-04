@@ -12,9 +12,13 @@ installed.
 
 - `gsp-sniffer-abi` — guest-side helper library implementing the write side of
   the ABI the host documents (`crates/gsp/src/sniffer_loader.rs` module doc):
-  a `alloc(len) -> ptr` export backed by the module's normal global allocator,
-  and an `encode`/`emit_hint` pair that packs a `RouteHint` into the compact
-  wire format the host decodes. Every plugin below depends on it.
+  an `alloc(len) -> ptr` export backed by the module's normal global allocator,
+  `input`/`config` to borrow the two regions the host writes before each call
+  (the peeked bytes and this module's `settings.sniffers.modules[].config`
+  string), and an `encode`/`emit_hint` pair that packs a `RouteHint` into the
+  compact wire format the host decodes. Every plugin below depends on it. The
+  guest export is
+  `sniff(in_ptr, in_len, cfg_ptr, cfg_len) -> i64` (see ADR 16a).
 - `a2s` — recognises Source-engine (CS:GO, TF2, Garry's Mod, Rust, …) A2S
   query packets (`0xFFFFFFFF` + a query-type byte). No hostname to extract;
   tags a recognised query with `key: "a2s"` so a `sniffer` route with an empty
@@ -24,13 +28,13 @@ installed.
   how BungeeCord/Velocity-style virtual-host routing works). Strips a Forge
   `\0FML\0…` suffix; lower-cases the host to match the proxy's `sni`-style
   `host:` patterns.
-- `regex-firstbytes` — a **template**, not a generic engine: the proxy's
-  `sniffer` route / `settings.sniffers` config have no per-plugin parameters
-  today, so there's nowhere to hand a module a runtime pattern. This
-  demonstrates the bounded, allocation-light matcher shape the roadmap
-  describes, hard-coded to recognise an HTTP/1.x request line. Real
-  per-instance configurability (e.g. a `modules[].config` blob passed to the
-  plugin) is future work — see `HANDOVER.md`.
+- `regex-firstbytes` — a bounded, allocation-light first-bytes matcher. As of
+  the data-plane-completion "per-plugin config" work the ABI carries a
+  `settings.sniffers.modules[].config` string (`cfg_*` region); slice **A2**
+  wired the plumbing and this crate still ships its compiled-in HTTP/1.x
+  request-line pattern, slice **A3** rebuilds it around the config so the
+  pattern is genuinely runtime-supplied. `a2s` and `minecraft` take no config
+  and ignore the region.
 
 Every plugin crate is `crate-type = ["cdylib", "lib"]`: `cargo test` runs its
 unit tests as a normal native `rlib` (the `recognise()` function is pure Rust,

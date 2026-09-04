@@ -110,6 +110,11 @@ struct RawSniffers {
 struct RawSnifferModule {
     name: String,
     sha256: String,
+    /// Opaque per-plugin configuration string, handed to the module on every
+    /// `sniff` call (the plugin parses it however it likes — e.g. a pattern for
+    /// `regex-firstbytes`). Omitted ⇒ the plugin gets an empty config.
+    #[serde(default)]
+    config: Option<String>,
 }
 
 fn default_sniffer_call_timeout_ms() -> u64 {
@@ -1215,6 +1220,9 @@ pub struct SniffersConfig {
 pub struct SnifferModulePin {
     pub name: String,
     pub sha256: String,
+    /// Opaque per-plugin config string (see `RawSnifferModule::config`). `None`
+    /// ⇒ the module is handed an empty config on each `sniff` call.
+    pub config: Option<String>,
 }
 
 /// Process-wide resource caps (phase 7). `None` fields = uncapped. The live
@@ -2224,9 +2232,16 @@ fn validate_sniffers(rs: RawSniffers) -> Result<SniffersConfig, ConfigError> {
                 m.name
             )));
         }
+        if matches!(&m.config, Some(c) if c.is_empty()) {
+            return Err(Invalid(format!(
+                "settings.sniffers.modules[{}].config must not be empty when set",
+                m.name
+            )));
+        }
         modules.push(SnifferModulePin {
             name: m.name,
             sha256: m.sha256.to_ascii_lowercase(),
+            config: m.config,
         });
     }
     Ok(SniffersConfig {
@@ -3370,17 +3385,21 @@ listeners:
 
         let yaml = format!(
             "settings:\n  sniffers:\n    dir: \"/plugins\"\n    call_timeout_ms: 5\n    \
-             max_memory_bytes: 1048576\n    modules:\n      - name: a2s\n        sha256: \"{}\"\n\
+             max_memory_bytes: 1048576\n    modules:\n      - name: a2s\n        sha256: \"{}\"\n      \
+             - name: regex_firstbytes\n        sha256: \"{}\"\n        config: \"^GET \"\n\
              pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
              listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
             "AB".repeat(32),
+            "CD".repeat(32),
         );
         let s = parse_str(&yaml).unwrap().sniffers.unwrap();
         assert_eq!(s.call_timeout, Duration::from_millis(5));
         assert_eq!(s.max_memory_bytes, 1_048_576);
-        assert_eq!(s.modules.len(), 1);
+        assert_eq!(s.modules.len(), 2);
         assert_eq!(s.modules[0].name, "a2s");
         assert_eq!(s.modules[0].sha256, "ab".repeat(32)); // lower-cased
+        assert_eq!(s.modules[0].config, None);
+        assert_eq!(s.modules[1].config.as_deref(), Some("^GET "));
     }
 
     #[test]
@@ -3420,6 +3439,15 @@ listeners:
         ] {
             assert!(parse_str(bad).is_err(), "should reject: {bad}");
         }
+
+        // empty `config` string on a module
+        let bad = format!(
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    modules:\n      - name: a2s\n        sha256: \"{}\"\n        config: \"\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            "ab".repeat(32),
+        );
+        assert!(parse_str(&bad).is_err(), "empty config must be rejected");
     }
 
     #[test]

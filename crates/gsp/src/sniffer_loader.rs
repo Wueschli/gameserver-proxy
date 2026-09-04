@@ -10,10 +10,14 @@
 //!
 //! ## ABI
 //! The guest exports `memory`, `alloc(len: i32) -> i32` (returns a pointer to
-//! `len` free, host-writable bytes) and `sniff(ptr: i32, len: i32) -> i64` —
-//! `0` means "not recognised"; any other value is the packed
-//! `(result_ptr << 32) | result_len`, pointing at a compact encoding of a
-//! `RouteHint`:
+//! `len` free, host-writable bytes) and
+//! `sniff(in_ptr: i32, in_len: i32, cfg_ptr: i32, cfg_len: i32) -> i64`. The
+//! host `alloc`s + writes two regions before the call: the peeked first bytes
+//! (`in_*`) and this module's `settings.sniffers.modules[].config` string bytes
+//! (`cfg_*`; `cfg_len == 0` and `cfg_ptr` meaningless when the module has no
+//! configured `config`). The return value: `0` means "not recognised"; any
+//! other value is the packed `(result_ptr << 32) | result_len`, pointing at a
+//! compact encoding of a `RouteHint`:
 //!
 //! ```text
 //! byte 0:            flags (bit0 = reject, bit1 = host present, bit2 = key present)
@@ -21,8 +25,8 @@
 //! if key present:     u16 LE length, then that many UTF-8 bytes
 //! ```
 //!
-//! This encoding is also what the (future, phase 9 slice 5) `gsp-sniffer-abi`
-//! guest helper crate implements on the write side.
+//! This encoding is also what the `gsp-sniffer-abi` guest helper crate
+//! (`crates/plugins/`) implements on the write side.
 //!
 //! ## Bounds
 //! Two independent bounds keep a plugin from stalling or ballooning the
@@ -56,6 +60,9 @@ pub struct WasmSniffer {
     engine: Arc<Engine>,
     module: Module,
     max_memory_bytes: usize,
+    /// This module's `settings.sniffers.modules[].config` string as bytes
+    /// (empty when unset); marshalled into linear memory on every `sniff` call.
+    config: Vec<u8>,
 }
 
 enum CallError {
@@ -116,16 +123,29 @@ impl WasmSniffer {
             .get_typed_func::<i32, i32>(&mut store, "alloc")
             .map_err(|_| CallError::Trap)?;
         let sniff = instance
-            .get_typed_func::<(i32, i32), i64>(&mut store, "sniff")
+            .get_typed_func::<(i32, i32, i32, i32), i64>(&mut store, "sniff")
             .map_err(|_| CallError::Trap)?;
 
-        let len = i32::try_from(first.len()).map_err(|_| CallError::BadOutput)?;
-        let ptr = alloc.call(&mut store, len).map_err(classify)?;
-        memory
-            .write(&mut store, ptr as usize, first)
-            .map_err(|_| CallError::BadOutput)?;
+        // `alloc` + copy a region into guest memory; a zero-length region is
+        // passed as `(0, 0)` and never allocated (matches `gsp_sniffer_abi::alloc`).
+        let write_region =
+            |store: &mut Store<StoreState>, bytes: &[u8]| -> Result<(i32, i32), CallError> {
+                if bytes.is_empty() {
+                    return Ok((0, 0));
+                }
+                let len = i32::try_from(bytes.len()).map_err(|_| CallError::BadOutput)?;
+                let ptr = alloc.call(&mut *store, len).map_err(classify)?;
+                memory
+                    .write(&mut *store, ptr as usize, bytes)
+                    .map_err(|_| CallError::BadOutput)?;
+                Ok((ptr, len))
+            };
+        let (in_ptr, in_len) = write_region(&mut store, first)?;
+        let (cfg_ptr, cfg_len) = write_region(&mut store, &self.config)?;
 
-        let packed = sniff.call(&mut store, (ptr, len)).map_err(classify)?;
+        let packed = sniff
+            .call(&mut store, (in_ptr, in_len, cfg_ptr, cfg_len))
+            .map_err(classify)?;
         if packed == 0 {
             return Ok(None);
         }
@@ -223,7 +243,9 @@ impl SnifferLoader {
     /// `cfg.modules` is non-empty every loaded file must have a matching pin
     /// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the
     /// whole scan (an old, still-pinned registry should be kept by the
-    /// caller rather than left half-updated).
+    /// caller rather than left half-updated). A module's `modules[].config`
+    /// string, if any, is baked onto its `WasmSniffer` here and handed to the
+    /// guest on every `sniff` call.
     pub fn scan(&self, cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
         let mut modules = HashMap::new();
         let entries = fs::read_dir(&cfg.dir)
@@ -240,17 +262,22 @@ impl SnifferLoader {
                 .to_string();
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
 
+            let pin = cfg.modules.iter().find(|m| m.name == name);
             if !cfg.modules.is_empty() {
                 let digest = format!("{:x}", Sha256::digest(&bytes));
-                match cfg.modules.iter().find(|m| m.name == name) {
-                    Some(pin) if pin.sha256 == digest => {}
-                    Some(pin) => bail!(
+                match pin {
+                    Some(p) if p.sha256 == digest => {}
+                    Some(p) => bail!(
                         "sniffer {name}: sha256 mismatch (pinned {}, loaded {digest})",
-                        pin.sha256
+                        p.sha256
                     ),
                     None => bail!("sniffer {name}: not listed in settings.sniffers.modules"),
                 }
             }
+            let config = pin
+                .and_then(|p| p.config.clone())
+                .unwrap_or_default()
+                .into_bytes();
 
             let module = Module::new(&self.engine, &bytes)
                 .map_err(|e| anyhow::anyhow!("compiling {}: {e}", path.display()))?;
@@ -259,6 +286,7 @@ impl SnifferLoader {
                 engine: self.engine.clone(),
                 module,
                 max_memory_bytes: cfg.max_memory_bytes,
+                config,
             });
             tracing::info!(sniffer = %name, path = %path.display(), "sniffer plugin loaded");
             modules.insert(name, sniffer);
@@ -313,9 +341,12 @@ mod tests {
             (global.set $next (i32.add (local.get $p) (local.get $len)))
             (local.get $p))
 
-          ;; sniff(ptr, len) -> packed (out_ptr << 32 | out_len), 0 if no
-          ;; "HOST:" prefix (first 5 bytes).
-          (func $sniff (export "sniff") (param $ptr i32) (param $len i32) (result i64)
+          ;; sniff(in_ptr, in_len, cfg_ptr, cfg_len) -> packed
+          ;; (out_ptr << 32 | out_len), 0 if no "HOST:" prefix (first 5 bytes).
+          ;; This fixture ignores the cfg_* params.
+          (func $sniff (export "sniff")
+            (param $ptr i32) (param $len i32) (param $cfg_ptr i32) (param $cfg_len i32)
+            (result i64)
             (local $out i32)
             (local $hostlen i32)
             (local $i i32)
@@ -354,7 +385,53 @@ mod tests {
               (i64.extend_i32_u (i32.add (i32.const 3) (local.get $hostlen))))))
     "#;
 
+    /// A fixture that ignores the input and emits `RouteHint { host: <config
+    /// bytes> }` — proves the host marshals `modules[].config` into the
+    /// `cfg_*` region on every call. Returns `0` (not recognised) when the
+    /// config is empty (`cfg_len == 0`). Assumes a config shorter than 256 B.
+    const CFG_ECHO_WAT: &str = r#"
+        (module
+          (memory (export "memory") 2)
+          (global $next (mut i32) (i32.const 4))
+          (func $alloc (export "alloc") (param $len i32) (result i32)
+            (local $p i32)
+            (local.set $p (global.get $next))
+            (global.set $next (i32.add (local.get $p) (local.get $len)))
+            (local.get $p))
+          (func $sniff (export "sniff")
+            (param $ptr i32) (param $len i32) (param $cfg_ptr i32) (param $cfg_len i32)
+            (result i64)
+            (local $out i32)
+            (local $i i32)
+            (if (i32.eqz (local.get $cfg_len)) (then (return (i64.const 0))))
+            (local.set $out (i32.const 65536))
+            (i32.store8 (local.get $out) (i32.const 0x02)) ;; flags: host present
+            (i32.store8 (i32.add (local.get $out) (i32.const 1)) (local.get $cfg_len))
+            (i32.store8 (i32.add (local.get $out) (i32.const 2)) (i32.const 0))
+            (local.set $i (i32.const 0))
+            (block $done
+              (loop $copy
+                (br_if $done (i32.ge_u (local.get $i) (local.get $cfg_len)))
+                (i32.store8
+                  (i32.add (i32.add (local.get $out) (i32.const 3)) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $cfg_ptr) (local.get $i))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $copy)))
+            (i64.or
+              (i64.shl (i64.extend_i32_u (local.get $out)) (i64.const 32))
+              (i64.extend_i32_u (i32.add (i32.const 3) (local.get $cfg_len))))))
+    "#;
+
     fn wasm_sniffer(name: &str, wat: &str, engine: &Arc<Engine>) -> WasmSniffer {
+        wasm_sniffer_cfg(name, wat, engine, Vec::new())
+    }
+
+    fn wasm_sniffer_cfg(
+        name: &str,
+        wat: &str,
+        engine: &Arc<Engine>,
+        config: Vec<u8>,
+    ) -> WasmSniffer {
         let bytes = wat::parse_str(wat).unwrap();
         let module = Module::new(engine, &bytes).unwrap();
         WasmSniffer {
@@ -362,6 +439,7 @@ mod tests {
             engine: engine.clone(),
             module,
             max_memory_bytes: 1 << 20,
+            config,
         }
     }
 
@@ -405,7 +483,7 @@ mod tests {
             (module
               (memory (export "memory") 1)
               (func $alloc (export "alloc") (param i32) (result i32) (i32.const 0))
-              (func $sniff (export "sniff") (param i32 i32) (result i64)
+              (func $sniff (export "sniff") (param i32 i32 i32 i32) (result i64)
                 (loop $forever (br $forever))
                 (i64.const 0)))
         "#;
@@ -447,6 +525,7 @@ mod tests {
         c.modules.push(gsp_config::SnifferModulePin {
             name: "test-host".into(),
             sha256: "0".repeat(64),
+            config: None,
         });
         assert!(build_sniffers(&c).is_err(), "wrong pin must fail the load");
 
@@ -454,8 +533,41 @@ mod tests {
         c.modules.push(gsp_config::SnifferModulePin {
             name: "test-host".into(),
             sha256: format!("{:x}", Sha256::digest(&bytes)),
+            config: None,
         });
         assert!(build_sniffers(&c).is_ok(), "correct pin must load");
+    }
+
+    #[test]
+    fn wasm_plugin_receives_its_config() {
+        let engine = epoch_engine();
+
+        let with_cfg = wasm_sniffer_cfg("cfg-echo", CFG_ECHO_WAT, &engine, b"eu-west".to_vec());
+        let hint = with_cfg
+            .sniff(b"whatever")
+            .expect("config should be delivered");
+        assert_eq!(hint.host.as_deref(), Some("eu-west"));
+
+        // No configured `config` ⇒ the guest sees `cfg_len == 0`.
+        let no_cfg = wasm_sniffer_cfg("cfg-echo", CFG_ECHO_WAT, &engine, Vec::new());
+        assert!(no_cfg.sniff(b"whatever").is_none());
+    }
+
+    #[test]
+    fn build_sniffers_wires_module_config_through_the_scan() {
+        let dir = tempdir();
+        let bytes = wat::parse_str(CFG_ECHO_WAT).unwrap();
+        std::fs::write(dir.join("cfg-echo.wasm"), &bytes).unwrap();
+
+        let mut c = cfg(&dir);
+        c.modules.push(gsp_config::SnifferModulePin {
+            name: "cfg-echo".into(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            config: Some("lobby-a".into()),
+        });
+        let (_loader, reg) = build_sniffers(&c).unwrap();
+        let hint = reg.get("cfg-echo").unwrap().sniff(b"x").unwrap();
+        assert_eq!(hint.host.as_deref(), Some("lobby-a"));
     }
 
     #[test]

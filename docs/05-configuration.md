@@ -127,8 +127,8 @@
 > **Sniffer plugin loader** (phase 9; config schema slice 2, the `wasmtime`
 > loader slice 3, live `dir` rescanning slice 4 — all landed):
 > `settings.sniffers: { dir, call_timeout_ms, max_memory_bytes, modules: [{
-> name, sha256 }] }`. Absent ⇒ no plugins load and a `sniffer:` route never
-> matches. `dir` is a directory of `*.wasm` modules, scanned at startup and
+> name, sha256, config? }] }`. Absent ⇒ no plugins load and a `sniffer:` route
+> never matches. `dir` is a directory of `*.wasm` modules, scanned at startup and
 > rescanned on every reload (added modules load, removed ones drop, changed
 > ones recompile — swapped in atomically, no listener restart); `call_timeout_ms`
 > (default 20) bounds a plugin's wall-clock time per call via `wasmtime` epoch
@@ -136,9 +136,12 @@
 > memory; `modules:` optionally pins each module's SHA-256 for supply-chain
 > verification — when non-empty, a `dir` entry not listed there (or whose hash
 > doesn't match) is refused (and, on a rescan, keeps the previous plugin set
-> rather than applying a half-updated one). `validate()` rejects an empty
-> `dir`, a zero `call_timeout_ms` / `max_memory_bytes`, and a non-64-hex-char
-> `sha256`. `call_timeout_ms` / `max_memory_bytes` themselves, and the
+> rather than applying a half-updated one). `modules[].config` is an optional
+> opaque string handed to that plugin on every `sniff` call (the plugin parses
+> it itself — e.g. a match pattern for `regex-firstbytes`); a module needs a
+> `modules[]` entry (hence its `sha256`) to carry a `config`. `validate()`
+> rejects an empty `dir`, a zero `call_timeout_ms` / `max_memory_bytes`, a
+> non-64-hex-char `sha256`, and an empty `config` string. `call_timeout_ms` / `max_memory_bytes` themselves, and the
 > `settings.sniffers` block appearing/disappearing, are startup-only — the
 > `wasmtime::Engine` and its epoch-ticker thread are built once (like
 > `settings.workers`).
@@ -374,7 +377,8 @@ listeners:
   `ip:port` and every value must be `>= 1`.
 - `settings.sniffers.dir` must not be empty; `call_timeout_ms` /
   `max_memory_bytes` must be `>= 1`; each `modules[].sha256` must be a 64-char
-  hex digest and `name` must not be empty.
+  hex digest and `name` must not be empty; a `modules[].config`, if given, must
+  be non-empty.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires
   `freebind: true` and a prefix routed to the host.
@@ -396,6 +400,6 @@ listeners:
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
 | `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
-| `settings.sniffers.dir` contents changed (module added / removed / recompiled) | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
+| `settings.sniffers.dir` contents changed (module added / removed / recompiled), or a `modules[].config` string changed | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
 | `settings.sniffers` block added / removed, or `call_timeout_ms` / `max_memory_bytes` changed | requires a restart — the `wasmtime::Engine` and its epoch-ticker thread are built once at startup, like `settings.workers` |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |

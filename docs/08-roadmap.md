@@ -276,8 +276,9 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   per `build_sniffers` call (`engine.increment_epoch()` every
   `call_timeout_ms`); a fresh `Store<StoreState>` per call with a `StoreLimits`
   memory cap (`max_memory_bytes`) and a one-tick epoch deadline. ABI: guest
-  exports `memory`, `alloc(len) -> ptr`, `sniff(ptr,len) -> packed(ptr,len)|0`;
-  host writes the input via `alloc`+`memory.write`, calls `sniff`, and decodes
+  exports `memory`, `alloc(len) -> ptr`, `sniff(ptr,len) -> packed(ptr,len)|0`
+  (widened to `sniff(in_ptr, in_len, cfg_ptr, cfg_len)` by ADR 16a — per-plugin
+  config); host writes the input via `alloc`+`memory.write`, calls `sniff`, and decodes
   a compact `RouteHint` encoding (flags byte + length-prefixed UTF-8 strings)
   from the returned region — any out-of-bounds pointer/length or malformed
   encoding is `bad_output`, never a panic. `Sniffer::name` changed
@@ -410,10 +411,16 @@ route's `peek_len()` ≤ `PEEK_MAX`.
 - **Result — phase 9 complete**: runtime-loaded, sandboxed game-protocol
   sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
   measured inside NFR N1; `regex` first-bytes matching lives in an optional
-  plugin, never in core. Known follow-ups, not blocking: per-plugin
-  configuration (would let `regex-firstbytes` become a true generic engine),
+  plugin, never in core. Known follow-ups, not blocking:
   per-source cap LRU eviction, `GET /sessions`, a k8s discovery watch
   informer — see `HANDOVER.md`.
+- ✅ **Post-phase-9 (data-plane completion)**: per-plugin config. ADR 16a
+  widens the guest ABI to
+  `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[]`
+  grows a `config` string, marshalled into a second linear-memory region on
+  every call. `a2s` / `minecraft` ignore it; **A3** rebuilds `regex-firstbytes`
+  around it so it is a genuinely runtime-configured bounded matcher, not the
+  hard-coded HTTP template.
 
 ## Phase 10 – Fleet aggregation & operational Web UI
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)

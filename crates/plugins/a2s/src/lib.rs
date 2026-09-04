@@ -33,12 +33,15 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     })
 }
 
+/// A2S recognition is a fixed magic check — this plugin takes no config, so the
+/// `cfg_*` params are ignored.
+///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note — `ptr`/`len` must be exactly
-/// what the host passed to this export.
+/// See `gsp_sniffer_abi::input`'s safety note — the pointer/length pairs must be
+/// exactly what the host passed to this export.
 #[no_mangle]
-pub unsafe extern "C" fn sniff(ptr: u32, len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(ptr, len);
+pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
+    let first = gsp_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
         Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
         None => gsp_sniffer_abi::NOT_RECOGNISED,
