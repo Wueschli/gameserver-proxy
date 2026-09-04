@@ -898,6 +898,34 @@ Suggested sequencing: one "data-plane completion" phase (list A + C) → one
 "perf pass" phase (list B) → then phases 10–12. This matches the `docs/08`
 milestone cut where v1.3 is additive and the data-plane contract is unchanged.
 
+**Execution order within list A** (small self-contained wins first — keep `main`
+continuously green and shippable; save the big cross-workspace change for a
+focused unit):
+
+1. ~~ClientHello fragmentation~~ — **done** (`slice/clienthello-reassembly`,
+   on `main`).
+2. **Item 3 — `RouteHint.reject` hard drop.** ← *next.* `gsp-core` routing +
+   `gsp-config`, small, half-done (UDP gate path already drops).
+3. **Item 6 — per-resolver `target` timeout knob.** Tiny config addition.
+4. **Item 5 — `weighted` balancer.** Self-contained.
+5. **Item 2 — per-plugin sniffer config**, as a deliberate two-slice unit:
+   - **A2**: `settings.sniffers.modules[].config` schema + widen the guest ABI
+     `sniff(in_ptr,in_len) → sniff(in_ptr,in_len,cfg_ptr,cfg_len)` +
+     `WasmSniffer` carries the blob + all three first-party plugins take the
+     two new args (a2s / minecraft ignore them). Needs a new ADR in `docs/09`.
+   - **A3**: `regex-firstbytes` consumes its config to become a genuinely
+     generic bounded matcher (drops the hard-coded HTTP template).
+   **ABI decision (locked here)**: *widen `sniff`*, not an optional `configure`
+   export. The sniffer ABI is a third-party contract that freezes at 1.0; there
+   are zero external plugins today, so the clean break is at its cheapest now,
+   and a uniform signature (config always passed, empty slice when none) beats a
+   permanent "call `configure` if the module exports it" branch and a two-class
+   plugin model. Extra blast radius is mechanical and in-tree.
+6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** Larger; fold
+   the item 6 knob's config plumbing into it if not already shipped.
+
+Then list C polish, then list B (perf pass).
+
 **Verification (checked against the code at `34867bf`)**: none of these items
 have been started, in any form — every one is still a `// later` comment or an
 unimplemented branch. Three, though, already have a partial mechanism, so they
@@ -930,10 +958,11 @@ are cheaper than a fresh slice:
    phase 9's own docs call `regex-firstbytes` "a template, not a generic
    engine" only because there is no per-plugin config path. Needs a
    config-schema extension (`gsp-config` + `validate()` + `config.example.yaml`
-   + `docs/05`) and threading the blob to `WasmSniffer`.
+   + `docs/05`) and threading the blob to `WasmSniffer`. Two slices (A2 / A3)
+   + a new ADR — see "Execution order" above for the locked ABI decision.
 3. **`RouteHint.reject` → hard drop** — security-relevant and small: a sniffer
    that positively rejects should be able to drop the connection / datagram,
-   not just decline to match the `sniffer` route.
+   not just decline to match the `sniffer` route. Scheduled next.
 4. **Live reload of `resolvers:` and `backend_sources:`** — both startup-only
    today; a proxy that advertises zero-downtime reload should fold these into
    the existing `validate → Snapshot::build → ArcSwap::store` path.
