@@ -89,7 +89,9 @@ listener → backend pool forwarding with:
   into the same snapshot rebuild as file reload / overlay edits; an errored or
   empty refresh keeps the last-known-good set (`gsp_discovery_refresh_total`,
   `gsp_discovery_backends`). Adapters live in the binary; `gsp-core` keeps the
-  HTTP-free `BackendSource` seam
+  HTTP-free `BackendSource` seam. A reload reconciles the refresh tasks live
+  (`SourceManager`): a `backend_sources[]` entry added / removed / re-parameterised
+  starts / stops / restarts its task without a process restart
 - sniffer plugin loader (phase 9): `settings.sniffers: { dir, call_timeout_ms,
   max_memory_bytes, modules }` loads `*.wasm` modules — sandboxed `wasmtime`
   (no WASI, no host imports, epoch-interruption time bound + a `StoreLimits`

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gsp_config::{Config, GlobalLimits, ListenerConfig, ResolverConfig};
+use gsp_config::{Config, GlobalLimits, ListenerConfig, ResolverConfig, SourceConfig};
 
 use crate::discovery::Discovery;
 use crate::overlay::BackendOverlay;
@@ -26,6 +26,11 @@ pub struct Snapshot {
     /// diff it and rebuild the resolver clients only when it actually changed.
     /// The clients themselves live outside the snapshot (in `Arc<Resolvers>`).
     pub resolvers: Vec<ResolverConfig>,
+    /// Pool name → its dynamic backend-discovery source, echoed so the reload
+    /// task can diff it and reconcile the refresh tasks (`SourceManager`) only
+    /// when a `backend_sources[]` entry actually changed. The refresh tasks and
+    /// the last-known-good sets live outside the snapshot.
+    pub sources: HashMap<String, SourceConfig>,
 }
 
 impl Snapshot {
@@ -85,6 +90,11 @@ impl Snapshot {
             limits: cfg.limits,
             geo_db: cfg.geo_db.clone(),
             resolvers: cfg.resolvers.clone(),
+            sources: cfg
+                .pools
+                .iter()
+                .filter_map(|pc| pc.source.clone().map(|s| (pc.name.clone(), s)))
+                .collect(),
         })
     }
 

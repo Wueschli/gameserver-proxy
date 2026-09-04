@@ -76,8 +76,15 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `gsp_core::Resolvers` gained `ArcSwap` interior mutability (like `Sniffers`),
   and the reload task rebuilds + swaps the clients when (only when)
   `ResolverConfig` differs. Trade-off: a rebuild resets each `CachedResolver`'s
-  LRU cache. (`backend_sources:` live reload is still restart-only — its own
-  slice; needs per-source refresh-task management like `ListenerManager`.)
+  LRU cache.
+- ✅ **Post-phase (data-plane completion)**: `backend_sources:` reloads live —
+  `gsp_core::SourceManager` (the discovery analogue of `ListenerManager`) owns
+  one refresh task per pool `source` behind a private stop channel and
+  reconciles them on every reload by diffing `Snapshot::sources`
+  (pool → `SourceConfig`, newly echoed). Added / removed / re-parameterised
+  entries start / stop / restart their task; a removed pool also drops its
+  cached discovered set. `gsp-core` stays HTTP-free — the `gsp` binary supplies
+  a `SourceFactory` (`DiscoveryFactory`) that rebuilds the concrete adapter.
 - **Result**: matchmaker integration, token→instance routing.
 
 ## Phase 5 – Operations & zero-downtime (week 13–14) ✅
@@ -218,8 +225,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ HA operations chapter in `docs/06` — anycast vs. L4 LB, capacity planning
   per instance, dashboards & alerts.
 - **Result**: dynamic backend fleets, horizontal scaling.
-- Deferred: k8s watch informer; per-`backend_sources` live reload (startup-only
-  today, like `workers`).
+- Deferred: k8s watch informer.
+- ✅ `backend_sources:` live reload (`SourceManager`) — landed in the
+  data-plane-completion pass; see Phase 4's post-phase note.
 
 ## Phase 9 – Sniffer plugin loader
 

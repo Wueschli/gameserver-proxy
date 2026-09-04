@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use gsp_config::{Config, SourceKind};
-use gsp_core::BackendSource;
+use gsp_config::{Config, SourceConfig, SourceKind};
+use gsp_core::{BackendSource, SourceFactory};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
 use serde::Deserialize;
@@ -27,43 +27,75 @@ const K8S_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/toke
 const K8S_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
 /// Build one [`BackendSource`] per pool that declares a dynamic `source`.
+/// Used at startup for the best-effort initial fetch; the live [`SourceManager`]
+/// rebuilds sources through [`DiscoveryFactory`] on reload.
 pub fn build_sources(cfg: &Config) -> anyhow::Result<Vec<Arc<dyn BackendSource>>> {
     let kube_auth = KubeAuth::from_pod();
     let mut out: Vec<Arc<dyn BackendSource>> = Vec::new();
     for p in &cfg.pools {
         let Some(sc) = &p.source else { continue };
-        let pool = p.name.clone();
-        let src: Arc<dyn BackendSource> = match &sc.kind {
-            SourceKind::DnsSrv { record } => Arc::new(DnsSrvSource::new(
-                pool,
-                record.clone(),
-                sc.refresh_interval,
-            )?),
-            SourceKind::Consul { service, addr, tag } => Arc::new(ConsulSource::new(
-                pool,
-                service.clone(),
-                addr.clone(),
-                tag.clone(),
-                sc.refresh_interval,
-            )?),
-            SourceKind::Kubernetes {
-                namespace,
-                service,
-                port_name,
-                api,
-            } => Arc::new(KubernetesSource::new(
-                pool,
-                namespace.clone(),
-                service.clone(),
-                port_name.clone(),
-                api.clone(),
-                sc.refresh_interval,
-                kube_auth.clone(),
-            )?),
-        };
-        out.push(src);
+        out.push(build_one(&p.name, sc, &kube_auth)?);
     }
     Ok(out)
+}
+
+/// Build the concrete adapter for one pool's `source`.
+pub fn build_one(
+    pool: &str,
+    sc: &SourceConfig,
+    kube_auth: &KubeAuth,
+) -> anyhow::Result<Arc<dyn BackendSource>> {
+    let pool = pool.to_string();
+    let src: Arc<dyn BackendSource> = match &sc.kind {
+        SourceKind::DnsSrv { record } => Arc::new(DnsSrvSource::new(
+            pool,
+            record.clone(),
+            sc.refresh_interval,
+        )?),
+        SourceKind::Consul { service, addr, tag } => Arc::new(ConsulSource::new(
+            pool,
+            service.clone(),
+            addr.clone(),
+            tag.clone(),
+            sc.refresh_interval,
+        )?),
+        SourceKind::Kubernetes {
+            namespace,
+            service,
+            port_name,
+            api,
+        } => Arc::new(KubernetesSource::new(
+            pool,
+            namespace.clone(),
+            service.clone(),
+            port_name.clone(),
+            api.clone(),
+            sc.refresh_interval,
+            kube_auth.clone(),
+        )?),
+    };
+    Ok(src)
+}
+
+/// [`SourceFactory`] for the live [`SourceManager`]: rebuilds a pool's adapter
+/// from its (possibly changed) [`SourceConfig`] on reload. Holds the in-pod
+/// Kubernetes credentials read once at startup.
+pub struct DiscoveryFactory {
+    kube_auth: KubeAuth,
+}
+
+impl DiscoveryFactory {
+    pub fn new() -> Self {
+        Self {
+            kube_auth: KubeAuth::from_pod(),
+        }
+    }
+}
+
+impl SourceFactory for DiscoveryFactory {
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+        build_one(pool, cfg, &self.kube_auth)
+    }
 }
 
 // ---------------------------------------------------------------------------

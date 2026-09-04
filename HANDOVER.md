@@ -17,7 +17,9 @@ then health / admin state. An errored / empty refresh keeps the previous set
 (never clears the pool) + `gsp_discovery_refresh_total{pool,kind,result}` /
 `gsp_discovery_backends{pool}`. HA operations chapter expanded in `docs/06`
 (anycast vs. L4 LB, per-instance capacity, dashboards & alerts). Deferred: k8s
-watch informer; live reload of `backend_sources` (startup-only, like `workers`).
+watch informer. `backend_sources` live reload landed later (data-plane
+completion) — `gsp_core::SourceManager` reconciles the per-pool refresh tasks
+on every reload, diffing the new `Snapshot::sources` map.
 Filter chain: per-listener radix-trie `allow` / `deny`
 CIDR lists + an optional MaxMind GeoIP `geo: { allow, deny }` country filter + a
 per-listener `rate_limit` token bucket (per source IP and per /24 / /64) + a
@@ -878,7 +880,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | **done** (data-plane completion, item 1 — `listener::peek_routing_bytes` re-peeks until the first TLS record is whole or the 250 ms budget expires) |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | **done** (phase 8) |
 | k8s discovery via a watch-based informer (polling now) | perf pass |
-| Live reload of `backend_sources` (startup-only now) | own slice — needs per-source refresh-task management (a `SourceManager` like `ListenerManager`: spawn added, stop removed, respawn re-parameterised). A `pools[].source` re-pointing at an existing source already reloads. |
+| Live reload of `backend_sources` | **done** (data-plane completion) — `gsp_core::SourceManager` (discovery analogue of `ListenerManager`): one refresh task per pool `source` behind a private stop channel, `reconcile(&Snapshot)` on reload diffs the new `Snapshot::sources` map (pool → `SourceConfig`, newly echoed) and spawns / stops / restarts. `gsp` binary supplies a `SourceFactory` (`DiscoveryFactory`). A dropped `source` also `Discovery::forget`s the pool's cached set. |
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
@@ -942,14 +944,23 @@ focused unit):
    `cfg.resolvers != prev.resolvers`. `build_resolvers` now returns the plain
    map (both `main.rs` — `Resolvers::from_map` — and the reload task use it).
    Test: `resolver::tests::replace_swaps_the_live_resolver_set`.
-   **`backend_sources:` live reload stays deferred as its own slice** — it needs
-   a `SourceManager` (per-source refresh tasks with individual stop signals,
-   reconcile-on-reload), a `ListenerManager`-sized piece and only "polish" per
-   the phase-8 notes. A `pools[].source` re-pointing at an existing source name
-   already reloads (it rides the snapshot rebuild).
+   **`backend_sources:` live reload** — **done** (data-plane completion,
+   split-out slice). `gsp_core::SourceManager` (new `sources.rs`, the discovery
+   analogue of `ListenerManager`): one `refresh_loop` task per pool `source`
+   behind a private `watch<bool>` stop, `start_all` at boot, `reconcile(&Snapshot)`
+   on reload. `Snapshot` now echoes `sources: HashMap<String, SourceConfig>`
+   (pool → its dynamic source) for the diff; `reload::apply` calls
+   `handle.reconcile_sources()` when `next.sources != prev.sources`. `gsp-core`
+   stays HTTP-free — `trait SourceFactory` is supplied by the `gsp` binary
+   (`discovery::DiscoveryFactory` → `build_one`). `Runtime::start_with_discovery`
+   took a `Vec<Arc<dyn BackendSource>>`; now takes
+   `Option<Arc<dyn SourceFactory>>` and owns the `SourceManager`
+   (`stop_all` / `abort_all` wired into `shutdown_with_grace`). A dropped
+   `source` also `Discovery::forget`s the pool. Tests:
+   `sources::tests::reconcile_adds_restarts_and_removes_refresh_tasks`,
+   `discovery::runtime_reconciles_sources_when_backend_sources_change`.
 
-**List A is complete** (bar the split-out `backend_sources` reload). Then list C
-polish, then list B (perf pass).
+**List A is complete.** Then list C polish, then list B (perf pass).
 
 **Verification (checked against the code at `34867bf`)**: none of these items
 have been started, in any form — every one is still a `// later` comment or an
@@ -991,8 +1002,8 @@ are cheaper than a fresh slice:
    `sniffer_reject_drops_the_udp_datagram_with_no_reply`.
 4. ~~**Live reload of `resolvers:`**~~ — **DONE**: `Resolvers` is `ArcSwap`-backed;
    the reload task rebuilds + swaps the clients when `ResolverConfig` differs
-   (LRU caches reset). `backend_sources:` live reload split out as its own slice
-   (needs a `SourceManager`).
+   (LRU caches reset). `backend_sources:` live reload landed as its own
+   split-out slice (`gsp_core::SourceManager` — see the list-A item 6 note).
 5. ~~**`weighted` balancer**~~ — **DONE**: `balancer: weighted` + pool
    `weights: { "ip:port": N }` (weight `>= 1`, default 1, `weighted`-only),
    weighted round-robin over the healthy set in `Pool::acquire_for` (one atomic

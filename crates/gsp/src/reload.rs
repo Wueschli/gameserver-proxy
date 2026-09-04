@@ -98,12 +98,14 @@ async fn apply(
             let prev = handle.current();
             let listeners_changed = cfg.listeners != prev.listeners;
             let resolvers_changed = cfg.resolvers != prev.resolvers;
-            handle.store(Snapshot::build_with_sources(
+            let next = Snapshot::build_with_sources(
                 &cfg,
                 Some(&prev),
                 handle.backend_overlay(),
                 handle.discovery(),
-            ));
+            );
+            let sources_changed = next.sources != prev.sources;
+            handle.store(next);
             metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
             metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
             if listeners_changed {
@@ -111,6 +113,15 @@ async fn apply(
                 tracing::info!(
                     running, stopped,
                     "listener definitions changed; listeners reconciled (added / removed / rebound)"
+                );
+            }
+            if sources_changed {
+                let (running, stopped) = handle.reconcile_sources().await;
+                tracing::info!(
+                    running,
+                    stopped,
+                    "backend_sources changed; discovery refresh tasks reconciled \
+                     (added / removed / restarted)"
                 );
             }
             if resolvers_changed {

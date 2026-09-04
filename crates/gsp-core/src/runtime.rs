@@ -8,7 +8,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
-use crate::discovery::{BackendSource, Discovery};
+use crate::discovery::Discovery;
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
@@ -18,6 +18,7 @@ use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::sniff::Sniffers;
+use crate::sources::{SourceFactory, SourceManager};
 
 pub struct Runtime {
     snapshot: Arc<ArcSwap<Snapshot>>,
@@ -32,10 +33,13 @@ pub struct Runtime {
     /// rebuild for pools with a `source`.
     discovery: Arc<Discovery>,
     listeners: Arc<ListenerManager>,
+    /// One refresh task per pool `source`; reconciled on reload. `None` when no
+    /// `SourceFactory` was supplied (i.e. tests / no discovery configured).
+    sources: Option<Arc<SourceManager>>,
     reload_requested: Arc<Notify>,
     shutdown_tx: watch::Sender<bool>,
-    /// The health-checker task plus one refresh task per discovery source.
-    /// Listener tasks live in `listeners`.
+    /// The health-checker task. Listener tasks live in `listeners`, discovery
+    /// refresh tasks in `sources`.
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -51,6 +55,7 @@ pub struct RuntimeHandle {
     overlay: Arc<BackendOverlay>,
     discovery: Arc<Discovery>,
     listeners: Arc<ListenerManager>,
+    sources: Option<Arc<SourceManager>>,
     reload_requested: Arc<Notify>,
 }
 
@@ -124,6 +129,20 @@ impl RuntimeHandle {
         self.listeners.reconcile(&snap).await
     }
 
+    /// Bring the running backend-discovery refresh tasks in line with the
+    /// current snapshot: spawn added `pools[].source`s, stop removed ones,
+    /// restart re-parameterised ones. Call after [`RuntimeHandle::store`].
+    /// Returns `(running, stopped)`; `(0, 0)` when no `SourceManager` exists.
+    pub async fn reconcile_sources(&self) -> (usize, usize) {
+        match &self.sources {
+            Some(mgr) => {
+                let snap = self.snapshot.load_full();
+                mgr.reconcile(&snap).await
+            }
+            None => (0, 0),
+        }
+    }
+
     /// Live proxied-connection count (TCP pumps + UDP sessions).
     pub fn active_conns(&self) -> usize {
         self.conns.active()
@@ -180,16 +199,18 @@ impl Runtime {
             geo,
             sniffers,
             Arc::new(Discovery::new()),
-            Vec::new(),
+            None,
             workers,
         )
     }
 
     /// Like [`Runtime::start_with_sniffers`], plus backend discovery (phase 8):
-    /// `discovery` holds the last-known-good address sets and `sources` get one
-    /// control-plane [`refresh_loop`](crate::discovery::refresh_loop) task each.
-    /// The caller (the `gsp` binary) builds the concrete sources and does a
-    /// best-effort initial fetch into `discovery` before `initial` is built.
+    /// `discovery` holds the last-known-good address sets and, when a
+    /// `source_factory` is supplied, a [`SourceManager`] runs one control-plane
+    /// [`refresh_loop`](crate::discovery::refresh_loop) task per pool `source`
+    /// and reconciles them on reload. The caller (the `gsp` binary) validates
+    /// the specs and does a best-effort initial fetch into `discovery` before
+    /// `initial` is built.
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_discovery(
         initial: Arc<Snapshot>,
@@ -197,7 +218,7 @@ impl Runtime {
         geo: Option<Arc<GeoDb>>,
         sniffers: Arc<Sniffers>,
         discovery: Arc<Discovery>,
-        sources: Vec<Arc<dyn BackendSource>>,
+        source_factory: Option<Arc<dyn SourceFactory>>,
         workers: usize,
     ) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
@@ -243,14 +264,11 @@ impl Runtime {
                 crate::health::run(snap, &mut sd).await;
             }));
         }
-        for source in sources {
-            let discovery = discovery.clone();
-            let reload = reload_requested.clone();
-            let mut sd = shutdown_rx.clone();
-            tasks.push(tokio::spawn(async move {
-                crate::discovery::refresh_loop(source, discovery, reload, &mut sd).await;
-            }));
-        }
+        let sources = source_factory.map(|factory| {
+            let mgr = SourceManager::new(discovery.clone(), reload_requested.clone(), factory);
+            mgr.start_all(&initial);
+            mgr
+        });
 
         Self {
             snapshot,
@@ -260,6 +278,7 @@ impl Runtime {
             overlay,
             discovery,
             listeners,
+            sources,
             reload_requested,
             shutdown_tx,
             tasks,
@@ -275,6 +294,7 @@ impl Runtime {
             overlay: self.overlay.clone(),
             discovery: self.discovery.clone(),
             listeners: self.listeners.clone(),
+            sources: self.sources.clone(),
             reload_requested: self.reload_requested.clone(),
         }
     }
@@ -296,9 +316,13 @@ impl Runtime {
         let drained = {
             let conns = self.conns.clone();
             let listeners = self.listeners.clone();
+            let sources = self.sources.clone();
             let tasks = &mut self.tasks;
             tokio::time::timeout(grace, async move {
                 listeners.stop_all().await;
+                if let Some(s) = &sources {
+                    s.stop_all().await;
+                }
                 for t in tasks.iter_mut() {
                     let _ = t.await;
                 }
@@ -319,5 +343,8 @@ impl Runtime {
             t.abort();
         }
         self.listeners.abort_all();
+        if let Some(s) = &self.sources {
+            s.abort_all();
+        }
     }
 }

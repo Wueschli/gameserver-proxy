@@ -142,6 +142,15 @@ async fn run(
         }
     }
 
+    // After the best-effort initial fetch, hand a factory (not the prebuilt
+    // sources) to the runtime: its `SourceManager` spawns one refresh task per
+    // pool `source` and reconciles them on every reload.
+    let source_factory: Option<Arc<dyn gsp_core::SourceFactory>> =
+        cfg.pools.iter().any(|p| p.source.is_some()).then(|| {
+            let f: Arc<dyn gsp_core::SourceFactory> = Arc::new(discovery::DiscoveryFactory::new());
+            f
+        });
+
     let snapshot: Arc<Snapshot> =
         Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
     let runtime = Runtime::start_with_discovery(
@@ -150,7 +159,7 @@ async fn run(
         geo_db,
         sniffers.clone(),
         discovery,
-        sources,
+        source_factory,
         cfg.workers,
     );
     let handle = runtime.handle();

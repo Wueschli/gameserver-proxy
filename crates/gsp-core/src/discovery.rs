@@ -81,6 +81,13 @@ impl Discovery {
     pub fn get(&self, pool: &str) -> Option<Vec<SocketAddr>> {
         self.sets.lock().unwrap().get(pool).cloned()
     }
+
+    /// Drop the last-known-good set for `pool`. Called when a pool's `source` is
+    /// removed on reload so a later re-add (or `GET`) starts from a clean slate
+    /// rather than a stale set; harmless if the pool keeps a static target list.
+    pub fn forget(&self, pool: &str) {
+        self.sets.lock().unwrap().remove(pool);
+    }
 }
 
 /// Poll one source on its interval; on a change, store it and wake the reload

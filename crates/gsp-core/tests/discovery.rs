@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gsp_config::parse_str;
+use gsp_config::{parse_str, SourceConfig};
 use gsp_core::discovery::{refresh_loop, BackendSource, Discovery};
-use gsp_core::{BackendOverlay, Snapshot};
+use gsp_core::{BackendOverlay, Runtime, Snapshot, SourceFactory};
 use tokio::sync::{watch, Notify};
 
 const CFG: &str = r#"
@@ -160,4 +160,107 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
 
     let _ = sd_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
+/// A fixed-set source + a factory over it, keyed by the SRV `record` string
+/// (abused as a literal `ip:port`) so a reconcile with a changed spec is
+/// observable.
+struct FixedSource {
+    pool: String,
+    addr: SocketAddr,
+}
+
+#[async_trait::async_trait]
+impl BackendSource for FixedSource {
+    fn pool(&self) -> &str {
+        &self.pool
+    }
+    fn kind(&self) -> &'static str {
+        "dns_srv"
+    }
+    fn refresh_interval(&self) -> Duration {
+        Duration::from_millis(30)
+    }
+    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        Ok(vec![self.addr])
+    }
+}
+
+struct FixedFactory;
+
+impl SourceFactory for FixedFactory {
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+        let record = match &cfg.kind {
+            gsp_config::SourceKind::DnsSrv { record } => record.clone(),
+            _ => unreachable!(),
+        };
+        Ok(Arc::new(FixedSource {
+            pool: pool.to_string(),
+            addr: record.parse()?,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn runtime_reconciles_sources_when_backend_sources_change() {
+    let with_source = |rec: &str| {
+        format!(
+            "backend_sources:\n  - {{ name: fleet, type: dns_srv, record: \"{rec}\", refresh_interval_sec: 1 }}\n\
+             pools:\n  - {{ name: game, source: fleet }}\n\
+             listeners:\n  - {{ name: l, bind: \"127.0.0.1:0\", pool: game }}\n"
+        )
+    };
+
+    let cfg = parse_str(&with_source("10.0.0.1:7777")).unwrap();
+    let discovery = Arc::new(Discovery::new());
+    let snap = Snapshot::build_with_sources(&cfg, None, &BackendOverlay::new(), &discovery);
+    let runtime = Runtime::start_with_discovery(
+        snap,
+        Default::default(),
+        None,
+        Default::default(),
+        discovery.clone(),
+        Some(Arc::new(FixedFactory)),
+        1,
+    );
+    let handle = runtime.handle();
+
+    // The refresh task's first tick populates the pool.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(discovery.get("game").unwrap(), vec![addr("10.0.0.1:7777")]);
+
+    // Reload with a re-parameterised source: rebuild the snapshot, store it,
+    // reconcile. The task restarts and the new address lands.
+    let cfg2 = parse_str(&with_source("10.0.0.2:7777")).unwrap();
+    handle.store(Snapshot::build_with_sources(
+        &cfg2,
+        Some(&handle.current()),
+        &BackendOverlay::new(),
+        &discovery,
+    ));
+    let (running, stopped) = handle.reconcile_sources().await;
+    assert_eq!((running, stopped), (1, 1));
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(discovery.get("game").unwrap(), vec![addr("10.0.0.2:7777")]);
+
+    // Reload dropping the source entirely: the task stops, the cached set is
+    // forgotten.
+    let cfg3 = parse_str(
+        "pools:\n  - { name: game, targets: [\"10.0.0.5:7777\"] }\n\
+         listeners:\n  - { name: l, bind: \"127.0.0.1:0\", pool: game }\n",
+    )
+    .unwrap();
+    handle.store(Snapshot::build_with_sources(
+        &cfg3,
+        Some(&handle.current()),
+        &BackendOverlay::new(),
+        &discovery,
+    ));
+    let (running, stopped) = handle.reconcile_sources().await;
+    assert_eq!((running, stopped), (0, 1));
+    assert!(discovery.get("game").is_none());
+
+    runtime
+        .shutdown_with_grace(Duration::from_millis(100))
+        .await;
 }
