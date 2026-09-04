@@ -1,16 +1,18 @@
 //! `gsp-controller` binary — see `lib.rs` for the design pointer and slice
 //! plan. Slice 1: open the store, serve `/healthz` so the process is already
-//! observable the same way `gsp` is. `POST /config` and the subscribe
-//! endpoint land in slices 2–3.
+//! observable the same way `gsp` is. Slice 2: `POST`/`GET /config`. The
+//! subscribe/change-stream endpoint lands in slice 3.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use gsp_controller::api::{self, AppState};
 use gsp_controller::store::Store;
 
 #[derive(Parser, Debug)]
@@ -39,8 +41,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let store = Store::open(&args.data_dir)
-        .map_err(|e| anyhow::anyhow!("opening store at {:?}: {e}", args.data_dir))?;
+    let store = Arc::new(
+        Store::open(&args.data_dir)
+            .map_err(|e| anyhow::anyhow!("opening store at {:?}: {e}", args.data_dir))?,
+    );
     let current_revision = store
         .current_revision()
         .map_err(|e| anyhow::anyhow!("reading store state: {e}"))?;
@@ -50,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
         "controller store opened"
     );
 
-    let app = Router::new().route("/healthz", get(|| async { "ok" }));
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .merge(api::router(AppState { store }));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

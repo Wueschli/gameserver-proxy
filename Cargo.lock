@@ -938,10 +938,13 @@ dependencies = [
  "anyhow",
  "axum 0.8.9",
  "clap",
+ "gsp-config",
+ "serde",
  "sled",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]

@@ -9,9 +9,10 @@
 //! role, no HA. The hierarchy/replication/adoption design in `docs/10` is
 //! phase 12 — additive on top of this, not required to make this crate work.
 //!
-//! Slice 1 (this module set) is the store only: [`store::Store`] persists
-//! config revisions. Slices 2–5 (the `POST /config` submit API, the
-//! subscribe/change-stream endpoint, and revision history/rollback) build on
-//! top of it in `main.rs`.
+//! Slice 1: [`store::Store`] persists config revisions. Slice 2 ([`api`]):
+//! `POST`/`GET /config`, validated with the same `gsp_config::parse_str` a
+//! proxy runs on a file reload. Slices 3–5 (the subscribe/change-stream
+//! endpoint, and revision history/rollback) are not built yet.
 
+pub mod api;
 pub mod store;

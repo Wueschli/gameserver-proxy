@@ -88,8 +88,20 @@ reopen-persists check. The binary opens the store and serves `GET /healthz`
 only — `POST /config` (slice 2) and the subscribe/change-stream endpoint
 (slice 3) aren't built yet. Workspace gained `sled` + `tempfile` (dev-dep) in
 the root `Cargo.toml`. `make check` (fmt + clippy `-D warnings` + `cargo test
---all`) passes with the new crate in the workspace. **Next**: slice 2 —
-`POST /config` running `gsp_config::validate()` before `Store::put`.
+--all`) passes with the new crate in the workspace.
+
+**Slice 2 done**: `crates/gsp-controller/src/api.rs` — `POST /config` runs
+the same `gsp_config::parse_str` (parse + `validate()`) a proxy runs on a
+file reload; a rejected submission (`422`, JSON error body) never touches
+`Store::put`, so the current revision stays whatever it was — same
+bad-reload-keeps-the-old-snapshot rule as the proxy, one hop earlier.
+`GET /config` returns the current revision's raw text with an
+`X-Config-Revision` header (`404` before any submission). Verified against
+the real `config.example.yaml`. 3 new tests (7 total in the crate).
+`gsp-config` is now a `gsp-controller` dependency; `tower` added as a
+gsp-controller dev-dependency for the in-module `axum` router tests (mirrors
+`gsp`'s own in-module admin HTTP tests). **Next**: slice 3 — the subscribe/
+change-stream endpoint, and `gsp` gaining `config_source: file | controller`.
 
 ### Known follow-ups (none blocking)
 

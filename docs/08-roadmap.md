@@ -370,9 +370,11 @@ controller's revision log is a follow-on once this ships.
    transaction, then flushes. `gsp-controller` binary opens the store and
    serves `GET /healthz` (same observability floor as `gsp`). Nothing calls
    `POST /config` yet — that's slice 2.
-2. `POST /config`: runs the **same `validate()`** `gsp` runs, assigns a
-   revision, persists it. Rejects and reports an invalid submission without
-   touching the last-good revision.
+2. ✅ `POST /config`: runs the **same `gsp_config::parse_str`** (parse +
+   `validate()`) a proxy runs on a file reload, then `Store::put`. Rejects
+   (`422`, error body) and leaves the current revision untouched on an
+   invalid submission. `GET /config` returns the current revision's raw text
+   + an `X-Config-Revision` header (`404` before the first submission).
 3. Subscribe endpoint: on connect, a full snapshot + revision cursor, then a
    change stream (SSE or long-poll — no need for anything fancier at one
    node) of later revisions.
