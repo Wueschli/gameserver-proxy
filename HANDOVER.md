@@ -274,8 +274,40 @@ both in isolation and on a full-suite rerun — pre-existing timing-sensitive
 flakiness, not a regression (this session never touched `gsp-core`). Worth
 knowing if it reappears, not worth chasing now.
 
-**Next**: slice 10 — bearer-token auth on `gsp-aggregator` (`--auth-token`,
-mirroring the controller's), the last slice in phase 10+11's plan.
+**Slice 10 done — all 10 controller+aggregator slices complete.** Three
+independent bearer-token secrets for three independent hops (deliberately
+never one token threaded through everything):
+
+- `gsp-config` gained `settings.admin.auth_token` (raw + resolved `Config`,
+  `config.example.yaml`, `docs/05` "Admin API auth" note — the target schema
+  there sketches an `auth: {mode, token}` object we don't implement; ours is
+  a flat string, called out as a documented divergence). `gsp/src/admin.rs`
+  gained a `require_bearer` middleware gating everything except `GET
+  /healthz` (split the router into a `route_layer`-gated group + an
+  unlayered `/healthz`, merged before `.with_state`).
+- `gsp-aggregator --auth-token` gates its own API the same way (new
+  `auth.rs`, mirrors the controller's exactly); `AppState` gained
+  `auth_token` + `with_auth_token()`.
+- `gsp-aggregator --instance-token` is the *separate* secret it presents
+  going *out* to every instance's admin API in `fanout.rs` (`AppState`
+  gained `instance_token` + `with_instance_token()`) — matches against that
+  instance's own `settings.admin.auth_token`.
+- `gsp --aggregator-token` is what a proxy presents pushing to `/ingest`
+  (`aggregator_client::PushConfig` gained `token`).
+
+3 new unit tests (admin auth gate, aggregator auth gate, `gsp-config`
+parsing `auth_token`) plus a full live end-to-end run through every hop at
+once: unauthenticated `GET /fleet/pools` → `401`; authenticated → the real
+pushed data; unauthenticated instance `GET /pools` → `401`; a fan-out drain
+through the aggregator (which had to present `--instance-token` correctly)
+→ `200`, confirmed real by the instance's own `/readyz` flipping to `503`.
+
+**Next**: slices 11–13 — the static SPA (fleet dashboard + operational
+actions from the aggregator, config editor + revision history from the
+controller), integration tests spinning up N `gsp` + 1 controller + 1
+aggregator together, and docs polish (`docs/06`, `README.md` status block,
+`docs/08` status legend). Slice 11 needs one real decision first: plain
+HTML/JS vs. a lightweight framework for the SPA — ask before starting it.
 
 ### Known follow-ups (none blocking)
 

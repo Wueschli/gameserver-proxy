@@ -4,9 +4,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -20,13 +21,18 @@ use gsp_core::RuntimeHandle;
 struct AdminState {
     runtime: RuntimeHandle,
     prometheus: PrometheusHandle,
+    /// Bearer token every request except `GET /healthz` must present;
+    /// `None` leaves the API open (`settings.admin.auth_token`, phase 10+11
+    /// slice 10 — see `docs/05` "Admin API auth").
+    auth_token: Option<String>,
 }
 
 /// The admin API route table. Split out from [`serve`] so integration tests can
-/// mount it on their own ephemeral listener.
+/// mount it on their own ephemeral listener. `/healthz` alone stays outside
+/// the [`require_bearer`] gate — plain liveness-probe convention, same
+/// choice `gsp-controller`/`gsp-aggregator` made for their own `/healthz`.
 fn router(state: AdminState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
+    let gated = Router::new()
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/pools", get(pools))
@@ -40,13 +46,46 @@ fn router(state: AdminState) -> Router {
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(gated)
         .with_state(state)
 }
 
-pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: PrometheusHandle) {
+/// See `AdminState::auth_token`. A single shared secret, not RBAC — the same
+/// scope call `gsp-controller`'s and `gsp-aggregator`'s own `auth.rs` make.
+async fn require_bearer(State(state): State<AdminState>, req: Request, next: Next) -> Response {
+    let Some(expected) = state.auth_token.as_deref() else {
+        return next.run(req).await; // no token configured: open, as always
+    };
+
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match presented {
+        Some(token) if token == expected => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response(),
+    }
+}
+
+pub async fn serve(
+    addr: SocketAddr,
+    runtime: RuntimeHandle,
+    prometheus: PrometheusHandle,
+    auth_token: Option<String>,
+) {
     let app = router(AdminState {
         runtime,
         prometheus,
+        auth_token,
     });
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -411,12 +450,17 @@ mod tests {
     /// Spin up `admin::router` on an ephemeral port against a live `Runtime`.
     /// Returns the base URL and the runtime (kept alive for the test).
     async fn spawn_admin(yaml: &str) -> (String, Runtime) {
+        spawn_admin_with_token(yaml, None).await
+    }
+
+    async fn spawn_admin_with_token(yaml: &str, auth_token: Option<&str>) -> (String, Runtime) {
         let cfg = gsp_config::parse_str(yaml).unwrap();
         let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
         let prometheus = PrometheusBuilder::new().build_recorder().handle();
         let app = router(AdminState {
             runtime: runtime.handle(),
             prometheus,
+            auth_token: auth_token.map(str::to_string),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -577,5 +621,37 @@ mod tests {
         runtime
             .shutdown_with_grace(Duration::from_millis(100))
             .await;
+    }
+
+    #[tokio::test]
+    async fn auth_token_gates_everything_but_healthz() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
+        let (base, _runtime) = spawn_admin_with_token(yaml, Some("secret123")).await;
+        let http = reqwest::Client::new();
+
+        // healthz stays open even with a token configured.
+        let r = http.get(format!("{base}/healthz")).send().await.unwrap();
+        assert!(r.status().is_success());
+
+        // Everything else is gated: no token, wrong token, right token.
+        let r = http.get(format!("{base}/pools")).send().await.unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let r = http
+            .get(format!("{base}/pools"))
+            .bearer_auth("wrong")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let r = http
+            .get(format!("{base}/pools"))
+            .bearer_auth("secret123")
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
     }
 }

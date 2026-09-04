@@ -171,8 +171,19 @@
 > take
 > `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
 > to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
-> when it is created. See `config.example.yaml`. The full schema below is the
-> target.
+> when it is created. See `config.example.yaml`.
+>
+> **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
+> (a flat string, not the target schema's `auth: { mode, token }` object
+> below) gates every admin API request except `GET /healthz` with a bearer
+> check. `None` (the default) leaves the API open — network-boundary-only
+> auth, same as always. A single shared secret, not RBAC/mTLS — appropriate
+> for gating a control-plane API that's meant to stay behind its own network
+> boundary regardless; needed once something calls in from outside that
+> boundary, which today means `gsp-aggregator`'s intent-verb fan-out
+> (`docs/10` "The aggregator"), given the same token to present.
+>
+> The full schema below is the target.
 
 ```yaml
 # global

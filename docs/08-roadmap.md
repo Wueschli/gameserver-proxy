@@ -480,10 +480,27 @@ controller's revision log is a follow-on once this ships.
    to send. Verified live end-to-end over real HTTP (targeted drain flipped
    the real instance's `/readyz` to `503`; broadcast add-backend landed on
    the instance's real `/pools`).
-10. Bearer-token auth on the aggregator's API; this also closes the "admin API
-    has zero auth" gap on the proxy side (`settings.admin.auth_token`,
-    checked by `admin.rs`, required by both the controller and the
-    aggregator's per-instance calls).
+10. ✅ Bearer-token auth, three independent secrets for three independent
+    hops (never one token threaded through everything): `gsp-aggregator
+    --auth-token` gates its own API (`/ingest`, `/fleet/*`, fan-out writes;
+    `/healthz` stays open); `settings.admin.auth_token` (new `gsp-config`
+    field) closes the "admin API has zero auth" gap on `gsp`'s own admin API
+    the same way (`admin.rs` gains a `require_bearer` middleware, mirroring
+    `gsp-controller`'s); `gsp --aggregator-token` is what a proxy presents
+    pushing to `/ingest`; `gsp-aggregator --instance-token` is the separate
+    secret the aggregator presents *out* to every instance's admin API when
+    fanning out (`settings.admin.auth_token` on the instance side must
+    match). 3 new tests (admin auth gate, aggregator auth gate, `gsp-config`
+    parsing `auth_token`). Verified live end-to-end over real HTTP through
+    every hop: unauthenticated aggregator read → `401`; authenticated read
+    showed the real pushed data; unauthenticated instance admin call → `401`;
+    a fan-out drain (through the aggregator, correctly presenting
+    `--instance-token`) → `200`, confirmed real by the instance's own
+    `/readyz` flipping to `503`.
+
+**All 10 slices of the phase 10+11 PoC's controller + aggregator halves are
+now done** — the remaining slices (11–13) are the Web UI, integration tests,
+and docs polish.
 
 ### Web UI + tests
 11. Static SPA: fleet dashboard + pool/backend table + operational actions

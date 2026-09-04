@@ -66,6 +66,11 @@ struct Args {
     /// Seconds between pushes to `--aggregator`.
     #[arg(long, default_value = "10")]
     aggregator_interval_sec: u64,
+
+    /// Bearer token to present on every push to `--aggregator`, if it
+    /// requires one (its own `--auth-token`).
+    #[arg(long)]
+    aggregator_token: Option<String>,
 }
 
 /// Where this process's config comes from, decided once at startup from
@@ -166,6 +171,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
                 .unwrap_or_else(|| cfg.admin_listen.to_string()),
             admin_url: format!("http://{}", cfg.admin_listen),
             interval: Duration::from_secs(args.aggregator_interval_sec),
+            token: args.aggregator_token,
         });
 
     run(
@@ -263,7 +269,12 @@ async fn run(
     }
     let fd_gauge = procinfo::spawn_fd_gauge(Duration::from_secs(5));
 
-    let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
+    let admin = tokio::spawn(admin::serve(
+        cfg.admin_listen,
+        handle.clone(),
+        prometheus,
+        cfg.admin_auth_token.clone(),
+    ));
     let aggregator = aggregator_push.map(|push_cfg| {
         tracing::info!(
             aggregator = %push_cfg.base_url,

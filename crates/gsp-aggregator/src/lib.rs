@@ -24,6 +24,7 @@
 //! `gsp-controller`'s).
 
 pub mod api;
+pub mod auth;
 pub mod fanout;
 pub mod ingest;
 mod util;

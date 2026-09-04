@@ -149,12 +149,20 @@ fn default_shutdown_grace_sec() -> u64 {
 struct RawAdmin {
     #[serde(default = "default_admin_listen")]
     listen: String,
+    /// Bearer token every admin API request (except `GET /healthz`) must
+    /// present. `None` leaves the API open — network-boundary-only auth,
+    /// same posture as always. Needed once anything calls in from outside
+    /// that boundary — today, `gsp-aggregator`'s intent-verb fan-out
+    /// (phase 10+11 slice 10, `docs/10` "The aggregator").
+    #[serde(default)]
+    auth_token: Option<String>,
 }
 
 impl Default for RawAdmin {
     fn default() -> Self {
         Self {
             listen: default_admin_listen(),
+            auth_token: None,
         }
     }
 }
@@ -1194,6 +1202,9 @@ pub struct Config {
     /// How long `shutdown` waits for in-flight connections to finish.
     pub shutdown_grace: Duration,
     pub admin_listen: SocketAddr,
+    /// Bearer token every admin API request (except `GET /healthz`) must
+    /// present; `None` leaves the API open.
+    pub admin_auth_token: Option<String>,
     pub pools: Vec<PoolConfig>,
     pub resolvers: Vec<ResolverConfig>,
     pub listeners: Vec<ListenerConfig>,
@@ -1448,6 +1459,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             raw.settings.admin.listen
         ))
     })?;
+    let admin_auth_token = raw.settings.admin.auth_token.clone();
 
     // Resolve `backend_sources`. A `static` source becomes a fixed address list;
     // the dynamic kinds become a `SourceConfig` for the runtime refresh task.
@@ -2216,6 +2228,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,
+        admin_auth_token,
         pools,
         resolvers,
         listeners,
@@ -2613,12 +2626,34 @@ listeners:
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.pools.len(), 1);
         assert_eq!(cfg.admin_listen.port(), 9900);
+        assert_eq!(cfg.admin_auth_token, None);
         assert_eq!(cfg.pools[0].connect_timeout.as_millis(), 300);
         assert_eq!(cfg.pools[0].balancer, Balancer::RoundRobin);
         assert_eq!(cfg.pools[0].health_check.rise, 2);
         assert_eq!(cfg.pools[0].health_check.fall, 3);
         assert!(cfg.pools[0].max_sessions.is_none());
         assert_eq!(cfg.pools[0].proxy_protocol, ProxyProtocol::None);
+    }
+
+    #[test]
+    fn parses_admin_auth_token() {
+        let cfg = parse_str(
+            r#"
+settings:
+  admin:
+    listen: "127.0.0.1:9900"
+    auth_token: "secret123"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#,
+        )
+        .expect("should parse");
+        assert_eq!(cfg.admin_auth_token.as_deref(), Some("secret123"));
     }
 
     #[test]

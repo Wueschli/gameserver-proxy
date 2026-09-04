@@ -9,6 +9,12 @@ settings:
   shutdown_grace_sec: 30
   admin:
     listen: "127.0.0.1:9900"   # /healthz /readyz /metrics /pools
+    # Bearer token every admin API request (except GET /healthz) must
+    # present. Omit for an open API (network-boundary-only auth, the
+    # default). Needed once something calls in from outside that boundary —
+    # e.g. gsp-aggregator's intent-verb fan-out (phase 10+11, docs/10 "The
+    # aggregator"), which is given the same token to present.
+    # auth_token: "change-me"
   # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
   # reload does not change these. Hitting a cap drops the new connection /
   # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|

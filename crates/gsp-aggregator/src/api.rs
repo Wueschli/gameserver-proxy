@@ -46,6 +46,14 @@ pub struct AppState {
     /// and reuses connections, so one lives on `AppState` rather than being
     /// built per call.
     pub http: reqwest::Client,
+    /// Bearer token every request except `GET /healthz` must present
+    /// (`--auth-token`); `None` leaves this aggregator's own API open.
+    pub auth_token: Option<String>,
+    /// Bearer token `crate::fanout` presents to every instance's admin API
+    /// (`--instance-token`) — a separate secret from `auth_token`: one gates
+    /// calls *into* this aggregator, the other is what this aggregator
+    /// presents *out* to instances that require `settings.admin.auth_token`.
+    pub instance_token: Option<String>,
 }
 
 impl AppState {
@@ -53,7 +61,19 @@ impl AppState {
         AppState {
             store,
             http: reqwest::Client::new(),
+            auth_token: None,
+            instance_token: None,
         }
+    }
+
+    pub fn with_auth_token(mut self, auth_token: Option<String>) -> Self {
+        self.auth_token = auth_token;
+        self
+    }
+
+    pub fn with_instance_token(mut self, instance_token: Option<String>) -> Self {
+        self.instance_token = instance_token;
+        self
     }
 }
 
@@ -64,6 +84,10 @@ pub fn router(state: AppState) -> Router {
         .route("/fleet/sessions", get(fleet_sessions))
         .route("/fleet/healthz", get(fleet_healthz))
         .merge(crate::fanout::router())
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_bearer,
+        ))
         .with_state(state)
 }
 
@@ -386,5 +410,45 @@ mod tests {
         };
         assert_eq!(by_instance("stale-1")["stale"], true);
         assert_eq!(by_instance("fresh-1")["stale"], false);
+    }
+
+    #[tokio::test]
+    async fn auth_token_gates_ingest_and_fleet_reads_but_not_healthz() {
+        // /healthz lives outside `api::router` in `main.rs`, so it's not
+        // part of what's under test here — only confirming everything
+        // *inside* this router is gated when a token is set.
+        let state =
+            AppState::new(Arc::new(IngestStore::new())).with_auth_token(Some("secret".into()));
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/fleet/pools").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/fleet/pools")
+                    .header("Authorization", "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::get("/fleet/pools")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -140,6 +140,9 @@ async fn proxy_to_instance(
 
     let url = format!("{}{}", inst.payload.admin_url, path_suffix);
     let mut req = state.http.request(method, &url);
+    if let Some(token) = &state.instance_token {
+        req = req.bearer_auth(token);
+    }
     if let Some(body) = body {
         req = req.header("content-type", "application/json").body(body);
     }
@@ -181,6 +184,7 @@ async fn broadcast(
     body: Option<Bytes>,
 ) -> Response {
     let instances = state.store.snapshot();
+    let instance_token = state.instance_token.clone();
     let mut calls = tokio::task::JoinSet::new();
     for inst in instances {
         let client = state.http.clone();
@@ -188,8 +192,12 @@ async fn broadcast(
         let url = format!("{}{}", inst.payload.admin_url, path_suffix);
         let body = body.clone();
         let instance = inst.payload.instance;
+        let instance_token = instance_token.clone();
         calls.spawn(async move {
             let mut req = client.request(method, &url);
+            if let Some(token) = &instance_token {
+                req = req.bearer_auth(token);
+            }
             if let Some(body) = body {
                 req = req.header("content-type", "application/json").body(body);
             }

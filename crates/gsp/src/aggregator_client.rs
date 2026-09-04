@@ -68,6 +68,10 @@ pub struct PushConfig {
     /// something this introduces.
     pub admin_url: String,
     pub interval: Duration,
+    /// Bearer token to present on every push, if `--aggregator-token` set
+    /// one — the aggregator side of the pair `settings.admin.auth_token` is
+    /// for calls coming the other way.
+    pub token: Option<String>,
 }
 
 /// Runs forever, pushing one summary per `cfg.interval`. `tokio::spawn`ed
@@ -78,6 +82,7 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
         instance,
         admin_url,
         interval,
+        token,
     } = cfg;
     let client = reqwest::Client::new();
     let url = format!("{base_url}/ingest");
@@ -89,7 +94,11 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
     loop {
         ticker.tick().await;
         let payload = build_payload(&instance, &admin_url, &handle);
-        match client.post(&url).json(&payload).send().await {
+        let mut req = client.post(&url).json(&payload);
+        if let Some(token) = &token {
+            req = req.bearer_auth(token);
+        }
+        match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::debug!(aggregator = %base_url, "pushed a fleet-state summary")
             }
