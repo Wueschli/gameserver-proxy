@@ -1034,7 +1034,16 @@ project's north star):**
     `RuntimeHandle::sessions()` and the filterable plaintext admin endpoint
     `GET /sessions[?listener=&pool=&proto=&src=]`. Tests:
     `drain::tests::sessions_reflects_live_entries_and_set_target`,
-    `tcp_forward::sessions_registry_lists_a_live_connection_with_its_pool_and_backend`.
+    `tcp_forward::sessions_registry_lists_a_live_connection_with_its_pool_and_backend`,
+    `udp_forward::sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend`.
+    Follow-up slice: `admin.rs` grew `#[cfg(test)] mod tests` (the first
+    HTTP-level admin coverage) — `serve` was split into `router(state) -> Router`
+    + the bind loop so a test can mount the real route table on an ephemeral
+    listener and drive it with `reqwest` (`gsp` is binary-only, so this lives
+    in-module, not in `crates/gsp/tests/`). Covers `healthz` / `readyz` /
+    `pools` / `config` and `sessions` incl. every query filter (match + exclude).
+    `PrometheusBuilder::build_recorder().handle()` gives a non-global handle so
+    the tests don't fight over the global recorder.
 11. **Reload debounce widening** (only coalesces within one 200 ms window) — low
     priority, low cost.
 12. **LRU eviction for the UDP sticky table and the per-source cap**

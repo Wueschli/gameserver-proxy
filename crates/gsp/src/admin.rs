@@ -22,8 +22,10 @@ struct AdminState {
     prometheus: PrometheusHandle,
 }
 
-pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: PrometheusHandle) {
-    let app = Router::new()
+/// The admin API route table. Split out from [`serve`] so integration tests can
+/// mount it on their own ephemeral listener.
+fn router(state: AdminState) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -38,10 +40,14 @@ pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: Prometh
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
-        .with_state(AdminState {
-            runtime,
-            prometheus,
-        });
+        .with_state(state)
+}
+
+pub async fn serve(addr: SocketAddr, runtime: RuntimeHandle, prometheus: PrometheusHandle) {
+    let app = router(AdminState {
+        runtime,
+        prometheus,
+    });
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -383,4 +389,186 @@ async fn delete_backend(
     s.runtime.request_reload();
     tracing::info!(%pool, %addr, "backend removed via admin API");
     (StatusCode::OK, format!("removed {addr} from {pool}\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use gsp_core::{Runtime, Snapshot};
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Spin up `admin::router` on an ephemeral port against a live `Runtime`.
+    /// Returns the base URL and the runtime (kept alive for the test).
+    async fn spawn_admin(yaml: &str) -> (String, Runtime) {
+        let cfg = gsp_config::parse_str(yaml).unwrap();
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+        let prometheus = PrometheusBuilder::new().build_recorder().handle();
+        let app = router(AdminState {
+            runtime: runtime.handle(),
+            prometheus,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        (format!("http://{addr}"), runtime)
+    }
+
+    /// A TCP backend that echoes after a delay, so a proxied connection stays
+    /// live long enough to be observed in `GET /sessions`.
+    async fn slow_echo_backend() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        if s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    fn free_port() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn healthz_readyz_pools_and_config_respond() {
+        let backend = slow_echo_backend().await;
+        let proxy = free_port();
+        let yaml = format!(
+            "pools:\n  - name: p\n    targets: [\"{backend}\"]\n\
+             listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+        );
+        let (base, runtime) = spawn_admin(&yaml).await;
+        let http = reqwest::Client::new();
+
+        let r = http.get(format!("{base}/healthz")).send().await.unwrap();
+        assert!(r.status().is_success());
+        assert_eq!(r.text().await.unwrap(), "ok");
+
+        let r = http.get(format!("{base}/readyz")).send().await.unwrap();
+        assert!(r.status().is_success());
+
+        let body = http
+            .get(format!("{base}/pools"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("p\tbalancer="), "pools body: {body}");
+        assert!(body.contains(&backend.to_string()));
+
+        let body = http
+            .get(format!("{base}/config"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("listeners:"), "config body: {body}");
+        assert!(body.contains("\tbind=") && body.contains("pools:"));
+
+        runtime
+            .shutdown_with_grace(Duration::from_millis(100))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sessions_endpoint_lists_a_live_connection_and_honours_filters() {
+        let backend = slow_echo_backend().await;
+        let proxy = free_port();
+        let yaml = format!(
+            "pools:\n  - name: p\n    targets: [\"{backend}\"]\n\
+             listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+        );
+        let (base, runtime) = spawn_admin(&yaml).await;
+        let http = reqwest::Client::new();
+
+        let empty = http
+            .get(format!("{base}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(empty, "sessions=0\n");
+
+        let mut c = TcpStream::connect(proxy).await.unwrap();
+        c.write_all(b"ping").await.unwrap();
+        let src_port = c.local_addr().unwrap().port();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let body = http
+            .get(format!("{base}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.starts_with("sessions=1\n"), "body: {body}");
+        assert!(body.contains("\ttcp\tl\t"), "body: {body}");
+        assert!(body.contains("pool=p"), "body: {body}");
+        assert!(body.contains(&format!("backend={backend}")), "body: {body}");
+        assert!(body.contains(&format!("peer=127.0.0.1:{src_port}")));
+
+        // Filters that should still match.
+        for q in ["?proto=tcp", "?listener=l", "?pool=p", "?src=127.0.0.1"] {
+            let b = http
+                .get(format!("{base}/sessions{q}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(b.starts_with("sessions=1\n"), "{q} -> {b}");
+        }
+        // Filters that should exclude the session.
+        for q in [
+            "?proto=udp",
+            "?listener=other",
+            "?pool=other",
+            "?src=10.0.0.1",
+        ] {
+            let b = http
+                .get(format!("{base}/sessions{q}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(b, "sessions=0\n", "{q}");
+        }
+
+        drop(c);
+        runtime
+            .shutdown_with_grace(Duration::from_millis(100))
+            .await;
+    }
 }
