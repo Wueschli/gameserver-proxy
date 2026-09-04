@@ -453,6 +453,13 @@ async fn open_session(
         sniff: hint.as_ref(),
     };
 
+    // A sniffer that positively rejects drops the datagram outright — no
+    // session, no reply (amplifier-safe). Before the gate / push-resolver hint:
+    // a content-based reject outranks a spoofable src_ip hint.
+    if hint.as_ref().is_some_and(|h| h.reject) {
+        return Err("sniffer_reject");
+    }
+
     // First-packet gate (phase 7): no session unless the first datagram is
     // positively recognised. Applies before the push-resolver hint — a src_ip
     // hint must not let a spoofed flood past.

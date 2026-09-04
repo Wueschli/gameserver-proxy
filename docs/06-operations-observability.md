@@ -4,7 +4,9 @@
 
 ### Listener / connections
 - `gsp_listener_connections_total{listener,protocol,result}` – `result` =
-  `accepted|denied_acl|denied_ratelimit|no_route|resolver_error`
+  `accepted|denied_acl|denied_ratelimit|no_route|resolver_error|sniffer_reject`
+  (`sniffer_reject`: a `sniffer` plugin returned a `reject` hint for the first
+  bytes; the connection is dropped before routing)
 - `gsp_active_connections{listener,protocol}` (gauge)
 - `gsp_active_udp_sessions{listener}` (gauge)
 - `gsp_connection_duration_seconds{listener,pool}` (histogram)
@@ -14,9 +16,10 @@
 - `gsp_bytes_total{listener,pool,dir}` – `dir` = `c2s|s2c`
 - `gsp_packets_total{listener,pool,dir}` (UDP) — v0 emits `{listener,dir}` only
 - `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
-  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate`
+  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject`
   (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`;
-  `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised)
+  `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised;
+  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply)
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)

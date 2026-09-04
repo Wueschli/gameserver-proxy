@@ -111,10 +111,25 @@ pub(crate) mod tests {
         }
     }
 
-    /// A registry with just `test-host`, for tests that exercise the seam.
+    /// Recognises `b"BAD"` first bytes and demands the connection be dropped.
+    pub(crate) struct TestReject;
+    impl Sniffer for TestReject {
+        fn name(&self) -> &'static str {
+            "test-reject"
+        }
+        fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
+            first.starts_with(b"BAD").then(|| RouteHint {
+                reject: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A registry with the test sniffers (`test-host`, `test-reject`).
     pub(crate) fn test_registry() -> Sniffers {
         let s = Sniffers::new();
         s.register(Arc::new(TestHost));
+        s.register(Arc::new(TestReject));
         s
     }
 
@@ -210,6 +225,150 @@ listeners:
 
         assert_eq!(mark("survival.example.net").await, b'S');
         assert_eq!(mark("creative.example.net").await, b'L');
+
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    /// A `reject` hint drops the TCP connection even though an `always` route
+    /// would otherwise catch it — and a benign connection still routes.
+    #[tokio::test]
+    async fn sniffer_reject_drops_the_tcp_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        async fn marker(tag: u8) -> std::net::SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = l.accept().await {
+                    tokio::spawn(async move {
+                        let _ = s.write_all(&[tag]).await;
+                        let mut buf = [0u8; 64];
+                        while let Ok(n) = s.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        let lobby = marker(b'L').await;
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let yaml = format!(
+            r#"
+pools:
+  - name: lobby
+    targets: ["{lobby}"]
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - match: {{ type: sniffer, sniffer: test-reject }}
+        action: {{ pool: lobby }}
+      - match: {{ type: always }}
+        action: {{ pool: lobby }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let runtime = crate::Runtime::start_with_sniffers(
+            crate::Snapshot::from_config(&cfg),
+            Default::default(),
+            None,
+            Arc::new(test_registry()),
+            1,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Rejected: the proxy closes the connection without a backend byte.
+        let mut bad = TcpStream::connect(proxy).await.unwrap();
+        bad.write_all(b"BADpayload").await.unwrap();
+        let mut m = [0u8; 1];
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bad.read_exact(&mut m),
+        )
+        .await
+        .expect("proxy should close a rejected connection, not hang");
+        assert!(r.is_err(), "rejected connection should get EOF, not a byte");
+
+        // Not rejected: still routes through `always`.
+        let mut ok = TcpStream::connect(proxy).await.unwrap();
+        ok.write_all(b"good payload").await.unwrap();
+        let mut m2 = [0u8; 1];
+        ok.read_exact(&mut m2).await.unwrap();
+        assert_eq!(m2[0], b'L');
+
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    /// A `reject` hint on the first datagram opens no UDP session and sends no
+    /// reply (amplifier-safe), even with an `always` route present.
+    #[tokio::test]
+    async fn sniffer_reject_drops_the_udp_datagram_with_no_reply() {
+        use tokio::net::{TcpListener, UdpSocket};
+
+        // Backend that echoes every datagram back — proves the proxy never
+        // forwarded (and thus never relayed a reply).
+        let backend = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 1024];
+            while let Ok((n, from)) = backend.recv_from(&mut b).await {
+                let _ = backend.send_to(&b[..n], from).await;
+            }
+        });
+
+        let proxy = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap()
+        };
+        let yaml = format!(
+            r#"
+pools:
+  - name: p
+    targets: ["{backend_addr}"]
+listeners:
+  - name: u
+    bind: "{proxy}"
+    protocol: udp
+    routes:
+      - match: {{ type: sniffer, sniffer: test-reject }}
+        action: {{ pool: p }}
+      - match: {{ type: always }}
+        action: {{ pool: p }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        let runtime = crate::Runtime::start_with_sniffers(
+            crate::Snapshot::from_config(&cfg),
+            Default::default(),
+            None,
+            Arc::new(test_registry()),
+            1,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(proxy).await.unwrap();
+        client.send(b"BAD flood").await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(400), client.recv(&mut buf))
+                .await;
+        assert!(got.is_err(), "a rejected datagram must draw no reply");
 
         runtime
             .shutdown_with_grace(std::time::Duration::from_millis(100))

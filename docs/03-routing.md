@@ -34,8 +34,9 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > that address, and datagrams outside the prefix are dropped
 > (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). The sniffer **seam**
 > is `gsp_core::sniff::Sniffer` → `RouteHint { host, key, reject }`, fed into
-> routing before matchers run; loading real sniffers (sandboxed, from a separate
-> repo) is Phase 9. The **push resolver** (`POST /route-hint`) is implemented:
+> routing before matchers run — a `reject` hint drops the connection / datagram
+> outright (`result="sniffer_reject"` / `reason="sniffer_reject"`); loading real
+> sniffers (sandboxed, from a separate repo) is Phase 9. The **push resolver** (`POST /route-hint`) is implemented:
 > a listener with `route_hint: true` checks a short-lived `src_ip → pool` table
 > before its route list (`gsp_route_hints_applied_total{listener}` counts hits).
 > The **external resolver** (`action: { resolver: <name> }`, `resolvers:`
@@ -58,13 +59,19 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 1. **Early filters** (ACL, rate limit, geo) – before routing, may reject immediately.
 2. **Listener binding** – the listener may already map 1:1 to a pool (simplest case,
    no further logic).
-3. **Push-resolver hint** – if the listener has `route_hint: true` and a live
+3. **Sniffer** (if a `sniffer` route is configured) – runs once on the peeked
+   first bytes. A `RouteHint { reject: true }` **drops the connection / datagram
+   immediately** (before the push-resolver hint, so a spoofable `src_ip` hint
+   cannot override it); TCP `gsp_listener_connections_total{result="sniffer_reject"}`,
+   UDP `gsp_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A
+   non-`reject` hint is carried into route matching.
+4. **Push-resolver hint** – if the listener has `route_hint: true` and a live
    `src_ip → pool` entry exists (from `POST /route-hint`) whose pool still
-   exists, it wins and steps 4–6 are skipped.
-4. **Route matching** – the listener's ordered rule list; **the first matching rule
+   exists, it wins and steps 5–7 are skipped.
+5. **Route matching** – the listener's ordered rule list; **the first matching rule
    wins**. Each rule: `match` + `action` (`pool` or `resolver`).
-5. **Resolver** (if the rule requires it) – external lookup with cache/fallback.
-6. **Default route** – when nothing matches.
+6. **Resolver** (if the rule requires it) – external lookup with cache/fallback.
+7. **Default route** – when nothing matches.
 
 ## Matcher types
 

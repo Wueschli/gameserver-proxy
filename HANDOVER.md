@@ -856,7 +856,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | **Phase 3 — done** (slices 1–9): route rule list; matchers `always` / `client_cidr` / `dst` / `port` / `first_bytes` (`prefix`+`length`) / `sni`; `consistent_hash` balancer; UDP `prefix:` listener + TCP `freebind:`; sniffer API seam + `sniffer` matcher (no built-ins); `POST /route-hint` push resolver | **done** |
 | Sniffer plugin **loader** + a generic `first_bytes` `regex` matcher (as a plugin) — separate community repo, sandboxed/WASM, runtime-loaded | **Phase 9** |
 | `first_bytes` `regex` variant (needs `regex` dep; goes in the `gsp_core::sniff` layer, not `gsp-config`) | phase 3 |
-| More sniffers (`quic`, `wireguard`, …); `RouteHint.reject` currently only makes a `sniffer` route *not match* (no hard drop) | phase 3+ |
+| More sniffers (`quic`, `wireguard`, …) | phase 3+ / community |
+| `RouteHint.reject` hard drop | **done** (data-plane completion, item 3 — `gsp-core` drops the connection / datagram before routing: `gsp_listener_connections_total{result="sniffer_reject"}` / `gsp_datagrams_dropped_total{reason="sniffer_reject"}`, no reply) |
 | Per-listener multiple distinct sniffers (only one name allowed today) | polish |
 | TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
 | **Phase 4 — done**: external resolver HTTP + gRPC, `pool` + `target`, `on_error`, TTL LRU cache + `stale_ok` | **done** |
@@ -902,11 +903,9 @@ milestone cut where v1.3 is additive and the data-plane contract is unchanged.
 continuously green and shippable; save the big cross-workspace change for a
 focused unit):
 
-1. ~~ClientHello fragmentation~~ — **done** (`slice/clienthello-reassembly`,
-   on `main`).
-2. **Item 3 — `RouteHint.reject` hard drop.** ← *next.* `gsp-core` routing +
-   `gsp-config`, small, half-done (UDP gate path already drops).
-3. **Item 6 — per-resolver `target` timeout knob.** Tiny config addition.
+1. ~~ClientHello fragmentation~~ — **done** (on `main`).
+2. ~~Item 3 — `RouteHint.reject` hard drop~~ — **done** (on `main`).
+3. **Item 6 — per-resolver `target` timeout knob.** ← *next.* Tiny config addition.
 4. **Item 5 — `weighted` balancer.** Self-contained.
 5. **Item 2 — per-plugin sniffer config**, as a deliberate two-slice unit:
    - **A2**: `settings.sniffers.modules[].config` schema + widen the guest ABI
@@ -933,11 +932,10 @@ are cheaper than a fresh slice:
 - **Item 1 (ClientHello fragmentation)** — **done** (see list A item 1). Was a
   one-shot `stream.peek()`; now a bounded re-peek loop keyed off the TLS record
   length.
-- **Item 3 (`RouteHint.reject` hard drop)** — on a UDP listener with
-  `first_packet_gate: true` a `reject` hint already fails the gate ⇒ no session
-  (`lib.rs:1346`). Only the TCP path and non-gated UDP still need the explicit
-  drop (`lib.rs:956` — a `reject` hint there just makes the `sniffer` route not
-  match).
+- **Item 3 (`RouteHint.reject` hard drop)** — **done** (see list A item 3).
+  `gsp-core` now drops a rejected connection / datagram before routing, on both
+  the TCP and UDP paths; the `!reject` guards in `gsp-config` matching stayed as
+  belt-and-braces for direct `route_for` callers.
 - **Item 8 (`IPV6_TRANSPARENT` on musl)** — `set_ip_transparent` already calls
   `socket2` 0.6's `set_ip_transparent_v6` unconditionally (`net.rs:138`), with
   no `target_env` guard. This may already work on musl; start with a build +
@@ -960,9 +958,13 @@ are cheaper than a fresh slice:
    config-schema extension (`gsp-config` + `validate()` + `config.example.yaml`
    + `docs/05`) and threading the blob to `WasmSniffer`. Two slices (A2 / A3)
    + a new ADR — see "Execution order" above for the locked ABI decision.
-3. **`RouteHint.reject` → hard drop** — security-relevant and small: a sniffer
-   that positively rejects should be able to drop the connection / datagram,
-   not just decline to match the `sniffer` route. Scheduled next.
+3. ~~**`RouteHint.reject` → hard drop**~~ — **DONE**: `gsp-core` drops a
+   rejected connection (`listener.rs`) / first datagram (`listener_udp.rs`,
+   before the gate and the push hint) instead of falling through to `always`.
+   `gsp_listener_connections_total{result="sniffer_reject"}` /
+   `gsp_datagrams_dropped_total{reason="sniffer_reject"}`; UDP sends no reply.
+   Tests: `sniff::tests::sniffer_reject_drops_the_tcp_connection` /
+   `sniffer_reject_drops_the_udp_datagram_with_no_reply`.
 4. **Live reload of `resolvers:` and `backend_sources:`** — both startup-only
    today; a proxy that advertises zero-downtime reload should fold these into
    the existing `validate → Snapshot::build → ArcSwap::store` path.
@@ -1349,8 +1351,9 @@ then per conn run
 `cfg.sniffer.and_then(sniff::sniffer).and_then(|s| s.sniff(first))` and pass
 `hint.as_ref()` into `MatchContext.sniff`.
 
-Not done: `RouteHint.reject` only makes a `sniffer` route *not match* (no hard
-drop); the loader itself is Phase 9.
+`RouteHint.reject` → hard drop landed later (data-plane completion, item 3):
+`gsp-core` drops a rejected connection / datagram before routing rather than
+falling through to `always`. The loader itself is Phase 9.
 
 ### Slice 9 — `POST /route-hint` push resolver (done — closes phase 3)
 

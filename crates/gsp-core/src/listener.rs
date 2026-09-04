@@ -185,6 +185,24 @@ pub async fn run_tcp_listener(
                         .as_deref()
                         .and_then(|n| sniffers.get(n))
                         .and_then(|s| s.sniff(first));
+
+                    // A sniffer that positively rejects drops the connection
+                    // outright — checked before the push-resolver hint so a
+                    // spoofable src_ip hint can't override a content-based
+                    // reject (same rule as the UDP first-packet gate).
+                    if hint.as_ref().is_some_and(|h| h.reject) {
+                        metrics::counter!(
+                            m::LISTENER_CONNECTIONS,
+                            "listener" => listener_name.clone(),
+                            "result" => "sniffer_reject",
+                        ).increment(1);
+                        tracing::debug!(
+                            listener = %listener_name, peer = %peer,
+                            "connection dropped by sniffer reject"
+                        );
+                        return;
+                    }
+
                     let mctx = gsp_config::MatchContext {
                         src: peer,
                         local,

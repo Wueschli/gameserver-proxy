@@ -1,7 +1,9 @@
 //! Canonical metric names. Kept in one place so names stay stable.
 //! See `docs/06-operations-observability.md` for the full metric catalogue.
 
-/// Counter. Labels: `listener`, `result` (`accepted` | `no_route` | ...).
+/// Counter. Labels: `listener`, `result` (`accepted` | `no_route` |
+/// `sniffer_reject` | ...). `sniffer_reject` = a `sniffer` plugin returned a
+/// `reject` hint for the connection's first bytes; it is dropped before routing.
 pub const LISTENER_CONNECTIONS: &str = "gsp_listener_connections_total";
 
 /// Gauge. Labels: `listener`.
@@ -15,7 +17,9 @@ pub const PACKETS: &str = "gsp_packets_total";
 
 /// Counter. Labels: `listener`, `reason`
 /// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send` |
-/// `outside_prefix` | `draining` | `reply_bind` | `first_packet_gate`).
+/// `outside_prefix` | `draining` | `reply_bind` | `first_packet_gate` |
+/// `sniffer_reject`). `sniffer_reject` = a `sniffer` plugin returned a `reject`
+/// hint for the first datagram; no session opens and no reply is sent.
 pub const DATAGRAMS_DROPPED: &str = "gsp_datagrams_dropped_total";
 
 /// Counter. Labels: `listener`, `dir` (`c2s` | `s2c`).

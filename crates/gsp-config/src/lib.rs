@@ -876,7 +876,11 @@ pub struct RouteHint {
     pub host: Option<String>,
     /// An opaque affinity / routing key (fed to a sticky table later).
     pub key: Option<String>,
-    /// The sniffer wants this connection rejected outright.
+    /// The sniffer wants this connection / datagram rejected outright. `gsp-core`
+    /// drops it before routing (TCP: `gsp_listener_connections_total{result=
+    /// "sniffer_reject"}`; UDP: no session, no reply,
+    /// `gsp_datagrams_dropped_total{reason="sniffer_reject"}`) — it does not fall
+    /// through to a later route such as `always`.
     pub reject: bool,
 }
 
@@ -909,9 +913,12 @@ pub enum Matcher {
     Sni(Vec<HostPattern>),
     /// The named sniffer plugin (see `gsp_core::sniff`) recognised the first
     /// bytes. With `host` patterns: also requires the hint's `host` to match one
-    /// of them; empty `host` ⇒ matches on any (non-`reject`) recognition. The
-    /// name is not validated here — the proxy checks it against the loaded
-    /// sniffers at listener start (an unknown name simply never matches).
+    /// of them; empty `host` ⇒ matches on any recognition. A `reject` hint never
+    /// reaches this matcher — `gsp-core` drops the connection / datagram before
+    /// routing (see [`RouteHint::reject`]) — so the `!reject` guard below is
+    /// belt-and-braces for a direct `route_for` caller. The name is not
+    /// validated here — the proxy checks it against the loaded sniffers at
+    /// listener start (an unknown name simply never matches).
     Sniffer {
         name: String,
         host: Vec<HostPattern>,
