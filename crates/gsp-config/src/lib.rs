@@ -67,6 +67,11 @@ struct RawSettings {
     /// filter. Startup-only.
     #[serde(default)]
     geo_db: Option<String>,
+    /// Sniffer plugin loader (phase 9). Absent ⇒ no plugins load; a `sniffer:`
+    /// route never matches. Startup-only for `dir` itself (rescanned on
+    /// reload once the loader lands — phase 9 slice 4).
+    #[serde(default)]
+    sniffers: Option<RawSniffers>,
 }
 
 impl Default for RawSettings {
@@ -77,8 +82,42 @@ impl Default for RawSettings {
             admin: RawAdmin::default(),
             limits: RawLimits::default(),
             geo_db: None,
+            sniffers: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSniffers {
+    /// Directory scanned for `*.wasm` plugin modules.
+    dir: String,
+    /// Per-call wall-clock budget (epoch interruption traps a plugin that
+    /// overruns this).
+    #[serde(default = "default_sniffer_call_timeout_ms")]
+    call_timeout_ms: u64,
+    /// Per-call memory ceiling for a plugin instance.
+    #[serde(default = "default_sniffer_max_memory_bytes")]
+    max_memory_bytes: usize,
+    /// Optional supply-chain pin: a module whose file name isn't listed here,
+    /// or whose SHA-256 doesn't match, is refused at load time.
+    #[serde(default)]
+    modules: Vec<RawSnifferModule>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSnifferModule {
+    name: String,
+    sha256: String,
+}
+
+fn default_sniffer_call_timeout_ms() -> u64 {
+    20
+}
+
+fn default_sniffer_max_memory_bytes() -> usize {
+    16 * 1024 * 1024
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1120,6 +1159,26 @@ pub struct Config {
     /// Path to the MaxMind Country DB, if any listener uses a `geo` filter.
     /// Startup-only.
     pub geo_db: Option<String>,
+    /// Sniffer plugin loader settings (phase 9). `None` ⇒ no plugins load.
+    pub sniffers: Option<SniffersConfig>,
+}
+
+/// Resolved `settings.sniffers` (phase 9). The loader itself (`wasmtime`, the
+/// ABI, the plugin crates) lives in the `gsp` binary — this is just the
+/// validated config it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SniffersConfig {
+    pub dir: String,
+    pub call_timeout: Duration,
+    pub max_memory_bytes: usize,
+    /// Supply-chain pins. Empty ⇒ any `*.wasm` in `dir` loads unchecked.
+    pub modules: Vec<SnifferModulePin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnifferModulePin {
+    pub name: String,
+    pub sha256: String,
 }
 
 /// Process-wide resource caps (phase 7). `None` fields = uncapped. The live
@@ -2047,6 +2106,11 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         max_new_sessions_per_sec: rl.max_new_sessions_per_sec,
     };
 
+    let sniffers = match raw.settings.sniffers {
+        Some(rs) => Some(validate_sniffers(rs)?),
+        None => None,
+    };
+
     Ok(Config {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
@@ -2056,6 +2120,47 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         listeners,
         limits,
         geo_db: raw.settings.geo_db,
+        sniffers,
+    })
+}
+
+fn validate_sniffers(rs: RawSniffers) -> Result<SniffersConfig, ConfigError> {
+    use ConfigError::Invalid;
+    if rs.dir.trim().is_empty() {
+        return Err(Invalid("settings.sniffers.dir must not be empty".into()));
+    }
+    if rs.call_timeout_ms == 0 {
+        return Err(Invalid(
+            "settings.sniffers.call_timeout_ms must be > 0".into(),
+        ));
+    }
+    if rs.max_memory_bytes == 0 {
+        return Err(Invalid(
+            "settings.sniffers.max_memory_bytes must be > 0".into(),
+        ));
+    }
+    let mut modules = Vec::with_capacity(rs.modules.len());
+    for m in rs.modules {
+        if m.name.trim().is_empty() {
+            return Err(Invalid("settings.sniffers.modules[].name must not be empty".into()));
+        }
+        let hex_ok = m.sha256.len() == 64 && m.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex_ok {
+            return Err(Invalid(format!(
+                "settings.sniffers.modules[{}].sha256 must be a 64-char hex digest",
+                m.name
+            )));
+        }
+        modules.push(SnifferModulePin {
+            name: m.name,
+            sha256: m.sha256.to_ascii_lowercase(),
+        });
+    }
+    Ok(SniffersConfig {
+        dir: rs.dir,
+        call_timeout: Duration::from_millis(rs.call_timeout_ms),
+        max_memory_bytes: rs.max_memory_bytes,
+        modules,
     })
 }
 
@@ -3141,6 +3246,71 @@ listeners:
              pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
              listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n    \
              geo:\n      deny: [\"GBR\"]",
+        ] {
+            assert!(parse_str(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn parses_sniffers_settings_with_defaults_and_pins() {
+        let yaml = "settings:\n  sniffers:\n    dir: \"/etc/gsp/sniffers\"\n\
+                    pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        let s = parse_str(yaml).unwrap().sniffers.unwrap();
+        assert_eq!(s.dir, "/etc/gsp/sniffers");
+        assert_eq!(s.call_timeout, Duration::from_millis(20));
+        assert_eq!(s.max_memory_bytes, 16 * 1024 * 1024);
+        assert!(s.modules.is_empty());
+
+        let yaml = format!(
+            "settings:\n  sniffers:\n    dir: \"/plugins\"\n    call_timeout_ms: 5\n    \
+             max_memory_bytes: 1048576\n    modules:\n      - name: a2s\n        sha256: \"{}\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            "AB".repeat(32),
+        );
+        let s = parse_str(&yaml).unwrap().sniffers.unwrap();
+        assert_eq!(s.call_timeout, Duration::from_millis(5));
+        assert_eq!(s.max_memory_bytes, 1_048_576);
+        assert_eq!(s.modules.len(), 1);
+        assert_eq!(s.modules[0].name, "a2s");
+        assert_eq!(s.modules[0].sha256, "ab".repeat(32)); // lower-cased
+    }
+
+    #[test]
+    fn absent_sniffers_settings_load_no_plugins() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        assert!(parse_str(yaml).unwrap().sniffers.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_sniffers_settings() {
+        for bad in [
+            // empty dir
+            "settings:\n  sniffers:\n    dir: \"\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            // zero call_timeout_ms
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    call_timeout_ms: 0\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            // zero max_memory_bytes
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    max_memory_bytes: 0\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            // empty module name
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    modules:\n      - name: \"\"\n        sha256: \"ab\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            // bad sha256 (too short, not hex)
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    modules:\n      - name: a2s\n        sha256: \"zz\"\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+            // unknown field
+            "settings:\n  sniffers:\n    dir: \"/x\"\n    bogus: 1\n\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
         ] {
             assert!(parse_str(bad).is_err(), "should reject: {bad}");
         }

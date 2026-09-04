@@ -119,6 +119,18 @@
 > `gsp_filter_blocked_total{listener,filter="geo"}`. Startup-only, like
 > `settings.workers`.
 >
+> **Sniffer plugin loader** (phase 9, config schema landed in slice 2 — the
+> loader itself is later slices): `settings.sniffers: { dir, call_timeout_ms,
+> max_memory_bytes, modules: [{ name, sha256 }] }`. Absent ⇒ no plugins load
+> and a `sniffer:` route never matches (today's behaviour). `dir` is a
+> directory of `*.wasm` modules; `call_timeout_ms` (default 20) bounds a
+> plugin's wall-clock time per call via `wasmtime` epoch interruption;
+> `max_memory_bytes` (default 16 MiB) caps a call's instance memory;
+> `modules:` optionally pins each module's SHA-256 for supply-chain
+> verification — when non-empty, a `dir` entry not listed there (or whose
+> hash doesn't match) is refused. `validate()` rejects an empty `dir`, a zero
+> `call_timeout_ms` / `max_memory_bytes`, and a non-64-hex-char `sha256`.
+>
 > **Global caps:** `settings.limits: { max_connections, max_udp_sessions,
 > max_new_sessions_per_sec }` are process-wide ceilings (all optional; omit for no
 > cap). `max_connections` / `max_udp_sessions` bound the live counts across every
@@ -342,6 +354,9 @@ listeners:
 - A listener `geo` filter requires `settings.geo_db`, a non-empty `allow` or
   `deny`, and 2-letter country codes; the DB file must open at startup / `--check`.
 - `consistent_hash` requires `hash_on`.
+- `settings.sniffers.dir` must not be empty; `call_timeout_ms` /
+  `max_memory_bytes` must be `>= 1`; each `modules[].sha256` must be a 64-char
+  hex digest and `name` must not be empty.
 - `match.type: dst` requires `recv_dst_addr: true` on the listener (otherwise the
   destination address per packet/connection is unknown); a prefix bind requires
   `freebind: true` and a prefix routed to the host.
@@ -363,4 +378,5 @@ listeners:
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
 | `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
+| `settings.sniffers.*` changed | requires a restart today; once the loader lands (phase 9 slice 4), `dir` is rescanned on reload — added modules load, removed drop, changed (hash) recompile |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |

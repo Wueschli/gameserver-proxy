@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, decisions already made, and how to pick it up.
-Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slice 1 landed).
+Last updated: 2026-09-04 (**phases 0–8 complete**, phase 9 slices 1–2 landed).
 Phase 8 (discovery & scaling): a top-level `backend_sources:` list referenced by
 `pools[].source` (exactly one of `targets` / `source`). Kinds: `static` (folded
 into the pool's `targets` at load time), `dns_srv`, `consul`, `kubernetes`
@@ -338,21 +338,35 @@ original destination. socket2 bumped 0.5 → 0.6 for `IPV6_TRANSPARENT`.
   `Sniffers::default()`, i.e. still no built-ins). Tests that need the seam
   build a small registry (`sniff::tests::test_registry()`, holds `test-host`)
   instead of relying on a global match arm.
-- **Next**: phase 9 slices 2–7 (the actual plugin loader). Per the locked plan
-  in `docs/08` Phase 9: slice 2 is `settings.sniffers` config schema
-  (`dir`, `call_timeout_ms`, `max_memory_bytes`, `modules[].sha256`); slice 3
-  is `WasmSniffer` in the `gsp` binary (`wasmtime`, epoch interruption,
-  `StoreLimits`, the `alloc`/`sniff` ABI) + `gsp_sniffer_calls_total` /
-  `gsp_sniffer_call_seconds`; slice 4 is reload rescanning `dir`; slice 5 is
-  the first-party plugin crates (`a2s`, `minecraft`, `regex-firstbytes`) under
-  `crates/plugins/` + a `gsp-sniffer-abi` guest helper crate, built via
-  `make plugins` to `wasm32-unknown-unknown`; slice 6 is a WASM-boundary
-  latency bench vs. NFR N1 + a `docs/07` sandbox-guarantees section; slice 7
-  is an end-to-end test through the real loader. `wasmtime` is a binary-only
-  dep (like `reqwest`) — `gsp-core` still has no sandboxing dependency, only
-  the `Sniffer` trait / `Sniffers` registry. Per-source cap LRU eviction,
-  `GET /sessions`, and a k8s watch informer are separate polish items.
-  Deferred: `GET /sessions` (per-session registry); resolver `sticky_key`.
+- **Phase 9 slice 2 done**: `settings.sniffers` config schema (loader itself is
+  still later slices — this is config-only, nothing reads it yet).
+  `gsp_config::SniffersConfig { dir, call_timeout, max_memory_bytes, modules:
+  Vec<SnifferModulePin { name, sha256 }> }` on `Config::sniffers: Option<...>`
+  (`None` = today's behaviour — no plugins, a `sniffer:` route never matches).
+  Raw `RawSniffers { dir, call_timeout_ms (default 20), max_memory_bytes
+  (default 16 MiB), modules }`; `validate_sniffers` rejects an empty `dir`, a
+  zero timeout / memory cap, an empty module `name`, and a `sha256` that isn't
+  64 hex chars (normalised to lowercase on success). `config.example.yaml` has
+  a commented example block; `docs/05` documents the schema, a validation
+  bullet, and a reload-semantics row (restart-only until slice 4's `dir`
+  rescan). 6 new `gsp-config` tests.
+- **Next**: phase 9 slices 3–7 (the actual plugin loader). Per the locked plan
+  in `docs/08` Phase 9: slice 3 is `WasmSniffer` in the `gsp` binary
+  (`wasmtime`, epoch interruption, `StoreLimits`, the `alloc`/`sniff` ABI),
+  `build_sniffers(&Config)` reading `Config::sniffers` to scan `dir` +
+  verify `sha256` pins, wired via a new `Runtime::start_with_sniffers` call
+  from `main.rs` (today it always passes `Sniffers::default()`), plus
+  `gsp_sniffer_calls_total` / `gsp_sniffer_call_seconds`; slice 4 is reload
+  rescanning `dir`; slice 5 is the first-party plugin crates (`a2s`,
+  `minecraft`, `regex-firstbytes`) under `crates/plugins/` + a
+  `gsp-sniffer-abi` guest helper crate, built via `make plugins` to
+  `wasm32-unknown-unknown`; slice 6 is a WASM-boundary latency bench vs. NFR
+  N1 + a `docs/07` sandbox-guarantees section; slice 7 is an end-to-end test
+  through the real loader. `wasmtime` is a binary-only dep (like `reqwest`) —
+  `gsp-core` still has no sandboxing dependency, only the `Sniffer` trait /
+  `Sniffers` registry. Per-source cap LRU eviction, `GET /sessions`, and a k8s
+  watch informer are separate polish items. Deferred: `GET /sessions`
+  (per-session registry); resolver `sticky_key`.
 - **Roadmap extended**: `docs/10-distributed-control-plane.md` (new) designs the
   v2 distributed control plane — Tier 1 global config/intent store + a
   `gsp-controller` + web UI (phases 10–11), Tier 2 regional health gossip

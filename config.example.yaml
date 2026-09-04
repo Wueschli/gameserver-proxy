@@ -20,6 +20,17 @@ settings:
   # Path to a MaxMind Country .mmdb, required if any listener has a `geo` filter.
   # The proxy fails startup / --check if it can't be opened. Startup-only.
   # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
+  # Sniffer plugin loader (phase 9). Absent => no plugins load; a `sniffer:`
+  # route never matches. `dir` is scanned for *.wasm modules at startup.
+  # `modules:` optionally pins each module's SHA-256 (supply-chain check) —
+  # a module not listed there, or whose hash doesn't match, is refused.
+  # sniffers:
+  #   dir: "/etc/gsp/sniffers"
+  #   call_timeout_ms: 20        # epoch-interrupted if a plugin overruns this
+  #   max_memory_bytes: 16777216 # per-call instance memory ceiling
+  #   modules:
+  #     - name: a2s
+  #       sha256: "..."
 
 # Backend discovery (phase 8). A named source hands a pool its backend set
 # instead of a static `targets:` list. Level-triggered: the adapter returns the

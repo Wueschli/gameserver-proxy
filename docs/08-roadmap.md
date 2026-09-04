@@ -263,8 +263,14 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   registry. No built-in sniffers register in production
   (`Sniffers::default()` is empty); tests build a registry with `test-host`.
   No behaviour change, no `wasmtime`.
-- **Slice 2**: `settings.sniffers` schema + `validate()` + `config.example.yaml`
-  + `docs/05`. Startup + reload semantics documented.
+- ✅ **Slice 2**: `settings.sniffers` schema — `dir`, `call_timeout_ms`
+  (default 20), `max_memory_bytes` (default 16 MiB), `modules: [{ name,
+  sha256 }]` → `gsp_config::SniffersConfig` on `Config::sniffers` (`None` when
+  the block is absent). `validate()` rejects an empty `dir`, a zero timeout /
+  memory cap, and a bad `sha256` (must be 64 hex chars — case-normalised to
+  lowercase). `config.example.yaml` + `docs/05` (schema block, a validation
+  bullet, and a reload-semantics row — restart-only until slice 4's rescan).
+  Config-only: nothing reads `Config::sniffers` yet (that's slice 3).
 - **Slice 3**: `WasmSniffer` in `gsp` — shared `wasmtime::Engine` (epoch on) +
   the epoch-ticker thread; per-call `Store` with `StoreLimits`; ABI marshalling;
   `RouteHint` decode. `build_sniffers(&Config)` scans `dir`, verifies `sha256`
