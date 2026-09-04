@@ -647,12 +647,57 @@ mod tests {
         let hint = minecraft.sniff(&framed).unwrap();
         assert_eq!(hint.host.as_deref(), Some("play.example.net"));
 
-        let http = registry
+        // `regex_firstbytes` needs a `config` to match anything — with none
+        // (this `cfg()` has no `modules`) it recognises nothing.
+        let rf = registry
             .get("regex_firstbytes")
             .expect("regex_firstbytes.wasm not built");
-        let hint = http.sniff(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap();
-        assert_eq!(hint.key.as_deref(), Some("http"));
-        assert!(http.sniff(b"\xff\xff\xff\xffT").is_none());
+        assert!(rf.sniff(b"GET / HTTP/1.1\r\n").is_none());
+    }
+
+    /// `regex_firstbytes` driven by a real `modules[].config` through the whole
+    /// loader path — proves the config-string plumbing (A2) plus the plugin's
+    /// own pattern language (A3) agree end to end.
+    #[test]
+    #[ignore = "needs `make plugins` to have built crates/plugins first"]
+    fn first_party_regex_firstbytes_matches_by_config() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/target/wasm32-unknown-unknown/release/regex_firstbytes.wasm");
+        assert!(
+            src.is_file(),
+            "run `make plugins` first (looked for {})",
+            src.display()
+        );
+
+        let dir = tempdir();
+        let bytes = std::fs::read(&src).unwrap();
+        std::fs::write(dir.join("regex_firstbytes.wasm"), &bytes).unwrap();
+
+        let mut sc = cfg(&dir);
+        sc.max_memory_bytes = 16 * 1024 * 1024;
+        sc.modules.push(gsp_config::SnifferModulePin {
+            name: "regex_firstbytes".into(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            config: Some("key:a2s|@0 hex:ffffffff|ascii:GET ".into()),
+        });
+        let (_loader, registry) = build_sniffers(&sc).unwrap();
+        let rf = registry.get("regex_firstbytes").unwrap();
+
+        assert_eq!(
+            rf.sniff(b"\xff\xff\xff\xffTSource Engine Query\0")
+                .unwrap()
+                .key
+                .as_deref(),
+            Some("a2s"),
+        );
+        assert_eq!(
+            rf.sniff(b"GET /health HTTP/1.1\r\n")
+                .unwrap()
+                .key
+                .as_deref(),
+            Some("a2s"),
+        );
+        assert!(rf.sniff(b"POST /x HTTP/1.1\r\n").is_none());
     }
 
     /// Phase 9 slice 6: bench the WASM boundary — a fresh `Store` + `Instance`
@@ -689,6 +734,16 @@ mod tests {
         // bench is measuring, so give it a long runway instead of coupling
         // the two.
         sc.call_timeout = std::time::Duration::from_secs(10);
+        // Pin all three (a config on `regex_firstbytes` is what makes it match;
+        // once `modules` is non-empty every file must be pinned).
+        for name in ["a2s", "minecraft", "regex_firstbytes"] {
+            let bytes = std::fs::read(dir.join(format!("{name}.wasm"))).unwrap();
+            sc.modules.push(gsp_config::SnifferModulePin {
+                name: name.into(),
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                config: (name == "regex_firstbytes").then(|| "ascii:GET ".to_string()),
+            });
+        }
         let (_loader, registry) = build_sniffers(&sc).unwrap();
 
         // One representative, recognised payload per plugin — the

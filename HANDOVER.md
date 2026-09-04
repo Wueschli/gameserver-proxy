@@ -912,7 +912,7 @@ focused unit):
 2. ~~Item 3 — `RouteHint.reject` hard drop~~ — **done** (on `main`).
 3. ~~Item 6 — per-resolver `target` timeout knob~~ — **done** (on `main`).
 4. ~~Item 5 — `weighted` balancer~~ — **done** (on `main`).
-5. **Item 2 — per-plugin sniffer config**, a two-slice unit:
+5. ~~**Item 2 — per-plugin sniffer config**~~ — **done** (on `main`), a two-slice unit:
    - ~~**A2**~~ — **done** (on `main`): `settings.sniffers.modules[].config`
      schema (+ `SnifferModulePin.config`, `validate_sniffers`), the widened
      guest ABI `sniff(in_ptr, in_len, cfg_ptr, cfg_len)` (host `alloc`s + writes
@@ -922,18 +922,21 @@ focused unit):
      ADR 16a. Tests: `sniffer_loader::tests::{wasm_plugin_receives_its_config,
      build_sniffers_wires_module_config_through_the_scan}` +
      `gsp_config` config-parse/reject cases.
-   - **A3** ← *next*: `regex-firstbytes` consumes its config to become a
-     genuinely runtime-configured bounded matcher (drops the hard-coded HTTP
-     template).
+   - ~~**A3**~~ — **done** (on `main`): `regex-firstbytes` rebuilt around its
+     `config` — a tiny `[key:NAME|] [@OFFSET ](hex:…|ascii:…){|…}` pattern
+     language (no `regex` dep), `O(n)` and allocation-free, caps on offset /
+     pattern count. Matches nothing without a `config`. Tests: 6 native in the
+     crate + `sniffer_loader::tests::first_party_regex_firstbytes_matches_by_config`
+     (`#[ignore]`d, real `.wasm` through the loader).
    **ABI decision (locked here)**: *widen `sniff`*, not an optional `configure`
    export. The sniffer ABI is a third-party contract that freezes at 1.0; there
    are zero external plugins today, so the clean break is at its cheapest now,
    and a uniform signature (config always passed, empty slice when none) beats a
    permanent "call `configure` if the module exports it" branch and a two-class
    plugin model. Extra blast radius is mechanical and in-tree.
-6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** Larger — the
-   resolver-config plumbing item 6 added (`ResolverConfig` fields, `build_resolvers`)
-   is the shape a live reload has to re-run.
+6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** ← *next.*
+   Larger — the resolver-config plumbing item 6 added (`ResolverConfig` fields,
+   `build_resolvers`) is the shape a live reload has to re-run.
 
 Then list C polish, then list B (perf pass).
 
@@ -964,9 +967,10 @@ are cheaper than a fresh slice:
    `PEEK_TIMEOUT` budget expires, then routes. Non-TLS first bytes keep the
    single-peek behaviour. Test:
    `tcp_forward::sni_matcher_reassembles_a_fragmented_client_hello`.
-2. **Per-plugin sniffer config** (`settings.sniffers.modules[].config` blob).
-   **A2 done** (schema + widened ABI + `WasmSniffer` config + ADR 16a);
-   **A3 next** (`regex-firstbytes` consumes it). See "Execution order" above.
+2. ~~**Per-plugin sniffer config**~~ — **DONE** (A2 + A3): `settings.sniffers.
+   modules[].config` string + widened `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`
+   ABI (ADR 16a); `regex-firstbytes` rebuilt around it as a configurable bounded
+   pattern matcher. See "Execution order" above.
 3. ~~**`RouteHint.reject` → hard drop**~~ — **DONE**: `gsp-core` drops a
    rejected connection (`listener.rs`) / first datagram (`listener_udp.rs`,
    before the gate and the push hint) instead of falling through to `always`.

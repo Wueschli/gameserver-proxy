@@ -28,13 +28,15 @@ installed.
   how BungeeCord/Velocity-style virtual-host routing works). Strips a Forge
   `\0FML\0…` suffix; lower-cases the host to match the proxy's `sni`-style
   `host:` patterns.
-- `regex-firstbytes` — a bounded, allocation-light first-bytes matcher. As of
-  the data-plane-completion "per-plugin config" work the ABI carries a
-  `settings.sniffers.modules[].config` string (`cfg_*` region); slice **A2**
-  wired the plumbing and this crate still ships its compiled-in HTTP/1.x
-  request-line pattern, slice **A3** rebuilds it around the config so the
-  pattern is genuinely runtime-supplied. `a2s` and `minecraft` take no config
-  and ignore the region.
+- `regex-firstbytes` — a bounded, allocation-light, **runtime-configured**
+  first-bytes matcher (no `regex` dependency). Its `settings.sniffers.modules[].config`
+  string is a tiny pattern language:
+  `[key:NAME|] pattern { |pattern }` where `pattern` is
+  `[@OFFSET ] (hex:HEX | ascii:TEXT)` — a datagram is recognised when any
+  pattern's literal bytes are a prefix of `first[offset..]`, tagging the hint
+  with `key` (default `firstbytes`). Examples: `ascii:GET `,
+  `key:a2s|@0 hex:ffffffff`. With no `config` it matches nothing. `a2s` and
+  `minecraft` take no config and ignore the `cfg_*` region.
 
 Every plugin crate is `crate-type = ["cdylib", "lib"]`: `cargo test` runs its
 unit tests as a normal native `rlib` (the `recognise()` function is pure Rust,

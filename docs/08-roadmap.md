@@ -418,8 +418,9 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   widens the guest ABI to
   `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[]`
   grows a `config` string, marshalled into a second linear-memory region on
-  every call. `a2s` / `minecraft` ignore it; **A3** rebuilds `regex-firstbytes`
-  around it so it is a genuinely runtime-configured bounded matcher, not the
+  every call. `a2s` / `minecraft` ignore it; `regex-firstbytes` was rebuilt
+  around it — a tiny `[key:NAME|] [@OFFSET ](hex:…|ascii:…){|…}` pattern
+  language, so it is a genuinely runtime-configured bounded matcher and not the
   hard-coded HTTP template.
 
 ## Phase 10 – Fleet aggregation & operational Web UI
