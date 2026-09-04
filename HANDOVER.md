@@ -130,9 +130,34 @@ retrying with growing backoff (`cursor=2` correctly, post-fix). Workspace
 gained `tokio-stream` (gsp-controller's SSE stream wrapper) and reqwest's
 `stream` feature (gsp's `Response::chunk()`).
 
-**Next**: slice 5 — revision history + diff + one-key rollback endpoints,
-plus minimal bearer-token auth on the controller's API (`docs/08` phase
-10+11); then the aggregator slices (6–10).
+**Slice 5 done — all 5 controller slices complete.** `gsp-controller` gained:
+`GET /config/revisions` (history: revision/size/`current`), `GET
+/config/revisions/{revision}` (past revision's raw text), `GET
+/config/revisions/{revision}/diff[?against=<revision>]` (a `similar`-crate
+line diff against `current` or another revision — added `similar` as a
+workspace dep), `POST /config/rollback/{revision}`. Rollback **never
+rewrites history**: it re-submits the old revision's exact bytes through the
+same validate-then-`Store::put` path `POST /config` already uses (a shared
+`submit()` helper both call), so a subscriber just sees an ordinary new
+revision — no special-casing needed anywhere downstream. New `auth.rs`:
+`--auth-token <token>` on `gsp-controller` gates the whole `/config*`
+router (via an `axum::middleware::from_fn_with_state` layer) with a bearer
+check; `/healthz` stays outside that router so it's never gated, matching
+plain liveness-probe convention. It's a single shared secret (`AppState`
+carries `Option<Arc<str>>`), not RBAC — correctly scoped for this release's
+one-controller PoC, not meant to be more. 8 new tests (19 total in the
+crate). Verified live end-to-end over real HTTP against
+`config.example.yaml`: unauthenticated request → `401`; submitted two
+revisions; `GET /config/revisions` showed both with correct sizes and
+`current` on the second; diffed revision 1 against current and got exactly
+the changed `max_connections` line; rolled back to revision 1 and confirmed
+`GET /config`'s `X-Config-Revision` became `3` (a new revision, not a
+rewind) with revision 1's exact content.
+
+**All 5 controller slices (1–5) are now done.** **Next**: the aggregator
+slices (6–10 in `docs/08` phase 10+11) — `gsp-aggregator` skeleton +
+`POST /ingest`, `gsp`'s push client, `/fleet/*` read endpoints, and
+intent-verb fan-out.
 
 ### Known follow-ups (none blocking)
 

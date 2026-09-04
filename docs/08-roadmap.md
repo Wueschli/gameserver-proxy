@@ -396,8 +396,20 @@ controller's revision log is a follow-on once this ships.
    while retrying). An invalid pushed revision is logged and skipped (cursor
    still advances — it must not be replayed forever on every reconnect), the
    same "bad reload keeps the old snapshot" rule as a file reload.
-5. Revision history + diff + one-key rollback endpoints; minimal auth (bearer
-   token) on the controller's API.
+5. ✅ `GET /config/revisions` (history: revision, size, `current` flag),
+   `GET /config/revisions/{revision}` (a past revision's raw text),
+   `GET /config/revisions/{revision}/diff[?against=<revision>]` (a
+   `similar`-crate line diff against `current` or another revision, `+`/`-`/
+   ` `-prefixed plain text), `POST /config/rollback/{revision}` (**never
+   rewrites history** — re-submits that revision's bytes through the same
+   validate-then-`Store::put` path as `POST /config`, so it's just an
+   ordinary new revision to every subscriber, no special-casing anywhere
+   else). `--auth-token <token>` on `gsp-controller` gates the whole
+   `/config*` surface with a bearer-token check (`/healthz` stays open); a
+   shared secret, not RBAC — appropriate for this release's one-controller
+   scope. 8 new tests; verified live end-to-end over real HTTP (401 without
+   the token, history/diff/rollback all round-tripped against
+   `config.example.yaml`).
 
 ### Aggregator slices (`gsp-aggregator`, fleet view + operational verbs)
 6. Skeleton binary; `POST /ingest` accepts a periodic push from a proxy (pool

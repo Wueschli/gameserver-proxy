@@ -61,6 +61,7 @@ sha2 = "0.10"
 sled = "0.34"
 tempfile = "3"
 tokio-stream = "0.1"
+similar = "2"
 
 [profile.release]
 lto = "thin"

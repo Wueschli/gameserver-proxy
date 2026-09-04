@@ -1,7 +1,8 @@
 //! `gsp-controller` binary — see `lib.rs` for the design pointer and slice
 //! plan. Slice 1: open the store, serve `/healthz` so the process is already
-//! observable the same way `gsp` is. Slice 2: `POST`/`GET /config`. The
-//! subscribe/change-stream endpoint lands in slice 3.
+//! observable the same way `gsp` is. Slice 2: `POST`/`GET /config`. Slice 3:
+//! `GET /config/subscribe`. Slice 5: revision history/diff/rollback +
+//! `--auth-token`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -29,6 +30,13 @@ struct Args {
     /// Address the controller's API listens on.
     #[arg(long, default_value = "127.0.0.1:9901")]
     listen: SocketAddr,
+
+    /// Bearer token required on every /config* request. Omit to leave the
+    /// API open — network-boundary-only auth, the same posture `gsp`'s own
+    /// admin API has today. Not a full RBAC/identity story, just a shared
+    /// secret (see `crate::auth`).
+    #[arg(long)]
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -51,12 +59,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         data_dir = %args.data_dir.display(),
         ?current_revision,
+        auth = args.auth_token.is_some(),
         "controller store opened"
     );
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router(AppState::new(store)));
+        .merge(api::router(AppState::new(store, args.auth_token)));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

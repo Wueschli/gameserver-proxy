@@ -16,12 +16,24 @@
 //! A lagging subscriber (slow reader vs. a burst of submissions) just
 //! re-runs the catch-up query from wherever it left off — `Store` never
 //! forgets a revision, so there is no delivery state to track here.
+//!
+//! Slice 5 adds `GET /config/revisions` (history), `GET
+//! /config/revisions/{revision}` (one past revision's raw text), `GET
+//! /config/revisions/{revision}/diff[?against=<revision>]` (a line diff
+//! against `current`, or another revision), and `POST
+//! /config/rollback/{revision}` — which **never rewrites history**, it
+//! re-submits that revision's bytes as a brand new one through the same
+//! validate-then-[`Store::put`] path `submit_config` uses, so a subscriber
+//! sees rollback as just another ordinary revision, no special-casing
+//! needed anywhere else. The whole surface is gated by
+//! [`crate::auth::require_bearer`] when `AppState::auth_token` is set.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -46,12 +58,19 @@ pub struct AppState {
     /// the subscriber re-fetches the bytes from `store` itself (the channel
     /// only ever carries a `u64`, never the config text).
     pub updates: broadcast::Sender<u64>,
+    /// Bearer token every `/config*` request must present, or `None` to
+    /// leave the API open (`crate::auth`).
+    pub auth_token: Option<Arc<str>>,
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: Arc<Store>, auth_token: Option<String>) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
-        AppState { store, updates }
+        AppState {
+            store,
+            updates,
+            auth_token: auth_token.map(Arc::from),
+        }
     }
 }
 
@@ -59,6 +78,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/config", post(submit_config).get(get_current_config))
         .route("/config/subscribe", get(subscribe))
+        .route("/config/revisions", get(list_revisions))
+        .route("/config/revisions/{revision}", get(get_revision))
+        .route("/config/revisions/{revision}/diff", get(diff_revision))
+        .route("/config/rollback/{revision}", post(rollback))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_bearer,
+        ))
         .with_state(state)
 }
 
@@ -75,7 +102,14 @@ struct ErrorResponse {
 /// `POST /config` — body is a raw YAML config document, the same shape a
 /// proxy's `--config` file has. Validates, then persists on success.
 async fn submit_config(State(state): State<AppState>, body: String) -> Response {
-    if let Err(e) = gsp_config::parse_str(&body) {
+    submit(&state, body).await
+}
+
+/// Validates `text` and persists it as a new revision on success — shared by
+/// [`submit_config`] and [`rollback`] (a rollback is just a re-submission of
+/// an old revision's bytes, never a rewrite of history).
+async fn submit(state: &AppState, text: String) -> Response {
+    if let Err(e) = gsp_config::parse_str(&text) {
         tracing::warn!(error = %e, "rejected an invalid config submission");
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -86,7 +120,7 @@ async fn submit_config(State(state): State<AppState>, body: String) -> Response 
             .into_response();
     }
 
-    match state.store.put(body.into_bytes()) {
+    match state.store.put(text.into_bytes()) {
         Ok(revision) => {
             tracing::info!(revision, "accepted a new config revision");
             // No receivers (no subscriber connected right now) is not an
@@ -122,6 +156,138 @@ async fn get_current_config(State(state): State<AppState>) -> Response {
             .into_response(),
         Err(e) => store_error_response(e),
     }
+}
+
+#[derive(Serialize)]
+struct RevisionSummary {
+    revision: u64,
+    size_bytes: usize,
+    current: bool,
+}
+
+/// `GET /config/revisions` — every revision, oldest first, with its size and
+/// whether it's the current one. Reuses `revisions_after(0)` rather than
+/// adding a store method that keeps only lengths — revisions are YAML config
+/// text (KB-sized), and this is a control-plane, human-paced call, not
+/// something worth a dedicated storage path.
+async fn list_revisions(State(state): State<AppState>) -> Response {
+    let current = match state.store.current_revision() {
+        Ok(c) => c,
+        Err(e) => return store_error_response(e),
+    };
+    match state.store.revisions_after(0) {
+        Ok(revisions) => {
+            let summaries: Vec<RevisionSummary> = revisions
+                .into_iter()
+                .map(|(revision, bytes)| RevisionSummary {
+                    revision,
+                    size_bytes: bytes.len(),
+                    current: Some(revision) == current,
+                })
+                .collect();
+            (StatusCode::OK, Json(summaries)).into_response()
+        }
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// `GET /config/revisions/{revision}` — one past revision's raw text (the
+/// same shape `GET /config` returns for the current one), `404` if it never
+/// existed.
+async fn get_revision(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+    match state.store.get(revision) {
+        Ok(Some(bytes)) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            (StatusCode::OK, text).into_response()
+        }
+        Ok(None) => revision_not_found(revision),
+        Err(e) => store_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DiffParams {
+    /// Defaults to the current revision — "what changed between this old
+    /// revision and now" is the common question; diffing two arbitrary past
+    /// revisions is still possible by passing this explicitly.
+    against: Option<u64>,
+}
+
+/// `GET /config/revisions/{revision}/diff[?against=<revision>]` — a
+/// line-level diff (`similar::TextDiff`) between `revision` and `against`
+/// (default: current), rendered as plain text with `+`/`-`/` ` line prefixes.
+async fn diff_revision(
+    State(state): State<AppState>,
+    Path(revision): Path<u64>,
+    Query(params): Query<DiffParams>,
+) -> Response {
+    let old = match state.store.get(revision) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return revision_not_found(revision),
+        Err(e) => return store_error_response(e),
+    };
+
+    let (against, new) = match params.against {
+        Some(rev) => match state.store.get(rev) {
+            Ok(Some(bytes)) => (rev, bytes),
+            Ok(None) => return revision_not_found(rev),
+            Err(e) => return store_error_response(e),
+        },
+        None => match state.store.current() {
+            Ok(Some((rev, bytes))) => (rev, bytes),
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "no current config to diff against".into(),
+                    }),
+                )
+                    .into_response()
+            }
+            Err(e) => return store_error_response(e),
+        },
+    };
+
+    let old_text = String::from_utf8_lossy(&old).into_owned();
+    let new_text = String::from_utf8_lossy(&new).into_owned();
+    let diff = similar::TextDiff::from_lines(&old_text, &new_text);
+    let mut out = format!("--- revision {revision}\n+++ revision {against}\n");
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            similar::ChangeTag::Delete => '-',
+            similar::ChangeTag::Insert => '+',
+            similar::ChangeTag::Equal => ' ',
+        };
+        out.push(sign);
+        out.push_str(change.as_str().unwrap_or(""));
+    }
+    (StatusCode::OK, out).into_response()
+}
+
+/// `POST /config/rollback/{revision}` — re-submits an old revision's exact
+/// bytes as a brand-new one (see the module doc: this never rewrites
+/// history). Same response shape as `POST /config`.
+async fn rollback(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+    match state.store.get(revision) {
+        Ok(Some(bytes)) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let resp = submit(&state, text).await;
+            tracing::info!(from_revision = revision, "rolled back");
+            resp
+        }
+        Ok(None) => revision_not_found(revision),
+        Err(e) => store_error_response(e),
+    }
+}
+
+fn revision_not_found(revision: u64) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("no revision {revision}"),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -245,7 +411,7 @@ mod tests {
     fn test_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        (AppState::new(store), dir)
+        (AppState::new(store, None), dir)
     }
 
     const VALID_CONFIG: &str = r#"
@@ -402,5 +568,213 @@ listeners:
 
         assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
         assert_eq!(rx.recv().await.unwrap(), (rev3, b"three".to_vec()));
+    }
+
+    const OTHER_VALID_CONFIG: &str = r#"
+pools:
+  - name: mc
+    targets: ["127.0.0.1:9999"]
+listeners:
+  - name: main
+    bind: "0.0.0.0:25565"
+    protocol: tcp
+    pool: mc
+"#;
+
+    async fn submit(app: &Router, body: &'static str) -> u64 {
+        let resp = app
+            .clone()
+            .oneshot(Request::post("/config").body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["revision"].as_u64().unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_revisions_reports_size_and_marks_current() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let rev1 = submit(&app, VALID_CONFIG).await;
+        let rev2 = submit(&app, OTHER_VALID_CONFIG).await;
+
+        let resp = app
+            .oneshot(
+                Request::get("/config/revisions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["revision"], rev1);
+        assert_eq!(list[0]["current"], false);
+        assert_eq!(list[1]["revision"], rev2);
+        assert_eq!(list[1]["current"], true);
+        assert_eq!(list[0]["size_bytes"], VALID_CONFIG.len());
+    }
+
+    #[tokio::test]
+    async fn get_revision_returns_a_past_revisions_text_and_404s_a_missing_one() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let rev1 = submit(&app, VALID_CONFIG).await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/config/revisions/{rev1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes, VALID_CONFIG.as_bytes());
+
+        let resp = app
+            .oneshot(
+                Request::get("/config/revisions/9999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn diff_against_current_shows_the_changed_line() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let rev1 = submit(&app, VALID_CONFIG).await;
+        submit(&app, OTHER_VALID_CONFIG).await;
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/config/revisions/{rev1}/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("-    targets: [\"127.0.0.1:25566\"]"));
+        assert!(text.contains("+    targets: [\"127.0.0.1:9999\"]"));
+    }
+
+    #[tokio::test]
+    async fn rollback_resubmits_the_old_bytes_as_a_new_revision() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let rev1 = submit(&app, VALID_CONFIG).await;
+        submit(&app, OTHER_VALID_CONFIG).await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/config/rollback/{rev1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rollback_rev = json["revision"].as_u64().unwrap();
+        assert_eq!(
+            rollback_rev, 3,
+            "a rollback is a new revision, never a rewrite of history"
+        );
+
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes, VALID_CONFIG.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn rollback_to_a_missing_revision_is_404() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/config/rollback/9999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_missing_token_is_unauthorized_when_one_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let state = AppState::new(store, Some("secret".into()));
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::get("/config")
+                    .header("Authorization", "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_right_token_is_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let state = AppState::new(store, Some("secret".into()));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/config")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No config submitted yet in this fresh store — 404, not 401, proves
+        // the request got *past* the auth layer.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

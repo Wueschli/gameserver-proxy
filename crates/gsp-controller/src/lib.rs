@@ -11,8 +11,11 @@
 //!
 //! Slice 1: [`store::Store`] persists config revisions. Slice 2 ([`api`]):
 //! `POST`/`GET /config`, validated with the same `gsp_config::parse_str` a
-//! proxy runs on a file reload. Slices 3–5 (the subscribe/change-stream
-//! endpoint, and revision history/rollback) are not built yet.
+//! proxy runs on a file reload. Slice 3: `GET /config/subscribe`, the
+//! catch-up + change-stream endpoint `gsp --controller` consumes. Slice 5:
+//! revision history/diff/rollback endpoints, and [`auth`]'s bearer-token
+//! gate on the whole `/config*` surface.
 
 pub mod api;
+pub mod auth;
 pub mod store;
