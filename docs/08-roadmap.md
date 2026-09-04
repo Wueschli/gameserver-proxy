@@ -28,8 +28,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 
 ## Phase 2 – L4 UDP proxy ✅
 - ✅ UDP listener with `SO_REUSEPORT`, one recv task per core, worker-local
-  (lock-free) session table. (`recvmmsg`/`sendmmsg` batching and a timing wheel
-  deferred — plain `recv_from`/`send` and a 1 s idle sweep for now.)
+  (lock-free) session table. Ingress batches — one `recvmmsg(2)` pulls up to
+  `RECV_BATCH` datagrams per wakeup (perf pass, ADR 18); `sendmmsg` egress
+  batching and a timing wheel (1 s idle sweep for now) are still deferred.
 - ✅ Per-session `connect(2)` upstream socket + a reply-pump task per session.
 - ✅ Session affinity (`hash_on: src_ip | src_ip_port` + per-worker sticky
   table). (`consistent_hash` balancer deferred.)

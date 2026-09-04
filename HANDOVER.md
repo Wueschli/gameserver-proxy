@@ -834,7 +834,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Data/control split | Data plane only reads the snapshot; `reload.rs` is the only writer. |
 | LB / health | `AtomicBool` healthy flag, `rise`/`fall` streaks under a short `Mutex`, `AtomicUsize` active count. `BackendGuard` RAII for the session slot + passive health. |
 | Balancers | `round_robin` (atomic index + `rotate_left`), `least_conn` (sort healthy by active), `weighted` (weighted round-robin: one atomic tick indexes the cumulative-weight line; pool `weights` map, default 1), `consistent_hash` (rendezvous/HRW hash via `std` `DefaultHasher`; no `hashring` dep — backend set is tiny). |
-| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. `recvmmsg`/`sendmmsg`, timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
+| UDP | Worker-local session table (no global lock), `connect(2)` socket + reply task per session, per-worker sticky affinity table (hard cap, wholesale clear), 1 s idle sweep. Ingress `recvmmsg`-batched (ADR 18); `sendmmsg` egress + timing wheel deferred. See ADR 9. `consistent_hash` now gives table-free affinity as an alternative to the sticky table. |
 | UDP prefix routing | One wildcard `IP_PKTINFO` socket per prefix (`recvmsg` for the real dest, `sendmsg` cmsg for the reply source), via `nix` — zero `unsafe`. See ADR 10. |
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
 | Sniffers | Loader **done** (phase 9 slices 3–5): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) + the `gsp-sniffer-abi` guest helper live in the standalone `crates/plugins/` workspace, `make plugins`. Per-plugin config (ADR 16a): the guest `sniff` export takes `(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[].config` is a string marshalled into a second linear-memory region on every call (`WasmSniffer` holds it; the `gsp-core` trait is unchanged). |
@@ -849,7 +849,8 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Item | Deferred to |
 |------|-------------|
 | `splice()` zero-copy TCP fast path | **done** (perf pass, ADR 17) — `proxy::pump` splices `socket → pipe → socket` on Linux (`nix` `zerocopy` feature); buffered `try_read`/`try_write` fallback on non-Linux / `pipe2` failure; half-close via `socket2` `SockRef::shutdown(Write)`. Test: `tcp_forward::splice_forwards_a_large_stream_and_propagates_half_close` (4 MiB round-trip + half-close). |
-| UDP `recvmmsg`/`sendmmsg` batching (plain `recv_from`/`send` now) | perf pass |
+| UDP ingress `recvmmsg` batching | **done** (perf pass, ADR 18) — one `recvmmsg` per readiness wakeup pulls up to `RECV_BATCH`=16 datagrams into a per-worker `RecvBatch`; non-Linux keeps one `recvmsg`. Test: `udp_forward::forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg`. |
+| UDP `sendmmsg` egress batching (reply pump + upstream forward) | perf pass — follow-up (per-session reply buffers would 16× RSS; deferred) |
 | UDP idle expiry via a timing wheel (1 s sweep now) | perf pass |
 | UDP sticky-affinity table: LRU eviction (hard cap + wholesale clear now) | polish |
 | `consistent_hash` balancer | **done** (phase 3 slice 3) |
@@ -872,7 +873,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | TCP prefix binding beyond `freebind` (accepting a whole prefix on one socket — needs routing + `getsockname`, no cmsg), IPv4 non-local bind ergonomics | phase 3–6 |
 | **Phase 4 — done**: external resolver HTTP + gRPC, `pool` + `target`, `on_error`, TTL LRU cache + `stale_ok` | **done** |
 | **Phase 6 — done**: PROXY protocol v1/v2 (TCP) + v2-udp (first datagram); TPROXY transparent mode (TCP + UDP, v4 + v6) | **done** |
-| UDP transparent `IPV6_TRANSPARENT` on a musl / non-glibc target, and `recvmmsg` batching for the transparent recv path | perf / portability pass |
+| UDP transparent `IPV6_TRANSPARENT` on a musl / non-glibc target | perf / portability pass (recvmmsg now covers the transparent recv path too — ADR 18) |
 | Resolver `sticky_key` — resolver-chosen affinity key; deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity; needs a design for how a later request recovers the key) | later |
 | `target` connections' connect / idle timeouts | **done** (data-plane completion, item 6 — `resolvers[].target_connect_timeout_ms` / `target_idle_timeout_sec`, defaults 300 ms / 90 s = `proxy::TARGET_*`, carried on `Routed::Target` via `Resolver::target_{connect,idle}_timeout`) |
 | Build now needs `protoc` (gRPC codegen in `crates/gsp/build.rs`); CI installs `protobuf-compiler` | — |
@@ -1031,9 +1032,17 @@ project's north star):**
      splices `socket → pipe → socket` on Linux behind the same fn; buffered
      `try_read`/`try_write` fallback elsewhere. `nix` gained the `zerocopy`
      feature. Test: `tcp_forward::splice_forwards_a_large_stream_and_propagates_half_close`.
-   - **`recvmmsg`/`sendmmsg` UDP batching** (incl. the transparent recv path) —
-     still `recv_from`/`send` per datagram. `nix` `socket` feature already has
-     the calls.
+   - ~~**UDP ingress `recvmmsg` batching**~~ — **done** (ADR 18). One
+     `recvmmsg` per readiness wakeup pulls up to `RECV_BATCH`=16 datagrams into
+     a per-worker `RecvBatch`; the per-datagram route/filter/forward loop runs
+     over the batch. Covers plain / prefix / transparent (the dest cmsg parse
+     moved into `dst_from_cmsg`). Non-Linux keeps one `recvmsg` behind the same
+     API. `nix` gained `time` (+ already had `socket`). Test:
+     `udp_forward::forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg`.
+   - **UDP `sendmmsg` egress batching** (reply pump + upstream forward) — still
+     one `send` per datagram. Deferred as a follow-up: per-session reply
+     buffers of `RECV_BATCH` × `MAX_DATAGRAM` would 16× the per-session RSS, so
+     it needs a smaller batch buffer or per-datagram alloc — its own decision.
    - **UDP idle expiry via a timing wheel** — still a 1 s full-scan sweep per
      worker.
 8. **`IPV6_TRANSPARENT` on musl / non-glibc** — pull in here if shipping Alpine
@@ -1113,10 +1122,15 @@ a clear win once memory bandwidth is the bottleneck.
 Per-UDP-session cost (paid once, on the first datagram of a session): 1
 `Pool::acquire` / `acquire_addr`, 1 `UdpSocket::bind` + `connect` for the upstream
 socket, 1 spawned reply-pump task, 1 sticky-table insert, 1 session-table insert.
-Two 64 KB buffers per session (one in the recv loop, shared across all of that
-worker's sessions; one per reply task). **Per-datagram** cost on the steady-state
-path: one `HashMap` lookup by client `SocketAddr`, one relaxed atomic store
-(liveness), one `send`/`send_to` — no lock, no allocation, no task spawn.
+Recv buffers: `RECV_BATCH` (16) × 64 KB per **worker** (the `RecvBatch`, shared
+across all of that worker's sessions), plus one 64 KB buffer per reply task.
+**Per-datagram** cost on the steady-state ingress path: a share of one
+`recvmmsg` (up to 16 datagrams per syscall on Linux; a fresh `MultiHeaders`
+alloc is amortised over the batch), one `HashMap` lookup by client
+`SocketAddr`, one relaxed atomic store (liveness), one `send` to the upstream
+socket — no lock, no per-datagram allocation, no task spawn. The reply path is
+still one `recv` + one `send`/`send_to` per datagram (`sendmmsg` egress
+batching deferred).
 
 Phase 3 routing adds, per new TCP connection / new UDP session only: one
 `stream.local_addr()` (TCP) or cached `down.local_addr()` (UDP) syscall and a
@@ -1291,10 +1305,11 @@ pool / health / cap machinery with per-client sessions. Key files:
 `HealthCheckKind`, `HashOn`, listener `affinity`).
 
 First-cut simplifications, each a drop-in replacement later (see the deferred
-table and ADR 9): plain `recv_from`/`send` instead of `recvmmsg`/`sendmmsg`; a 1 s
-idle sweep instead of a timing wheel; the sticky-affinity table is bounded by a
-hard cap and cleared wholesale (no LRU); ICMP port-unreachable just ends the reply
-pump. `consistent_hash` was **not** added (still `round_robin` / `least_conn`).
+table and ADR 9): ~~plain `recv_from`/`send`~~ ingress is now `recvmmsg`-batched
+(perf pass, ADR 18) — `sendmmsg` egress still pending; a 1 s idle sweep instead
+of a timing wheel; the sticky-affinity table is bounded by a hard cap and
+cleared wholesale (no LRU); ICMP port-unreachable just ends the reply pump.
+`consistent_hash` was **not** added (still `round_robin` / `least_conn`).
 
 Reload contract held: a reload rebuilds pools; live UDP sessions keep running
 against their existing `Arc<Backend>` (the `BackendGuard` keeps the slot), and the
@@ -1395,9 +1410,14 @@ Config: `listeners[].prefix: <cidr>` (UDP only, resolved to
 `setsockopt(Ipv4PacketInfo | Ipv6RecvPacketInfo)`; `bind_reuseport_tcp(addr,
 backlog, freebind)` — with `freebind`, `socket2` `set_freebind[_ipv6]`.
 
-`listener_udp.rs`: `recv_one(sock, buf, pktinfo)` — plain `recv_from` when off,
-else `readable().await` + `try_io(recvmsg_pktinfo)`. `recvmsg_pktinfo` builds a
-`nix::cmsg_space!(in6_pktinfo)` buffer, `recvmsg::<SockaddrStorage>`, reads the
+`listener_udp.rs`: `RecvBatch::recv(sock, mode)` — `readable().await` +
+`try_io(recv_now)`; on Linux `recv_now` is one `recvmmsg` of up to
+`RECV_BATCH`=16 datagrams into the batch's buffers (fresh `MultiHeaders` per
+call), non-Linux is one `recv_from` / `recvmsg_dst`. Each datagram's dest cmsg
+is parsed by `dst_from_cmsg` (`Ipv4/Ipv6PacketInfo` for prefix — port filled
+from the listener; `Ipv4/Ipv6OrigDstAddr` for transparent — real `ip:port`).
+The non-Linux `recvmsg_dst` builds a
+`nix::cmsg_space!(in6_pktinfo, sockaddr_in6)` buffer, `recvmsg::<SockaddrStorage>`, reads the
 client from `msg.address` (`sockaddr_to_std`) and the dest from
 `ControlMessageOwned::Ipv4PacketInfo.ipi_addr` / `Ipv6PacketInfo.ipi6_addr`
 (`.to_ne_bytes()` for the v4 `s_addr`). Session key is `(SocketAddr,

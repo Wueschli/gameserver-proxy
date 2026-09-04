@@ -19,8 +19,12 @@
 //! keyed by `(client, dst)`. Without prefix mode nothing changes: plain
 //! `recv_from` / `send_to`, sessions keyed by client only.
 //!
-//! v0 simplifications (see `HANDOVER.md`, "Phase 2"):
-//! - plain `recv_from` / `send`, not `recvmmsg` / `sendmmsg` batching;
+//! The ingress path batches: one `recvmmsg(2)` on Linux pulls up to
+//! [`RECV_BATCH`] datagrams per wakeup (see [`RecvBatch`]); non-Linux and the
+//! per-session reply pump still do one datagram per syscall.
+//!
+//! v0 simplifications still open (see `HANDOVER.md`, "Phase 2"):
+//! - the reply pump and the upstream forward are not `sendmmsg`-batched;
 //! - idle expiry by a 1 s sweep, not a timing wheel;
 //! - one spawned reply task per session (recorded in the latency ledger);
 //! - the stickiness table is bounded by a hard cap and cleared wholesale when
@@ -163,7 +167,7 @@ pub async fn run_udp_listener(
 
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
     let mut sticky: HashMap<StickyKey, SocketAddr> = HashMap::new();
-    let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut rbatch = RecvBatch::new();
     let mut sweep = interval(SWEEP_PERIOD);
     sweep.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -206,124 +210,131 @@ pub async fn run_udp_listener(
                         .decrement(evicted as f64);
                 }
             }
-            recv = recv_one(&sock, &mut buf, mode) => {
-                let (n, client, dst) = match recv {
-                    Ok(v) => v,
+            recv = rbatch.recv(&sock, mode) => {
+                let count = match recv {
+                    Ok(c) => c,
                     Err(e) => {
                         tracing::warn!(listener = %cfg.name, error = %e, "udp recv failed");
                         continue;
                     }
                 };
-                metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s")
-                    .increment(1);
+                if count > 0 {
+                    metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s")
+                        .increment(count as u64);
+                }
+                // One `recvmmsg` (Linux) pulled up to `RECV_BATCH` datagrams;
+                // route / forward each. `continue` skips to the next datagram.
+                for i in 0..count {
+                    let (data, client, dst) = rbatch.at(i);
 
-                // Prefix mode: drop datagrams to a destination outside the prefix
-                // (and any datagram we somehow got no destination for).
-                if let Some(prefix) = &cfg.prefix {
-                    match dst {
-                        Some(d) if prefix.contains(d.ip()) => {}
-                        _ => {
+                    // Prefix mode: drop datagrams to a destination outside the
+                    // prefix (and any datagram we somehow got no destination for).
+                    if let Some(prefix) = &cfg.prefix {
+                        match dst {
+                            Some(d) if prefix.contains(d.ip()) => {}
+                            _ => {
+                                metrics::counter!(
+                                    m::DATAGRAMS_DROPPED,
+                                    "listener" => cfg.name.clone(), "reason" => "outside_prefix",
+                                ).increment(1);
+                                continue;
+                            }
+                        }
+                    }
+
+                    let key: SessionKey = (client, dst);
+
+                    // Existing session: forward and refresh liveness.
+                    if let Some(s) = sessions.get(&key) {
+                        s.last_ms.store(now_ms(), Ordering::Relaxed);
+                        let up = s.upstream.clone();
+                        if let Err(e) = up.send(data).await {
+                            note_port_unreachable(&cfg.name, &s.health, &e);
                             metrics::counter!(
                                 m::DATAGRAMS_DROPPED,
-                                "listener" => cfg.name.clone(), "reason" => "outside_prefix",
+                                "listener" => cfg.name.clone(), "reason" => "upstream_send",
+                            ).increment(1);
+                            tracing::warn!(
+                                listener = %cfg.name, %client, error = %e,
+                                "udp forward to backend failed"
+                            );
+                        }
+                        continue;
+                    }
+
+                    // Filter chain (phase 7): a new session from a denied source
+                    // IP is dropped before session allocation. Established
+                    // sessions keep their steady-state path scan-free.
+                    if !cfg.acl.permits(client.ip()) {
+                        metrics::counter!(
+                            m::FILTER_BLOCKED,
+                            "listener" => cfg.name.clone(), "filter" => "acl",
+                        ).increment(1);
+                        continue;
+                    }
+                    if let Some(geo_acl) = &cfg.geo {
+                        let admitted = geo
+                            .as_deref()
+                            .map(|db| geo_acl.permits(db.country_code(client.ip())))
+                            .unwrap_or(false); // fail closed if the DB did not load
+                        if !admitted {
+                            metrics::counter!(
+                                m::FILTER_BLOCKED,
+                                "listener" => cfg.name.clone(), "filter" => "geo",
                             ).increment(1);
                             continue;
                         }
                     }
-                }
-
-                let key: SessionKey = (client, dst);
-
-                // Existing session: forward and refresh liveness.
-                if let Some(s) = sessions.get(&key) {
-                    s.last_ms.store(now_ms(), Ordering::Relaxed);
-                    let up = s.upstream.clone();
-                    if let Err(e) = up.send(&buf[..n]).await {
-                        note_port_unreachable(&cfg.name, &s.health, &e);
-                        metrics::counter!(
-                            m::DATAGRAMS_DROPPED,
-                            "listener" => cfg.name.clone(), "reason" => "upstream_send",
-                        ).increment(1);
-                        tracing::warn!(
-                            listener = %cfg.name, %client, error = %e,
-                            "udp forward to backend failed"
-                        );
-                    }
-                    continue;
-                }
-
-                // Filter chain (phase 7): a new session from a denied source IP
-                // is dropped before session allocation. Established sessions
-                // keep their steady-state path scan-free.
-                if !cfg.acl.permits(client.ip()) {
-                    metrics::counter!(
-                        m::FILTER_BLOCKED,
-                        "listener" => cfg.name.clone(), "filter" => "acl",
-                    ).increment(1);
-                    continue;
-                }
-                if let Some(geo_acl) = &cfg.geo {
-                    let admitted = geo
-                        .as_deref()
-                        .map(|db| geo_acl.permits(db.country_code(client.ip())))
-                        .unwrap_or(false); // fail closed if the DB did not load
-                    if !admitted {
-                        metrics::counter!(
-                            m::FILTER_BLOCKED,
-                            "listener" => cfg.name.clone(), "filter" => "geo",
-                        ).increment(1);
-                        continue;
-                    }
-                }
-                if let Some(which) = limiter.permit(client.ip()) {
-                    metrics::counter!(
-                        m::FILTER_BLOCKED,
-                        "listener" => cfg.name.clone(), "filter" => which,
-                    ).increment(1);
-                    continue;
-                }
-
-                // New session — refused once draining.
-                if draining {
-                    metrics::counter!(
-                        m::DATAGRAMS_DROPPED,
-                        "listener" => cfg.name.clone(), "reason" => "draining",
-                    ).increment(1);
-                    continue;
-                }
-                // Per-source concurrent cap (per listener).
-                let src_guard = match src_limiter.acquire(client.ip()) {
-                    Ok(g) => g,
-                    Err(which) => {
+                    if let Some(which) = limiter.permit(client.ip()) {
                         metrics::counter!(
                             m::FILTER_BLOCKED,
                             "listener" => cfg.name.clone(), "filter" => which,
                         ).increment(1);
                         continue;
                     }
-                };
-                // Global caps (process-wide): refuse before allocating a session.
-                let limit_guard = match limits.acquire_udp() {
-                    Ok(g) => g,
-                    Err(which) => {
+
+                    // New session — refused once draining.
+                    if draining {
                         metrics::counter!(
-                            m::FILTER_BLOCKED,
-                            "listener" => cfg.name.clone(), "filter" => which,
+                            m::DATAGRAMS_DROPPED,
+                            "listener" => cfg.name.clone(), "reason" => "draining",
                         ).increment(1);
                         continue;
                     }
-                };
-                match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, &buf[..n]).await {
-                    Ok(session) => {
-                        sessions.insert(key, session);
-                        metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
-                            .increment(1.0);
-                    }
-                    Err(reason) => {
-                        metrics::counter!(
-                            m::DATAGRAMS_DROPPED,
-                            "listener" => cfg.name.clone(), "reason" => reason,
-                        ).increment(1);
+                    // Per-source concurrent cap (per listener).
+                    let src_guard = match src_limiter.acquire(client.ip()) {
+                        Ok(g) => g,
+                        Err(which) => {
+                            metrics::counter!(
+                                m::FILTER_BLOCKED,
+                                "listener" => cfg.name.clone(), "filter" => which,
+                            ).increment(1);
+                            continue;
+                        }
+                    };
+                    // Global caps (process-wide): refuse before allocating.
+                    let limit_guard = match limits.acquire_udp() {
+                        Ok(g) => g,
+                        Err(which) => {
+                            metrics::counter!(
+                                m::FILTER_BLOCKED,
+                                "listener" => cfg.name.clone(), "filter" => which,
+                            ).increment(1);
+                            continue;
+                        }
+                    };
+                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, data).await {
+                        Ok(session) => {
+                            sessions.insert(key, session);
+                            metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
+                                .increment(1.0);
+                        }
+                        Err(reason) => {
+                            metrics::counter!(
+                                m::DATAGRAMS_DROPPED,
+                                "listener" => cfg.name.clone(), "reason" => reason,
+                            ).increment(1);
+                        }
                     }
                 }
             }
@@ -331,30 +342,12 @@ pub async fn run_udp_listener(
     }
 }
 
-/// Receive one datagram. In plain mode this is `recv_from`. In prefix /
-/// transparent mode it is `recvmsg` with a control message yielding the real
-/// destination address the client sent to (`IP_PKTINFO` — dest IP, listener
-/// port — for prefix; `IP_ORIGDSTADDR` — full dest `ip:port` — for transparent).
-async fn recv_one(
-    sock: &UdpSocket,
-    buf: &mut [u8],
-    mode: UdpMode,
-) -> io::Result<(usize, SocketAddr, Option<SocketAddr>)> {
-    if mode == UdpMode::Plain {
-        let (n, from) = sock.recv_from(buf).await?;
-        return Ok((n, from, None));
-    }
-    let port = sock.local_addr()?.port();
-    loop {
-        sock.readable().await?;
-        match sock.try_io(Interest::READABLE, || recvmsg_dst(sock, &mut *buf, port)) {
-            Ok(v) => return Ok(v),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
-        }
-    }
-}
-
+/// `recvmsg` with a control message yielding the real destination address the
+/// client sent to (`IP_PKTINFO` — dest IP, listener port — for prefix;
+/// `IP_ORIGDSTADDR` — full dest `ip:port` — for transparent). The Linux ingress
+/// path uses `recvmmsg` in [`RecvBatch`]; this is the non-Linux fallback and the
+/// shared cmsg-parsing reference.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn recvmsg_dst(
     sock: &UdpSocket,
     buf: &mut [u8],
@@ -418,6 +411,157 @@ fn sockaddr_to_std(a: nix::sys::socket::SockaddrStorage) -> Option<SocketAddr> {
         )));
     }
     None
+}
+
+/// Max datagrams pulled from the listen socket in one `recvmmsg` (Linux).
+const RECV_BATCH: usize = 16;
+
+/// One received datagram's metadata (the payload stays in [`RecvBatch`]'s buffers).
+struct Datagram {
+    len: usize,
+    client: SocketAddr,
+    /// Real destination from the pktinfo / origdst cmsg (prefix / transparent).
+    dst: Option<SocketAddr>,
+}
+
+/// Reusable receive buffers for the listen socket's ingress path.
+///
+/// On Linux one [`RecvBatch::recv`] pulls up to [`RECV_BATCH`] datagrams with a
+/// single `recvmmsg(2)` — the per-datagram routing / forwarding work then runs
+/// over the batch, amortising the receive syscall. Elsewhere it degrades to one
+/// `recvmsg` per call. Either way the caller reads payload `i` via
+/// [`RecvBatch::at`].
+struct RecvBatch {
+    bufs: Vec<Vec<u8>>,
+    meta: Vec<Datagram>,
+}
+
+impl RecvBatch {
+    fn new() -> Self {
+        let cap = if cfg!(target_os = "linux") {
+            RECV_BATCH
+        } else {
+            1
+        };
+        Self {
+            bufs: (0..cap).map(|_| vec![0u8; MAX_DATAGRAM]).collect(),
+            meta: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Payload and addressing of the `i`-th datagram from the last `recv`.
+    fn at(&self, i: usize) -> (&[u8], SocketAddr, Option<SocketAddr>) {
+        let d = &self.meta[i];
+        (&self.bufs[i][..d.len], d.client, d.dst)
+    }
+
+    /// Await readability and receive a batch; returns how many datagrams landed.
+    async fn recv(&mut self, sock: &UdpSocket, mode: UdpMode) -> io::Result<usize> {
+        let port = if mode == UdpMode::Plain {
+            0
+        } else {
+            sock.local_addr()?.port()
+        };
+        loop {
+            sock.readable().await?;
+            match sock.try_io(Interest::READABLE, || self.recv_now(sock, mode, port)) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn recv_now(&mut self, sock: &UdpSocket, mode: UdpMode, port: u16) -> io::Result<usize> {
+        self.meta.clear();
+        let (len, client, dst) = if mode == UdpMode::Plain {
+            let (n, from) = sock.try_recv_from(&mut self.bufs[0])?;
+            (n, from, None)
+        } else {
+            recvmsg_dst(sock, &mut self.bufs[0], port)?
+        };
+        self.meta.push(Datagram { len, client, dst });
+        Ok(1)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recv_now(&mut self, sock: &UdpSocket, mode: UdpMode, port: u16) -> io::Result<usize> {
+        use nix::sys::socket::{recvmmsg, MsgFlags, MultiHeaders, SockaddrStorage};
+
+        let Self { bufs, meta } = self;
+        meta.clear();
+        let want_cmsg = mode != UdpMode::Plain;
+        let cmsg =
+            want_cmsg.then(|| nix::cmsg_space!(nix::libc::in6_pktinfo, nix::libc::sockaddr_in6));
+        // A fresh header set per call: `recvmmsg` does not reset `msg_namelen` /
+        // `msg_controllen` between calls, so a reused set would truncate an
+        // address / cmsg after the first differing datagram.
+        let mut headers = MultiHeaders::<SockaddrStorage>::preallocate(bufs.len(), cmsg);
+        let mut iovs: Vec<[IoSliceMut<'_>; 1]> = bufs
+            .iter_mut()
+            .map(|b| [IoSliceMut::new(b.as_mut_slice())])
+            .collect();
+
+        let results = recvmmsg(
+            sock.as_raw_fd(),
+            &mut headers,
+            iovs.iter_mut(),
+            MsgFlags::MSG_DONTWAIT,
+            None::<nix::sys::time::TimeSpec>,
+        )
+        .map_err(io::Error::from)?;
+
+        for msg in results {
+            let client = match msg.address.and_then(sockaddr_to_std) {
+                Some(a) => a,
+                None => continue, // no source address: drop this slot
+            };
+            let mut dst = None;
+            if want_cmsg {
+                for cm in msg.cmsgs().map_err(io::Error::from)? {
+                    if let Some(d) = dst_from_cmsg(cm, port) {
+                        dst = Some(d);
+                    }
+                }
+            }
+            meta.push(Datagram {
+                len: msg.bytes,
+                client,
+                dst,
+            });
+        }
+        Ok(meta.len())
+    }
+}
+
+/// Turn a pktinfo / origdst control message into the destination `SocketAddr`.
+/// `listen_port` fills the port for `IP_PKTINFO` (which carries only the IP).
+#[cfg(target_os = "linux")]
+fn dst_from_cmsg(
+    cm: nix::sys::socket::ControlMessageOwned,
+    listen_port: u16,
+) -> Option<SocketAddr> {
+    use nix::sys::socket::ControlMessageOwned as C;
+    match cm {
+        C::Ipv4PacketInfo(pi) => {
+            let ip = Ipv4Addr::from(pi.ipi_addr.s_addr.to_ne_bytes());
+            Some(SocketAddr::new(IpAddr::V4(ip), listen_port))
+        }
+        C::Ipv6PacketInfo(pi) => {
+            let ip = Ipv6Addr::from(pi.ipi6_addr.s6_addr);
+            Some(SocketAddr::new(IpAddr::V6(ip), listen_port))
+        }
+        C::Ipv4OrigDstAddr(a) => {
+            let ip = Ipv4Addr::from(a.sin_addr.s_addr.to_ne_bytes());
+            Some(SocketAddr::new(IpAddr::V4(ip), u16::from_be(a.sin_port)))
+        }
+        C::Ipv6OrigDstAddr(a) => {
+            let ip = Ipv6Addr::from(a.sin6_addr.s6_addr);
+            Some(SocketAddr::new(IpAddr::V6(ip), u16::from_be(a.sin6_port)))
+        }
+        _ => None,
+    }
 }
 
 /// Pick a backend (honouring stickiness), bind the upstream socket, send the

@@ -80,6 +80,59 @@ listeners:
 }
 
 #[tokio::test]
+async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
+    let b1 = echo_backend(1).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b1}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+
+    // Fire a tight burst with no reads in between, so several datagrams are
+    // queued on the listen socket and pulled by a single `recvmmsg`.
+    const N: u8 = 40;
+    for i in 0..N {
+        client.send(&[b'x', i]).await.unwrap();
+    }
+
+    // Every datagram must come back exactly once (order per session is FIFO).
+    let mut seen = vec![0u32; N as usize];
+    let mut buf = [0u8; 32];
+    for _ in 0..N {
+        let n = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("reply timed out")
+            .unwrap();
+        assert_eq!(n, 3, "echo backend prefixes one tag byte");
+        assert_eq!(buf[0], 1);
+        assert_eq!(buf[1], b'x');
+        seen[buf[2] as usize] += 1;
+    }
+    assert!(
+        seen.iter().all(|&c| c == 1),
+        "each datagram echoed exactly once: {seen:?}"
+    );
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
 async fn sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend() {
     let backend = echo_backend(9).await;
     let proxy_addr = free_udp_addr();
