@@ -72,6 +72,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   `proxy.rs` / `listener_udp.rs` — no health / cap / guard). ⬜ `sticky_key`
   deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity;
   needs its own design).
+- ✅ **Post-phase (data-plane completion)**: `resolvers:` reloads live —
+  `gsp_core::Resolvers` gained `ArcSwap` interior mutability (like `Sniffers`),
+  and the reload task rebuilds + swaps the clients when (only when)
+  `ResolverConfig` differs. Trade-off: a rebuild resets each `CachedResolver`'s
+  LRU cache. (`backend_sources:` live reload is still restart-only — its own
+  slice; needs per-source refresh-task management like `ListenerManager`.)
 - **Result**: matchmaker integration, token→instance routing.
 
 ## Phase 5 – Operations & zero-downtime (week 13–14) ✅

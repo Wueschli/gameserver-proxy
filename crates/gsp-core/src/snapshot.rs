@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gsp_config::{Config, GlobalLimits, ListenerConfig};
+use gsp_config::{Config, GlobalLimits, ListenerConfig, ResolverConfig};
 
 use crate::discovery::Discovery;
 use crate::overlay::BackendOverlay;
@@ -22,6 +22,10 @@ pub struct Snapshot {
     pub limits: GlobalLimits,
     /// MaxMind Country DB path (read once at `Runtime::start`; startup-only).
     pub geo_db: Option<String>,
+    /// External resolver config, echoed onto the snapshot so the reload task can
+    /// diff it and rebuild the resolver clients only when it actually changed.
+    /// The clients themselves live outside the snapshot (in `Arc<Resolvers>`).
+    pub resolvers: Vec<ResolverConfig>,
 }
 
 impl Snapshot {
@@ -80,6 +84,7 @@ impl Snapshot {
             pools,
             limits: cfg.limits,
             geo_db: cfg.geo_db.clone(),
+            resolvers: cfg.resolvers.clone(),
         })
     }
 

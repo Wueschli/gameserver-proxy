@@ -1153,7 +1153,7 @@ pub enum CacheKeyPart {
 }
 
 /// Resolver result cache (`resolvers[].cache`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
     pub key: Vec<CacheKeyPart>,
     pub positive_ttl: Duration,
@@ -1161,8 +1161,10 @@ pub struct CacheConfig {
     pub max_entries: usize,
 }
 
-/// An external routing resolver (`resolvers:` entry).
-#[derive(Debug, Clone)]
+/// An external routing resolver (`resolvers:` entry). `PartialEq` so the reload
+/// task can tell when `resolvers:` actually changed and rebuild the clients only
+/// then (a plain reload / discovery tick must not drop the LRU caches).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverConfig {
     pub name: String,
     pub kind: ResolverKind,

@@ -107,7 +107,9 @@ async fn run(
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
-    let resolvers = Arc::new(resolver::build_resolvers(&cfg)?);
+    let resolvers = Arc::new(gsp_core::Resolvers::from_map(resolver::build_resolvers(
+        &cfg,
+    )?));
     if !resolvers.is_empty() {
         tracing::info!(count = resolvers.len(), "external resolvers ready");
     }
@@ -144,7 +146,7 @@ async fn run(
         Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
     let runtime = Runtime::start_with_discovery(
         snapshot,
-        resolvers,
+        resolvers.clone(),
         geo_db,
         sniffers.clone(),
         discovery,
@@ -155,7 +157,13 @@ async fn run(
     metrics::gauge!(gsp_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
 
     let admin = tokio::spawn(admin::serve(cfg.admin_listen, handle.clone(), prometheus));
-    let reload = tokio::spawn(reload::run(config_path, handle, sniffer_loader, sniffers));
+    let reload = tokio::spawn(reload::run(
+        config_path,
+        handle,
+        resolvers,
+        sniffer_loader,
+        sniffers,
+    ));
 
     wait_for_shutdown().await;
     tracing::info!(

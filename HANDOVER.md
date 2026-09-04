@@ -834,7 +834,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | Discovery adapters | **done** (phase 8): `BackendSource` seam + `Discovery` + `refresh_loop` in `gsp-core`; `DnsSrvSource` (`hickory-resolver`) / `ConsulSource` / `KubernetesSource` (`reqwest`) in `gsp`. Level-triggered, last-known-good on failure, fed through `Snapshot::build_with_sources`. |
 | Sniffers | Loader **done** (phase 9 slices 3–5): `wasmtime`, core WASM module (no WASI), epoch interruption + `StoreLimits` for the two bounds; `settings.sniffers.dir` is rescanned live on reload (an `ArcSwap`-backed `Sniffers` registry, swapped like the snapshot — engine params are startup-only). `wasmtime`/`sha2` are binary-only deps (`gsp` only) — `gsp-core` still only has the `Sniffer` trait / `Sniffers` registry. First-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) + the `gsp-sniffer-abi` guest helper live in the standalone `crates/plugins/` workspace, `make plugins`. Per-plugin config (ADR 16a): the guest `sniff` export takes `(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[].config` is a string marshalled into a second linear-memory region on every call (`WasmSniffer` holds it; the `gsp-core` trait is unchanged). |
 | PROXY protocol (`proxy_protocol: v1 / v2 / v2-udp`) + TPROXY transparent mode (`transparent: true`, TCP + UDP) | **done** (phase 6). `set_ip_transparent` via `socket2` 0.6 `SockRef`; origdst via `nix` — still zero `unsafe`. |
-| External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. |
+| External resolver | `trait Resolver` + cache + `on_error` + routing loop in `gsp-core`; HTTP/gRPC clients in the `gsp` binary, injected as `Arc<dyn Resolver>` (same pattern as the sniffer seam). Keeps HTTP out of `gsp-core`. The `Resolvers` registry is `ArcSwap`-backed (like `Sniffers`) so a `resolvers:` change reloads live — rebuilt + swapped by the reload task when `ResolverConfig` differs (resets the LRU caches). |
 | Deps kept out of `gsp-core` | `axum`, `clap`, `notify`, `reqwest`, `hickory-resolver`, `wasmtime`, `sha2` live in the `gsp` binary only. (`gsp-core` uses `nix` for `IP_PKTINFO` / `IP_ORIGDSTADDR` cmsgs, `socket2` 0.6 for `IP_TRANSPARENT` / `IP_FREEBIND`, `async-trait` for `Resolver`, `lru` for the resolver cache, and `maxminddb` — a pure-Rust `.mmdb` reader, no network — for the geo filter.) |
 
 ---
@@ -872,12 +872,12 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 | `target` connections' connect / idle timeouts | **done** (data-plane completion, item 6 — `resolvers[].target_connect_timeout_ms` / `target_idle_timeout_sec`, defaults 300 ms / 90 s = `proxy::TARGET_*`, carried on `Routed::Target` via `Resolver::target_{connect,idle}_timeout`) |
 | Build now needs `protoc` (gRPC codegen in `crates/gsp/build.rs`); CI installs `protobuf-compiler` | — |
 | Resolver cache uses `std::sync::Mutex<LruCache>` — a brief lock on the routing path (not held across `.await`); like `Backend::observe`, deliberate | — |
-| Resolver config is startup-only (no live reload of `resolvers:`); a resolver call is a per-connection `.await` bounded by `timeout_ms` | — |
+| `resolvers:` live reload | **done** (data-plane completion, item 4 — `gsp_core::Resolvers` is `ArcSwap`-backed like `Sniffers`; the reload task rebuilds + `replace()`s the clients when `ResolverConfig` differs. Rebuild resets each `CachedResolver` LRU cache.) |
 | `route_hint` per-conn cost adds a lock-free `ArcSwap<HashMap>` read when the listener opts in — recorded in the latency ledger | — |
 | `sni` on a ClientHello split across TCP segments (single peek only; falls through) | **done** (data-plane completion, item 1 — `listener::peek_routing_bytes` re-peeks until the first TLS record is whole or the 250 ms budget expires) |
 | Backend discovery adapters (DNS SRV, K8s, Consul) | **done** (phase 8) |
 | k8s discovery via a watch-based informer (polling now) | perf pass |
-| Live reload of `backend_sources` (startup-only now) | polish |
+| Live reload of `backend_sources` (startup-only now) | own slice — needs per-source refresh-task management (a `SourceManager` like `ListenerManager`: spawn added, stop removed, respawn re-parameterised). A `pools[].source` re-pointing at an existing source already reloads. |
 | CIDR allow/deny filter chain (per-listener `allow` / `deny`) | **done** (phase 7 slice 1) |
 | Rate limiting (per-listener token bucket, src_ip + /24 / /64) | **done** (phase 7 slice 2) |
 | Global caps (`max_connections` / `max_udp_sessions` / `max_new_sessions_per_sec`) | **done** (phase 7 slice 3) |
@@ -934,11 +934,21 @@ focused unit):
    and a uniform signature (config always passed, empty slice when none) beats a
    permanent "call `configure` if the module exports it" branch and a two-class
    plugin model. Extra blast radius is mechanical and in-tree.
-6. **Item 4 — live reload of `resolvers:` / `backend_sources:`.** ← *next.*
-   Larger — the resolver-config plumbing item 6 added (`ResolverConfig` fields,
-   `build_resolvers`) is the shape a live reload has to re-run.
+6. **Item 4 — live reload of `resolvers:`** — **done** (on `main`).
+   `gsp_core::Resolvers` became `ArcSwap`-backed (mirrors `Sniffers` slice 4);
+   `Snapshot` carries `resolvers: Vec<ResolverConfig>` (echoed, for the diff);
+   `reload::apply` rebuilds + `Resolvers::replace`s the clients only when
+   `cfg.resolvers != prev.resolvers`. `build_resolvers` now returns the plain
+   map (both `main.rs` — `Resolvers::from_map` — and the reload task use it).
+   Test: `resolver::tests::replace_swaps_the_live_resolver_set`.
+   **`backend_sources:` live reload stays deferred as its own slice** — it needs
+   a `SourceManager` (per-source refresh tasks with individual stop signals,
+   reconcile-on-reload), a `ListenerManager`-sized piece and only "polish" per
+   the phase-8 notes. A `pools[].source` re-pointing at an existing source name
+   already reloads (it rides the snapshot rebuild).
 
-Then list C polish, then list B (perf pass).
+**List A is complete** (bar the split-out `backend_sources` reload). Then list C
+polish, then list B (perf pass).
 
 **Verification (checked against the code at `34867bf`)**: none of these items
 have been started, in any form — every one is still a `// later` comment or an
@@ -978,9 +988,10 @@ are cheaper than a fresh slice:
    `gsp_datagrams_dropped_total{reason="sniffer_reject"}`; UDP sends no reply.
    Tests: `sniff::tests::sniffer_reject_drops_the_tcp_connection` /
    `sniffer_reject_drops_the_udp_datagram_with_no_reply`.
-4. **Live reload of `resolvers:` and `backend_sources:`** — both startup-only
-   today; a proxy that advertises zero-downtime reload should fold these into
-   the existing `validate → Snapshot::build → ArcSwap::store` path.
+4. ~~**Live reload of `resolvers:`**~~ — **DONE**: `Resolvers` is `ArcSwap`-backed;
+   the reload task rebuilds + swaps the clients when `ResolverConfig` differs
+   (LRU caches reset). `backend_sources:` live reload split out as its own slice
+   (needs a `SourceManager`).
 5. ~~**`weighted` balancer**~~ — **DONE**: `balancer: weighted` + pool
    `weights: { "ip:port": N }` (weight `>= 1`, default 1, `weighted`-only),
    weighted round-robin over the healthy set in `Pool::acquire_for` (one atomic
@@ -1472,7 +1483,9 @@ bumps `gsp_resolver_requests_total{resolver,result}`. `Resolvers` is threaded
 base64 encoder, `build_resolvers(&Config)` (called from `main.rs`; `grpc` →
 `bail!`). New deps: `async-trait`, `serde_json` in the workspace; `reqwest`
 (rustls) + `serde_json` + `async-trait` in `gsp`; `async-trait` in `gsp-core`.
-Resolver config is startup-only (not rebuilt on reload).
+Resolver config was startup-only here; it reloads live since the data-plane
+completion pass (`Resolvers` is `ArcSwap`-backed, rebuilt on a `resolvers:`
+change — see the deferred table).
 
 ### Do NOT
 

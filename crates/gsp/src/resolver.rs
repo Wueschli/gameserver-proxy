@@ -2,11 +2,12 @@
 //! `gsp-core`; the transports (HTTP now, gRPC in a later slice) live here so
 //! `gsp-core` stays free of an HTTP client.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use gsp_config::{Config, OnError, ProxyProtocol, ResolverConfig, ResolverKind};
-use gsp_core::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver, Resolvers};
+use gsp_core::{CachedResolver, Resolution, ResolveError, ResolveRequest, Resolver};
 use serde::{Deserialize, Serialize};
 
 /// Generated from `proto/resolver.proto`.
@@ -16,9 +17,12 @@ mod pb {
 }
 
 /// Build the name → resolver map from config. Errors if a resolver cannot be
-/// constructed (bad endpoint URL, unimplemented transport).
-pub fn build_resolvers(cfg: &Config) -> anyhow::Result<Resolvers> {
-    let mut map = Resolvers::new();
+/// constructed (bad endpoint URL, unimplemented transport). Used at startup
+/// (wrapped in `gsp_core::Resolvers`) and on every `resolvers:` change by the
+/// reload task (`Resolvers::replace`) — each call makes fresh clients, so a
+/// `CachedResolver`'s LRU cache starts empty.
+pub fn build_resolvers(cfg: &Config) -> anyhow::Result<HashMap<String, Arc<dyn Resolver>>> {
+    let mut map = HashMap::new();
     for rc in &cfg.resolvers {
         let inner: Arc<dyn Resolver> = match rc.kind {
             ResolverKind::Http => Arc::new(HttpResolver::new(rc)?),

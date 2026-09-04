@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 
 use gsp_core::metrics_defs as m;
 use gsp_core::sniff::Sniffers;
-use gsp_core::{RuntimeHandle, Snapshot};
+use gsp_core::{Resolvers, RuntimeHandle, Snapshot};
 
 use crate::sniffer_loader::SnifferLoader;
 
@@ -24,6 +24,7 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 pub async fn run(
     path: PathBuf,
     handle: RuntimeHandle,
+    resolvers: Arc<Resolvers>,
     sniffer_loader: Option<Arc<SnifferLoader>>,
     sniffers: Arc<Sniffers>,
 ) {
@@ -50,7 +51,14 @@ pub async fn run(
             // Coalesce a burst: swallow any trigger that landed during the
             // debounce window so it doesn't cause a second redundant reload.
             let _ = tokio::time::timeout(Duration::ZERO, trigger.notified()).await;
-            apply(&path, &handle, sniffer_loader.as_deref(), &sniffers).await;
+            apply(
+                &path,
+                &handle,
+                &resolvers,
+                sniffer_loader.as_deref(),
+                &sniffers,
+            )
+            .await;
         }
     }
 
@@ -66,7 +74,14 @@ pub async fn run(
             // Coalesce a burst: swallow any trigger that landed during the
             // debounce window so it doesn't cause a second redundant reload.
             let _ = tokio::time::timeout(Duration::ZERO, trigger.notified()).await;
-            apply(&path, &handle, sniffer_loader.as_deref(), &sniffers).await;
+            apply(
+                &path,
+                &handle,
+                &resolvers,
+                sniffer_loader.as_deref(),
+                &sniffers,
+            )
+            .await;
         }
     }
 }
@@ -74,6 +89,7 @@ pub async fn run(
 async fn apply(
     path: &Path,
     handle: &RuntimeHandle,
+    resolvers: &Resolvers,
     sniffer_loader: Option<&SnifferLoader>,
     sniffers: &Sniffers,
 ) {
@@ -81,6 +97,7 @@ async fn apply(
         Ok(cfg) => {
             let prev = handle.current();
             let listeners_changed = cfg.listeners != prev.listeners;
+            let resolvers_changed = cfg.resolvers != prev.resolvers;
             handle.store(Snapshot::build_with_sources(
                 &cfg,
                 Some(&prev),
@@ -96,6 +113,9 @@ async fn apply(
                     "listener definitions changed; listeners reconciled (added / removed / rebound)"
                 );
             }
+            if resolvers_changed {
+                rebuild_resolvers(&cfg, resolvers);
+            }
             rescan_sniffers(&cfg, sniffer_loader, sniffers);
             tracing::info!(config = %path.display(), "configuration reloaded");
         }
@@ -103,6 +123,26 @@ async fn apply(
             metrics::counter!(m::CONFIG_RELOAD, "result" => "failed").increment(1);
             tracing::error!(error = %e, "config reload failed; keeping current configuration");
         }
+    }
+}
+
+/// Rebuild the external-resolver clients from the new `resolvers:` and swap the
+/// whole set in (`Resolvers::replace`). Only called when `ResolverConfig`
+/// actually changed, so a plain reload / discovery tick / overlay edit never
+/// drops a `CachedResolver`'s LRU cache. A build error (bad endpoint URL) keeps
+/// the previous set, same spirit as `rescan_sniffers`; the snapshot has already
+/// swapped so pool / routing changes still land.
+fn rebuild_resolvers(cfg: &gsp_config::Config, resolvers: &Resolvers) {
+    match crate::resolver::build_resolvers(cfg) {
+        Ok(map) => {
+            let n = map.len();
+            resolvers.replace(map);
+            tracing::info!(count = n, "external resolvers rebuilt (caches reset)");
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "resolver rebuild failed; keeping the previous resolver set"
+        ),
     }
 }
 

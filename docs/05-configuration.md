@@ -395,6 +395,8 @@ listeners:
 | Backend → `draining` / `disabled` (`PATCH .../{addr}`) | no new sessions, existing ones drain; state carried across a reload by address |
 | Pool balancer changed | applies to **new** routing decisions |
 | Route changed/added | applies to new connections/sessions |
+| `resolvers:` changed | live — the reload task rebuilds the resolver clients and swaps the whole set in atomically when (and only when) `resolvers:` actually differs; an in-flight resolver call finishes against the old client, new calls use the new one. A rebuild resets each resolver's LRU result cache, so expect a brief cache-cold window. A bad endpoint keeps the previous set (logged). |
+| `backend_sources:` changed | requires a restart — the refresh tasks are spawned once at startup (like `settings.workers`). A `pools[].source` re-*pointing* at an existing source name still takes effect on reload; only adding / removing / re-parameterising a `backend_sources[]` entry needs a restart. |
 | Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / affinity / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |

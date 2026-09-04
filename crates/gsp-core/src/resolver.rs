@@ -20,6 +20,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use gsp_config::{
     Action, CacheConfig, CacheKeyPart, ListenerConfig, MatchContext, OnError, ProxyProtocol,
@@ -85,8 +86,63 @@ pub trait Resolver: Send + Sync {
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError>;
 }
 
-/// Name → resolver, built once from config and shared across listeners.
-pub type Resolvers = HashMap<String, Arc<dyn Resolver>>;
+/// Name → resolver, built from config and shared across every listener worker.
+///
+/// Interior mutability via an [`ArcSwap`] over the map (mirroring
+/// [`crate::sniff::Sniffers`]): every `Arc<Resolvers>` clone handed to a worker
+/// at spawn time points at the *same* instance, so a config reload can swap the
+/// whole set in with [`Resolvers::replace`] and every worker sees it at once —
+/// no re-plumbing through `Runtime` / `ListenerManager`. A resolver call in
+/// flight during a swap keeps its own `Arc<dyn Resolver>` (from
+/// [`Resolvers::get`]) and finishes against the old client; new calls use the
+/// new set. A rebuild drops each `CachedResolver`'s LRU cache, so there is a
+/// brief cache-cold window after a `resolvers:` change (only then — the reload
+/// task rebuilds solely when `ResolverConfig` actually differs).
+#[derive(Default)]
+pub struct Resolvers {
+    map: ArcSwap<HashMap<String, Arc<dyn Resolver>>>,
+}
+
+impl Resolvers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wrap a ready name→resolver map (the startup build path).
+    pub fn from_map(map: HashMap<String, Arc<dyn Resolver>>) -> Self {
+        Self {
+            map: ArcSwap::from_pointee(map),
+        }
+    }
+
+    /// Insert one resolver (incremental build / tests).
+    pub fn insert(&self, name: String, resolver: Arc<dyn Resolver>) {
+        self.map.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.insert(name.clone(), resolver.clone());
+            next
+        });
+    }
+
+    /// Atomically replace the whole set (config reload).
+    pub fn replace(&self, map: HashMap<String, Arc<dyn Resolver>>) {
+        self.map.store(Arc::new(map));
+    }
+
+    /// The resolver registered under `name`, as an owned handle the caller can
+    /// hold across a concurrent [`Resolvers::replace`].
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Resolver>> {
+        self.map.load().get(name).cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.load().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.load().len()
+    }
+}
 
 /// The outcome of routing: a pool (normal LB) or a fixed instance (`target`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,7 +479,7 @@ listeners:
 
     async fn run(mode: Mode, on_error: OnError) -> Option<Routed> {
         let lc = listener_with_resolver();
-        let mut resolvers = Resolvers::new();
+        let resolvers = Resolvers::new();
         resolvers.insert(
             "mm".to_string(),
             Arc::new(Stub { mode, on_error }) as Arc<dyn Resolver>,
@@ -442,6 +498,46 @@ listeners:
         assert_eq!(
             run(Mode::Pool("prod"), OnError::Reject).await,
             Some(Routed::Pool("prod".into()))
+        );
+    }
+
+    /// `Resolvers::replace` swaps the live set — every worker's shared handle
+    /// sees the new resolver on the next `resolve_route` (config reload path).
+    #[tokio::test]
+    async fn replace_swaps_the_live_resolver_set() {
+        let lc = listener_with_resolver();
+        let resolvers = Resolvers::new();
+        resolvers.insert(
+            "mm".to_string(),
+            Arc::new(Stub {
+                mode: Mode::Pool("old"),
+                on_error: OnError::Reject,
+            }) as Arc<dyn Resolver>,
+        );
+        let mctx = MatchContext {
+            src: "9.9.9.9:1".parse().unwrap(),
+            local: "1.1.1.1:7777".parse().unwrap(),
+            first_bytes: &[],
+            sniff: None,
+        };
+        assert_eq!(
+            resolve_route(&lc, &resolvers, &mctx, &[]).await,
+            Some(Routed::Pool("old".into()))
+        );
+
+        let mut next: HashMap<String, Arc<dyn Resolver>> = HashMap::new();
+        next.insert(
+            "mm".to_string(),
+            Arc::new(Stub {
+                mode: Mode::Pool("new"),
+                on_error: OnError::Reject,
+            }),
+        );
+        resolvers.replace(next);
+
+        assert_eq!(
+            resolve_route(&lc, &resolvers, &mctx, &[]).await,
+            Some(Routed::Pool("new".into()))
         );
     }
 
@@ -486,7 +582,7 @@ listeners:
         }
 
         let lc = listener_with_resolver();
-        let mut resolvers = Resolvers::new();
+        let resolvers = Resolvers::new();
         resolvers.insert("mm".to_string(), Arc::new(SlowTarget) as Arc<dyn Resolver>);
         let mctx = MatchContext {
             src: "9.9.9.9:1".parse().unwrap(),
@@ -575,7 +671,7 @@ listeners:
 "#
         );
         let cfg = gsp_config::parse_str(&yaml).unwrap();
-        let mut resolvers = Resolvers::new();
+        let resolvers = Resolvers::new();
         resolvers.insert(
             "mm".to_string(),
             Arc::new(Stub {
@@ -647,7 +743,7 @@ listeners:
 "#
         );
         let cfg = gsp_config::parse_str(&yaml).unwrap();
-        let mut resolvers = Resolvers::new();
+        let resolvers = Resolvers::new();
         let target_str: &'static str = Box::leak(one_off.to_string().into_boxed_str());
         resolvers.insert(
             "mm".to_string(),
@@ -731,7 +827,7 @@ listeners:
 "#
         );
         let cfg = gsp_config::parse_str(&yaml).unwrap();
-        let mut resolvers = Resolvers::new();
+        let resolvers = Resolvers::new();
         resolvers.insert(
             "pp".to_string(),
             Arc::new(PpStub(backend)) as Arc<dyn Resolver>,
