@@ -112,6 +112,20 @@ impl IngestStore {
 }
 
 #[cfg(test)]
+impl IngestStore {
+    /// Test-only seam: insert a fully-formed [`InstanceState`], letting a
+    /// test control `received_at_ms` directly instead of always stamping
+    /// with the real clock (`ingest`) — needed to test [`crate::api`]'s
+    /// staleness threshold without an actual multi-second sleep.
+    pub(crate) fn insert_state(&self, state: InstanceState) {
+        self.instances
+            .write()
+            .expect("ingest store lock poisoned")
+            .insert(state.payload.instance.clone(), state);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

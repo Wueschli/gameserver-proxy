@@ -441,9 +441,21 @@ controller's revision log is a follow-on once this ships.
    `Runtime`); verified live end-to-end over real HTTP (`GSP_LOG=debug`
    showed two successful pushes 2s apart, matching `--aggregator-interval-sec
    2`).
-8. `GET /fleet/pools` / `/fleet/config` / `/fleet/healthz` / `/fleet/sessions`
-   — served directly from ingested state (no fan-out RPC needed, the data
-   already arrived).
+8. ✅ `GET /fleet/pools` / `/fleet/sessions` / `/fleet/healthz` — served
+   directly from `IngestStore` (no fan-out RPC needed, the data already
+   arrived), each entry carrying `last_seen_ms_ago` (the aggregator's own
+   clock). `/fleet/healthz` flags an instance `stale` past 30s (~3x `gsp`'s
+   default push interval) — the threshold `IngestStore` itself deliberately
+   doesn't have. **No `GET /fleet/config`** in this release: `IngestPayload`
+   is state, not config content — the controller already owns that
+   (`GET /config`/`/config/revisions`). A fleet-wide "which revision is each
+   instance running" view is real and useful (an optional `config_revision`
+   field on `IngestPayload`) but needs `controller_client` and
+   `aggregator_client` to share state inside `gsp` that today are
+   deliberately independent — deferred, not dropped. 8 new tests (incl. a
+   test-only `IngestStore::insert_state` seam to test the staleness
+   threshold without a real 30s wait); verified live end-to-end over real
+   HTTP.
 9. Fan-out for the phase-5 intent verbs (drain/undrain a backend, add/remove a
    backend, route-hint, drain an instance) — a thin per-instance proxy to the
    target's existing admin API; a fleet-wide call reports success/failure per

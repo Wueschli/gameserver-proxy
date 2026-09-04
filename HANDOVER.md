@@ -206,14 +206,44 @@ session with no other output — switching to `timeout -s KILL <cmd>` wrapping
 each process (no manual `kill`/`pkill` afterward) avoided it. Worth trying
 first if a future smoke test's process cleanup misbehaves the same way.
 
-**Next**: slice 8 (`/fleet/*` read endpoints over `IngestStore`), slice 9
-(intent-verb fan-out to instances), slice 10 (aggregator auth, mirroring the
-controller's `--auth-token`).
+**Slice 8 done**: `GET /fleet/pools` / `/fleet/sessions` / `/fleet/healthz`
+on `gsp-aggregator`, all served straight from `IngestStore` (no fan-out —
+data already arrived), each entry carrying `last_seen_ms_ago`.
+`/fleet/healthz` flags `stale` past `STALE_AFTER_MS` (30s, ~3x `gsp`'s
+default 10s push interval) — the first place "stale" gets an actual
+threshold, per the note left in `ingest.rs` at slice 6. Added a test-only
+`IngestStore::insert_state` seam (`#[cfg(test)]`) so the staleness path is
+tested deterministically instead of needing a real 30s sleep. **Deliberately
+skipped `GET /fleet/config`**: `IngestPayload` carries state, not config
+content — the controller already owns config via `GET /config`/
+`/config/revisions`; a "which revision is each instance running" view would
+need `controller_client` and `aggregator_client` to share state inside `gsp`
+that's deliberately independent today (slice 7's "unrelated axes"), so it's
+deferred as a documented follow-up (an optional `config_revision` field), not
+silently dropped. 8 new tests. Verified live end-to-end over real HTTP.
+
+Along the way: the live smoke test's `/fleet/sessions` showed 28,230 UDP
+sessions after ~4s against `config.example.yaml`, which was alarming until
+traced to a pre-existing, unrelated fact about that file — its `realtime`
+pool's targets (`127.0.0.1:27015`/`27016`) are the *same addresses* its own
+listeners bind, so actually running it live (not just parsing it, which is
+all CI/`--check` ever do) lets the `udp_probe` health check loop back
+through the proxy's own listener as a fake client, snowballing session
+counts. Confirmed unrelated to this session's work by re-running against a
+minimal non-self-referential config (`active: 0`, as expected) — logged in
+"Known follow-ups" below, not fixed (out of scope here, and
+`config.example.yaml`'s job is documenting syntax, not being a runnable
+fixture).
+
+**Next**: slice 9 (intent-verb fan-out to instances — drain/undrain a
+backend, add/remove a backend, route-hint, drain an instance), slice 10
+(aggregator auth, mirroring the controller's `--auth-token`).
 
 ### Known follow-ups (none blocking)
 
 | Item | Notes |
 |------|-------|
+| `config.example.yaml`'s `realtime` pool self-references its own listener ports | targets `127.0.0.1:27015`/`27016` == the listener binds of the same name; actually *running* this file live (not just `--check`/parsing it, which is all CI does) makes the `udp_probe` health check loop back through the proxy's own listener as if it were a client, growing `active`/session counts unbounded within seconds (observed: 28k+ after ~4s). Found via slice 8's live `/fleet/sessions` smoke test, confirmed unrelated to phase 10+11 by re-running against a minimal non-self-referential config (`active: 0`, as expected). Not a regression from this session — a pre-existing property of the example/documentation config when actually executed rather than just parsed. Not fixing now: out of scope for the aggregator work, and `config.example.yaml`'s job is to document every feature's syntax, not to be a runnable fixture.
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |
