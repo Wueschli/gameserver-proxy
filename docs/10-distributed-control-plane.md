@@ -347,10 +347,26 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
 
 ## The admin GUI
 
-A pure client of the **nearest tier's controller + aggregator** — an operator
-(or a controller/GUI hosted in any failure domain) gets the full fleet view
-from whichever tier is closest, not from one fixed global endpoint. Two
-capability levels, shippable in order:
+**Served only by the topmost `standalone` tier — never by a `slave` tier.**
+Every regional controller/aggregator stays a machine-to-machine API (serving
+its own subtree, relaying to its parent) with no browser-facing frontend at
+all; only the root hosts the GUI, because it's the one place with full-fleet
+authority and it keeps auth/RBAC/session state a single fact in a single
+place, instead of N regional logins each needing to agree on who can do what.
+Serving a UI per tier would reopen exactly the problem the hierarchy was
+built to close: an operator not knowing *which* region's login is
+authoritative for a given action, and RBAC that must be kept consistent
+across every tier instead of living in one.
+
+A regional tier's raw API is still reachable directly (curl / CLI, on its own
+internal network) as **break-glass** during a root outage or partition —
+the same status the phase-5 direct-per-instance admin API already has next
+to the aggregator/controller. That is deliberately *not* a served web UI:
+break-glass access is for an operator who already knows exactly what they're
+doing to one region, not a second, parallel product surface to build and
+secure.
+
+Two capability levels, shippable in order:
 
 1. **Operational** — needs no Tier-1 store. Fleet-wide view + the phase-5
    verbs, via the stateless aggregator hierarchy. This is roadmap **Phase 10**
@@ -391,8 +407,9 @@ authentication and authorization.
   revision.
 - **Tier 2 is lower value** (advisory, rebuildable) but still authenticated —
   signed messages / mTLS mesh.
-- **The GUI is the only operator-facing component.** All authn / authz lives in
-  the controller behind it.
+- **The GUI is the only operator-facing component, and it is served solely by
+  the root tier.** All authn / authz lives there, once, rather than being kept
+  consistent across every regional tier's own frontend.
 
 ---
 
