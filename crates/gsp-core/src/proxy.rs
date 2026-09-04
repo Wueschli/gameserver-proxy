@@ -1,13 +1,17 @@
 //! The per-connection byte pump.
 //!
-//! v0 uses a buffered user-space copy in both directions with a per-direction
-//! idle timeout. The Linux `splice()` zero-copy fast path is a later
-//! optimization and will slot in behind this same function.
+//! Each direction is copied independently until its source reaches EOF, then the
+//! half-close is propagated (`SHUT_WR`) so the peer sees it. On Linux the bytes
+//! move through a kernel pipe with `splice(2)` — no userspace copy, the buffer
+//! pair lives in the kernel; other platforms (or a pipe-setup failure) fall back
+//! to a buffered `try_read` / `try_write` loop. The idle timer is per direction
+//! (see the note on [`copy_buffered`]).
 
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -169,20 +173,10 @@ async fn pump(
     let _ = client.set_nodelay(true);
     let _ = backend.set_nodelay(true);
 
-    let (mut client_rd, mut client_wr) = client.into_split();
-    let (mut backend_rd, mut backend_wr) = backend.into_split();
-
-    let c2s = async {
-        let n = copy_with_idle(&mut client_rd, &mut backend_wr, idle).await;
-        let _ = backend_wr.shutdown().await;
-        n
-    };
-    let s2c = async {
-        let n = copy_with_idle(&mut backend_rd, &mut client_wr, idle).await;
-        let _ = client_wr.shutdown().await;
-        n
-    };
-
+    // `TcpStream`'s readiness/`try_*` API takes `&self`, so both directions can
+    // share `&client` / `&backend` in one task — no `into_split`.
+    let c2s = copy_one_way(&client, &backend, idle);
+    let s2c = copy_one_way(&backend, &client, idle);
     let (c2s_res, s2c_res) = tokio::join!(c2s, s2c);
 
     ConnOutcome {
@@ -192,35 +186,168 @@ async fn pump(
     }
 }
 
-/// Copy from `r` to `w` until EOF. Returns the number of bytes copied, or an
-/// error if a read/write fails or no data arrives within `idle`.
+/// Copy every byte from `from` to `to` until `from` reaches EOF, then propagate
+/// the half-close so the peer sees it. Returns the byte count, or an error if a
+/// read/write fails or `from` is idle longer than `idle`.
+async fn copy_one_way(from: &TcpStream, to: &TcpStream, idle: Duration) -> io::Result<u64> {
+    #[cfg(target_os = "linux")]
+    let res = match splice_impl::copy_spliced(from, to, idle).await {
+        Err(splice_impl::SpliceError::Setup) => copy_buffered(from, to, idle).await,
+        Err(splice_impl::SpliceError::Io(e)) => Err(e),
+        Ok(n) => Ok(n),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let res = copy_buffered(from, to, idle).await;
+
+    // Best-effort `SHUT_WR` so the destination peer sees the EOF we just saw.
+    // Ignored if the socket is already closed / errored.
+    let _ = socket2::SockRef::from(to).shutdown(std::net::Shutdown::Write);
+    res
+}
+
+/// Buffered fallback: a userspace `try_read` → `try_write` loop over the shared
+/// `&TcpStream` refs. Used on non-Linux and if `splice`'s pipe setup fails.
 ///
 /// Note (v0 simplification): the idle timer is per direction. A connection that
 /// legitimately goes silent one way for longer than `idle` while the other way
 /// is active will have its quiet half torn down. Game traffic is bidirectional
 /// and frequent, so the default (90s) is comfortably safe; revisit when adding
 /// the shared min-progress watchdog.
-async fn copy_with_idle<R, W>(r: &mut R, w: &mut W, idle: Duration) -> std::io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+async fn copy_buffered(from: &TcpStream, to: &TcpStream, idle: Duration) -> io::Result<u64> {
     let mut buf = vec![0u8; 32 * 1024];
     let mut total: u64 = 0;
     loop {
-        let n = match timeout(idle, r.read(&mut buf)).await {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "idle timeout",
-                ))
+        let n = loop {
+            wait_ready(from, Interest::READABLE, idle).await?;
+            match from.try_read(&mut buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
             }
         };
-        w.write_all(&buf[..n]).await?;
+        if n == 0 {
+            break;
+        }
+        let mut w = 0;
+        while w < n {
+            wait_ready(to, Interest::WRITABLE, idle).await?;
+            match to.try_write(&buf[w..n]) {
+                Ok(m) => w += m,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
         total += n as u64;
     }
     Ok(total)
+}
+
+/// Await `interest` readiness on `sock`, mapping the idle deadline to a
+/// `TimedOut` error.
+async fn wait_ready(sock: &TcpStream, interest: Interest, idle: Duration) -> io::Result<()> {
+    match timeout(idle, sock.ready(interest)).await {
+        Ok(r) => r.map(|_| ()),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "idle timeout")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod splice_impl {
+    //! `splice(2)` fast path: bytes move `socket → pipe → socket` entirely in
+    //! the kernel. One pipe pair per direction per connection, driven by tokio
+    //! readiness via [`TcpStream::try_io`].
+
+    use std::io;
+    use std::os::fd::OwnedFd;
+    use std::time::Duration;
+
+    use nix::fcntl::{splice, OFlag, SpliceFFlags};
+    use tokio::io::Interest;
+    use tokio::net::TcpStream;
+
+    use super::wait_ready;
+
+    /// Default pipe capacity is 64 KiB; move one that big per syscall.
+    const CHUNK: usize = 64 * 1024;
+    const FLAGS: SpliceFFlags = SpliceFFlags::SPLICE_F_MOVE.union(SpliceFFlags::SPLICE_F_NONBLOCK);
+
+    pub enum SpliceError {
+        /// Pipe creation failed before any byte moved — the caller falls back to
+        /// the buffered copy.
+        Setup,
+        Io(io::Error),
+    }
+
+    pub async fn copy_spliced(
+        from: &TcpStream,
+        to: &TcpStream,
+        idle: Duration,
+    ) -> Result<u64, SpliceError> {
+        let (pipe_r, pipe_w) =
+            nix::unistd::pipe2(OFlag::O_NONBLOCK).map_err(|_| SpliceError::Setup)?;
+        let mut total: u64 = 0;
+        loop {
+            let moved = socket_to_pipe(from, &pipe_w, idle)
+                .await
+                .map_err(SpliceError::Io)?;
+            if moved == 0 {
+                return Ok(total); // source EOF
+            }
+            let mut left = moved;
+            while left > 0 {
+                let n = pipe_to_socket(&pipe_r, to, left, idle)
+                    .await
+                    .map_err(SpliceError::Io)?;
+                left -= n;
+                total += n as u64;
+            }
+        }
+    }
+
+    /// `splice` from the source socket into the pipe, waiting on the socket's
+    /// read readiness and retrying on `EAGAIN`. `Ok(0)` == socket EOF.
+    async fn socket_to_pipe(
+        sock: &TcpStream,
+        pipe_w: &OwnedFd,
+        idle: Duration,
+    ) -> io::Result<usize> {
+        loop {
+            wait_ready(sock, Interest::READABLE, idle).await?;
+            let out = sock.try_io(Interest::READABLE, || {
+                splice(sock, None, pipe_w, None, CHUNK, FLAGS)
+                    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+            });
+            match out {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `splice` `len` bytes from the pipe into the destination socket, waiting on
+    /// the socket's write readiness and retrying on `EAGAIN`.
+    async fn pipe_to_socket(
+        pipe_r: &OwnedFd,
+        sock: &TcpStream,
+        len: usize,
+        idle: Duration,
+    ) -> io::Result<usize> {
+        loop {
+            wait_ready(sock, Interest::WRITABLE, idle).await?;
+            let out = sock.try_io(Interest::WRITABLE, || {
+                match splice(pipe_r, None, sock, None, len, FLAGS)
+                    .map_err(|e| io::Error::from_raw_os_error(e as i32))?
+                {
+                    0 => Err(io::Error::new(io::ErrorKind::WriteZero, "splice wrote 0")),
+                    n => Ok(n),
+                }
+            });
+            match out {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }

@@ -685,8 +685,10 @@ Run `cargo run -p gsp -- --config config.example.yaml` and you get:
   src_ip | src_ip_port` — over the healthy backends; `acquire()` with no client
   key falls back to round-robin). TCP passes `peer`; UDP passes the client addr
   on the non-sticky path.
-- **Per-connection pump**: buffered bidirectional copy, connect timeout, per-direction
-  idle timeout, half-close propagation, `TCP_NODELAY`.
+- **Per-connection pump**: bidirectional copy — Linux `splice(2)` zero-copy
+  (`socket → pipe → socket`), buffered `try_read`/`try_write` fallback elsewhere
+  (ADR 17) — connect timeout, per-direction idle timeout, half-close
+  propagation, `TCP_NODELAY`.
 - **Client-IP preservation**: a pool with `proxy_protocol: v1 | v2` (TCP) gets one
   PROXY protocol header written to the backend before any client bytes, carrying
   the real `(client, proxy-local)` addresses; `v2-udp` prepends the v2 binary
@@ -846,7 +848,7 @@ From `docs/09-technology-choices.md` (ADR table) and implementation:
 
 | Item | Deferred to |
 |------|-------------|
-| `splice()` zero-copy TCP fast path (buffered copy for now, behind the same fn) | perf pass, any time |
+| `splice()` zero-copy TCP fast path | **done** (perf pass, ADR 17) — `proxy::pump` splices `socket → pipe → socket` on Linux (`nix` `zerocopy` feature); buffered `try_read`/`try_write` fallback on non-Linux / `pipe2` failure; half-close via `socket2` `SockRef::shutdown(Write)`. Test: `tcp_forward::splice_forwards_a_large_stream_and_propagates_half_close` (4 MiB round-trip + half-close). |
 | UDP `recvmmsg`/`sendmmsg` batching (plain `recv_from`/`send` now) | perf pass |
 | UDP idle expiry via a timing wheel (1 s sweep now) | perf pass |
 | UDP sticky-affinity table: LRU eviction (hard cap + wholesale clear now) | polish |
@@ -1024,10 +1026,16 @@ are cheaper than a fresh slice:
 **B. Dedicated performance pass (its own phase, before v1.x — the NFRs are the
 project's north star):**
 
-7. **`splice()` zero-copy TCP**, **`recvmmsg`/`sendmmsg` UDP batching** (incl.
-   the transparent recv path), **UDP idle expiry via a timing wheel**. All
-   already scoped as drop-in replacements behind the same fn. These gate
-   N3/N4/N5 throughput.
+7. Drop-in hot-path replacements. These gate N3/N4/N5 throughput.
+   - ~~**`splice()` zero-copy TCP**~~ — **done** (ADR 17). `proxy::pump`
+     splices `socket → pipe → socket` on Linux behind the same fn; buffered
+     `try_read`/`try_write` fallback elsewhere. `nix` gained the `zerocopy`
+     feature. Test: `tcp_forward::splice_forwards_a_large_stream_and_propagates_half_close`.
+   - **`recvmmsg`/`sendmmsg` UDP batching** (incl. the transparent recv path) —
+     still `recv_from`/`send` per datagram. `nix` `socket` feature already has
+     the calls.
+   - **UDP idle expiry via a timing wheel** — still a 1 s full-scan sweep per
+     worker.
 8. **`IPV6_TRANSPARENT` on musl / non-glibc** — pull in here if shipping Alpine
    containers.
 
@@ -1091,8 +1099,16 @@ project's north star):**
 ## Latency ledger
 
 Per-TCP-connection cost: 1 `Pool::acquire` (lock-free reads + one atomic add),
-1 backend `TcpStream::connect`, 1 spawned task for the pump. No per-byte allocation
-beyond the two 32 KB direction buffers. Nothing per-connection touches a lock.
+1 backend `TcpStream::connect`, 1 spawned task for the pump. On Linux the pump
+uses `splice(2)` (ADR 17): 1 `pipe2` pair (2 fds) per direction, bytes move
+`socket → pipe → socket` in the kernel — **no per-byte userspace copy and no
+32 KiB×2 heap buffers on the steady path** (the fds cost ~2 KiB kernel memory
+each vs. 64 KiB of userspace buffer, so RSS/conn drops). Non-Linux and a
+`pipe2` failure fall back to the old buffered `try_read`/`try_write` loop
+(one 32 KiB buffer per direction). Nothing per-connection touches a lock.
+The splice path costs up to 2 extra syscalls per direction per 64 KiB chunk
+(pipe fill + pipe drain) — a wash on a tiny-payload loopback ping-pong,
+a clear win once memory bandwidth is the bottleneck.
 
 Per-UDP-session cost (paid once, on the first datagram of a session): 1
 `Pool::acquire` / `acquire_addr`, 1 `UdpSocket::bind` + `connect` for the upstream

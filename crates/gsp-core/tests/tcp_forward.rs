@@ -65,6 +65,77 @@ async fn forwards_tcp_bytes_end_to_end() {
 }
 
 #[tokio::test]
+async fn splice_forwards_a_large_stream_and_propagates_half_close() {
+    // Echo backend that closes its side once the client half-closes.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Loop so the active health-check probe and the real connection are both
+        // served.
+        while let Ok((mut s, _)) = backend.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if s.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Client EOF seen: drop `s` so the client's read side sees EOF.
+            });
+        }
+    });
+
+    let proxy_addr = {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        probe.local_addr().unwrap()
+    };
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let stream = TcpStream::connect(proxy_addr).await.unwrap();
+    let (mut rd, mut wr) = stream.into_split();
+
+    const TOTAL: usize = 4 * 1024 * 1024;
+    let writer = tokio::spawn(async move {
+        let chunk = vec![0xABu8; 64 * 1024];
+        let mut sent = 0;
+        while sent < TOTAL {
+            let n = (TOTAL - sent).min(chunk.len());
+            wr.write_all(&chunk[..n]).await.unwrap();
+            sent += n;
+        }
+        wr.shutdown().await.unwrap(); // half-close: backend must see EOF
+    });
+
+    let mut got = 0usize;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = rd.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break; // backend closed after seeing our half-close, proxied back
+        }
+        assert!(buf[..n].iter().all(|&b| b == 0xAB), "payload corrupted");
+        got += n;
+    }
+    writer.await.unwrap();
+    assert_eq!(got, TOTAL, "every byte echoed back through the splice path");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
 async fn routes_around_a_dead_backend() {
     // One live echo backend.
     let alive = TcpListener::bind("127.0.0.1:0").await.unwrap();
