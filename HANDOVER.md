@@ -591,6 +591,45 @@ now-accurate docs (slice 13). Phase 12 (fleet hierarchy/HA/shared intent) and
 phase 13 (regional health fabric) remain **design only** — see
 [`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
 
+**Dependabot alert cleanup (2026-09-05, off-roadmap)**: GitHub flagged 2
+vulnerabilities on `main` after the slice 12/13 push. `cargo audit` (freshly
+installed — wasn't in this environment before) pinned them to `hickory-proto`
+0.24.4 (RUSTSEC-2026-0119 / GHSA-q2qq-hmj6-3wpp, O(n²) name-compression CPU
+exhaustion, moderate — pulled in twice: once via `hickory-resolver` 0.24, once
+via the `hickory-server` 0.24 dev-dependency used only by the DNS SRV
+discovery test's mock nameserver) and `lru` 0.12.5/0.16.4 (two unsound-iterator
+RUSTSEC advisories in succession, low). Fixed by bumping `hickory-resolver`
+0.24→0.26, `hickory-server` 0.24→0.26, and `lru` 0.12→0.18 in the root
+`Cargo.toml`. All three crossed real API breaks, not just semver-compatible
+bumps:
+- `hickory-resolver`: `TokioAsyncResolver` → `TokioResolver` (a type alias for
+  `Resolver<TokioRuntimeProvider>`), constructed via a two-step
+  `builder_tokio()?.build()?` instead of one fallible call;
+  `NameServerConfigGroup` is gone — a custom-port test nameserver is now a
+  `NameServerConfig` with its `ConnectionConfig::port` field set directly;
+  `SrvLookup`'s convenience `.iter()` is gone — `crates/gsp/src/discovery.rs`'s
+  SRV fetch now reads `lookup.answers()` and matches `RData::SRV` itself, and
+  `SRV`'s `.port()`/`.target()` became plain public fields.
+- `hickory-server` (test-only, mocks a DNS server for the SRV discovery test):
+  `authority` module renamed to `zone_handler`, `InMemoryAuthority` →
+  `InMemoryZoneHandler` (now generic over a `RuntimeProvider`, so the test
+  needed an explicit `InMemoryZoneHandler` type annotation), `Catalog::upsert`
+  now takes `Vec<Arc<dyn ZoneHandler>>` instead of `Box<Arc<InMemoryAuthority>>`,
+  `empty()` gained a required `AxfrPolicy` parameter, and `ServerFuture` was
+  renamed to `server::Server`.
+- `lru`'s API was untouched by either fix version; no code changes needed
+  there, just the version bump.
+
+Verified via a full re-run: `make check` green, the DNS SRV discovery test
+passes (real behavior, not just compiles), and `cargo audit` now reports
+**0 vulnerabilities** (only two unrelated "unmaintained crate" warnings for
+`fxhash`/`instant` remain — both are transitive, informational-only RUSTSEC
+entries with no GHSA alias, so they were never part of Dependabot's flagged
+count and don't need action). Worth remembering: `cargo-audit` isn't installed
+by default in a fresh environment (`cargo install cargo-audit --locked`) —
+there's no `make audit` target for this yet, which would be a reasonable
+follow-up if Dependabot alerts recur.
+
 ### Known follow-ups (none blocking)
 
 | Item | Notes |

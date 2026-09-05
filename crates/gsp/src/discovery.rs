@@ -18,8 +18,9 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use gsp_config::{Config, SourceConfig, SourceKind};
 use gsp_core::{BackendSource, SourceFactory};
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use serde::Deserialize;
 
 /// In-pod service-account paths for the Kubernetes API.
@@ -106,17 +107,24 @@ pub struct DnsSrvSource {
     pool: String,
     record: String,
     interval: Duration,
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
 }
 
 impl DnsSrvSource {
     pub fn new(pool: String, record: String, interval: Duration) -> anyhow::Result<Self> {
         // Prefer the host resolver config; fall back to a default (public) one
         // so a missing /etc/resolv.conf doesn't abort startup.
-        let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "dns_srv: system resolver config unavailable; using defaults");
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-        });
+        let resolver = TokioResolver::builder_tokio()
+            .and_then(|b| b.build())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "dns_srv: system resolver config unavailable; using defaults");
+                TokioResolver::builder_with_config(
+                    ResolverConfig::default(),
+                    TokioRuntimeProvider::default(),
+                )
+                .build()
+                .expect("building a resolver from a default config never fails")
+            });
         Ok(Self {
             pool,
             record,
@@ -133,15 +141,17 @@ impl DnsSrvSource {
         interval: Duration,
         nameserver: SocketAddr,
     ) -> Self {
-        use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
-        let group =
-            NameServerConfigGroup::from_ips_clear(&[nameserver.ip()], nameserver.port(), true);
-        let cfg = ResolverConfig::from_parts(None, vec![], group);
+        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+        let mut ns = NameServerConfig::udp(nameserver.ip());
+        ns.connections[0].port = nameserver.port();
+        let cfg = ResolverConfig::from_parts(None, vec![], vec![ns]);
         Self {
             pool,
             record,
             interval,
-            resolver: TokioAsyncResolver::tokio(cfg, ResolverOpts::default()),
+            resolver: TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
+                .build()
+                .expect("building a resolver from a fixed nameserver never fails"),
         }
     }
 }
@@ -166,9 +176,12 @@ impl BackendSource for DnsSrvSource {
             .with_context(|| format!("SRV lookup for {}", self.record))?;
 
         let mut out = Vec::new();
-        for srv in lookup.iter() {
-            let port = srv.port();
-            let target = srv.target().to_utf8();
+        for record in lookup.answers() {
+            let hickory_resolver::proto::rr::RData::SRV(srv) = &record.data else {
+                continue;
+            };
+            let port = srv.port;
+            let target = srv.target.to_utf8();
             let target = target.trim_end_matches('.');
             match target.parse() {
                 Ok(ip) => out.push(SocketAddr::new(ip, port)),
@@ -483,15 +496,16 @@ mod tests {
 
     #[tokio::test]
     async fn dns_srv_source_resolves_targets_to_addresses() {
-        use hickory_server::authority::{Catalog, ZoneType};
         use hickory_server::proto::rr::rdata::{A, SRV};
         use hickory_server::proto::rr::{LowerName, Name, RData, Record};
-        use hickory_server::store::in_memory::InMemoryAuthority;
-        use hickory_server::ServerFuture;
+        use hickory_server::server::Server;
+        use hickory_server::store::in_memory::InMemoryZoneHandler;
+        use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneType};
         use std::sync::Arc;
 
         let origin = Name::from_ascii("example.com.").unwrap();
-        let mut auth = InMemoryAuthority::empty(origin.clone(), ZoneType::Primary, false);
+        let mut auth: InMemoryZoneHandler =
+            InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
         auth.upsert_mut(
             Record::from_rdata(
                 Name::from_ascii("_game._udp.example.com.").unwrap(),
@@ -515,11 +529,11 @@ mod tests {
         );
 
         let mut catalog = Catalog::new();
-        catalog.upsert(LowerName::from(origin), Box::new(Arc::new(auth)));
+        catalog.upsert(LowerName::from(origin), vec![Arc::new(auth)]);
 
         let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ns = udp.local_addr().unwrap();
-        let mut server = ServerFuture::new(catalog);
+        let mut server = Server::new(catalog);
         server.register_socket(udp);
         tokio::spawn(async move {
             let _ = server.block_until_done().await;
