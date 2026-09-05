@@ -293,10 +293,61 @@ struct RawBackendSource {
     /// `kubernetes` only: API server base URL (default the in-cluster address).
     #[serde(default)]
     api: Option<String>,
+    /// `tunnel` only: the origin's WireGuard public key (base64, 32 bytes) —
+    /// identifies which `gsp-agent`-registered origin this source resolves
+    /// backends from, and pins the key `gsp` expects that origin to present.
+    #[serde(default)]
+    pubkey: Option<String>,
 }
 
 fn default_source_refresh_sec() -> u64 {
     15
+}
+
+/// Minimal standard-alphabet base64 decoder, just enough to validate a
+/// WireGuard key (32 bytes, i.e. exactly 44 chars with one trailing `=`).
+/// `gsp-config` may only depend on `serde`/`serde_yaml`/`thiserror` (see
+/// CLAUDE.md's crate-boundary rule), so this doesn't pull in a `base64` crate
+/// for one validation check.
+fn base64_decode_32(s: &str) -> Option<[u8; 32]> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() != 44 || bytes[43] != b'=' {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (chunk_idx, chunk) in bytes[..40].chunks(4).enumerate() {
+        let vals: Vec<u8> = chunk.iter().map(|&b| val(b)).collect::<Option<_>>()?;
+        let n = (vals[0] as u32) << 18
+            | (vals[1] as u32) << 12
+            | (vals[2] as u32) << 6
+            | (vals[3] as u32);
+        let o = chunk_idx * 3;
+        out[o] = (n >> 16) as u8;
+        out[o + 1] = (n >> 8) as u8;
+        out[o + 2] = n as u8;
+    }
+    // Final 4-char group "XX==" style but here it's chars[40..44] = 3 data + '='.
+    let last = &bytes[40..44];
+    let v0 = val(last[0])?;
+    let v1 = val(last[1])?;
+    let v2 = val(last[2])?;
+    if last[3] != b'=' {
+        return None;
+    }
+    let n = (v0 as u32) << 18 | (v1 as u32) << 12 | (v2 as u32) << 6;
+    out[30] = (n >> 16) as u8;
+    out[31] = (n >> 8) as u8;
+    Some(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1356,6 +1407,10 @@ pub enum SourceKind {
         port_name: Option<String>,
         api: String,
     },
+    /// Phase 14: backend addresses registered by a `gsp-agent`-managed origin
+    /// behind a WireGuard tunnel, resolved via the controller's backend-peers
+    /// registry (slice 2). `pubkey` pins the origin's expected WireGuard key.
+    Tunnel { pubkey: String },
 }
 
 /// Internal: a `backend_sources[]` entry after validation — either folded to a
@@ -1621,10 +1676,30 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                     refresh_interval,
                 })
             }
+            "tunnel" => {
+                let pubkey = s.pubkey.clone().ok_or_else(|| {
+                    Invalid(format!(
+                        "backend_sources {}: type tunnel needs `pubkey`",
+                        s.name
+                    ))
+                })?;
+                if base64_decode_32(&pubkey).is_none() {
+                    return Err(Invalid(format!(
+                        "backend_sources {}: `pubkey` must be a base64-encoded \
+                         32-byte WireGuard key",
+                        s.name
+                    )));
+                }
+                ResolvedSource::Dynamic(SourceConfig {
+                    name: s.name.clone(),
+                    kind: SourceKind::Tunnel { pubkey },
+                    refresh_interval,
+                })
+            }
             other => {
                 return Err(Invalid(format!(
                     "backend_sources {}: unknown type {other:?} \
-                     (static | dns_srv | consul | kubernetes)",
+                     (static | dns_srv | consul | kubernetes | tunnel)",
                     s.name
                 )))
             }
@@ -4445,6 +4520,48 @@ listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
 "#
         )
         .is_err());
+        // tunnel without `pubkey`
+        assert!(parse_str(
+            r#"
+backend_sources: [{ name: s, type: tunnel }]
+pools: [{ name: p, source: s }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
+        // tunnel with a malformed pubkey (not 32 bytes of base64)
+        assert!(parse_str(
+            r#"
+backend_sources: [{ name: s, type: tunnel, pubkey: "not-a-key" }]
+pools: [{ name: p, source: s }]
+listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
+"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tunnel_source_attaches_to_the_pool_with_the_pinned_pubkey() {
+        let yaml = r#"
+backend_sources:
+  - name: home
+    type: tunnel
+    pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    refresh_interval_sec: 10
+pools:
+  - { name: p, source: home }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+        let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.pools[0].targets.is_empty());
+        let sc = cfg.pools[0].source.as_ref().unwrap();
+        assert_eq!(sc.name, "home");
+        assert!(matches!(
+            &sc.kind,
+            SourceKind::Tunnel { pubkey }
+                if pubkey == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        ));
     }
 
     fn gossip_fixture(settings_extra: &str) -> String {

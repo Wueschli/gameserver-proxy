@@ -1003,13 +1003,13 @@ public endpoint — an origin behind a home NAT needs no port forwarding.
 Slices, ordered by dependency (each buildable and testable before the next
 needs it; none started):
 
-1. ⬜ **Config schema**: `backend_sources[].type: tunnel` (`gsp-config` raw +
+1. ✅ **Config schema**: `backend_sources[].type: tunnel` (`gsp-config` raw +
    resolved types, `validate()`, `config.example.yaml`, `docs/05`) —
    parses and validates with no runtime behavior behind it yet, same
    "schema first, mechanism after" shape phase 13 slice 1 used. Fields:
    at minimum the origin's expected public key and which pool(s) it feeds;
    exact shape decided in this slice, not locked in `docs/11`.
-2. ⬜ **`gsp-controller`'s backend-peers registry**: a new resource
+2. 🔜 **`gsp-controller`'s backend-peers registry**: a new resource
    alongside the config-revision and intent logs (its own `sled` tree/DB,
    matching `Store`'s own precedent) — `POST` for an agent to register
    (pubkey, allowed backend addresses, last-known endpoint) and a

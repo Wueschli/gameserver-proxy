@@ -3,6 +3,32 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 slice 1 done (2026-09-05, same day as the slice-list breakdown
+below)**: `backend_sources[].type: tunnel` schema only, no runtime behavior —
+same "schema first, mechanism after" shape phase 13 slice 1 used. `gsp-config`
+gained `RawBackendSource.pubkey: Option<String>` (`tunnel` only) and
+`SourceKind::Tunnel { pubkey: String }`; `validate()`'s new `tunnel` branch
+requires `pubkey` and checks it decodes as a base64-encoded 32-byte WireGuard
+key. **No new dependency**: `gsp-config`'s crate-boundary rule
+(`serde`/`serde_yaml`/`thiserror` only, see `CLAUDE.md` guardrail 7) meant
+pulling in a `base64` crate for one validation check wasn't an option, so
+`base64_decode_32` is a small hand-rolled standard-alphabet decoder local to
+this module — good enough to reject a malformed key, not a general-purpose
+codec. `crates/gsp/src/discovery.rs`'s `build_one` needed a new match arm for
+the exhaustive `SourceKind` match (`gsp-core::BackendSource` has no adapter
+for `tunnel` yet — that's slice 5); it returns a clear "not implemented yet
+(phase 14 slice 5)" error rather than a `todo!()` panic, so a config that
+declares a `tunnel` source today fails cleanly at startup instead of building
+silently-broken. `config.example.yaml` and `docs/05-configuration.md` both
+gained a commented-out `tunnel` example, matching the `dns_srv`/`consul`/
+`kubernetes` precedent exactly. 4 new tests in `gsp-config` (parses + attaches
+with the pinned pubkey; rejects missing `pubkey`; rejects a malformed
+`pubkey`). `make check` green; also smoke-tested `cargo run -p gsp --
+--config config.example.yaml --check` to confirm the schema addition doesn't
+disturb existing parsing. **Next**: slice 2, `gsp-controller`'s backend-peers
+registry — standalone-testable with nothing but the crate's own HTTP tests,
+no real WireGuard/`gsp-agent` needed yet.
+
 **Phase 14 (backend transport) design session (2026-09-05, same day, after the
 gsp-ui redesign) — no code changes.** At the user's request: how does a
 globally-distributed fleet of edge proxies reach game servers that are *not*

@@ -74,6 +74,16 @@ pub fn build_one(
             sc.refresh_interval,
             kube_auth.clone(),
         )?),
+        // Phase 14 slice 1: schema only. The adapter that resolves a pool's
+        // backends from the controller's backend-peers registry lands in
+        // slice 5 (docs/08 "Phase 14"); until then a `tunnel` source parses
+        // and validates but can't be started.
+        SourceKind::Tunnel { .. } => {
+            return Err(anyhow!(
+                "pool {pool}: backend_sources type tunnel is not implemented yet \
+                 (phase 14 slice 5)"
+            ))
+        }
     };
     Ok(src)
 }

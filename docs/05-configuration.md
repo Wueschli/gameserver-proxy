@@ -19,7 +19,7 @@
 > **Implemented subset (roadmap phase 2 + phase 3 routing, partial).**
 > `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
 > or a `pools[].source` naming a `backend_sources[]` entry
-> (`static` / `dns_srv` / `consul` / `kubernetes`, flat fields,
+> (`static` / `dns_srv` / `consul` / `kubernetes` / `tunnel`, flat fields,
 > `refresh_interval_sec`); `balancer: round_robin | least_conn | consistent_hash
 > | weighted` (scalar, not an object) — `consistent_hash` also reads a pool-level
 > `hash_on: src_ip | src_ip_port` (default `src_ip`), and `weighted` a pool-level
@@ -274,6 +274,13 @@ backend_sources:
     type: dns_srv              # resolves the SRV record; port from the record
     record: "_game._udp.us.internal.example.com"
     refresh_interval_sec: 10
+  - name: home-origin
+    type: tunnel               # phase 14, schema only — no runtime behavior yet.
+                                # Resolves backend addresses a `gsp-agent`-managed
+                                # origin behind a WireGuard tunnel has registered
+                                # with the controller's backend-peers registry.
+    pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # origin's WG pubkey
+    refresh_interval_sec: 10
 
 # pools
 pools:
@@ -402,7 +409,8 @@ listeners:
 
 - A pool needs exactly one of `targets:` / `source:`; `source` must point to a
   `backend_sources[].name`. `refresh_interval_sec >= 1`. `dns_srv` needs
-  `record`; `consul` / `kubernetes` need `service`.
+  `record`; `consul` / `kubernetes` need `service`; `tunnel` needs `pubkey`
+  (a base64-encoded 32-byte WireGuard key).
 - Every `action.pool` / `action.resolver` must exist.
 - Every listener needs at least one route. There is currently no warning for a
   route list with no trailing `always` — an unmatched connection/datagram is

@@ -72,6 +72,9 @@ settings:
 #   type: dns_srv      — resolve an SRV record; port comes from the record
 #   type: consul       — passing instances of a Consul service (HTTP API)
 #   type: kubernetes   — Endpoints of a Service (polled; SA token + CA in-pod)
+#   type: tunnel        — backend addresses a `gsp-agent`-managed origin behind
+#                         a WireGuard tunnel has registered with the controller
+#                         (phase 14, schema only so far — no runtime behavior yet)
 backend_sources:
   - name: local-static
     type: static
@@ -92,6 +95,10 @@ backend_sources:
   #   namespace: "games"                     # default: "default"
   #   port_name: "game"                      # optional; else the subset's first port
   #   api: "https://kubernetes.default.svc"  # default
+  #   refresh_interval_sec: 10
+  # - name: home-origin
+  #   type: tunnel
+  #   pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # origin's WG pubkey
   #   refresh_interval_sec: 10
 
 pools:
