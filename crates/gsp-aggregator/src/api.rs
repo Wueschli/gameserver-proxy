@@ -157,6 +157,8 @@ struct FleetPools {
     instance: String,
     last_seen_ms_ago: u64,
     pools: Vec<PoolSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 /// `GET /fleet/pools` — every known instance's pool/backend summary, oldest-
@@ -172,6 +174,7 @@ async fn fleet_pools(State(state): State<AppState>) -> Response {
             instance: s.payload.instance,
             last_seen_ms_ago: now.saturating_sub(s.received_at_ms),
             pools: s.payload.pools,
+            group: s.payload.group,
         })
         .collect();
     (StatusCode::OK, Json(out)).into_response()
@@ -244,6 +247,8 @@ struct FleetInstanceView {
     stale: bool,
     pools: Vec<PoolSummary>,
     sessions: SessionCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 /// The merged view `/fleet/subscribe` sends — everything the three plain
@@ -262,6 +267,7 @@ fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
                 stale: age > STALE_AFTER_MS,
                 pools: s.payload.pools,
                 sessions: s.payload.sessions,
+                group: s.payload.group,
             }
         })
         .collect()
@@ -342,6 +348,7 @@ mod tests {
             admin_url: "http://127.0.0.1:0".to_string(),
             pools: vec![],
             sessions: SessionCounts { tcp: 3, udp: 7 },
+            group: None,
         })
         .unwrap()
     }
@@ -447,6 +454,7 @@ mod tests {
                 }],
             }],
             sessions: SessionCounts { tcp: 5, udp: 10 },
+            group: None,
         }
     }
 

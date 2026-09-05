@@ -3,6 +3,68 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**gsp-ui full redesign (2026-09-05, same day, after phase 13 closed out)**:
+at the user's request — the previous frontend was a two-tab, unstyled React
+app with a raw YAML textarea for config and no way to organize a fleet
+beyond one flat instance list. Three parts, all `make check`-green and
+verified live against real `gsp`/`gsp-controller`/`gsp-aggregator`/`gsp-ui`
+processes:
+
+1. **Hierarchical fleet grouping**: new `settings.group: Option<String>`
+   (`gsp-config`, validated as a `/`-separated non-empty-segment path,
+   mirroring `failure_domain`'s shape but unpaired — no both-or-neither
+   rule). Flows through `gsp`'s aggregator push client → `IngestPayload`
+   (`gsp-aggregator::ingest`, `#[serde(default)]` so an older instance
+   without the field still ingests) → both `FleetPools` and
+   `FleetInstanceView` response shapes in `gsp-aggregator::api` (the second
+   one is what `/fleet/subscribe` → `gsp-ui`'s `/ws/fleet` → the browser
+   actually renders — the first pass at this missed threading `group` into
+   `FleetInstanceView` specifically, caught by an actual live curl check
+   against a running `gsp-ui`, not by the unit tests, which is why both
+   response shapes now carry it). Never touches `gsp-core` — purely a
+   fleet-display label, unrelated to routing/forwarding or to phase 13's
+   `failure_domain`/gossip mesh.
+2. **Plugin management from the UI** — previously file-copy-only. New `gsp`
+   admin routes `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}`
+   (writes/removes `.wasm` files in `settings.sniffers.dir`, then calls the
+   existing `request_reload()` — the already-live rescan-on-reload mechanism
+   picks it up, no second hot-reload path invented); `409` when
+   `settings.sniffers` is absent (turning it on from nothing is still
+   startup-only). Fanned out via new `gsp-aggregator::fanout` verbs
+   (`POST`/`DELETE /fleet/sniffers[/{name}]` broadcast to every instance,
+   `GET /fleet/instances/{instance}/sniffers` targeted — listing has no
+   fleet-wide "merge" meaning across instances with different `dir`
+   contents) and proxied by `gsp-ui::aggregator_proxy` the same way every
+   other operator verb is. `gsp-aggregator`'s `broadcast` helper gained a
+   `content_type` parameter (was hardcoded to `application/json`) since the
+   upload verb's body is raw `.wasm` bytes, not JSON.
+3. **Frontend rebuild** (`crates/gsp-ui/web/`): first new frontend
+   dependencies this app has had — Tailwind v4 (`@tailwindcss/vite`),
+   `react-router-dom` (replacing the old `useState`-tab toggle in `App.tsx`
+   with real routes), `@radix-ui/react-dialog` (the plugin upload modal),
+   and `yaml` (structured-form ↔ raw-YAML-text round-trip). A "night ops
+   console" token system (deep blue-slate ground, one signal-teal accent,
+   IBM Plex Sans/Mono) replaces the old hand-written `index.css`. New pages:
+   `FleetPage` (a collapsible tree built client-side from each instance's
+   `group` path — `lib/groupTree.ts`, no new aggregator endpoint needed),
+   `SettingsPage` (a schema-driven form over the common `settings.*`/pools/
+   listeners fields, mutating a parsed copy of the whole YAML document and
+   re-serializing — so fields with no dedicated control, like routes/
+   matchers/resolvers, round-trip untouched; a collapsible raw-YAML panel
+   underneath is always the actual escape hatch, satisfying "every setting
+   must stay changeable"), `PluginsPage` (per-instance module list + upload/
+   delete), `ConfigHistoryPage` (the old revision/diff/rollback table,
+   restyled, split out of the old combined `ConfigView`). `FleetView.tsx`/
+   `ConfigView.tsx` deleted.
+
+**Known gap, stated explicitly rather than silently scoped out**: the
+settings form covers `settings.*` scalars, per-pool name/balancer/targets,
+and per-listener name/bind/protocol/pool — not the full route/matcher/ACL/
+rate-limit/resolver/backend_source/sniffer-pin schema, which stays
+raw-YAML-only for now. This was a deliberate scope cut (that schema is large
+and better served by a dedicated future pass) rather than an oversight; the
+raw panel guarantees no field is ever unreachable in the meantime.
+
 **Phase 13 slice 5 done (2026-09-05, same day as slices 1-4) — phase 13 is
 now fully built.** New `crates/gsp-fleet-tests/tests/gossip.rs`, mirroring
 the same "spawn the real binaries, drive them over real sockets" shape

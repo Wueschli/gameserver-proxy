@@ -3,7 +3,7 @@
 // frontend never holds or sends a bearer token; gsp-ui presents those to
 // the controller/aggregator itself (docs/10 "The admin GUI").
 
-import type { FanoutResponse, RevisionSummary } from "./types";
+import type { FanoutResponse, RevisionSummary, SnifferInfo } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -116,6 +116,26 @@ export function routeHint(srcIp: string, pool: string, ttlSec: number): Promise<
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ src_ip: srcIp, pool, ttl_sec: ttlSec }),
+  });
+}
+
+// --- plugins (proxied to gsp-aggregator, fanned out to instances) ---
+
+export function listInstanceSniffers(instance: string): Promise<SnifferInfo[]> {
+  return requestJson(`/api/fleet/instances/${encodeURIComponent(instance)}/sniffers`);
+}
+
+export function uploadSniffer(name: string, bytes: ArrayBuffer): Promise<FanoutResponse> {
+  return requestJson(`/api/fleet/sniffers?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: bytes,
+  });
+}
+
+export function deleteSniffer(name: string): Promise<FanoutResponse> {
+  return requestJson(`/api/fleet/sniffers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
   });
 }
 

@@ -1,12 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 // Built assets are served by gsp-ui itself (tower-http::ServeDir) from the
 // same origin as the API, so relative asset paths and no dev-server proxy
 // config are needed for production. `server.proxy` below is only for
 // `npm run dev` against a real gsp-ui process during frontend development.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   base: "./",
   build: {
     outDir: "dist",

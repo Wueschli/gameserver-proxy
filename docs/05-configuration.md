@@ -146,7 +146,12 @@
 > non-64-hex-char `sha256`, and an empty `config` string. `call_timeout_ms` / `max_memory_bytes` themselves, and the
 > `settings.sniffers` block appearing/disappearing, are startup-only — the
 > `wasmtime::Engine` and its epoch-ticker thread are built once (like
-> `settings.workers`).
+> `settings.workers`). Modules within an already-configured `dir` can also be
+> managed over HTTP: `GET/POST /admin/sniffers` + `DELETE
+> /admin/sniffers/{name}` on the instance's own admin API (`409` if
+> `settings.sniffers` is absent), fanned out fleet-wide via `gsp-aggregator`'s
+> `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
+> see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
 >
 > **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — config
 > schema landed, the gossip mesh itself is design only, not yet built):
@@ -167,6 +172,15 @@
 > only on this instance's own local `rise` streak, and a Tier-1
 > `force-down` (`AdminState::Disabled`) always wins over the domain view.
 > Startup-only, like `settings.workers`.
+>
+> **Fleet grouping:** `settings.group` (optional string) is this instance's
+> self-reported organization path — e.g. `"eu/frankfurt/cluster-a"` — pushed
+> to gsp-aggregator alongside its `IngestPayload` so the admin GUI can render
+> a grouped/tree fleet view. `/`-separated, non-empty segments, no
+> leading/trailing `/`; `validate()` rejects anything else. Purely a display
+> label — never consulted by routing/forwarding, and independent of
+> `failure_domain` (which is about health-fabric membership, not fleet
+> organization).
 >
 > **Global caps:** `settings.limits: { max_connections, max_udp_sessions,
 > max_new_sessions_per_sec }` are process-wide ceilings (all optional; omit for no

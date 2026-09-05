@@ -1,20 +1,24 @@
 //! The admin / observability HTTP API. Bound to an internal address only.
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use metrics_exporter_prometheus::PrometheusHandle;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use gsp_core::pool::AdminState as BackendState;
+use gsp_core::sniff::Sniffers;
 use gsp_core::RuntimeHandle;
 
 #[derive(Clone)]
@@ -25,6 +29,12 @@ struct AdminState {
     /// `None` leaves the API open (`settings.admin.auth_token`, phase 10+11
     /// slice 10 — see `docs/05` "Admin API auth").
     auth_token: Option<String>,
+    /// `settings.sniffers.dir`, if configured — where `/admin/sniffers`
+    /// writes/removes `.wasm` files. `None` when this instance has no
+    /// `settings.sniffers` block at all (turning sniffing on from nothing is
+    /// still startup-only; see `sniffers_disabled`).
+    sniffers_dir: Option<PathBuf>,
+    sniffers: std::sync::Arc<Sniffers>,
 }
 
 /// The admin API route table. Split out from [`serve`] so integration tests can
@@ -46,6 +56,8 @@ fn router(state: AdminState) -> Router {
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
+        .route("/admin/sniffers", get(list_sniffers).post(upload_sniffer))
+        .route("/admin/sniffers/{name}", delete(delete_sniffer))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -81,11 +93,15 @@ pub async fn serve(
     runtime: RuntimeHandle,
     prometheus: PrometheusHandle,
     auth_token: Option<String>,
+    sniffers_dir: Option<PathBuf>,
+    sniffers: std::sync::Arc<Sniffers>,
 ) {
     let app = router(AdminState {
         runtime,
         prometheus,
         auth_token,
+        sniffers_dir,
+        sniffers,
     });
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -437,6 +453,157 @@ async fn delete_backend(
     (StatusCode::OK, format!("removed {addr} from {pool}\n"))
 }
 
+/// A module name safe to join onto `sniffers_dir` — no path separators, no
+/// `..`, non-empty. Rejects anything else rather than trying to sanitize it,
+/// since this name becomes a filename on disk from an admin-API caller.
+fn valid_module_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[derive(Serialize, Deserialize)]
+struct SnifferInfo {
+    name: String,
+    sha256: String,
+    size_bytes: u64,
+    /// Whether this module is actually loaded into the live registry right
+    /// now (a file can exist on disk but have failed its last scan — e.g. a
+    /// hash-pin mismatch — in which case this is `false`).
+    loaded: bool,
+}
+
+/// `GET /admin/sniffers` — lists every `.wasm` file in `settings.sniffers.dir`
+/// (name, sha256, size), plus whether it's currently loaded into the live
+/// registry. `409` if this instance has no `settings.sniffers` configured at
+/// all.
+async fn list_sniffers(State(s): State<AdminState>) -> Response {
+    let Some(dir) = &s.sniffers_dir else {
+        return sniffers_disabled();
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading sniffers.dir: {e}\n"),
+            )
+                .into_response()
+        }
+    };
+    let loaded = s.sniffers.names();
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        out.push(SnifferInfo {
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            size_bytes: bytes.len() as u64,
+            loaded: loaded.contains(&name),
+            name,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(out).into_response()
+}
+
+/// `POST /admin/sniffers?name=<module>` — uploads a `.wasm` module's raw
+/// bytes into `settings.sniffers.dir/<name>.wasm`, then requests a reload so
+/// `SnifferLoader::scan` (already rescanned live on every reload, phase 9
+/// slice 4) picks it up — the same hot mechanism `POST /pools/{pool}/backends`
+/// uses for the runtime overlay, not a second one. If `settings.sniffers.
+/// modules` pins hashes on this instance, an upload under an unpinned name
+/// loads the file but the *next* scan then rejects the whole registry
+/// update per the existing pin-enforcement rule in `sniffer_loader.rs` —
+/// updating the pin list itself is a config change, out of scope for this
+/// endpoint.
+#[derive(Deserialize)]
+struct SnifferUploadQuery {
+    name: String,
+}
+
+async fn upload_sniffer(
+    State(s): State<AdminState>,
+    Query(q): Query<SnifferUploadQuery>,
+    body: Bytes,
+) -> Response {
+    let Some(dir) = &s.sniffers_dir else {
+        return sniffers_disabled();
+    };
+    if !valid_module_name(&q.name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "name must be non-empty and contain only [A-Za-z0-9_-]\n".to_string(),
+        )
+            .into_response();
+    }
+    let path = dir.join(format!("{}.wasm", q.name));
+    if let Err(e) = std::fs::write(&path, &body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("writing {}: {e}\n", path.display()),
+        )
+            .into_response();
+    }
+    s.runtime.request_reload();
+    tracing::info!(name = %q.name, size = body.len(), "sniffer module uploaded via admin API");
+    (
+        StatusCode::OK,
+        format!("uploaded {}.wasm ({} bytes)\n", q.name, body.len()),
+    )
+        .into_response()
+}
+
+/// `DELETE /admin/sniffers/{name}` — removes a `.wasm` module from
+/// `settings.sniffers.dir` and requests a reload so the next rescan drops it
+/// from the live registry.
+async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Some(dir) = &s.sniffers_dir else {
+        return sniffers_disabled();
+    };
+    if !valid_module_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid module name\n".to_string()).into_response();
+    }
+    let path = dir.join(format!("{name}.wasm"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            s.runtime.request_reload();
+            tracing::info!(%name, "sniffer module removed via admin API");
+            (StatusCode::OK, format!("removed {name}.wasm\n")).into_response()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "no such module\n".to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("removing {}: {e}\n", path.display()),
+        )
+            .into_response(),
+    }
+}
+
+fn sniffers_disabled() -> Response {
+    (
+        StatusCode::CONFLICT,
+        "settings.sniffers is not configured on this instance; turning it on from nothing needs \
+         a restart, see docs/05-configuration.md\n",
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +621,14 @@ mod tests {
     }
 
     async fn spawn_admin_with_token(yaml: &str, auth_token: Option<&str>) -> (String, Runtime) {
+        spawn_admin_full(yaml, auth_token, None).await
+    }
+
+    async fn spawn_admin_full(
+        yaml: &str,
+        auth_token: Option<&str>,
+        sniffers_dir: Option<std::path::PathBuf>,
+    ) -> (String, Runtime) {
         let cfg = gsp_config::parse_str(yaml).unwrap();
         let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
         let prometheus = PrometheusBuilder::new().build_recorder().handle();
@@ -461,6 +636,8 @@ mod tests {
             runtime: runtime.handle(),
             prometheus,
             auth_token: auth_token.map(str::to_string),
+            sniffers_dir,
+            sniffers: std::sync::Arc::new(gsp_core::sniff::Sniffers::default()),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -653,5 +830,114 @@ mod tests {
             .await
             .unwrap();
         assert!(r.status().is_success());
+    }
+
+    #[tokio::test]
+    async fn sniffer_routes_are_409_when_settings_sniffers_is_absent() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
+        let (base, _runtime) = spawn_admin(yaml).await;
+        let http = reqwest::Client::new();
+
+        let r = http
+            .get(format!("{base}/admin/sniffers"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+
+        let r = http
+            .post(format!("{base}/admin/sniffers?name=x"))
+            .body(vec![0u8])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+
+        let r = http
+            .delete(format!("{base}/admin/sniffers/x"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn upload_list_and_delete_a_sniffer_module_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "gsp-admin-sniffer-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
+        let (base, _runtime) = spawn_admin_full(yaml, None, Some(dir.clone())).await;
+        let http = reqwest::Client::new();
+
+        // Nothing uploaded yet.
+        let list: Vec<SnifferInfo> = http
+            .get(format!("{base}/admin/sniffers"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(list.is_empty());
+
+        // Reject a path-traversal-shaped name before touching the filesystem.
+        let r = http
+            .post(format!("{base}/admin/sniffers?name=../evil"))
+            .body(vec![1u8, 2, 3])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // A real upload lands on disk and shows up in the listing.
+        let bytes = vec![0u8, 1, 2, 3, 4];
+        let r = http
+            .post(format!("{base}/admin/sniffers?name=demo"))
+            .body(bytes.clone())
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+        assert!(dir.join("demo.wasm").is_file());
+
+        let list: Vec<SnifferInfo> = http
+            .get(format!("{base}/admin/sniffers"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "demo");
+        assert_eq!(list[0].size_bytes, bytes.len() as u64);
+        // Not a real wasm module, so the registry never actually loaded it —
+        // `loaded` reports the live registry's state, not just file presence.
+        assert!(!list[0].loaded);
+
+        // Delete removes the file.
+        let r = http
+            .delete(format!("{base}/admin/sniffers/demo"))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+        assert!(!dir.join("demo.wasm").exists());
+
+        // Deleting again is a clean 404, not a panic.
+        let r = http
+            .delete(format!("{base}/admin/sniffers/demo"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -18,7 +18,7 @@
 //! instance's own admin API, where the eventual effect lands.
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -34,6 +34,10 @@ pub fn viewer_router() -> Router<AppState> {
         .route("/api/fleet/pools", get(get_pools))
         .route("/api/fleet/sessions", get(get_sessions))
         .route("/api/fleet/healthz", get(get_healthz))
+        .route(
+            "/api/fleet/instances/{instance}/sniffers",
+            get(get_instance_sniffers),
+        )
 }
 
 /// The phase-5 intent verbs, fanned out through the aggregator —
@@ -54,6 +58,11 @@ pub fn operator_router() -> Router<AppState> {
             patch(patch_backend).delete(delete_backend),
         )
         .route("/api/fleet/route-hint", post(route_hint))
+        .route("/api/fleet/sniffers", post(upload_sniffer))
+        .route(
+            "/api/fleet/sniffers/{name}",
+            axum::routing::delete(delete_sniffer),
+        )
 }
 
 async fn get_pools(State(state): State<AppState>) -> Response {
@@ -66,6 +75,21 @@ async fn get_sessions(State(state): State<AppState>) -> Response {
 
 async fn get_healthz(State(state): State<AppState>) -> Response {
     proxy(&state, Method::GET, "/fleet/healthz", None, None).await
+}
+
+async fn get_instance_sniffers(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(instance): Path<String>,
+) -> Response {
+    proxy(
+        &state,
+        Method::GET,
+        &format!("/fleet/instances/{instance}/sniffers"),
+        None,
+        actor,
+    )
+    .await
 }
 
 async fn drain_instance(
@@ -153,6 +177,43 @@ async fn route_hint(
     proxy(&state, Method::POST, "/fleet/route-hint", Some(body), actor).await
 }
 
+#[derive(serde::Deserialize)]
+struct SnifferUploadQuery {
+    name: String,
+}
+
+async fn upload_sniffer(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Query(q): Query<SnifferUploadQuery>,
+    body: Bytes,
+) -> Response {
+    proxy_raw(
+        &state,
+        Method::POST,
+        &format!("/fleet/sniffers?name={}", q.name),
+        Some(body),
+        "application/octet-stream",
+        actor,
+    )
+    .await
+}
+
+async fn delete_sniffer(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(name): Path<String>,
+) -> Response {
+    proxy(
+        &state,
+        Method::DELETE,
+        &format!("/fleet/sniffers/{name}"),
+        None,
+        actor,
+    )
+    .await
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -169,6 +230,20 @@ async fn proxy(
     method: Method,
     path_suffix: &str,
     body: Option<Bytes>,
+    actor: Option<String>,
+) -> Response {
+    proxy_raw(state, method, path_suffix, body, "application/json", actor).await
+}
+
+/// Like [`proxy`], but lets the caller pick the forwarded body's
+/// `content-type` — needed for `/api/fleet/sniffers` uploads, which carry
+/// raw `.wasm` bytes rather than JSON.
+async fn proxy_raw(
+    state: &AppState,
+    method: Method,
+    path_suffix: &str,
+    body: Option<Bytes>,
+    content_type: &str,
     actor: Option<String>,
 ) -> Response {
     let Some(aggregator) = &state.aggregator else {
@@ -190,7 +265,7 @@ async fn proxy(
         req = req.header("X-Actor", actor);
     }
     if let Some(body) = body {
-        req = req.header("content-type", "application/json").body(body);
+        req = req.header("content-type", content_type).body(body);
     }
 
     match req.send().await {

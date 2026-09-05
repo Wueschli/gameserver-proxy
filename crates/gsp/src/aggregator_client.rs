@@ -33,6 +33,11 @@ struct IngestPayload {
     admin_url: String,
     pools: Vec<PoolSummary>,
     sessions: SessionCounts,
+    /// Self-reported fleet organization path (`settings.group`), so the
+    /// admin GUI can render a grouped/tree fleet view. Never consulted by
+    /// routing/forwarding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -144,6 +149,7 @@ fn build_payload(instance: &str, admin_url: &str, handle: &RuntimeHandle) -> Ing
         admin_url: admin_url.to_string(),
         pools,
         sessions: SessionCounts { tcp, udp },
+        group: snapshot.group.clone(),
     }
 }
 
@@ -153,6 +159,8 @@ mod tests {
     use gsp_core::{Runtime, Snapshot};
 
     const YAML: &str = r#"
+settings:
+  group: "eu/frankfurt"
 pools:
   - name: local
     targets: ["127.0.0.1:9001"]
@@ -182,5 +190,6 @@ listeners:
         assert_eq!(payload.pools[0].backends[0].state, "enabled");
         assert_eq!(payload.sessions.tcp, 0);
         assert_eq!(payload.sessions.udp, 0);
+        assert_eq!(payload.group.as_deref(), Some("eu/frankfurt"));
     }
 }

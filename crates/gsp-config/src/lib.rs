@@ -81,6 +81,13 @@ struct RawSettings {
     /// `failure_domain`, or not at all. Startup-only.
     #[serde(default)]
     gossip: Option<RawGossip>,
+    /// Self-reported fleet organization path (e.g. `"eu/frankfurt/cluster-a"`),
+    /// pushed to gsp-aggregator alongside this instance's `IngestPayload` so
+    /// the admin GUI can render a grouped/tree view. Purely a fleet-display
+    /// label — never consulted by routing/forwarding. `/`-separated,
+    /// non-empty segments, no leading/trailing `/`.
+    #[serde(default)]
+    group: Option<String>,
 }
 
 impl Default for RawSettings {
@@ -94,6 +101,7 @@ impl Default for RawSettings {
             sniffers: None,
             failure_domain: None,
             gossip: None,
+            group: None,
         }
     }
 }
@@ -1254,6 +1262,10 @@ pub struct Config {
     /// fully disabled, today's local-only health behaviour.
     pub failure_domain: Option<String>,
     pub gossip: Option<GossipConfig>,
+    /// Self-reported fleet organization path (e.g. `"eu/frankfurt/cluster-a"`).
+    /// `None` ⇒ this instance shows up ungrouped in the admin GUI's fleet
+    /// tree. Never consulted by routing/forwarding.
+    pub group: Option<String>,
 }
 
 /// Resolved `settings.gossip` (phase 13, docs/10 "Tier 2"). The mesh itself
@@ -2289,6 +2301,11 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         (Some(_), Some(rg)) => Some(validate_gossip(rg)?),
     };
 
+    let group = match raw.settings.group {
+        Some(g) => Some(validate_group(g)?),
+        None => None,
+    };
+
     Ok(Config {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
@@ -2302,7 +2319,23 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         sniffers,
         failure_domain: raw.settings.failure_domain,
         gossip,
+        group,
     })
+}
+
+fn validate_group(g: String) -> Result<String, ConfigError> {
+    use ConfigError::Invalid;
+    if g.is_empty() || g.starts_with('/') || g.ends_with('/') {
+        return Err(Invalid(
+            "settings.group must not be empty or start/end with '/'".into(),
+        ));
+    }
+    if g.split('/').any(|segment| segment.is_empty()) {
+        return Err(Invalid(
+            "settings.group must not contain empty segments (e.g. \"a//b\")".into(),
+        ));
+    }
+    Ok(g)
 }
 
 fn validate_gossip(rg: RawGossip) -> Result<GossipConfig, ConfigError> {
@@ -4500,6 +4533,34 @@ listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
                 "  failure_domain: \"d\"\n  gossip:\n    bind: \"0.0.0.0:7946\"\n    \
                  psk: \"secret\"\n    quorum_fraction: 1.5\n",
             ),
+        ] {
+            assert!(parse_str(&bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn absent_group_is_none() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        assert!(parse_str(yaml).unwrap().group.is_none());
+    }
+
+    #[test]
+    fn parses_valid_multi_segment_group() {
+        let yaml = gossip_fixture("  group: \"eu/frankfurt/cluster-a\"\n");
+        assert_eq!(
+            parse_str(&yaml).unwrap().group.as_deref(),
+            Some("eu/frankfurt/cluster-a")
+        );
+    }
+
+    #[test]
+    fn rejects_bad_group_paths() {
+        for bad in [
+            gossip_fixture("  group: \"\"\n"),
+            gossip_fixture("  group: \"/eu/frankfurt\"\n"),
+            gossip_fixture("  group: \"eu/frankfurt/\"\n"),
+            gossip_fixture("  group: \"eu//frankfurt\"\n"),
         ] {
             assert!(parse_str(&bad).is_err(), "should reject: {bad}");
         }

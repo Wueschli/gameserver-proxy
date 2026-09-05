@@ -1,46 +1,39 @@
 import { useEffect, useState } from "react";
-import { checkSession, logout } from "./api";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { checkSession } from "./api";
 import { Login } from "./components/Login";
-import { FleetView } from "./components/FleetView";
-import { ConfigView } from "./components/ConfigView";
-
-type Tab = "fleet" | "config";
+import { Layout } from "./components/Layout";
+import { FleetPage } from "./pages/FleetPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { PluginsPage } from "./pages/PluginsPage";
+import { ConfigHistoryPage } from "./pages/ConfigHistoryPage";
 
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
-  const [tab, setTab] = useState<Tab>("fleet");
 
   useEffect(() => {
     checkSession().then(setAuthenticated);
   }, []);
 
   if (authenticated === null) {
-    return <p className="loading">loading…</p>;
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-ink-muted">Loading…</div>
+    );
   }
   if (!authenticated) {
     return <Login onLoggedIn={() => setAuthenticated(true)} />;
   }
 
   return (
-    <div className="app">
-      <header>
-        <h1>gsp fleet</h1>
-        <nav>
-          <button className={tab === "fleet" ? "active" : ""} onClick={() => setTab("fleet")}>
-            fleet
-          </button>
-          <button className={tab === "config" ? "active" : ""} onClick={() => setTab("config")}>
-            config
-          </button>
-        </nav>
-        <button
-          className="logout"
-          onClick={() => logout().finally(() => setAuthenticated(false))}
-        >
-          log out
-        </button>
-      </header>
-      <main>{tab === "fleet" ? <FleetView /> : <ConfigView />}</main>
-    </div>
+    <Routes>
+      <Route element={<Layout onLoggedOut={() => setAuthenticated(false)} />}>
+        <Route index element={<Navigate to="/fleet" replace />} />
+        <Route path="/fleet" element={<FleetPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/plugins" element={<PluginsPage />} />
+        <Route path="/config-history" element={<ConfigHistoryPage />} />
+        <Route path="*" element={<Navigate to="/fleet" replace />} />
+      </Route>
+    </Routes>
   );
 }

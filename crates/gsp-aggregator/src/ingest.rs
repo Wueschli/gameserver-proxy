@@ -35,6 +35,12 @@ pub struct IngestPayload {
     pub pools: Vec<PoolSummary>,
     #[serde(default)]
     pub sessions: SessionCounts,
+    /// Self-reported fleet organization path (`settings.group`), e.g.
+    /// `"eu/frankfurt/cluster-a"` — an older instance that predates this
+    /// field simply reports `None`, showing up ungrouped. Purely a display
+    /// label for the admin GUI's fleet tree.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,7 +150,15 @@ mod tests {
             admin_url: "http://127.0.0.1:0".to_string(),
             pools: vec![],
             sessions: SessionCounts::default(),
+            group: None,
         }
+    }
+
+    #[test]
+    fn a_payload_without_a_group_field_still_deserializes() {
+        let json = r#"{"instance":"a","admin_url":"http://127.0.0.1:0","pools":[]}"#;
+        let payload: IngestPayload = serde_json::from_str(json).unwrap();
+        assert!(payload.group.is_none());
     }
 
     #[test]

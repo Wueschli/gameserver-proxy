@@ -99,6 +99,33 @@ pick up an added, removed, or rebuilt module. Optional `settings.sniffers.
 modules: [{ name, sha256 }]` pins each file's hash for supply-chain
 verification; compute it with `sha256sum <file>.wasm`.
 
+### Installing over HTTP instead of `cp`
+
+An instance with `settings.sniffers` configured also accepts modules over its
+admin API, so an operator (or the admin GUI's Plugins page) doesn't need
+filesystem access to the host:
+
+```sh
+curl -X POST --data-binary @a2s.wasm "http://<admin-listen>/admin/sniffers?name=a2s"
+curl "http://<admin-listen>/admin/sniffers"                # list, with sha256 + loaded state
+curl -X DELETE "http://<admin-listen>/admin/sniffers/a2s"
+```
+
+This writes into the same `settings.sniffers.dir` the manual `cp` workflow
+above uses, then triggers the same live rescan — the two approaches are
+interchangeable, not alternatives with different behavior. `gsp-aggregator`
+fans the same upload/delete out to every known instance at once
+(`POST`/`DELETE /fleet/sniffers[/{name}]`), and `gsp-ui`'s Plugins page calls
+that fan-out. All three routes are `409` on an instance with no
+`settings.sniffers` block at all — turning sniffing on from nothing is still
+startup-only (see `docs/05-configuration.md`); this endpoint only manages
+modules within an already-configured `dir`. If `settings.sniffers.modules`
+pins hashes, uploading a brand-new (previously-unpinned) module name loads
+the file but the *next* rescan then rejects the whole registry update per
+the existing pin-enforcement rule — updating the pin list itself is a config
+change made the normal way (file edit / controller revision), not through
+this endpoint.
+
 ## Size / sandbox notes
 
 Release profile (workspace-wide, `[profile.release]` in this workspace's

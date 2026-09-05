@@ -107,6 +107,7 @@ mod tests {
                 backends: vec![],
             }],
             sessions: SessionCounts { tcp: 1, udp: 0 },
+            group: None,
         }
     }
 

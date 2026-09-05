@@ -890,6 +890,21 @@ Two capability levels, shippable in order:
 No proxy admin port is ever exposed to a human; the GUI carries all
 authentication and authorization.
 
+**Redesign (2026-09-05)**: the GUI gained a real fleet tree (instances group
+under a self-reported `settings.group` path, e.g. `"eu/frankfurt/cluster-a"`
+— a display-only label alongside the existing `admin_url`/`sessions` fields
+in `IngestPayload`, unrelated to the Tier-1/Tier-2 hierarchy above), a
+schema-driven settings form over the same submitted YAML text (a raw-YAML
+panel stays underneath so every field — including ones the form has no
+control for yet — is always reachable), and a Plugins page for managing
+sniffer modules. Plugin management needed new backend surface: `gsp` gained
+`GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into
+`settings.sniffers.dir`, then reuses the existing live rescan-on-reload
+mechanism — no new hot-reload path), fanned out fleet-wide via
+`gsp-aggregator`'s `POST/DELETE /fleet/sniffers[/{name}]` and a targeted
+`GET /fleet/instances/{instance}/sniffers`. Turning `settings.sniffers` on
+from nothing is still startup-only, per its existing design.
+
 ---
 
 ## Failure behaviour

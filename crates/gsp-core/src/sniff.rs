@@ -74,6 +74,12 @@ impl Sniffers {
     pub fn get(&self, name: &str) -> Option<Arc<dyn Sniffer>> {
         self.map.load().get(name).cloned()
     }
+
+    /// Every currently-loaded sniffer's name, for a control-plane listing
+    /// (`GET /admin/sniffers`) — never consulted on the hot path.
+    pub fn names(&self) -> Vec<String> {
+        self.map.load().keys().cloned().collect()
+    }
 }
 
 /// Log a warning if `listener` routes on a sniffer name that resolves to

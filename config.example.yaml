@@ -56,6 +56,11 @@ settings:
   #   quorum_fraction: 0.66   # > 0.5, <= 1.0 — fraction of the domain that
   #                           # must report a backend down to override "up"
   #   psk: "change-me"        # every gossip datagram is HMAC-SHA256-tagged
+  # Self-reported fleet organization path, pushed to gsp-aggregator so the
+  # admin GUI can render a grouped/tree view. Purely a display label — never
+  # consulted by routing/forwarding. `/`-separated, non-empty segments, no
+  # leading/trailing `/`.
+  # group: "eu/frankfurt/cluster-a"
 
 # Backend discovery (phase 8). A named source hands a pool its backend set
 # instead of a static `targets:` list. Level-triggered: the adapter returns the

@@ -27,6 +27,8 @@ export interface FleetInstanceView {
   stale: boolean;
   pools: PoolSummary[];
   sessions: SessionCounts;
+  /** Self-reported fleet organization path, e.g. "eu/frankfurt/cluster-a". */
+  group?: string | null;
 }
 
 export interface FanoutInstanceResult {
@@ -43,4 +45,11 @@ export interface RevisionSummary {
   revision: number;
   size_bytes: number;
   current: boolean;
+}
+
+export interface SnifferInfo {
+  name: string;
+  sha256: string;
+  size_bytes: number;
+  loaded: boolean;
 }

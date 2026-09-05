@@ -286,6 +286,8 @@ async fn run(
         handle.clone(),
         prometheus,
         cfg.admin_auth_token.clone(),
+        cfg.sniffers.as_ref().map(|sc| PathBuf::from(&sc.dir)),
+        sniffers.clone(),
     ));
     let aggregator = aggregator_push.map(|push_cfg| {
         tracing::info!(

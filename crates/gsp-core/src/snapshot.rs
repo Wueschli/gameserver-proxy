@@ -31,6 +31,12 @@ pub struct Snapshot {
     /// when a `backend_sources[]` entry actually changed. The refresh tasks and
     /// the last-known-good sets live outside the snapshot.
     pub sources: HashMap<String, SourceConfig>,
+    /// Self-reported fleet organization path (`settings.group`), echoed onto
+    /// the snapshot so a reload updates what the aggregator push client
+    /// reports — unlike `failure_domain`/`gossip`, this is a pure display
+    /// label with no socket/mesh lifecycle behind it, so there's no reason
+    /// for it to be startup-only.
+    pub group: Option<String>,
 }
 
 impl Snapshot {
@@ -95,6 +101,7 @@ impl Snapshot {
                 .iter()
                 .filter_map(|pc| pc.source.clone().map(|s| (pc.name.clone(), s)))
                 .collect(),
+            group: cfg.group.clone(),
         })
     }
 

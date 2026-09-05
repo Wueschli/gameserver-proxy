@@ -42,7 +42,7 @@
 //! audit trail is `gsp-controller`'s per-revision `actor` field.
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{patch, post};
@@ -64,12 +64,21 @@ pub fn router() -> Router<AppState> {
             "/fleet/instances/{instance}/undrain",
             post(undrain_instance),
         )
+        .route(
+            "/fleet/instances/{instance}/sniffers",
+            axum::routing::get(list_instance_sniffers),
+        )
         .route("/fleet/pools/{pool}/backends", post(add_backend))
         .route(
             "/fleet/pools/{pool}/backends/{addr}",
             patch(patch_backend).delete(delete_backend),
         )
         .route("/fleet/route-hint", post(route_hint))
+        .route("/fleet/sniffers", post(upload_sniffer))
+        .route(
+            "/fleet/sniffers/{name}",
+            axum::routing::delete(delete_sniffer),
+        )
 }
 
 /// `X-Actor`, if present — see the module doc.
@@ -110,6 +119,29 @@ async fn undrain_instance(
         &instance,
         Method::POST,
         "/admin/undrain",
+        None,
+        actor.as_deref(),
+    )
+    .await
+}
+
+/// `GET /fleet/instances/{instance}/sniffers` — a targeted read of one named
+/// instance's loaded sniffer modules, same targeted shape as drain/undrain
+/// (listing has no fleet-wide "merge" meaning across instances with
+/// different `settings.sniffers.dir` contents, so a caller picks the
+/// instance).
+async fn list_instance_sniffers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(instance): Path<String>,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%instance, ?actor, verb = "list_sniffers", "fan-out verb");
+    proxy_to_instance(
+        &state,
+        &instance,
+        Method::GET,
+        "/admin/sniffers",
         None,
         actor.as_deref(),
     )
@@ -185,6 +217,53 @@ async fn route_hint(State(state): State<AppState>, headers: HeaderMap, body: Byt
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SnifferUploadQuery {
+    name: String,
+}
+
+/// `POST /fleet/sniffers?name=<module>` — broadcasts a `.wasm` module upload
+/// to every known instance's `POST /admin/sniffers`, raw bytes with
+/// `content-type: application/octet-stream` (not JSON — this is the one
+/// fan-out verb whose body isn't JSON, see `broadcast_with_content_type`).
+async fn upload_sniffer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SnifferUploadQuery>,
+    body: Bytes,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(name = %q.name, ?actor, verb = "upload_sniffer", "fan-out verb");
+    broadcast_with_content_type(
+        &state,
+        Method::POST,
+        &format!("/admin/sniffers?name={}", q.name),
+        Some(body),
+        "application/octet-stream",
+        actor.as_deref(),
+    )
+    .await
+}
+
+/// `DELETE /fleet/sniffers/{name}` — broadcasts a module removal to every
+/// known instance's `DELETE /admin/sniffers/{name}`.
+async fn delete_sniffer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%name, ?actor, verb = "delete_sniffer", "fan-out verb");
+    broadcast(
+        &state,
+        Method::DELETE,
+        &format!("/admin/sniffers/{name}"),
+        None,
+        actor.as_deref(),
+    )
+    .await
 }
 
 /// Proxies one call to exactly one named instance, passing its response
@@ -275,9 +354,24 @@ async fn broadcast(
     body: Option<Bytes>,
     actor: Option<&str>,
 ) -> Response {
+    broadcast_with_content_type(state, method, path_suffix, body, "application/json", actor).await
+}
+
+/// Like [`broadcast`], but lets the caller pick the forwarded body's
+/// `content-type` — needed for `/admin/sniffers` uploads, which carry raw
+/// `.wasm` bytes rather than JSON.
+async fn broadcast_with_content_type(
+    state: &AppState,
+    method: Method,
+    path_suffix: &str,
+    body: Option<Bytes>,
+    content_type: &str,
+    actor: Option<&str>,
+) -> Response {
     let instances = state.store.snapshot();
     let instance_token = state.instance_token.clone();
     let actor = actor.map(str::to_string);
+    let content_type = content_type.to_string();
     let mut calls = tokio::task::JoinSet::new();
     for inst in instances {
         let client = state.http.clone();
@@ -287,6 +381,7 @@ async fn broadcast(
         let instance = inst.payload.instance;
         let instance_token = instance_token.clone();
         let actor = actor.clone();
+        let content_type = content_type.clone();
         calls.spawn(async move {
             let mut req = client.request(method, &url);
             if let Some(token) = &instance_token {
@@ -296,7 +391,7 @@ async fn broadcast(
                 req = req.header("X-Actor", actor.as_str());
             }
             if let Some(body) = body {
-                req = req.header("content-type", "application/json").body(body);
+                req = req.header("content-type", content_type).body(body);
             }
             match req.send().await {
                 Ok(resp) => InstanceResult {
@@ -351,6 +446,7 @@ mod tests {
                 backends: vec![],
             }],
             sessions: SessionCounts::default(),
+            group: None,
         }
     }
 
@@ -644,5 +740,82 @@ mod tests {
             .unwrap();
         assert!(bad["status"].is_null());
         assert!(bad["error"].is_string());
+    }
+
+    type CapturedUpload = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+
+    #[tokio::test]
+    async fn upload_sniffer_broadcasts_raw_bytes_with_octet_stream_content_type() {
+        let captured: CapturedUpload = Arc::new(Mutex::new(None));
+        let captured_for_handler = captured.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = Router::new().route(
+            "/admin/sniffers",
+            post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    let ct = headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured.lock().unwrap() = Some((ct, body.to_vec()));
+                    "uploaded\n"
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/sniffers?name=demo")
+                    .body(Body::from(vec![1u8, 2, 3]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (ct, body) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(ct, "application/octet-stream");
+        assert_eq!(body, vec![1u8, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn delete_sniffer_broadcasts_to_every_instance() {
+        let (url, _captured) = spawn_mock_instance(
+            "/admin/sniffers/demo",
+            Method::DELETE,
+            StatusCode::OK,
+            "removed\n",
+        )
+        .await;
+        let state = test_state();
+        state.store.ingest(ingest_payload("a", &url));
+        let app = crate::api::router(state);
+
+        let resp = app
+            .oneshot(
+                Request::delete("/fleet/sniffers/demo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["results"][0]["status"], 200);
     }
 }
