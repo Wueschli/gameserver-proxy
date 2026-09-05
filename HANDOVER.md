@@ -3,6 +3,67 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 slice 5 done (2026-09-05, same day as slices 1-4)**: the new
+`tunnel` `BackendSource` — closes the loop slice 1's schema opened, so a
+pool's `source: <backend_sources[].name>` pointing at a `type: tunnel`
+entry now actually produces live backend addresses, through the exact same
+discovery reconcile path `dns_srv`/`consul`/`kubernetes` already use (no
+`Snapshot::build_with_sources` changes needed — the whole point of the
+`BackendSource` seam).
+
+`TunnelSource::fetch` does `GET {tunnel-controller-url}/peers/{origin}`
+(`origin` = the `backend_sources[].name` itself — by construction, the same
+identifier a pool's `source:` already names and what an operator points a
+`gsp-agent --name` at, so no separate "origin id" field was needed in the
+schema). Reuses `--tunnel-controller-url`/`--tunnel-controller-token` (new
+`discovery::TunnelRegistry`, threaded through `build_sources`/`build_one`/
+`DiscoveryFactory`) rather than a second flag pair, since it's the
+identical registry slice 4's reconcile task already subscribes to.
+
+**A real security property, not just plumbing**: every fetch verifies the
+registry's *currently* registered pubkey still matches `backend_sources
+[].pubkey` before trusting its backend list — an origin `name` later
+re-registered under a different key (accidentally or maliciously) is
+refused with a loud error, never silently trusted just because the name
+still matches. A `404` (never registered, or not yet) is deliberately
+**not** an error — `Ok(Vec::new())`, which the existing level-triggered
+discovery contract already treats the same as "keep the last-known-good
+set", exactly the posture `docs/10`'s "freeze on last-known-good" already
+established for every other discovery adapter's empty/failed fetch.
+
+4 new tests, all against a real ephemeral-port mock HTTP server (this
+project's existing `mock_http` test helper, shared with the `consul`/
+`kubernetes` adapter tests — extended with a `serve_status` variant to
+cover the `404` case, since the existing `serve_json` only ever answered
+`200`): the happy path, a pubkey mismatch refused, a `404` treated as
+empty-not-error, and a malformed backend address rejected. `make check`
+green (one unrelated pre-existing flake hit and confirmed: `gsp-controller`'s
+`ha::log_store` seeded-entries test occasionally fails on a `sled` file-lock
+race under parallel `cargo test` execution — reproduced once, passed
+immediately on a solo re-run, confirmed unrelated to this slice's files by
+inspection; not chased further, matching this project's existing "note a
+found-but-unrelated flake, don't silently ignore it" precedent from phase
+13's `/tmp` config-reload flake).
+
+**Live verification, same limitation as slices 3-4**: `TunnelSource::fetch`
+itself is proven against a real HTTP server (the unit tests above) and
+against a real running `gsp-controller` (a `curl POST /peers` + `GET
+/peers/{name}` round trip, confirming the exact JSON shape `TunnelSource`
+parses). **The full pipeline — a real `gsp` process actually reaching a
+pool's live tunnel backends — could not be exercised end-to-end in this
+sandbox**, because slice 4 deliberately brings the WireGuard interface up
+*before* building any backend sources (the ordering-bug fix from slice 4's
+entry), so a config using a `tunnel` source can't be loaded here at all
+without `--tunnel-iface` succeeding first, which needs `CAP_NET_ADMIN` this
+sandbox doesn't have. Not a new limitation — the same one already noted for
+slices 3 and 4, just now blocking one slice further down the chain too.
+
+**Next**: slice 6, end-to-end live verification — needs a host with
+`CAP_NET_ADMIN` (or a netns-simulated NAT boundary) to actually exercise
+this, plus closing the still-open gap from slice 4's entry (how an origin's
+`gsp-agent` learns the proxy's own pubkey/endpoint to dial out — nothing
+builds that yet).
+
 **Phase 14 slice 4 done (2026-09-05, same day as slices 1-3)**: `gsp`'s own
 subscribe-and-reconcile task. New `crates/gsp/src/tunnel_client.rs`, wired
 in behind new `--tunnel-iface`/`--tunnel-listen-port`/`--tunnel-address`/

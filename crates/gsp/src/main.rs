@@ -293,11 +293,23 @@ async fn run(
         tracing::info!(count = resolvers.len(), "external resolvers ready");
     }
 
+    // Phase 14 slice 5 (docs/11): a `tunnel` backend_sources entry resolves
+    // an origin's currently-registered backends from the same backend-peers
+    // registry the tunnel reconcile task (below) subscribes to — reuses
+    // `--tunnel-controller-url`/`--tunnel-controller-token` rather than a
+    // second pair of flags, since it's the identical registry. Borrowed
+    // (not moved) here so the bring-up block further down can still
+    // consume `tunnel_config` by value.
+    let tunnel_registry = tunnel_config.as_ref().map(|tc| discovery::TunnelRegistry {
+        controller_url: tc.controller_url.clone(),
+        token: tc.controller_token.clone(),
+    });
+
     // Backend discovery (phase 8): build one source per pool with a `source`,
     // do a best-effort initial fetch so the first snapshot has real backends,
     // then let the runtime run a refresh task per source.
     let discovery = Arc::new(gsp_core::Discovery::new());
-    let sources = discovery::build_sources(&cfg)?;
+    let sources = discovery::build_sources(&cfg, tunnel_registry.as_ref())?;
     if !sources.is_empty() {
         tracing::info!(count = sources.len(), "backend discovery sources ready");
         for s in &sources {
@@ -326,7 +338,8 @@ async fn run(
     // pool `source` and reconciles them on every reload.
     let source_factory: Option<Arc<dyn gsp_core::SourceFactory>> =
         cfg.pools.iter().any(|p| p.source.is_some()).then(|| {
-            let f: Arc<dyn gsp_core::SourceFactory> = Arc::new(discovery::DiscoveryFactory::new());
+            let f: Arc<dyn gsp_core::SourceFactory> =
+                Arc::new(discovery::DiscoveryFactory::new(tunnel_registry.clone()));
             f
         });
 

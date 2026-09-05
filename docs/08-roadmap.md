@@ -1030,14 +1030,14 @@ needs it; none started):
    `wireguard-rs`) to match. Verifiable standalone against slice 3's real
    agent: the proxy's interface should show the agent as a peer within one
    subscribe cycle, independent of any actual game traffic yet.
-5. 🔜 **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
+5. ✅ **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
    existing DNS-SRV/Consul/Kubernetes sources): `fetch()` resolves an
    origin's currently-registered backend address(es) from the same peers
    registry slice 4 already subscribes to. This is what actually lets a
    pool's `source: <origin>` produce live, tunnel-internal backend
    addresses through the existing discovery reconcile path — no changes
    needed to `Snapshot::build_with_sources` itself.
-6. ⬜ **End-to-end live verification**: a real `gsp-agent` + real backend
+6. 🔜 **End-to-end live verification**: a real `gsp-agent` + real backend
    process on one side of a real (or netns-simulated) NAT boundary, a real
    `gsp` proxy + `gsp-controller` on the other, actual game traffic routed
    proxy → WireGuard tunnel → agent → backend, confirmed live — matching

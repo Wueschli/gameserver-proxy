@@ -68,7 +68,7 @@ crates/
     main.rs                 CLI, tracing, runtime bring-up, shutdown
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
-    discovery.rs             DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8)
+    discovery.rs             DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9)
     procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
