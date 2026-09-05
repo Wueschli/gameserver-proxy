@@ -644,10 +644,18 @@ token, is ever exposed to a human directly.
   tables and forms. **A real frontend overhaul is future, separate work** —
   tracked under "Later / optional" below — deliberately deferred rather than
   polished now, since it doesn't block anything else in this phase.
-12. Integration tests: N `gsp` instances + 1 controller + 1 aggregator (+
-    1 `gsp-ui` once it exists) —
+12. ✅ Integration tests: N `gsp` instances + 1 controller + 1 aggregator —
     subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial
-    failure, config reject-keeps-previous.
+    failure, config reject-keeps-previous. New crate `crates/gsp-fleet-tests`
+    (workspace member, part of `make check`): spawns the real
+    `gsp`/`gsp-controller`/`gsp-aggregator` **binaries** as child processes on
+    loopback with OS-assigned ports and drives them over real HTTP, rather
+    than an in-process harness — matching how every earlier slice was
+    actually verified (see HANDOVER.md) and specifically able to catch the
+    wire-shape class of bug slices 11e/11f already found live. 4 tests, all
+    green. `gsp-ui` isn't spawned here — nothing in the 4 listed scenarios
+    exercises it, and it has no state of its own to assert on beyond what
+    slice 11's own tests already cover.
 13. Docs: `docs/06` (new metrics/endpoints), `README.md` status block,
     `docs/08` status legend, `HANDOVER.md`.
 

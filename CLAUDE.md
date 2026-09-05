@@ -92,6 +92,10 @@ crates/
     ws.rs                   GET /ws/fleet — the browser's live-updates WebSocket, fed by fleet_feed
     web/                    standalone npm project (own package.json, never a Cargo workspace member) — the React + Vite + TS frontend; `make ui` builds it to `dist/`, served by `--static-dir`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
+  gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
+                              gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
+                              child processes and drives them over real HTTP
+                              (`cargo test -p gsp-fleet-tests`, included in `make check`)
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
 

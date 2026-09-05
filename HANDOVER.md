@@ -50,9 +50,11 @@ control plane's single-tier PoC) is now **implemented, not just designed** —
 see the session notes immediately below for the full arc. Three new crates
 (`gsp-controller`, `gsp-aggregator`, `gsp-ui`) plus a frontend
 (`crates/gsp-ui/web/`), all 11 slices done and individually verified live
-against real running processes, up through slice 11 (the admin GUI). Only
-slice 12 (integration tests spinning up the whole fleet together) and slice
-13 (docs polish) remain before phase 10+11 is fully closed out. Phase 12
+against real running processes, up through slice 11 (the admin GUI). Slice
+12 (integration tests spinning up the fleet together, new crate
+`crates/gsp-fleet-tests`) is also done — see its own entry further down.
+Only slice 13 (docs polish) remains before phase 10+11 is fully closed out.
+Phase 12
 (fleet hierarchy/HA/shared intent) and phase 13 (regional health fabric) are
 still **design only** — see
 [`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
@@ -510,13 +512,67 @@ now: every backend path the UI drives is real and tested, only the
 presentation layer (styling, confirmations on destructive actions, loading
 states, routing) needs a real pass later.
 
-**Next**: slice 12 (integration tests spinning up N `gsp` + controller +
-aggregator + `gsp-ui` together — subscribe/reconnect/freeze-on-disconnect,
-push/ingest, fan-out partial failure, config reject-keeps-previous) and
-slice 13 (docs polish: `docs/06`, `README.md` status block, `docs/08` status
-legend). **Phase 10+11's entire controller + aggregator + UI implementation
-is otherwise done** — slices 1-11 all complete and individually verified
-live, now including an actual human driving the real UI in a real browser.
+**Slice 12 done**: new crate `crates/gsp-fleet-tests` (workspace member, part
+of `make check`) — the four integration-test scenarios the roadmap named,
+each spinning up real `gsp`/`gsp-controller`/`gsp-aggregator` **binaries** as
+child processes on loopback with OS-assigned ports, not an in-process
+harness. That choice was deliberate, not incidental: every phase 10+11 slice
+so far was actually verified by a human standing up real processes and
+finding real wire-shape bugs that way (slice 11e's header-forwarding bug,
+slice 11f's `JSON.parse("ok")` bug) — an in-process shortcut mocking each
+binary's `main` would reintroduce exactly that blind spot. `gsp-ui` is
+deliberately not spawned here: none of the four named scenarios exercise it,
+and slice 11b-11f's own tests already cover its surface.
+
+`src/lib.rs` holds the shared harness: `free_port()` (bind-then-drop, same
+tiny TOCTOU tradeoff `127.0.0.1:0` already has elsewhere in this codebase),
+`build_fleet_bins()` (a plain `cargo build -p ...` — debug, not release,
+since this is a correctness test, not `gsp-bench`'s latency harness),
+`Proc` (a spawned child, `kill_on_drop` + an explicit `Drop` impl so a
+failing assertion never leaves a stray process squatting on a port for the
+rest of the suite), `wait_http_up`/`wait_until` (poll helpers), and
+`minimal_gsp_config`/`invalid_gsp_config` (the smallest always-valid /
+always-schema-invalid configs, reused by every test).
+
+The 4 tests in `tests/fleet.rs`:
+- **`controller_reconnect_freezes_then_catches_up`**: `gsp --controller`
+  pulls the controller's revision 1, keeps serving it (confirmed via its own
+  `GET /config`) after the controller is killed, then picks up a revision 2
+  pushed to a second controller process reusing the same `sled` data dir —
+  proving the reconnect loop's cursor survives the gap and the store's
+  durability is what actually carries the history across the outage, not the
+  process.
+- **`controller_rejects_bad_config_and_keeps_previous`**: a schema-invalid
+  submission gets `422` and `GET /config`'s `X-Config-Revision` /body stay
+  exactly what they were before it.
+- **`gsp_pushes_state_that_the_aggregator_ingests`**: a real `gsp
+  --aggregator` instance's periodic push shows up in the aggregator's
+  `GET /fleet/pools` by instance name.
+- **`fanout_broadcast_partial_failure`**: broadcasting a backend-add across
+  two known instances, one killed first (and confirmed actually gone via
+  `port_is_down` before the broadcast, to avoid a kill/broadcast race),
+  reports `status: 200` for the live one and `status: null` for the dead one
+  in the same response — never fails or hangs the whole call.
+
+One real fix made while writing these: the controller's `POST /config`
+success response carries the new revision only in its JSON body
+(`{"revision": N}`), not an `X-Config-Revision` header — only `GET /config`
+sets that header. The first draft of the reject-keeps-previous test asserted
+the header on the `POST` response and failed immediately; not a bug in
+`gsp-controller` (its own tests already cover this split correctly), just
+this test getting the two routes' shapes conflated at first. Confirmed
+unrelated to this work: a `cargo test --all` run once failed
+`gsp-core`'s `acl_deny_drops_the_connection_before_routing` under the added
+parallel load from the new crate's subprocess-spawning tests, then passed
+immediately both in isolation and on a full-suite rerun — the same
+pre-existing timing-sensitive-under-load flakiness class already logged at
+slice 9 for a different test, not a regression from this slice.
+
+**Next**: slice 13 (docs polish: `docs/06`, `README.md` status block,
+`docs/08` status legend — the last item before phase 10+11 is fully closed
+out). **Phase 10+11's entire controller + aggregator + UI implementation +
+integration tests are otherwise done** — slices 1-12 all complete and
+individually verified live.
 
 ### Known follow-ups (none blocking)
 
@@ -693,6 +749,7 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
 | `crates/plugins/` | Standalone workspace (own `[workspace]`): `gsp-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `gsp` / `gsp-core`. |
 | `crates/gsp-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `gsp` process, connection-count ramp, `/proc` RSS/fd sampling). |
+| `crates/gsp-fleet-tests/` | Phase 10+11 slice 12: `cargo test -p gsp-fleet-tests` (part of `make check`) spawns real `gsp`/`gsp-controller`/`gsp-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
 | `crates/gsp-config/fuzz/` | Standalone workspace: `extract_sni` / `route_match` / `parse_config` `cargo-fuzz` targets. `make fuzz` (nightly). |
 
 ---
@@ -702,7 +759,11 @@ rebuild reads `Discovery::get`).
 `make check` runs fmt + clippy `-D warnings` + ~150 tests (`gsp-config`,
 `gsp-core` unit + `crates/gsp-core/tests/{tcp_forward,udp_forward,amplification}.rs`,
 `gsp` unit incl. the `sniffer_loader` WAT-fixture end-to-end and the in-module
-admin HTTP tests). Needs `protoc` on `PATH`.
+admin HTTP tests), plus `gsp-controller`/`gsp-aggregator`/`gsp-ui`'s own
+in-module HTTP tests and `crates/gsp-fleet-tests`' 4 real-multi-process
+integration tests (slice 12) — the latter debug-builds and spawns the real
+`gsp`/`gsp-controller`/`gsp-aggregator` binaries, adding real wall-clock time
+(~15-20s) to `cargo test --all` vs. every other crate's in-process tests. Needs `protoc` on `PATH`.
 
 - `TP­ROXY` / `IP_TRANSPARENT` e2e is not in CI (needs `CAP_NET_ADMIN`) — covered
   by config parse/reject + `connect_tcp_from` fallback tests. Setup recipe in

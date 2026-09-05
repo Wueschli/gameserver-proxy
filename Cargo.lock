@@ -1003,6 +1003,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsp-fleet-tests"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "gsp-ui"
 version = "0.0.1"
 dependencies = [
