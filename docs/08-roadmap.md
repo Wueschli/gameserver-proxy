@@ -1000,24 +1000,55 @@ every subscribed edge proxy the same way config revisions already are.
 WireGuard's own roaming + keepalive mean only the proxy side ever needs a
 public endpoint — an origin behind a home NAT needs no port forwarding.
 
-Slices (not yet numbered/started):
+Slices, ordered by dependency (each buildable and testable before the next
+needs it; none started):
 
-- `gsp-controller`'s new backend-peers registry (write side: `gsp-agent`
-  registration; read side: proxy subscribe + reconcile).
-- New `gsp-agent` crate: `wireguard-rs`-managed interface lifecycle +
-  controller registration.
-- `gsp`'s own subscribe-and-reconcile task (mirrors `controller_client.rs`),
-  managing the shared proxy-side interface's peer list via `wireguard-rs`.
-- The new `tunnel` `BackendSource` implementation (`gsp` binary, same seam
-  as the existing DNS-SRV/Consul/Kubernetes sources) resolving an origin's
-  registered addresses through the peers registry.
-- `gsp-config` schema: `backend_sources[].type: tunnel` + its fields,
-  `gsp-config` raw+resolved types, `validate()`, `config.example.yaml`,
-  `docs/05`.
+1. ⬜ **Config schema**: `backend_sources[].type: tunnel` (`gsp-config` raw +
+   resolved types, `validate()`, `config.example.yaml`, `docs/05`) —
+   parses and validates with no runtime behavior behind it yet, same
+   "schema first, mechanism after" shape phase 13 slice 1 used. Fields:
+   at minimum the origin's expected public key and which pool(s) it feeds;
+   exact shape decided in this slice, not locked in `docs/11`.
+2. ⬜ **`gsp-controller`'s backend-peers registry**: a new resource
+   alongside the config-revision and intent logs (its own `sled` tree/DB,
+   matching `Store`'s own precedent) — `POST` for an agent to register
+   (pubkey, allowed backend addresses, last-known endpoint) and a
+   subscribe endpoint mirroring `GET /config/subscribe`'s catch-up-then-
+   tail shape. Buildable and independently testable with nothing but
+   `curl`/the crate's own HTTP tests — no real WireGuard, `gsp-agent`, or
+   `gsp` integration needed yet, same as how the config/intent logs were
+   each built and tested standalone before any client integrated with
+   them.
+3. ⬜ **New `gsp-agent` crate**: creates/maintains one local WireGuard
+   interface via `defguard/wireguard-rs`, registers with slice 2's
+   registry on startup and on change. Verifiable standalone: point a real
+   `gsp-agent` at a real `gsp-controller`, confirm its registration lands
+   and a real local WireGuard interface comes up with the right key.
+4. ⬜ **`gsp`'s subscribe-and-reconcile task**: mirrors
+   `controller_client.rs`'s shape, subscribes to slice 2's registry, and
+   reconciles the proxy's own shared WireGuard interface's peer list (via
+   `wireguard-rs`) to match. Verifiable standalone against slice 3's real
+   agent: the proxy's interface should show the agent as a peer within one
+   subscribe cycle, independent of any actual game traffic yet.
+5. ⬜ **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
+   existing DNS-SRV/Consul/Kubernetes sources): `fetch()` resolves an
+   origin's currently-registered backend address(es) from the same peers
+   registry slice 4 already subscribes to. This is what actually lets a
+   pool's `source: <origin>` produce live, tunnel-internal backend
+   addresses through the existing discovery reconcile path — no changes
+   needed to `Snapshot::build_with_sources` itself.
+6. ⬜ **End-to-end live verification**: a real `gsp-agent` + real backend
+   process on one side of a real (or netns-simulated) NAT boundary, a real
+   `gsp` proxy + `gsp-controller` on the other, actual game traffic routed
+   proxy → WireGuard tunnel → agent → backend, confirmed live — matching
+   the "verified live with real processes" bar every phase so far has
+   used, not just in-tokio unit tests. A `crates/gsp-fleet-tests`-style
+   integration test (spawn the real binaries, drive them over real
+   sockets) is the natural home for a repeatable version of this.
 
 Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
-NAT fallback (documented v1 limitation, no code); nothing else blocks
-starting slice 1.
+NAT fallback (documented v1 limitation, no code) — does not block starting
+slice 1.
 
 ## Later / optional
 - QUIC-CID-aware sniffer & session keying.

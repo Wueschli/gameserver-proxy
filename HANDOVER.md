@@ -81,6 +81,17 @@ updated to reflect these as locked, with a concrete slice list now in
 (a documented v1 limitation, not a blocker). Nothing built — still design
 only.
 
+**Second follow-up (same day): Phase 14's slice list turned from a flat
+bullet list into a proper numbered, dependency-ordered breakdown** in
+`docs/08` (matching the detail level phase 12/13 already carry) — schema
+first (1), then the controller registry standalone-testable before anything
+else depends on it (2), then `gsp-agent` (3), then `gsp`'s own reconcile
+task (4), then the new `tunnel` `BackendSource` (5), then a real end-to-end
+live verification slice (6), explicitly modeled on this project's own
+"verify live with real processes, not just unit tests" bar every phase so
+far has used. Still nothing built — this is the plan for slice 1 onward,
+not slice 1 itself.
+
 **gsp-ui full redesign (2026-09-05, same day, after phase 13 closed out)**:
 at the user's request — the previous frontend was a two-tab, unstyled React
 app with a raw YAML textarea for config and no way to organize a fleet
