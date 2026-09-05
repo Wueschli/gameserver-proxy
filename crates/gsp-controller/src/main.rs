@@ -19,6 +19,7 @@ use gsp_controller::adopt::AdoptState;
 use gsp_controller::api::{self, AppState};
 use gsp_controller::ha::{self, HaHandle, NodeId as HaNodeId};
 use gsp_controller::intent::api::IntentState;
+use gsp_controller::peers::api::PeersState;
 use gsp_controller::role::{Role, RoleHandle};
 use gsp_controller::store::Store;
 
@@ -150,6 +151,19 @@ async fn main() -> anyhow::Result<()> {
         intent_dir = %intent_dir.display(),
         "intent store opened"
     );
+
+    // A third separate sled database (phase 14 slice 2) — the backend-peers
+    // registry is content-wise unrelated to both config and intent.
+    let peers_dir = args.data_dir.join("peers");
+    let peers_store = Arc::new(
+        Store::open(&peers_dir)
+            .map_err(|e| anyhow::anyhow!("opening peers store at {peers_dir:?}: {e}"))?,
+    );
+    tracing::info!(
+        peers_dir = %peers_dir.display(),
+        "backend-peers store opened"
+    );
+    let peers_state = PeersState::new(peers_store, args.auth_token.clone());
 
     // Shared, mutable across `AppState` and `IntentState` — `adopt` flips
     // this one cell and both write gates see it instantly (see
@@ -308,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router((*state).clone()))
         .merge(gsp_controller::intent::api::router((*intent_state).clone()))
+        .merge(gsp_controller::peers::api::router(peers_state))
         .merge(gsp_controller::adopt::router(adopt_state));
     if let Some(handle) = ha_handle {
         app = app.merge(ha::routes::router(handle));

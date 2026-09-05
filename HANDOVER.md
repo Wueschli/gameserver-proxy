@@ -3,6 +3,56 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 slice 2 done (2026-09-05, same day as slice 1)**:
+`gsp-controller`'s backend-peers registry — new `peers` module (`peers.rs` +
+`peers/api.rs`), a third resource alongside the config-revision and intent
+logs, in its own `sled` database at `<data_dir>/peers` (`Store::open`, the
+exact same type the config and intent logs already use). `PeerRegistration
+{ name, pubkey, endpoint: Option, backends: Vec<String> }` is what
+`gsp-agent` will submit (slice 3) — validated (non-empty `name`, `pubkey`
+decodes via `gsp_config::base64_decode_32` — made `pub` in slice 1's module
+specifically so this didn't need duplicating, `backends` entries parse as
+`SocketAddr`) before it ever reaches the store, same posture
+`intent::IntentOp::validate` already established.
+
+**Shape decision**: a peer registration is *state* (an origin's current
+pubkey/endpoint/backends), not a *command* like an intent op or a shared
+*document* like config — so `PeersState` reuses `Store`'s append-only log
+for `GET /peers/subscribe`'s catch-up-then-tail (a subscriber replays every
+registration event and keeps its own latest-by-name view, exactly the
+`gsp` reconcile task slice 4 will build), plus one sibling `sled` tree
+(`current`, opened via `Store::db()` — the same pattern `crate::api::
+AppState::stage`'s phase-12-slice-7 tree already established) mapping
+`name -> latest revision number`, written in the same call as the log
+append so a crash can never leave the two disagreeing. This is what lets
+`GET /peers`/`GET /peers/{name}` answer "what's current" in O(1) rather
+than scanning the whole log. Routes: `POST /peers` (register/update),
+`GET /peers` (every current registration), `GET /peers/{name}` (one,
+`404` if never registered), `GET /peers/subscribe?since=`.
+
+**Scope cut, stated in the module doc**: no `slave`-tier relay and no HA
+(Raft) integration in this slice, unlike config/intent which both eventually
+grew both — those are per-tier concerns phase 12 built for a reason (fleet
+hierarchy, crash-tolerant writes to a shared document/log), and this
+registry doesn't automatically need them; added later only if a real
+multi-tier deployment needs origin registrations relayed. `auth_token` reuse
+(the existing `--auth-token` gate) is the one thing carried over unmodified.
+
+15 new tests (6 `PeerRegistration::validate` unit tests, 9 `peers::api` HTTP
+tests including the catch-up-then-tail subscribe worker and a bearer-auth
+check) — 75 total `gsp-controller` tests, `make check` green. **Verified
+live** against a real running `gsp-controller`: `POST /peers` → `{"revision":
+1}`; `GET /peers/home` echoed the registration back; `GET /peers` listed it;
+`GET /peers/nope` → `404`; a fresh `GET /peers/subscribe` (no `?since`)
+against a controller that already had one registration replayed it
+correctly as the catch-up event.
+
+**Next**: slice 3, the new `gsp-agent` crate — creates/maintains one local
+WireGuard interface via `defguard/wireguard-rs` and registers with this
+registry on startup and on change; verifiable standalone by pointing a real
+`gsp-agent` at a real `gsp-controller` and confirming the registration
+lands and a real local WireGuard interface comes up with the right key.
+
 **Phase 14 slice 1 done (2026-09-05, same day as the slice-list breakdown
 below)**: `backend_sources[].type: tunnel` schema only, no runtime behavior —
 same "schema first, mechanism after" shape phase 13 slice 1 used. `gsp-config`

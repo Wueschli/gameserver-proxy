@@ -1009,7 +1009,7 @@ needs it; none started):
    "schema first, mechanism after" shape phase 13 slice 1 used. Fields:
    at minimum the origin's expected public key and which pool(s) it feeds;
    exact shape decided in this slice, not locked in `docs/11`.
-2. 🔜 **`gsp-controller`'s backend-peers registry**: a new resource
+2. ✅ **`gsp-controller`'s backend-peers registry**: a new resource
    alongside the config-revision and intent logs (its own `sled` tree/DB,
    matching `Store`'s own precedent) — `POST` for an agent to register
    (pubkey, allowed backend addresses, last-known endpoint) and a
@@ -1019,7 +1019,7 @@ needs it; none started):
    `gsp` integration needed yet, same as how the config/intent logs were
    each built and tested standalone before any client integrated with
    them.
-3. ⬜ **New `gsp-agent` crate**: creates/maintains one local WireGuard
+3. 🔜 **New `gsp-agent` crate**: creates/maintains one local WireGuard
    interface via `defguard/wireguard-rs`, registers with slice 2's
    registry on startup and on change. Verifiable standalone: point a real
    `gsp-agent` at a real `gsp-controller`, confirm its registration lands
