@@ -1024,13 +1024,13 @@ needs it; none started):
    registry on startup and on change. Verifiable standalone: point a real
    `gsp-agent` at a real `gsp-controller`, confirm its registration lands
    and a real local WireGuard interface comes up with the right key.
-4. 🔜 **`gsp`'s subscribe-and-reconcile task**: mirrors
+4. ✅ **`gsp`'s subscribe-and-reconcile task**: mirrors
    `controller_client.rs`'s shape, subscribes to slice 2's registry, and
    reconciles the proxy's own shared WireGuard interface's peer list (via
    `wireguard-rs`) to match. Verifiable standalone against slice 3's real
    agent: the proxy's interface should show the agent as a peer within one
    subscribe cycle, independent of any actual game traffic yet.
-5. ⬜ **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
+5. 🔜 **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
    existing DNS-SRV/Consul/Kubernetes sources): `fetch()` resolves an
    origin's currently-registered backend address(es) from the same peers
    registry slice 4 already subscribes to. This is what actually lets a

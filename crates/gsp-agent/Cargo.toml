@@ -14,11 +14,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-# Used only here (matches the `openraft`/`foca` precedent for a
-# single-crate dependency, see CLAUDE.md's guardrail 7 note on
-# gsp-core/gsp-config's own crate boundaries — gsp-agent has none of
-# those restrictions, it's a plain binary like gsp/gsp-controller).
-defguard_wireguard_rs = "0.12"
+defguard_wireguard_rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

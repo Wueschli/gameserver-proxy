@@ -1289,6 +1289,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "clap",
+ "defguard_wireguard_rs",
  "gsp-config",
  "gsp-core",
  "hickory-resolver",

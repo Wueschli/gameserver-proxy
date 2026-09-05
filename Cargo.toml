@@ -67,6 +67,11 @@ tempfile = "3"
 tokio-stream = "0.1"
 similar = "2"
 rand = "0.8"
+# Phase 14 backend transport (docs/11): used by both `gsp-agent` (the
+# origin-side agent) and `gsp` itself (slice 4's proxy-side reconcile task),
+# so — unlike a single-crate dependency such as `foca`/`openraft` — this one
+# earns a shared workspace entry rather than two independently-pinned copies.
+defguard_wireguard_rs = "0.12"
 
 [profile.release]
 lto = "thin"

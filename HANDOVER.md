@@ -3,6 +3,87 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 slice 4 done (2026-09-05, same day as slices 1-3)**: `gsp`'s own
+subscribe-and-reconcile task. New `crates/gsp/src/tunnel_client.rs`, wired
+in behind new `--tunnel-iface`/`--tunnel-listen-port`/`--tunnel-address`/
+`--tunnel-key-file`/`--tunnel-controller-url`/`--tunnel-controller-token`/
+`--tunnel-userspace` flags — `None` (`--tunnel-iface` unset) is byte-for-byte
+today's exact pre-slice behaviour, matching every other optional feature
+flag's precedent (`--aggregator`, `settings.gossip`, etc.). Promoted
+`defguard_wireguard_rs` from slice 3's single-crate dependency to a real
+`[workspace.dependencies]` entry, since it's now used by two crates
+(`gsp-agent` and `gsp`) that must stay on the same version — the
+`foca`/`openraft` "one crate, declare it locally" precedent stops applying
+once a second crate needs it.
+
+**Shape**: mirrors `controller_client.rs`'s subscribe/reconnect-with-backoff
+structure almost line for line, applied to `GET /peers/subscribe` instead
+of `GET /config/subscribe` — a dropped connection retries with capped
+exponential backoff while the WireGuard interface (like the last-applied
+`Snapshot`) is left exactly as it was, never torn down, matching `docs/10`
+principle 4 ("freeze on last-known-good") applied to peers instead of
+routing config. `bring_up`/`load_or_generate_key` duplicate `gsp-agent`'s
+own `interface.rs`/`keypair.rs` almost verbatim rather than sharing a
+library — `gsp-agent` is a binary crate with no `lib.rs` to depend on, and
+this codebase's established precedent (`controller_client`'s hand-parsed
+SSE, `aggregator_client`'s duplicated `IngestPayload`) is to duplicate a
+small wire/logic shape across processes rather than force an artificial
+shared crate for it.
+
+**Reconcile behavior**: every accepted `PeerRegistration` event becomes a
+`configure_peer` upsert — WireGuard peer = the origin's pubkey,
+`allowed_ips` = every registered backend as a `/32` (or `/128`) host route,
+`endpoint` set only when the registration carries one. Since this task
+holds no persisted local peer table, every reconnect re-subscribes from
+`since=0` and replays every past registration again — harmless, because
+`configure_peer` is itself an idempotent upsert. **Scope cut, stated in the
+module doc**: peers are only ever added/updated, never removed, even if an
+origin stops registering — there's no "gone for good" vs. "temporarily
+unreachable" signal yet to safely base a removal on.
+
+**A real gap flagged rather than hidden**: this closes the *proxy* side of
+peer reconciliation, but nothing yet tells an origin's `gsp-agent` *this*
+proxy's own pubkey/endpoint so it can dial out (`docs/11`'s "only the
+origin needs to dial, since it's the side behind an unpredictable NAT"
+still needs the origin to know where to dial to). `gsp-agent` (slice 3) only
+manages and registers its own interface today. Since the proxy side already
+always has a known public address in this design, closing this loop likely
+doesn't need a second registry round trip — a static `gsp-agent
+--peer-endpoint`/`--peer-pubkey` pair the origin operator configures once
+is the most likely shape — but that's not built, and is explicitly left as
+something slice 6's end-to-end verification has to resolve before a real
+tunnel can form, not silently assumed away.
+
+**A real ordering bug found by live testing, not by inspection**: the first
+draft placed the tunnel bring-up *after* `Runtime::start_with_discovery`
+(alongside where the intent/admin-reload tasks are spawned) — so a
+misconfigured/failing `--tunnel-*` flag set left every listener already
+bound before the process exited with an error. Live-tested against a real
+`gsp-controller` with `--tunnel-userspace` in this sandbox (no
+`CAP_NET_ADMIN`, same limitation as slice 3): confirmed listeners logged as
+started *before* the tunnel error surfaced. Fixed by moving the whole
+tunnel-bring-up block to before `Snapshot::build_with_sources`/`Runtime::
+start_with_discovery`, matching `geo_db`/`sniffers`' existing "must load
+cleanly before anything starts" posture exactly; re-tested live and
+confirmed the tunnel error now surfaces with zero listeners started.
+
+8 new tests (SSE parsing, `to_wg_peer`'s pubkey/backend/endpoint handling).
+`make check` green across the whole workspace. **Verified live**: CLI
+validation (`--tunnel-iface` without `--tunnel-address`/
+`--tunnel-controller-url` each fail with a clear error before touching
+anything); a real `gsp` process against a real `gsp-controller` with
+`--tunnel-userspace` fails cleanly on interface bring-up with zero
+listeners started (the same `CAP_NET_ADMIN` limitation slice 3 hit — a real
+peer-reconcile run still needs a host with that capability, not done in
+this sandbox for the same reason noted there).
+
+**Next**: slice 5, the new `tunnel` `BackendSource` (`gsp` binary, same
+seam as the existing `dns_srv`/`consul`/`kubernetes` sources) —
+`fetch()` resolves an origin's currently-registered backend addresses from
+the same peers registry this slice already subscribes to, letting a pool's
+`source: <origin>` (phase 14 slice 1's schema) actually produce live
+backend addresses through the existing discovery reconcile path.
+
 **Phase 14 slice 3 done (2026-09-05, same day as slices 1-2)**: the new
 `gsp-agent` crate — origin-side agent, `defguard_wireguard_rs` 0.12
 (`WGApi<Kernel>`/`WGApi<Userspace>` behind one API, exactly the "unifies

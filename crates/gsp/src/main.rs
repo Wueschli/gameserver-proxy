@@ -13,11 +13,13 @@ mod procinfo;
 mod reload;
 mod resolver;
 mod sniffer_loader;
+mod tunnel_client;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -77,6 +79,57 @@ struct Args {
     /// requires one (its own `--auth-token`).
     #[arg(long)]
     aggregator_token: Option<String>,
+
+    /// Enables phase 14's WireGuard backend transport (`docs/11`):
+    /// brings up a local interface with this name and reconciles its peer
+    /// list from `--tunnel-controller-url`'s backend-peers registry.
+    /// Requires `--tunnel-address` and `--tunnel-controller-url`. Omit to
+    /// leave this feature off entirely — today's exact behavior otherwise.
+    #[arg(long)]
+    tunnel_iface: Option<String>,
+
+    /// UDP port the tunnel interface listens on.
+    #[arg(long, default_value_t = 51820)]
+    tunnel_listen_port: u16,
+
+    /// This proxy's own tunnel-internal address, `ip/cidr` (e.g.
+    /// `10.60.0.1/24`). Required with `--tunnel-iface`.
+    #[arg(long)]
+    tunnel_address: Option<String>,
+
+    /// File holding this proxy's persisted WireGuard private key (created
+    /// if missing).
+    #[arg(long, default_value = "gsp-tunnel.key")]
+    tunnel_key_file: PathBuf,
+
+    /// Base URL of the `gsp-controller` backend-peers registry to subscribe
+    /// to — independent of `--controller` (a deployment may pull structural
+    /// config from a file while still using a controller's tunnel registry,
+    /// or vice versa). Required with `--tunnel-iface`.
+    #[arg(long)]
+    tunnel_controller_url: Option<String>,
+
+    /// Bearer token for `--tunnel-controller-url`, if it requires one.
+    #[arg(long)]
+    tunnel_controller_token: Option<String>,
+
+    /// Skip the kernel WireGuard backend and use boringtun userspace
+    /// directly — see `gsp-agent --userspace`'s doc for why.
+    #[arg(long)]
+    tunnel_userspace: bool,
+}
+
+/// Resolved `--tunnel-*` settings, built once in `async_main` after
+/// validating the flag combination — `run` doesn't need to re-check
+/// `tunnel_address`/`tunnel_controller_url` are `Some` a second time.
+struct TunnelConfig {
+    iface: String,
+    listen_port: u16,
+    address: String,
+    key_file: PathBuf,
+    controller_url: String,
+    controller_token: Option<String>,
+    userspace: bool,
 }
 
 /// Where this process's config comes from, decided once at startup from
@@ -106,6 +159,28 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
+    let tunnel_config = match &args.tunnel_iface {
+        Some(iface) => {
+            let address = args
+                .tunnel_address
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-address"))?;
+            let controller_url = args.tunnel_controller_url.clone().ok_or_else(|| {
+                anyhow::anyhow!("--tunnel-iface requires --tunnel-controller-url")
+            })?;
+            Some(TunnelConfig {
+                iface: iface.clone(),
+                listen_port: args.tunnel_listen_port,
+                address,
+                key_file: args.tunnel_key_file.clone(),
+                controller_url,
+                controller_token: args.tunnel_controller_token.clone(),
+                userspace: args.tunnel_userspace,
+            })
+        }
+        None => None,
+    };
+
     let (config_source, cfg, initial_revision) = match &args.controller {
         Some(url) => {
             let (revision, text) =
@@ -193,10 +268,12 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         sniffer_loader,
         sniffers,
         aggregator_push,
+        tunnel_config,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors controller_client::run's shape; a struct doesn't earn its keep for one call site
 async fn run(
     cfg: gsp_config::Config,
     config_source: ConfigSource,
@@ -205,6 +282,7 @@ async fn run(
     sniffer_loader: Option<Arc<sniffer_loader::SnifferLoader>>,
     sniffers: Arc<gsp_core::sniff::Sniffers>,
     aggregator_push: Option<aggregator_client::PushConfig>,
+    tunnel_config: Option<TunnelConfig>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
@@ -251,6 +329,45 @@ async fn run(
             let f: Arc<dyn gsp_core::SourceFactory> = Arc::new(discovery::DiscoveryFactory::new());
             f
         });
+
+    // Phase 14 slice 4 (docs/11): bring up the shared WireGuard interface
+    // and start reconciling its peer list from the backend-peers registry,
+    // before any listener binds — a failure here is loud, not silent, same
+    // posture as `geo_db`/`sniffers` loading earlier: a misconfigured
+    // `--tunnel-*` flag set shouldn't start a proxy that silently never
+    // forwards tunneled traffic, and shouldn't leave listeners bound behind
+    // a startup error either.
+    let tunnel = match tunnel_config {
+        Some(tc) => {
+            let private_key = tunnel_client::load_or_generate_key(&tc.key_file)
+                .with_context(|| format!("loading tunnel key from {:?}", tc.key_file))?;
+            let address: defguard_wireguard_rs::net::IpAddrMask =
+                tc.address.parse().map_err(|e| {
+                    anyhow::anyhow!("--tunnel-address {:?} is invalid: {e}", tc.address)
+                })?;
+            let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> =
+                Arc::from(tunnel_client::bring_up(
+                    &tc.iface,
+                    &private_key,
+                    tc.listen_port,
+                    address,
+                    tc.userspace,
+                )?);
+            tracing::info!(
+                iface = %tc.iface,
+                port = tc.listen_port,
+                controller = %tc.controller_url,
+                "wireguard tunnel interface up; subscribing to backend-peers updates"
+            );
+            let task = tokio::spawn(tunnel_client::run(
+                tc.controller_url,
+                tc.controller_token,
+                wg.clone(),
+            ));
+            Some((task, wg))
+        }
+        None => None,
+    };
 
     let snapshot: Arc<Snapshot> =
         Snapshot::build_with_sources(&cfg, None, &gsp_core::BackendOverlay::new(), &discovery);
@@ -369,6 +486,12 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
+    if let Some((task, wg)) = tunnel {
+        task.abort();
+        if let Err(e) = wg.remove_interface() {
+            tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
+        }
+    }
     tracing::info!("stopped");
     Ok(())
 }
