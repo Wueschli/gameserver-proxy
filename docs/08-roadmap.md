@@ -813,12 +813,32 @@ layout, and rejected alternatives) and a `docs/09` ADR (21–23):
   failover: node 1 was elected the new leader within seconds, and both a
   config write (revision 3) and an intent write both succeeded through the
   surviving 2-node majority.
-- **Slice 7 — Staged / canary rollout**: one monotonic config log, revisions
-  tagged `{promoted, canary_groups}` in a new `stage` tree; an instance
-  self-reports a `canary_group` when subscribing; `POST
-  /config/promote/{revision}` is the one deliberate exception to "every
-  change is a new revision." Config only, not the intent log. See `docs/10`
-  "Staged / canary rollout (design)", ADR 22.
+- ✅ **Slice 7 — Staged / canary rollout**: one monotonic config log, never
+  forked — revisions tagged `{promoted, canary_groups}` in a new `stage`
+  `sled` tree (a sibling of `Store`'s own trees, opened via a new
+  `Store::db()` accessor; `Store` itself gains nothing, stays exactly the
+  content-agnostic log it always was). `POST /config?stage=canary&group=
+  <name>` submits a revision visible only to a subscriber reporting that
+  group (`GET /config?group=<name>`, `GET /config/subscribe?group=
+  <name>`); a plain `POST`/`GET` with no `stage`/`group` is byte-for-byte
+  the pre-slice-7 behavior (every revision defaults `Stage::promoted`).
+  `POST /config/promote/{revision}` is the one deliberate exception to
+  "every change is a new revision" — flips an existing revision's
+  visibility in place. `GET /config/revisions` gained `promoted`/
+  `canary_groups` columns. `subscribe_worker`'s catch-up/tail now filter
+  every candidate through `Stage::visible_to`, holding an invisible
+  revision back (without advancing the subscriber's cursor past it) until
+  a later signal — its own promotion, or any newer submission — makes it
+  either visible or moot. HA-aware: `WriteRequest::Config` now carries its
+  `Stage` through the Raft log, and a new `WriteRequest::Promote(revision)`
+  variant replicates a promotion the same way. **Deliberately config-only,
+  not the intent log** — no clean partial-rollout meaning for a single
+  already-narrow op (see `docs/10`). 7 new tests. Verified live: submitted
+  a promoted v1 and a `region-a`-canary v2; a plain `GET /config` and
+  `GET /config?group=region-b` both still showed v1; `GET /config?group=
+  region-a` showed v2; `POST /config/promote/2` then made v2 the plain
+  `GET /config` answer too. See `docs/10` "Staged / canary rollout
+  (design)", ADR 22.
 - **Slice 8 — RBAC and audit**: multi-operator accounts (`--users-file`,
   `argon2` hashes) and three roles (`viewer`/`operator`/`admin`) enforced in
   `gsp-ui` — the controller/aggregator keep their existing single

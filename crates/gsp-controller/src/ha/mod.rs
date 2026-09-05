@@ -57,8 +57,19 @@ pub type NodeId = u64;
 /// tier is one Raft group (`docs/10`: "not two independent groups").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WriteRequest {
-    Config(Vec<u8>),
+    /// Carries the submission's [`crate::api::Stage`] alongside the bytes —
+    /// phase 12 slice 7 — so every replica's state machine applies the
+    /// exact same rollout visibility a direct (non-HA) `submit()` would
+    /// have, not just the same bytes.
+    Config {
+        bytes: Vec<u8>,
+        stage: crate::api::Stage,
+    },
     Intent(Vec<u8>),
+    /// Phase 12 slice 7: flips an existing config revision's `Stage::promoted`
+    /// to `true` in place — the same operation `AppState::promote_revision`
+    /// does directly when HA is off.
+    Promote(u64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

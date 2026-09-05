@@ -334,6 +334,19 @@ routes (`append`, `vote`, `snapshot`) — a separate secret from
 (rejected at startup) — see `docs/10` for the scope cut and what combining
 them would need.
 
+**Staged / canary rollout (phase 12 slice 7)**: `POST /config?stage=canary
+&group=<name>` submits a revision visible only to a subscriber reporting
+that group; a plain `POST /config` (no `stage`) is unaffected — immediately
+visible to everyone, exactly as before this feature existed. `GET
+/config?group=<name>` and `GET /config/subscribe?since=<revision>&group=
+<name>` show what's visible to that group: the highest revision that's
+either promoted or staged to it. `POST /config/promote/{revision}` makes an
+existing revision visible to everyone (`404` if it doesn't exist) — this is
+the one operation that changes an existing revision rather than creating a
+new one. `GET /config/revisions` gained `promoted`/`canary_groups` fields
+per entry. One group per submission in this release. Not available for
+`/intent` (config only).
+
 **Adoption (phase 12 slice 5)**: `POST /admin/adopt
 {"parent_url":"...","parent_token":"..."}` flips a running `standalone`
 tier to `slave` without a restart. Refused with `409` unless this tier's

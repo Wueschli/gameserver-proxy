@@ -260,9 +260,41 @@ the new leader within a couple of seconds (well within the configured
 the surviving 2-node majority — proving the whole write path, not just
 election, survives a leader loss.
 
-Next step for phase 12: slices 7 (staged/canary rollout) and 8 (RBAC and
-audit) remain, per their `docs/10` design sections and `docs/09` ADRs
-22–23. Neither depends on slice 6 or on each other.
+**Slice 7 (staged / canary rollout) done (2026-09-05, same day)**: built on
+top of slice 6's HA work without touching its shape — one monotonic config
+log, never forked. New [`Stage`] (`{promoted, canary_groups}`) lives in a
+new `stage` `sled` tree, a sibling of `Store`'s own trees in the exact same
+database (`Store` gained a `db()` accessor for this — `Store` itself stays
+completely unchanged/content-agnostic, matching the design doc's intent).
+`POST /config?stage=canary&group=<name>` submits a revision visible only to
+a subscriber reporting that group; a plain `POST`/`GET /config` is
+byte-for-byte the pre-slice-7 behavior (everything defaults
+`Stage::promoted`, confirmed by every one of slices 1–6's existing tests
+passing unmodified). `POST /config/promote/{revision}` is the one
+deliberate exception to "every change is a new revision" the design doc
+called for — flips visibility in place.
+
+`subscribe_worker`'s catch-up/tail loops (config's `GET /config/subscribe`)
+now filter every candidate revision through `Stage::visible_to` before
+sending; the trick that keeps this simple: an invisible revision just
+doesn't advance the subscriber's cursor, so the *next* signal (a later
+promotion, or a newer submission) re-evaluates it for free — no separate
+"pending" bookkeeping needed. HA integration: `WriteRequest::Config` now
+carries its `Stage` through the Raft log, and a new
+`WriteRequest::Promote(revision)` replicates a promotion the same way as
+any other write — the leader-forwarding path threads the original query
+string through so a `?stage=canary&group=` submission proposed by a
+non-leader still lands with the right stage when the leader applies it.
+
+7 new tests. `make check` green. **Verified live** against a real running
+`gsp-controller`: submitted a promoted v1 and a `region-a`-canary v2; a
+plain `GET /config` and `GET /config?group=region-b` both still answered
+v1; `GET /config?group=region-a` answered v2; `POST /config/promote/2`
+made v2 the plain `GET /config` answer too, exactly as designed.
+
+Next step for phase 12: slice 8 (RBAC and audit) is the one item left, per
+`docs/10` "RBAC and audit (design)" and `docs/09` ADR 23. It's independent
+of slices 6 and 7 and lives mostly in `gsp-ui`, not `gsp-controller`.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This

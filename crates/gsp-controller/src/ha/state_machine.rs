@@ -156,14 +156,29 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                 EntryPayload::Blank => WriteResponse { revision: None },
                 EntryPayload::Normal(req) => {
                     let revision = match req {
-                        WriteRequest::Config(bytes) => self
+                        WriteRequest::Config { bytes, stage } => self
                             .config
-                            .apply_revision(bytes)
+                            .apply_revision_with_stage(bytes, stage)
                             .map_err(|e| StorageIOError::write_state_machine(&e))?,
                         WriteRequest::Intent(bytes) => self
                             .intent
                             .apply_revision(bytes)
                             .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        WriteRequest::Promote(revision) => {
+                            // Best-effort: a promote of a revision this
+                            // replica doesn't have (shouldn't happen — the
+                            // revision that's being promoted was itself a
+                            // committed, and therefore already-applied,
+                            // entry) is silently a no-op rather than
+                            // failing the whole `apply` batch; the direct
+                            // (non-HA) `promote_revision` call is what gives
+                            // an accurate `404` to the caller.
+                            let _ = self
+                                .config
+                                .promote_revision(revision)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?;
+                            revision
+                        }
                     };
                     WriteResponse {
                         revision: Some(revision),
@@ -293,7 +308,13 @@ mod tests {
     #[tokio::test]
     async fn applying_a_config_write_lands_it_in_the_config_store() {
         let (mut sm, _dirs) = test_sm();
-        let entries = vec![normal_entry(1, WriteRequest::Config(b"pools: []".to_vec()))];
+        let entries = vec![normal_entry(
+            1,
+            WriteRequest::Config {
+                bytes: b"pools: []".to_vec(),
+                stage: crate::api::Stage::promoted(),
+            },
+        )];
         let responses = sm.apply(entries).await.unwrap();
         assert_eq!(responses[0].revision, Some(1));
 
@@ -359,7 +380,10 @@ mod tests {
         let (mut sm, _dirs) = test_sm();
         sm.apply(vec![normal_entry(
             1,
-            WriteRequest::Config(b"pools: []".to_vec()),
+            WriteRequest::Config {
+                bytes: b"pools: []".to_vec(),
+                stage: crate::api::Stage::promoted(),
+            },
         )])
         .await
         .unwrap();

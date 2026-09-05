@@ -30,6 +30,7 @@ pub enum StoreError {
 const CURRENT_KEY: &[u8] = b"current";
 
 pub struct Store {
+    db: sled::Db,
     revisions: sled::Tree,
     meta: sled::Tree,
 }
@@ -40,7 +41,20 @@ impl Store {
         let db = sled::open(path)?;
         let revisions = db.open_tree("revisions")?;
         let meta = db.open_tree("meta")?;
-        Ok(Store { revisions, meta })
+        Ok(Store {
+            db,
+            revisions,
+            meta,
+        })
+    }
+
+    /// The underlying `sled` database — lets a caller (`crate::api::Stage`,
+    /// phase 12 slice 7) open its own sibling tree in the exact same
+    /// database rather than tracking a second `sled::open` path. `Store`
+    /// itself stays content-agnostic; this is only ever used to add trees
+    /// *alongside* `revisions`/`meta`, never to touch them directly.
+    pub fn db(&self) -> &sled::Db {
+        &self.db
     }
 
     /// The latest accepted revision number, or `None` before the first

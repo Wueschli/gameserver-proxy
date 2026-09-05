@@ -27,6 +27,20 @@
 //! sees rollback as just another ordinary revision, no special-casing
 //! needed anywhere else. The whole surface is gated by
 //! [`crate::auth::require_bearer`] when `AppState::auth_token` is set.
+//!
+//! Slice 7 (`docs/10` "Staged / canary rollout (design)") adds **staged
+//! rollout on top of the same single, never-forked revision log**: `POST
+//! /config?stage=canary&group=<name>` writes a revision that's visible only
+//! to subscribers reporting that `group`; `POST /config/promote/{revision}`
+//! is the one deliberate exception to "every change is a new revision" — it
+//! flips an existing revision's visibility in place rather than minting a
+//! new one, since promoting isn't new content. [`Stage`] (a small
+//! `{promoted, canary_groups}` record per revision, in its own `stage` tree
+//! in the same `sled` database `Store::db` opened, never folded into the
+//! revision bytes) is the whole mechanism; "current for group G" is the
+//! highest revision that's `promoted` or has `G` in `canary_groups`, found
+//! by scanning backward from the top of the log — `Store` itself gains
+//! nothing new, it's still exactly the content-agnostic log slice 1 built.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -52,9 +66,55 @@ use crate::store::{RevisionBytes, Store, StoreError};
 /// plane (submissions are rare, human-paced events).
 const UPDATES_CAPACITY: usize = 64;
 
+/// A revision's rollout visibility (phase 12 slice 7). Stored per revision
+/// in `AppState::stage`, a `sled` tree sibling to `Store`'s own — never
+/// folded into the revision bytes `Store` holds, so `Store` stays exactly
+/// as content-agnostic as it was before this slice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Stage {
+    /// Visible to every subscriber, regardless of `canary_groups`.
+    pub promoted: bool,
+    /// Visible additionally to a subscriber reporting one of these groups,
+    /// even while `promoted` is `false`. A single group per submission in
+    /// this release (`POST /config` takes one `?group=`) — the type stays a
+    /// `Vec` so `promote`/storage need no shape change if multi-group
+    /// canary is added later.
+    pub canary_groups: Vec<String>,
+}
+
+impl Stage {
+    /// Every plain `POST /config` (no `?stage=canary`) and every rollback
+    /// gets this — visible to everyone immediately, byte-for-byte the only
+    /// behavior that existed before this slice.
+    pub fn promoted() -> Self {
+        Stage {
+            promoted: true,
+            canary_groups: Vec::new(),
+        }
+    }
+
+    fn canary(group: String) -> Self {
+        Stage {
+            promoted: false,
+            canary_groups: vec![group],
+        }
+    }
+
+    fn visible_to(&self, group: Option<&str>) -> bool {
+        self.promoted || group.is_some_and(|g| self.canary_groups.iter().any(|c| c == g))
+    }
+}
+
+fn encode_rev(rev: u64) -> [u8; 8] {
+    rev.to_be_bytes()
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
+    /// Per-revision [`Stage`], keyed the same way `Store`'s own trees are —
+    /// see the module doc.
+    pub stage: sled::Tree,
     /// Notifies every live subscriber of a newly accepted revision number;
     /// the subscriber re-fetches the bytes from `store` itself (the channel
     /// only ever carries a `u64`, never the config text).
@@ -78,8 +138,15 @@ pub struct AppState {
 impl AppState {
     pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
+        // A sibling tree in the exact same `sled` database `store` opened —
+        // see `Store::db`'s doc.
+        let stage = store
+            .db()
+            .open_tree("stage")
+            .expect("opening the stage tree");
         AppState {
             store,
+            stage,
             updates,
             auth_token: auth_token.map(Arc::from),
             role,
@@ -92,15 +159,102 @@ impl AppState {
         self
     }
 
-    /// Persists `bytes` as a new revision and notifies subscribers — the one
-    /// path both a local `submit()` and [`crate::parent_client`]'s relay use
-    /// to actually land a revision, after each has done its own role check
-    /// (a local submit must be rejected first; a parent relay is always
-    /// allowed regardless of role).
+    /// Persists `bytes` as a new, immediately-[`Stage::promoted`] revision
+    /// and notifies subscribers — the one path
+    /// [`crate::parent_client`]'s relay and [`crate::adopt`] use to land a
+    /// revision, after each has done its own role check (a local submit
+    /// must be rejected first; a parent relay is always allowed regardless
+    /// of role). A relayed/adopted revision is always promoted: staging is
+    /// an operator decision made at the point of *submission*, and neither
+    /// caller here is a submission — a relay is replaying facts the parent
+    /// tier already promoted (or not — see `crate::intent::relay`'s doc on
+    /// canary not applying to intent); `adopt`'s seed is the parent's
+    /// current (i.e. already-promoted) config.
     pub fn apply_revision(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
+        self.apply_revision_with_stage(bytes, Stage::promoted())
+    }
+
+    /// The general form `apply_revision` is a convenience wrapper over —
+    /// used by `submit()` (this tier's own direct writes) and by
+    /// `crate::ha::state_machine` (a committed Raft entry, which already
+    /// carries whatever stage the original submission specified).
+    pub fn apply_revision_with_stage(
+        &self,
+        bytes: RevisionBytes,
+        stage: Stage,
+    ) -> Result<u64, StoreError> {
         let revision = self.store.put(bytes)?;
+        self.set_stage(revision, &stage)?;
         let _ = self.updates.send(revision);
         Ok(revision)
+    }
+
+    /// Flips an existing revision's `promoted` to `true` in place — the one
+    /// deliberate exception to "every change is a new revision" (see the
+    /// module doc). `Ok(false)` if `revision` doesn't exist (the caller
+    /// turns that into a `404`); never an error just for "already
+    /// promoted" (promoting twice is a no-op, not a conflict).
+    pub fn promote_revision(&self, revision: u64) -> Result<bool, StoreError> {
+        if self.store.get(revision)?.is_none() {
+            return Ok(false);
+        }
+        let mut stage = self.stage_of(revision);
+        stage.promoted = true;
+        self.set_stage(revision, &stage)?;
+        let _ = self.updates.send(revision);
+        Ok(true)
+    }
+
+    /// `revision`'s current [`Stage`] — [`Stage::promoted`] if never
+    /// explicitly staged (every revision from before this slice, and every
+    /// plain `POST /config`).
+    pub fn stage_of(&self, revision: u64) -> Stage {
+        self.stage
+            .get(encode_rev(revision))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_else(Stage::promoted)
+    }
+
+    fn set_stage(&self, revision: u64, stage: &Stage) -> Result<(), StoreError> {
+        let bytes = serde_json::to_vec(stage).expect("Stage always serializes");
+        self.stage.insert(encode_rev(revision), bytes)?;
+        self.stage.flush()?;
+        Ok(())
+    }
+
+    /// Is `revision` visible to a subscriber reporting `group` (`None` =
+    /// no canary group, the default / non-canary case)?
+    pub fn is_visible(&self, revision: u64, group: Option<&str>) -> bool {
+        self.stage_of(revision).visible_to(group)
+    }
+
+    /// "Current, for group `group`": the highest revision that's visible to
+    /// it — `promoted`, or carrying `group` in its `canary_groups`. An
+    /// `O(revisions)` backward scan from the top of the log, not an index —
+    /// see the module doc / `docs/10`'s "Staged / canary rollout (design)"
+    /// for why that's the right tradeoff at this scale.
+    pub fn current_for_group(
+        &self,
+        group: Option<&str>,
+    ) -> Result<Option<(u64, RevisionBytes)>, StoreError> {
+        let Some(mut rev) = self.store.current_revision()? else {
+            return Ok(None);
+        };
+        loop {
+            if self.is_visible(rev, group) {
+                let bytes = self
+                    .store
+                    .get(rev)?
+                    .expect("a revision number from current_revision/the scan always exists");
+                return Ok(Some((rev, bytes)));
+            }
+            if rev == 1 {
+                return Ok(None);
+            }
+            rev -= 1;
+        }
     }
 }
 
@@ -112,6 +266,7 @@ pub fn router(state: AppState) -> Router {
         .route("/config/revisions/{revision}", get(get_revision))
         .route("/config/revisions/{revision}/diff", get(diff_revision))
         .route("/config/rollback/{revision}", post(rollback))
+        .route("/config/promote/{revision}", post(promote))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             crate::auth::require_bearer,
@@ -129,19 +284,64 @@ struct ErrorResponse {
     error: String,
 }
 
-/// `POST /config` — body is a raw YAML config document, the same shape a
-/// proxy's `--config` file has. Validates, then persists on success.
-async fn submit_config(State(state): State<AppState>, body: String) -> Response {
-    submit(&state, body).await
+#[derive(Deserialize)]
+struct SubmitParams {
+    /// `"canary"` to stage rather than promote immediately; anything else
+    /// (including absent) means "promote now," today's only behavior before
+    /// this slice.
+    stage: Option<String>,
+    /// Required when `stage=canary`. One group per submission in this
+    /// release — see [`Stage`]'s doc.
+    group: Option<String>,
 }
 
-/// Validates `text` and persists it as a new revision on success — shared by
-/// [`submit_config`] and [`rollback`] (a rollback is just a re-submission of
-/// an old revision's bytes, never a rewrite of history). Rejects outright on
-/// a `slave` tier (`docs/10` "never accepts a write directly") before even
-/// parsing — a slave's only source of new revisions is
-/// [`crate::parent_client`], which never calls this function.
-async fn submit(state: &AppState, text: String) -> Response {
+/// `POST /config[?stage=canary&group=<name>]` — body is a raw YAML config
+/// document, the same shape a proxy's `--config` file has. Validates, then
+/// persists on success.
+async fn submit_config(
+    State(state): State<AppState>,
+    Query(params): Query<SubmitParams>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    body: String,
+) -> Response {
+    let stage = match params.stage.as_deref() {
+        None => Stage::promoted(),
+        Some("canary") => match params.group {
+            Some(group) if !group.trim().is_empty() => Stage::canary(group),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "stage=canary requires a non-empty group".into(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("unknown stage {other:?}; expected \"canary\" or omitted"),
+                }),
+            )
+                .into_response()
+        }
+    };
+    let query_suffix = raw_query.map(|q| format!("?{q}")).unwrap_or_default();
+    submit(&state, body, stage, &format!("/config{query_suffix}")).await
+}
+
+/// Validates `text` and persists it (at `stage`) as a new revision on
+/// success — shared by [`submit_config`] and [`rollback`] (a rollback is
+/// just an immediately-promoted re-submission of an old revision's bytes,
+/// never a rewrite of history). Rejects outright on a `slave` tier
+/// (`docs/10` "never accepts a write directly") before even parsing — a
+/// slave's only source of new revisions is [`crate::parent_client`], which
+/// never calls this function. `forward_path` is this write's own route +
+/// query string, forwarded byte-for-byte to the raft leader if this replica
+/// isn't it (`crate::ha::client::propose_write`) — irrelevant when HA is off.
+async fn submit(state: &AppState, text: String, stage: Stage, forward_path: &str) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
     }
@@ -160,18 +360,50 @@ async fn submit(state: &AppState, text: String) -> Response {
     if let Some(ha) = &state.ha {
         return crate::ha::client::propose_write(
             ha,
-            crate::ha::WriteRequest::Config(text.clone().into_bytes()),
-            "/config",
+            crate::ha::WriteRequest::Config {
+                bytes: text.clone().into_bytes(),
+                stage,
+            },
+            forward_path,
             text,
         )
         .await;
     }
 
-    match state.apply_revision(text.into_bytes()) {
+    match state.apply_revision_with_stage(text.into_bytes(), stage) {
         Ok(revision) => {
             tracing::info!(revision, "accepted a new config revision");
             (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
         }
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// `POST /config/promote/{revision}` — flips a previously-staged revision's
+/// `Stage::promoted` to `true` (see the module doc). `404` if the revision
+/// never existed; promoting an already-promoted revision is a harmless
+/// no-op, not a conflict.
+async fn promote(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+    if state.role.get() == Role::Slave {
+        return slave_rejects_write();
+    }
+
+    if let Some(ha) = &state.ha {
+        return crate::ha::client::propose_write(
+            ha,
+            crate::ha::WriteRequest::Promote(revision),
+            &format!("/config/promote/{revision}"),
+            String::new(),
+        )
+        .await;
+    }
+
+    match state.promote_revision(revision) {
+        Ok(true) => {
+            tracing::info!(revision, "promoted a config revision");
+            (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
+        }
+        Ok(false) => revision_not_found(revision),
         Err(e) => store_error_response(e),
     }
 }
@@ -188,10 +420,22 @@ fn slave_rejects_write() -> Response {
         .into_response()
 }
 
-/// `GET /config` — the current revision's raw text, or 404 before the first
-/// submission has ever landed.
-async fn get_current_config(State(state): State<AppState>) -> Response {
-    match state.store.current() {
+#[derive(Deserialize)]
+struct GetConfigParams {
+    /// Reports this instance's canary group, if any — see the module doc.
+    /// Absent means "no group": only ever see `promoted` revisions, exactly
+    /// today's behavior.
+    group: Option<String>,
+}
+
+/// `GET /config[?group=<name>]` — the current revision *visible to `group`*
+/// (see [`AppState::current_for_group`]), or `404` before anything visible
+/// to it has ever landed.
+async fn get_current_config(
+    State(state): State<AppState>,
+    Query(params): Query<GetConfigParams>,
+) -> Response {
+    match state.current_for_group(params.group.as_deref()) {
         Ok(Some((revision, bytes))) => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             (
@@ -217,10 +461,14 @@ struct RevisionSummary {
     revision: u64,
     size_bytes: usize,
     current: bool,
+    /// Slice 7: this revision's rollout visibility — see [`Stage`].
+    promoted: bool,
+    canary_groups: Vec<String>,
 }
 
-/// `GET /config/revisions` — every revision, oldest first, with its size and
-/// whether it's the current one. Reuses `revisions_after(0)` rather than
+/// `GET /config/revisions` — every revision, oldest first, with its size,
+/// whether it's the current (highest-numbered, regardless of promotion)
+/// one, and its rollout stage. Reuses `revisions_after(0)` rather than
 /// adding a store method that keeps only lengths — revisions are YAML config
 /// text (KB-sized), and this is a control-plane, human-paced call, not
 /// something worth a dedicated storage path.
@@ -233,10 +481,15 @@ async fn list_revisions(State(state): State<AppState>) -> Response {
         Ok(revisions) => {
             let summaries: Vec<RevisionSummary> = revisions
                 .into_iter()
-                .map(|(revision, bytes)| RevisionSummary {
-                    revision,
-                    size_bytes: bytes.len(),
-                    current: Some(revision) == current,
+                .map(|(revision, bytes)| {
+                    let stage = state.stage_of(revision);
+                    RevisionSummary {
+                        revision,
+                        size_bytes: bytes.len(),
+                        current: Some(revision) == current,
+                        promoted: stage.promoted,
+                        canary_groups: stage.canary_groups,
+                    }
                 })
                 .collect();
             (StatusCode::OK, Json(summaries)).into_response()
@@ -325,7 +578,9 @@ async fn rollback(State(state): State<AppState>, Path(revision): Path<u64>) -> R
     match state.store.get(revision) {
         Ok(Some(bytes)) => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let resp = submit(&state, text).await;
+            // A rollback is always immediately promoted — it's presumably
+            // urgent, never something to stage (see the module doc).
+            let resp = submit(&state, text, Stage::promoted(), "/config").await;
             tracing::info!(from_revision = revision, "rolled back");
             resp
         }
@@ -347,12 +602,15 @@ fn revision_not_found(revision: u64) -> Response {
 #[derive(Deserialize)]
 struct SubscribeParams {
     since: Option<u64>,
+    /// This subscriber's canary group, if any — see the module doc. Absent
+    /// means only ever see `promoted` revisions.
+    group: Option<String>,
 }
 
-/// `GET /config/subscribe?since=<revision>` — see the module doc. Spawns
-/// [`subscribe_worker`] to do the actual catch-up + tail work and turns its
-/// output into SSE `Event`s; the split keeps the worker's logic (the part
-/// worth testing) free of any HTTP/SSE framing.
+/// `GET /config/subscribe?since=<revision>[&group=<name>]` — see the module
+/// doc. Spawns [`subscribe_worker`] to do the actual catch-up + tail work
+/// and turns its output into SSE `Event`s; the split keeps the worker's
+/// logic (the part worth testing) free of any HTTP/SSE framing.
 async fn subscribe(
     State(state): State<AppState>,
     Query(params): Query<SubscribeParams>,
@@ -361,6 +619,8 @@ async fn subscribe(
     let updates = state.updates.subscribe();
     tokio::spawn(subscribe_worker(
         state.store,
+        state.stage,
+        params.group,
         updates,
         params.since.unwrap_or(0),
         tx,
@@ -375,26 +635,40 @@ async fn subscribe(
 }
 
 /// Sends the catch-up range for `since`, then tails `updates` for whatever
-/// [`submit_config`] accepts next, forever (until the receiving end of `tx`
-/// drops — the client disconnected). A [`broadcast::error::RecvError::Lagged`]
-/// (the worker fell behind a burst of submissions) just re-runs the catch-up
-/// query from wherever it last got to — every revision lives in `store`
-/// forever, so nothing is lost, only replayed.
+/// [`submit_config`]/[`promote`] accept or change next, forever (until the
+/// receiving end of `tx` drops — the client disconnected). A
+/// [`broadcast::error::RecvError::Lagged`] (the worker fell behind a burst
+/// of submissions) just re-runs the catch-up query from wherever it last
+/// got to — every revision lives in `store` forever, so nothing is lost,
+/// only replayed.
+///
+/// Slice 7: every candidate revision is filtered through
+/// [`AppState::is_visible`] for `group` before being sent, and `last_sent`
+/// only ever advances *past* an invisible one — a revision this subscriber
+/// can't see yet is simply left for the next signal (its own later
+/// `promote`, or any subsequent submission) to re-evaluate, rather than
+/// being permanently skipped. For `group: None` and every revision that
+/// predates this slice (always `Stage::promoted`), every candidate is
+/// trivially visible and this is byte-for-byte the pre-slice-7 behavior.
 async fn subscribe_worker(
     store: Arc<Store>,
+    stage: sled::Tree,
+    group: Option<String>,
     mut updates: broadcast::Receiver<u64>,
     since: u64,
     tx: mpsc::Sender<(u64, RevisionBytes)>,
 ) {
+    let group = group.as_deref();
     let mut last_sent = since;
 
-    if !catch_up(&store, &mut last_sent, &tx).await {
+    if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
         return;
     }
 
     loop {
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {} // already sent by catch-up
+            Ok(revision) if !is_visible(&stage, revision, group) => {} // not (yet) ours to see
             Ok(revision) => match store.get(revision) {
                 Ok(Some(bytes)) => {
                     if tx.send((revision, bytes)).await.is_err() {
@@ -412,7 +686,7 @@ async fn subscribe_worker(
             },
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "subscriber lagged; replaying from the store");
-                if !catch_up(&store, &mut last_sent, &tx).await {
+                if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
                     return;
                 }
             }
@@ -421,10 +695,14 @@ async fn subscribe_worker(
     }
 }
 
-/// Sends every revision after `*last_sent`, advancing it as it goes.
-/// Returns `false` if the receiver dropped (stop the worker).
+/// Sends every *visible-to-`group`* revision after `*last_sent`, advancing
+/// it only for the ones actually sent — see [`subscribe_worker`]'s doc on
+/// why an invisible one doesn't advance the cursor. Returns `false` if the
+/// receiver dropped (stop the worker).
 async fn catch_up(
     store: &Store,
+    stage: &sled::Tree,
+    group: Option<&str>,
     last_sent: &mut u64,
     tx: &mpsc::Sender<(u64, RevisionBytes)>,
 ) -> bool {
@@ -436,12 +714,29 @@ async fn catch_up(
         }
     };
     for (revision, bytes) in revisions {
+        if !is_visible(stage, revision, group) {
+            continue;
+        }
         if tx.send((revision, bytes)).await.is_err() {
             return false;
         }
         *last_sent = revision;
     }
     true
+}
+
+/// Free-function form of [`AppState::is_visible`] — `subscribe_worker`
+/// holds a bare `stage` tree (cloned out of `AppState` once, at subscribe
+/// time) rather than a whole `AppState`, so its tests don't need to spin up
+/// everything else `AppState` carries just to check visibility.
+fn is_visible(stage: &sled::Tree, revision: u64, group: Option<&str>) -> bool {
+    stage
+        .get(encode_rev(revision))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice::<Stage>(&v).ok())
+        .unwrap_or_else(Stage::promoted)
+        .visible_to(group)
 }
 
 fn store_error_response(e: StoreError) -> Response {
@@ -553,6 +848,15 @@ listeners:
         );
     }
 
+    /// A fresh, empty `stage` tree — every revision the tests below put
+    /// straight into a bare `Store` (bypassing `AppState`) is unstaged,
+    /// which `Stage::promoted`'s default already makes visible to everyone,
+    /// so these pre-slice-7 tests need no other changes.
+    fn test_stage_tree() -> sled::Tree {
+        let dir = tempfile::tempdir().unwrap();
+        sled::open(dir.path()).unwrap().open_tree("stage").unwrap()
+    }
+
     #[tokio::test]
     async fn subscribe_worker_sends_the_catch_up_range_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -562,7 +866,14 @@ listeners:
 
         let (_updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
-        tokio::spawn(subscribe_worker(store, updates_rx, 0, tx));
+        tokio::spawn(subscribe_worker(
+            store,
+            test_stage_tree(),
+            None,
+            updates_rx,
+            0,
+            tx,
+        ));
 
         assert_eq!(rx.recv().await.unwrap(), (rev1, b"one".to_vec()));
         assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
@@ -576,7 +887,14 @@ listeners:
 
         let (updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
-        tokio::spawn(subscribe_worker(store.clone(), updates_rx, 0, tx));
+        tokio::spawn(subscribe_worker(
+            store.clone(),
+            test_stage_tree(),
+            None,
+            updates_rx,
+            0,
+            tx,
+        ));
 
         assert_eq!(rx.recv().await.unwrap(), (rev1, b"one".to_vec()));
 
@@ -594,7 +912,14 @@ listeners:
 
         let (_updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
-        tokio::spawn(subscribe_worker(store, updates_rx, rev1, tx));
+        tokio::spawn(subscribe_worker(
+            store,
+            test_stage_tree(),
+            None,
+            updates_rx,
+            rev1,
+            tx,
+        ));
 
         assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
     }
@@ -607,7 +932,14 @@ listeners:
 
         let (updates_tx, updates_rx) = broadcast::channel(1);
         let (tx, mut rx) = mpsc::channel(8);
-        tokio::spawn(subscribe_worker(store.clone(), updates_rx, 0, tx));
+        tokio::spawn(subscribe_worker(
+            store.clone(),
+            test_stage_tree(),
+            None,
+            updates_rx,
+            0,
+            tx,
+        ));
 
         // Initial catch-up delivers rev1.
         assert_eq!(rx.recv().await.unwrap(), (rev1, b"one".to_vec()));
@@ -888,5 +1220,209 @@ listeners:
         // No config submitted yet in this fresh store — 404, not 401, proves
         // the request got *past* the auth layer.
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Slice 7: staged / canary rollout ---
+
+    #[tokio::test]
+    async fn a_plain_submission_is_immediately_promoted_and_visible_to_everyone() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        submit(&app, VALID_CONFIG).await;
+
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn a_canary_submission_is_hidden_from_a_plain_get_and_from_other_groups() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        submit(&app, VALID_CONFIG).await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/config?stage=canary&group=region-a")
+                    .body(Body::from(OTHER_VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // No group: still sees the last promoted revision (1), not the canary.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "1");
+
+        // A different group: same — not enrolled in region-a.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/config?group=region-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "1");
+
+        // region-a: sees the canary revision (2).
+        let resp = app
+            .oneshot(
+                Request::get("/config?group=region-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "2");
+    }
+
+    #[tokio::test]
+    async fn promoting_a_canary_revision_makes_it_visible_to_everyone() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        submit(&app, VALID_CONFIG).await;
+        app.clone()
+            .oneshot(
+                Request::post("/config?stage=canary&group=region-a")
+                    .body(Body::from(OTHER_VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/config/promote/2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "2");
+    }
+
+    #[tokio::test]
+    async fn promoting_a_missing_revision_is_404() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/config/promote/9999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn canary_without_a_group_is_a_bad_request() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/config?stage=canary")
+                    .body(Body::from(VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_revisions_reports_stage() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        submit(&app, VALID_CONFIG).await;
+        app.clone()
+            .oneshot(
+                Request::post("/config?stage=canary&group=region-a")
+                    .body(Body::from(OTHER_VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::get("/config/revisions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list[0]["promoted"], true);
+        assert_eq!(list[1]["promoted"], false);
+        assert_eq!(list[1]["canary_groups"], serde_json::json!(["region-a"]));
+    }
+
+    #[tokio::test]
+    async fn subscribe_worker_holds_back_an_unpromoted_canary_revision_until_promoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let rev1 = store.put(b"one".to_vec()).unwrap();
+        let stage_tree = test_stage_tree();
+        // rev2 is canary-only, not visible to a group-less subscriber.
+        let rev2 = store.put(b"two".to_vec()).unwrap();
+        stage_tree
+            .insert(
+                encode_rev(rev2),
+                serde_json::to_vec(&Stage::canary("region-a".into())).unwrap(),
+            )
+            .unwrap();
+
+        let (updates_tx, updates_rx) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_worker(
+            store,
+            stage_tree.clone(),
+            None,
+            updates_rx,
+            0,
+            tx,
+        ));
+
+        // Only rev1 shows up in the catch-up range; rev2 stays held back.
+        assert_eq!(rx.recv().await.unwrap(), (rev1, b"one".to_vec()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "an un-promoted canary revision must not reach a group-less subscriber"
+        );
+
+        // Promoting rev2 and re-signaling makes it visible on the next tick.
+        stage_tree
+            .insert(
+                encode_rev(rev2),
+                serde_json::to_vec(&Stage::promoted()).unwrap(),
+            )
+            .unwrap();
+        updates_tx.send(rev2).unwrap();
+        assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
     }
 }
