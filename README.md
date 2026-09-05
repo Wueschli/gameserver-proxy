@@ -26,8 +26,9 @@ and access control.
 
 ## Status
 
-**Roadmap phases 1–9 complete** (resolver `sticky_key` deferred). TCP and UDP
-listener → backend pool forwarding with:
+**Roadmap phases 1–9 complete** (resolver `sticky_key` deferred), plus
+**phase 10+11** (fleet controller + aggregator + admin GUI, PoC-scoped — see
+below). TCP and UDP listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
   `hash_on: src_ip | src_ip_port`) balancing
@@ -101,6 +102,24 @@ listener → backend pool forwarding with:
   extraction from the protocol handshake), plus a `regex-firstbytes`
   template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
   real plugins, loopback) — see `docs/07`
+
+**Phase 10+11 complete** (single-tier PoC — hierarchy/HA/shared intent is
+phase 12, design only): three additional binaries alongside `gsp` itself —
+`gsp-controller` (a `sled`-backed config revision store: `POST`/`GET /config`,
+`GET /config/subscribe` SSE, revision history/diff/rollback — a `gsp
+--controller <url>` instance pulls from it instead of a local file, with
+freeze-on-disconnect + reconnect-with-backoff), `gsp-aggregator` (fleet reads
++ operational fan-out: instances `POST /ingest` their own state on an
+interval, `GET /fleet/pools|sessions|healthz|subscribe` reads it back,
+`POST`/`PATCH`/`DELETE /fleet/...` fan intent verbs out to every instance's
+own admin API), and `gsp-ui` (a dedicated BFF holding both services' bearer
+tokens so the browser only ever needs a session cookie, serving a built
+React/Vite/TS frontend). Independent optional bearer-token auth on each hop.
+See `docs/06`'s "Fleet control plane" section for the full endpoint
+reference, `docs/10` for the design, and `crates/gsp-fleet-tests` for the
+multi-process integration tests. The `gsp-ui` frontend itself is a functional
+PoC (every backend path it drives is real and tested), not a polished
+operator UI — tracked as deferred future work in `docs/08-roadmap.md`.
 
 **Phases 1–9 complete** (`sticky_key` deferred). Phase 9
 (sniffer plugin loader): the WASM sandbox above, plus `crates/plugins/` and

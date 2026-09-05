@@ -343,7 +343,7 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   language, so it is a genuinely runtime-configured bounded matcher and not the
   hard-coded HTTP template.
 
-## Phase 10+11 (merged) – PoC: single controller + single aggregator
+## Phase 10+11 (merged) – PoC: single controller + single aggregator ✅
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 ("Fleet topology", "The controller", "The aggregator", "The admin GUI"). This
 is the **first working release** of the two new services, deliberately
@@ -656,14 +656,18 @@ token, is ever exposed to a human directly.
     green. `gsp-ui` isn't spawned here — nothing in the 4 listed scenarios
     exercises it, and it has no state of its own to assert on beyond what
     slice 11's own tests already cover.
-13. Docs: `docs/06` (new metrics/endpoints), `README.md` status block,
-    `docs/08` status legend, `HANDOVER.md`.
+13. ✅ Docs: `docs/06` gained a "Fleet control plane" section (full endpoint
+    reference for `gsp-controller`/`gsp-aggregator`/`gsp-ui`, and updated the
+    now-stale "not persisted or fleet-synced today" / "no built-in fleet-wide
+    view" callouts in "Multi-instance operations" to point at it); `README.md`
+    status block now covers phase 10+11; this status legend; `HANDOVER.md`.
 
 - **Result**: one controller to distribute config to a fleet, persistently and
   with an audit trail, and one aggregator to view and operate that fleet from
   one screen — a real, working v2 release. The `standalone`/`slave`
   hierarchy, intra-tier HA, adoption, and moving intent into the controller
   are the next release on top of this, not blocking it.
+- **All 13 slices of phase 10+11 are now complete.**
 
 ## Phase 12 – Fleet hierarchy, HA, and shared intent
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)

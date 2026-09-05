@@ -217,23 +217,123 @@ regions, fronted by **anycast or an L4 load balancer**. No shared data-plane
 state (ADR 4): lose an instance and the LB / anycast spreads its clients onto the
 rest; affected sessions reconnect.
 
-- **Config distribution** today is the operator's job — bake into the image (change
-  = rolling redeploy), or render the file from a store (ConfigMap /
-  `consul-template` / Ansible) and let file-watch pick it up in seconds. The
-  structural config is hot-reloaded; validate-before-swap keeps a bad file from
-  taking an instance down.
+- **Config distribution**: either the file-based approach below, or the phase
+  10+11 controller (see "Fleet control plane" below) — bake into the image
+  (change = rolling redeploy), render the file from a store (ConfigMap /
+  `consul-template` / Ansible) and let file-watch pick it up in seconds, or
+  point every instance at a `gsp-controller` with `--controller <url>`. Either
+  way the structural config is hot-reloaded; validate-before-swap keeps a bad
+  config from taking an instance down (the controller rejects it at
+  submission time instead, one hop earlier — see below).
 - **Backend membership** comes from phase-8 discovery (`backend_sources`: DNS SRV
   / Consul / k8s Endpoints), not per-instance file edits. Every instance runs the
   same source config and converges independently; a source outage freezes the
   set at last-known-good rather than draining a pool fleet-wide.
-- **Operator intent** (drain / add / remove a backend, route hints) is applied
-  per instance via each instance's admin API and is **not persisted or
-  fleet-synced today** — fan it out yourself, and re-apply after a restart.
+- **Operator intent** (drain / add / remove a backend, route hints) is still
+  applied per instance, either directly against that instance's admin API or
+  fanned out through `gsp-aggregator` (see below), and is **not persisted or
+  replayed after a restart** — moving intent into the controller's revision
+  log is phase 12, not this release.
 - **`transparent: true` needs the backend's return path through the same instance**
   that owns the connection (per-flow-consistent ECMP / anycast). PROXY protocol
   has no such constraint — prefer it when the fronting layer can rehash.
-- Aggregate `/metrics` and `/pools` in Prometheus; there is no built-in
-  fleet-wide view.
+- Aggregate `/metrics` and `/pools` yourself in Prometheus for per-instance detail;
+  for a single fleet-wide read/operate surface, see `gsp-aggregator` and
+  `gsp-ui` below — there is still no fleet-wide metrics aggregation.
+
+## Fleet control plane (phase 10+11)
+
+Three additional, independent binaries — a single-tier PoC (`docs/10`'s
+`standalone`/`slave` hierarchy, intra-tier HA, and moving intent into the
+controller's revision log are phase 12, design-only). None of them expose
+`GET /metrics`; the Prometheus surface stays per-`gsp`-instance as above. All
+three serve unauthenticated `GET /healthz` for liveness regardless of their
+auth settings below.
+
+### `gsp-controller` — structural config distribution
+
+One `--auth-token`-gated (optional) surface, backed by an embedded `sled`
+store that never forgets a revision (ADR 20):
+
+- `POST /config` — submit a raw YAML config (the same document a `gsp
+  --config` file would hold). Validated with the same `gsp_config::parse_str`
+  a file reload runs; a rejected submission (`422`, JSON error body) leaves
+  the current revision untouched — the revision only advances on success.
+  Response body is `{"revision": N}` (the new revision only appears here, not
+  as a header).
+- `GET /config` — the current revision's raw text, with `X-Config-Revision`
+  header. `404` before any submission.
+- `GET /config/subscribe?since=<revision>` (SSE) — catch-up range then a live
+  tail; `gsp --controller <url>` consumes this to hot-reload. A lagging
+  subscriber just re-runs the catch-up query against the store — no delivery
+  state kept on the writer side.
+- `GET /config/revisions` — history (revision, size, whether it's `current`).
+- `GET /config/revisions/{revision}` — a past revision's raw text.
+- `GET /config/revisions/{revision}/diff[?against=<revision>]` — a line diff
+  against `current` or another revision.
+- `POST /config/rollback/{revision}` — re-submits that revision's exact bytes
+  through the same validate-then-store path `POST /config` uses; rollback
+  never rewrites history, it creates a new revision with old content.
+
+A `gsp` instance opts in with `--controller <url>` (+ `--controller-token` if
+the controller requires one) **instead of** `--config <file>` — the two are
+mutually exclusive. On a controller outage `gsp` keeps running its
+last-applied config and retries the subscribe connection with capped
+exponential backoff (500ms → 30s); nothing about the data path pauses.
+
+### `gsp-aggregator` — fleet reads and operational fan-out
+
+One `--auth-token`-gated (optional) surface fed by every instance's own push,
+plus a `--instance-token` this aggregator presents going back out to each
+instance's admin API (a separate secret from `--auth-token` — one gates calls
+in, the other authenticates calls out):
+
+- `POST /ingest` — an instance's periodic self-reported summary (pool/backend
+  health + admin state, session *counts*, its own `admin_url`). Latest-write-wins,
+  **never persisted** — every fact here is a proxy's own state, re-pushed on
+  the next tick, so restarting the aggregator loses nothing durable.
+- `GET /fleet/pools` / `/fleet/sessions` — every known instance's ingested
+  summary, each entry carrying `last_seen_ms_ago`.
+- `GET /fleet/healthz` — per-instance staleness (`stale` past 30s, ~3x `gsp`'s
+  default 10s push interval).
+- `GET /fleet/subscribe` (SSE) — the same summaries, pushed on change
+  (debounced 150ms so a burst of near-simultaneous instance pushes collapses
+  into one resend, not one per push).
+- `POST /fleet/instances/{instance}/drain` / `/undrain` — targeted fan-out to
+  that instance's own `POST /admin/drain`/`/admin/undrain`; `404` if the
+  instance isn't known.
+- `POST /fleet/pools/{pool}/backends` — broadcast to every known instance's
+  own `POST /pools/{pool}/backends`.
+- `PATCH` / `DELETE /fleet/pools/{pool}/backends/{addr}` — broadcast to every
+  instance's own `PATCH`/`DELETE /pools/{pool}/backends/{addr}`.
+- `POST /fleet/route-hint` — broadcast to every instance's own
+  `POST /route-hint`.
+
+Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
+— one entry per known instance, `status: null` (not a failed request) for one
+that couldn't be reached; a broadcast never fails or blocks on one bad
+instance. A `gsp` instance opts in with `--aggregator <url>` (+
+`--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
+default 10s) — independent of `--controller`, pushing state and pulling
+config are unrelated axes.
+
+### `gsp-ui` — the operator dashboard's BFF
+
+A dedicated process holding both the controller's and the aggregator's own
+bearer tokens on the operator's behalf; the browser only ever holds a session
+cookie (`--ui-password`, `POST /ui/login`/`/ui/logout`, `GET /ui/session`),
+never a bearer token. Everything else is a thin, header-preserving proxy:
+`/api/fleet/*` → the `gsp-aggregator` routes above (`--aggregator-url`/
+`--aggregator-token`), `/api/config*` → the `gsp-controller` routes above
+(`--controller-url`/`--controller-token`), and `GET /ws/fleet` — a browser
+WebSocket fed by one shared subscription to the aggregator's
+`/fleet/subscribe` (one aggregator connection total, fanned out to every
+connected browser, not one per tab). `--static-dir` (default
+`crates/gsp-ui/web/dist`, built by `make ui`) serves the React/Vite/TS
+frontend as a fallback under whatever the API routes above don't claim — it's
+the one process, one port an operator's browser ever talks to. Either proxy
+target is optional; fleet reads/config actions 503 cleanly if the
+corresponding `--*-url` was never given.
 
 ### Fronting layer: anycast vs. L4 load balancer
 

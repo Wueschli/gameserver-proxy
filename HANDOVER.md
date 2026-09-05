@@ -1,7 +1,7 @@
 # HANDOVER
 
 State of the work, how to pick it up, and the traps.
-Last updated: 2026-09-04.
+Last updated: 2026-09-05.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This
@@ -49,12 +49,11 @@ implementation narration lives in git history and `docs/08`, not here.
 control plane's single-tier PoC) is now **implemented, not just designed** —
 see the session notes immediately below for the full arc. Three new crates
 (`gsp-controller`, `gsp-aggregator`, `gsp-ui`) plus a frontend
-(`crates/gsp-ui/web/`), all 11 slices done and individually verified live
-against real running processes, up through slice 11 (the admin GUI). Slice
-12 (integration tests spinning up the fleet together, new crate
-`crates/gsp-fleet-tests`) is also done — see its own entry further down.
-Only slice 13 (docs polish) remains before phase 10+11 is fully closed out.
-Phase 12
+(`crates/gsp-ui/web/`), all 13 slices now done and individually verified live
+against real running processes — see the slice-by-slice notes further down,
+including slice 12's multi-process integration tests
+(`crates/gsp-fleet-tests`) and slice 13's docs polish. **Phase 10+11 is fully
+closed out.** Phase 12
 (fleet hierarchy/HA/shared intent) and phase 13 (regional health fabric) are
 still **design only** — see
 [`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
@@ -568,11 +567,29 @@ immediately both in isolation and on a full-suite rerun — the same
 pre-existing timing-sensitive-under-load flakiness class already logged at
 slice 9 for a different test, not a regression from this slice.
 
-**Next**: slice 13 (docs polish: `docs/06`, `README.md` status block,
-`docs/08` status legend — the last item before phase 10+11 is fully closed
-out). **Phase 10+11's entire controller + aggregator + UI implementation +
-integration tests are otherwise done** — slices 1-12 all complete and
-individually verified live.
+**Slice 13 done — all 13 slices of phase 10+11 are now complete.** Docs
+polish: `docs/06-operations-observability.md` gained a "Fleet control plane"
+section — the full HTTP endpoint reference for `gsp-controller`,
+`gsp-aggregator`, and `gsp-ui` (every route, its auth token, and its
+behavior), written from the actual router definitions in `api.rs`/
+`fanout.rs`/`aggregator_proxy.rs`/`controller_proxy.rs`/`ws.rs` rather than
+from memory of the design docs, catching that `docs/06`'s existing
+"Multi-instance operations" section had gone stale — it still said operator
+intent is "not persisted or fleet-synced today" and there's "no built-in
+fleet-wide view", both no longer true now that `gsp-aggregator`/`gsp-ui`
+exist; updated those callouts to point at the new section while keeping the
+honest caveat that intent still isn't *persisted* (that's phase 12's revision
+log, not this release). `README.md`'s status block gained a phase 10+11
+paragraph (previously the whole status section only ever mentioned phases
+1-9 — phase 10+11 had shipped but was never reflected there). `docs/08-roadmap.md`'s
+phase 10+11 heading and all-13-slices summary now carry ✅.
+
+**Phase 10+11 (the distributed control plane's single-tier PoC) is now
+entirely done** — all 13 slices complete, individually verified live, plus
+`crates/gsp-fleet-tests`' real-multi-process integration tests (slice 12) and
+now-accurate docs (slice 13). Phase 12 (fleet hierarchy/HA/shared intent) and
+phase 13 (regional health fabric) remain **design only** — see
+[`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
 
 ### Known follow-ups (none blocking)
 
