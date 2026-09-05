@@ -8,6 +8,7 @@ mod admin;
 mod aggregator_client;
 mod controller_client;
 mod discovery;
+mod intent_client;
 mod procinfo;
 mod reload;
 mod resolver;
@@ -294,6 +295,39 @@ async fn run(
         );
         tokio::spawn(aggregator_client::run(push_cfg, handle.clone()))
     });
+    // The intent log (phase 12 slice 3) lives on the same controller
+    // instance as structural config, so it only makes sense to subscribe
+    // alongside `--controller` — an "unrelated axis" the other way from
+    // `aggregator_client` (that one is independent of `--controller`; this
+    // one is a second stream off the *same* connection target).
+    let intent = if let ConfigSource::Controller(url, token) = &config_source {
+        tracing::info!(controller = %url, "subscribing to controller intent updates");
+        Some(tokio::spawn(intent_client::run(
+            url.clone(),
+            token.clone(),
+            handle.clone(),
+        )))
+    } else {
+        None
+    };
+
+    // See `controller_client::watch_admin_reloads`'s doc: in `--controller`
+    // mode, nothing otherwise rebuilds the snapshot after an admin-API or
+    // intent-op backend overlay change (`reload::run`, which normally does,
+    // only runs in file-config mode).
+    let admin_reload_watch = if let ConfigSource::Controller(url, token) = &config_source {
+        Some(tokio::spawn(controller_client::watch_admin_reloads(
+            url.clone(),
+            token.clone(),
+            handle.clone(),
+            resolvers.clone(),
+            sniffer_loader.clone(),
+            sniffers.clone(),
+        )))
+    } else {
+        None
+    };
+
     let reload = match config_source {
         ConfigSource::File(path) => tokio::spawn(reload::run(
             path,
@@ -321,6 +355,12 @@ async fn run(
 
     runtime.shutdown_with_grace(cfg.shutdown_grace).await;
     reload.abort();
+    if let Some(intent) = intent {
+        intent.abort();
+    }
+    if let Some(admin_reload_watch) = admin_reload_watch {
+        admin_reload_watch.abort();
+    }
     admin.abort();
     if let Some(aggregator) = aggregator {
         aggregator.abort();

@@ -295,6 +295,28 @@ transparent below this tier. Losing the parent freezes this tier on
 last-known-good with the same reconnect-with-backoff behavior `gsp`'s own
 `--controller` client has; it never promotes itself to `standalone`.
 
+**Operator intent log (phase 12 slice 3)**: alongside `/config*`, every
+`gsp-controller` also serves `POST /intent` and `GET /intent/subscribe`, a
+second `sled`-backed revision log (its own `<data_dir>/intent` database)
+covering the **pool-scoped** phase-5 admin verbs — backend add
+(`{"op":"backend_add","pool":...,"addr":...}`), backend remove
+(`backend_remove`), backend admin state (`backend_patch`, `state` one of
+`enabled`/`draining`/`disabled`), and route-hint (`route_hint`,
+`{"src_ip":...,"pool":...,"ttl_sec":...}`, default `ttl_sec` 30). `POST
+/intent` validates the op's shape (addr/IP parse, known state) before
+accepting it — there's no `gsp_config::validate()` equivalent for a bare op,
+so this is that check, one hop earlier than broadcasting it. A `gsp`
+instance running with `--controller` automatically also subscribes to
+`/intent/subscribe` and applies every op it receives through the same
+`RuntimeHandle` calls the admin API's own handlers use — an intent op is a
+new *source* for an existing mutation, never a new code path. **Not part of
+this log**: whole-instance drain/undrain (targets one instance, not "every
+instance with pool X" — use the aggregator's targeted fan-out or the
+instance's own `/admin/drain`) and resolver pins (still open, `docs/01`).
+The `slave`-role write gate applies to `/intent` too, but slave-tier relay
+for the intent log is not built yet — only the config log relays through a
+parent today.
+
 ### `gsp-aggregator` — fleet reads and operational fan-out
 
 One `--auth-token`-gated (optional) surface fed by every instance's own push,

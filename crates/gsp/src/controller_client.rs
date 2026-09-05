@@ -199,6 +199,75 @@ fn parse_sse_event(event: &str) -> Option<SseRevision> {
 /// replayed forever on every reconnect, the same way a bad file reload
 /// doesn't retry itself, it just waits for the next trigger. Returns `None`
 /// for anything that wasn't a data event at all (see [`parse_sse_event`]).
+/// Debounce window, mirrors `reload::DEBOUNCE` — coalesces a burst of
+/// `request_reload()` calls (e.g. several intent ops landing close together)
+/// into one re-fetch instead of one per call.
+const ADMIN_REBUILD_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Watches [`RuntimeHandle::reload_requested`] and re-fetches + re-applies
+/// the controller's current config on every notification. **Fixes a real
+/// gap, not a hypothetical one**: `reload::run` is what normally listens on
+/// this `Notify` and rebuilds the snapshot (`crate::admin`'s backend
+/// add/patch/delete handlers, and now `crate::intent_client`'s
+/// `BackendAdd`/`BackendRemove`, both call `request_reload()` after mutating
+/// `BackendOverlay`) — but `reload::run` is only spawned in file-config mode.
+/// In `--controller` mode nothing was watching this `Notify` at all, so a
+/// backend added/removed via the admin API (or an intent op) silently never
+/// took effect: `request_reload()` fired into the void. Found via this
+/// slice's live end-to-end smoke test (a `backend_add` intent op logged as
+/// "applied" but never showed up in `GET /pools`), not by inspection — the
+/// same class of gap `docs/10`'s "phase-5 admin verbs become 'controller
+/// writes a revision'" is explicitly meant to close, just surfacing one hop
+/// earlier than the intent log itself.
+///
+/// `tokio::spawn`ed by `main.rs` alongside [`run`] whenever `--controller`
+/// is set. Re-fetching the whole config rather than caching the last-applied
+/// `Config` locally keeps this in sync with the controller by construction
+/// (no second copy of "what's current" to drift) at the cost of one cheap
+/// `GET /config` per debounced burst — control-plane, human/operator-paced,
+/// not a hot path.
+pub async fn watch_admin_reloads(
+    base_url: String,
+    token: Option<String>,
+    handle: RuntimeHandle,
+    resolvers: Arc<Resolvers>,
+    sniffer_loader: Option<Arc<SnifferLoader>>,
+    sniffers: Arc<Sniffers>,
+) {
+    let admin = handle.reload_requested().clone();
+    loop {
+        admin.notified().await;
+        tokio::time::sleep(ADMIN_REBUILD_DEBOUNCE).await;
+        // Swallow anything that landed during the debounce window, same
+        // coalescing `reload::run` does for its own triggers.
+        let _ = tokio::time::timeout(Duration::ZERO, admin.notified()).await;
+
+        match fetch_current(&base_url, token.as_deref()).await {
+            Ok((_revision, text)) => match gsp_config::parse_str(&text) {
+                Ok(cfg) => {
+                    crate::reload::apply_config(
+                        cfg,
+                        &handle,
+                        &resolvers,
+                        sniffer_loader.as_deref(),
+                        &sniffers,
+                        "admin-triggered overlay change",
+                    )
+                    .await;
+                }
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "re-fetched controller config failed to parse after an admin-triggered reload"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                error = %e, controller = %base_url,
+                "could not re-fetch controller config after an admin-triggered reload"
+            ),
+        }
+    }
+}
+
 async fn apply_sse_event(
     event: &str,
     handle: &RuntimeHandle,

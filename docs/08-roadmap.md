@@ -706,8 +706,41 @@ additive, no rework of what shipped there.
   `axum::serve` listener. Verified live: a child aggregator ingesting
   `proxy-1` shows up on a real parent aggregator's `GET /fleet/sessions`
   as `region-a/proxy-1`.
-  **Still not built**: intra-tier HA, intent migration, RBAC, canary
-  rollout, adoption.
+  **Not yet built at the time**: intra-tier HA, intent migration, RBAC,
+  canary rollout, adoption.
+- ✅ **Slice 3 (operator intent → the controller's revision log)**:
+  pool-scoped operator intent — backend add/remove, backend admin state,
+  route-hint — now has a fleet-wide, persisted path through
+  `gsp-controller`, alongside (not replacing) direct per-instance admin API
+  calls. New `gsp-controller::intent` module: a second `sled` log (its own
+  `<data_dir>/intent` database, reusing `Store` unchanged), `POST /intent`
+  (validates the op's shape — addr/IP parse, known state — before it's ever
+  broadcast, since there's no `gsp_config::validate()` to lean on for a bare
+  op) and `GET /intent/subscribe`, the identical catch-up-then-tail shape
+  config uses. **Deliberately excludes** whole-instance drain/undrain (it
+  targets one instance, not "every instance with pool X" — stays on the
+  aggregator/direct-admin path) and resolver pins (still an open question,
+  `docs/01`). New `gsp` module `intent_client.rs` subscribes whenever
+  `--controller` is set and applies each op through the exact same
+  `RuntimeHandle` calls `crate::admin`'s handlers make — an intent op is a
+  new *source* for an existing mutation, not a new code path. 15 new tests
+  across both crates.
+  **Real pre-existing bug found and fixed along the way, via this slice's
+  live smoke test**: in `--controller` mode, nothing was watching
+  `RuntimeHandle::reload_requested()` at all — `reload::run` is the only
+  thing that ever did, and it's only spawned in file-config mode — so the
+  phase-5 admin API's own `POST`/`DELETE /pools/{pool}/backends` (backend
+  overlay edits) silently never took effect for any `--controller` instance,
+  before this slice existed. Fixed with a new
+  `controller_client::watch_admin_reloads`, spawned alongside
+  `--controller`: debounces `request_reload()` notifications and re-fetches
+  + re-applies the controller's current config (rather than caching a local
+  copy, so there's nothing to drift from the controller's own view).
+  Verified live end-to-end: `gsp-controller` + `gsp --controller` running
+  for real, a `POST /intent` `backend_add` landed in `gsp`'s own
+  `GET /pools` output within one debounce window.
+  **Still not built**: intra-tier HA, slave-tier intent relay (only config
+  relays through a parent today), RBAC, canary rollout, adoption.
 - `standalone` / `slave` role per controller and aggregator tier (static,
   install-time, never inferred from connectivity) so a deployment can nest
   regions under a root tier.

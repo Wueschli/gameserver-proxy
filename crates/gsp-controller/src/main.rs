@@ -14,6 +14,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use gsp_controller::api::{self, AppState};
+use gsp_controller::intent::api::IntentState;
 use gsp_controller::role::Role;
 use gsp_controller::store::Store;
 
@@ -83,7 +84,22 @@ async fn main() -> anyhow::Result<()> {
         "controller store opened"
     );
 
-    let state = Arc::new(AppState::new(store, args.auth_token, args.role));
+    // A separate sled database in its own subdirectory — the intent log
+    // (phase 12 slice 3) is content-wise unrelated to config revisions, and
+    // keeping it out of the existing `data_dir` root leaves every
+    // already-deployed config store's on-disk layout untouched.
+    let intent_dir = args.data_dir.join("intent");
+    let intent_store = Arc::new(
+        Store::open(&intent_dir)
+            .map_err(|e| anyhow::anyhow!("opening intent store at {intent_dir:?}: {e}"))?,
+    );
+    tracing::info!(
+        intent_dir = %intent_dir.display(),
+        "intent store opened"
+    );
+
+    let state = Arc::new(AppState::new(store, args.auth_token.clone(), args.role));
+    let intent_state = IntentState::new(intent_store, args.role, args.auth_token);
 
     if args.role == Role::Slave {
         let parent_url = args.parent_url.expect("checked above");
@@ -130,7 +146,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(api::router((*state).clone()));
+        .merge(api::router((*state).clone()))
+        .merge(gsp_controller::intent::api::router(intent_state));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

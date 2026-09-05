@@ -22,6 +22,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod intent;
 pub mod parent_client;
 pub mod role;
 pub mod store;

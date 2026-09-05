@@ -49,11 +49,50 @@ aggregator (`--tier-name region-a`) ingested `proxy-1`, and a separate real
 parent aggregator's `GET /fleet/sessions` showed it as
 `region-a/proxy-1` within one push interval.
 
+**Phase 12 slice 3 done (same day)**: pool-scoped operator intent — backend
+add/remove, backend admin state, route-hint — now has a fleet-wide,
+persisted path through `gsp-controller`, per `docs/10`'s "phase-5 admin
+verbs become 'controller writes a revision'", alongside (not replacing)
+direct per-instance admin calls. New `gsp-controller::intent` module: a
+second `sled` log in its own `<data_dir>/intent` database (reuses `Store`
+completely unchanged — it was already a generic content-agnostic revision
+log), `POST /intent` (does its own minimal shape validation — addr/IP
+parse, known backend state — since there's no `gsp_config::validate()`
+equivalent for a bare op) and `GET /intent/subscribe` (identical
+catch-up-then-tail shape to config's). **Deliberately excludes**
+whole-instance drain/undrain (targets *one* instance, not "every instance
+with pool X" — the controller has no instance identity, that's the
+aggregator's job) and resolver pins (still an open question). New `gsp`
+module `intent_client.rs`, active whenever `--controller` is set, applies
+each op via the exact same `RuntimeHandle` calls `crate::admin`'s own
+handlers use — a new *source*, not a new code path. 15 new tests across
+both crates.
+
+**A real, pre-existing bug found and fixed via this slice's live smoke
+test, not by inspection**: submitting a `backend_add` intent op logged as
+"applied" on the `gsp` side but the backend never showed up in `GET
+/pools`. Root cause: `RuntimeHandle::reload_requested()` (the `Notify`
+`request_reload()` fires) was only ever watched by `reload::run` — spawned
+exclusively in *file*-config mode. In `--controller` mode nothing watched
+it at all, so the phase-5 admin API's own `POST`/`DELETE
+/pools/{pool}/backends` had been silently inert for any `--controller`
+instance this whole time, predating this slice entirely — the intent
+client just exercised that path for the first time and surfaced it. Fixed
+with a new `controller_client::watch_admin_reloads`, spawned alongside
+`--controller`: debounces `request_reload()` (same 200ms shape as
+`reload::run`'s own file-watch debounce) and re-fetches + re-applies the
+controller's current config, rather than caching a local `Config` copy that
+could drift. Verified live end-to-end with real `gsp-controller` + `gsp
+--controller` processes: `POST /intent` a `backend_add` → landed in `GET
+/pools` within one debounce window.
+
 **Not yet built for phase 12**: intra-tier HA (Raft/etcd consensus group per
-tier), operator intent migrating into the controller's revision log, staged/
-canary rollout, RBAC, and the adoption flow (`standalone`→`slave` role flip
-post-install). See `docs/08-roadmap.md` phase 12 and
-`docs/10-distributed-control-plane.md` for the full remaining scope.
+tier), slave-tier intent relay (only the config log relays through a parent
+today — the intent log's `slave` write gate is applied but nothing feeds a
+slave's intent log yet), staged/canary rollout, RBAC, and the adoption flow
+(`standalone`→`slave` role flip post-install). See `docs/08-roadmap.md`
+phase 12 and `docs/10-distributed-control-plane.md` for the full remaining
+scope.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This
