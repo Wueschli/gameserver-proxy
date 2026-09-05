@@ -92,7 +92,11 @@ setup (capabilities instead of root).
 
 ## Assumptions
 
-- Backends are reachable over a trusted internal network.
+- Backends are reachable over a trusted internal network. **Superseded for a
+  globally-distributed fleet** (phase 10–13): see
+  [11-backend-transport.md](11-backend-transport.md) (design only) for how a
+  proxy reaches a backend that isn't on its local network. A same-network
+  deployment needs none of that and this assumption still holds for it.
 - The client reaches the proxy via DNS; the proxy does not need to cryptographically
   verify client identity (the game does that if needed).
 - Volumetric L3/4 attacks are absorbed upstream (scrubbing/anycast).

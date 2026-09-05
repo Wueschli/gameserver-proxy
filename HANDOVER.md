@@ -3,6 +3,84 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 (backend transport) design session (2026-09-05, same day, after the
+gsp-ui redesign) — no code changes.** At the user's request: how does a
+globally-distributed fleet of edge proxies reach game servers that are *not*
+on the same network — the thing `docs/01-requirements.md`'s Assumptions
+section still states outright ("Backends are reachable over a trusted
+internal network"), true for a single-region deployment but not for what
+phase 10–13 actually built. New `docs/11-backend-transport.md`, ADR 25 in
+`docs/09-technology-choices.md`, a new Phase 14 section in
+`docs/08-roadmap.md`, and a superseded-note added to `docs/01`'s Assumptions
+bullet (same-network deployments are unaffected). `CLAUDE.md`'s repo-layout
+line updated `docs/ (00–10)` → `(00–11)`.
+
+**Locked decisions, explicitly reusing existing solutions per the user's
+"don't reinvent the wheel" ask** (each with rejected alternatives in ADR 25):
+unmodified **WireGuard** (kernel module primary, `boringtun` userspace as a
+portable fallback for environments without `CAP_NET_ADMIN`) as the entire
+tunnel data plane — no new crypto/framing protocol, continuing the ADR 21/
+24 "defer to a maintained, audited implementation" reasoning a third time.
+WireGuard already handles the exact NAT shape needed here for free: only
+the proxy side (edge infrastructure, always has a public IP) needs a known
+endpoint; an origin behind a home NAT dials out once and WireGuard's own
+peer-roaming + keepalive keep the mapping alive indefinitely, no port
+forwarding ever required on the origin side. Prior art considered and
+explicitly *not* adopted wholesale: **Steam Datagram Relay** (validates the
+shape — origin never exposes a public IP to clients — but proprietary, not
+reusable), **rathole**/**frp** (real, working Rust/Go reverse-tunnel tools,
+but standalone binaries with their own protocol, no fleet/health/pool
+awareness, not embeddable as a library), **Headscale** (BSD-3 self-hosted
+Tailscale-protocol coordination server — good proof that "a control plane
+handing out WireGuard peer configs" is sound and well-scoped, but adopting
+it means running real Tailscale clients or reimplementing its coordination
+protocol, bigger than the one narrow registry this project actually needs).
+
+**What's genuinely new** (the only two pieces without an off-the-shelf
+answer): a small origin-side **`gsp-agent`** binary (new workspace crate,
+matching the `gsp-controller`/`gsp-aggregator`/`gsp-ui` precedent of one
+small process per concern) that manages a local WireGuard interface and
+registers its pubkey + fronted backend addresses; and a new **"backend
+peers" registry** on the existing Tier-1 `gsp-controller`, alongside (not
+replacing) the config-revision and phase-12 intent logs, distributing peer
+configuration to every subscribed edge proxy the same subscribe-and-
+reconcile way config revisions already are (ADR 13). Key material stays out
+of the config-revision log since it's security-sensitive and high-churn,
+unrelated to routing/pool structure.
+
+**The data plane itself needs zero changes** — confirmed by reading the
+actual dial sites (`connect_backend` in `crates/gsp-core/src/proxy.rs:138`,
+`connect_upstream` in `crates/gsp-core/src/listener_udp.rs:844`, and
+`health.rs`'s own independent dials): all three are already a plain
+`connect()` to a bare `SocketAddr`, no seam. Once a WireGuard interface for
+an origin exists on the proxy host, that origin's backends are just
+ordinary routable addresses on the interface's subnet — the existing dial
+code doesn't know or care that a tunnel is involved, same reasoning that
+already lets transparent-proxy mode (ADR 12) layer on without touching the
+pump.
+
+**Explicitly deferred, not designed here**: the genuinely-both-sides-behind-
+restrictive-NAT edge case (documented as a known v1 limitation; a
+relay-of-last-resort closer to Steam Datagram Relay's actual shape is a
+possible v2, not designed now). **Not started** — design only, matching the
+depth of the phase 12/13 pre-build sessions before either was built.
+
+**Follow-up session (same day): the four open questions this design left
+were walked through and locked**, per user request, all matching the
+recommended option: (1) WireGuard interface config via `defguard/
+wireguard-rs` (unifies kernel-netlink + `boringtun`-userspace behind one
+API) rather than hand-joining `wireguard-uapi` + `boringtun` separately;
+(2) one shared WireGuard interface with many peers, not one interface per
+origin; (3) an origin is modeled as a new `BackendSource` (`backend_
+sources[].type: tunnel`, reusing ADR 12a's existing discovery seam) rather
+than a new `origins:`/`pools[].origin` schema concept; (4) `gsp-agent` is
+its own workspace crate, not a `gsp --agent` mode. `docs/11`'s "Open
+questions" section, ADR 25, and Phase 14's slice list in `docs/08` were all
+updated to reflect these as locked, with a concrete slice list now in
+`docs/08`. Still open: only the CGNAT/both-sides-restrictive-NAT fallback
+(a documented v1 limitation, not a blocker). Nothing built — still design
+only.
+
 **gsp-ui full redesign (2026-09-05, same day, after phase 13 closed out)**:
 at the user's request — the previous frontend was a two-tab, unstyled React
 app with a raw YAML textarea for config and no way to organize a fleet

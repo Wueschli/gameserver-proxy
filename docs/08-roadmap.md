@@ -975,6 +975,50 @@ Slices:
 - **Result**: faster, multi-vantage-point backend health across a domain; one
   bad vantage point no longer flaps a pool.
 
+## Phase 14 – Backend transport (design only)
+Full design: [11-backend-transport.md](11-backend-transport.md). Closes the
+gap `docs/01-requirements.md`'s Assumptions section states outright
+("Backends are reachable over a trusted internal network") — not true once
+proxy instances are distributed globally (phase 10–13's whole point) in
+front of game servers on a different network entirely. **Design only, not
+started** — see ADR 25 in `docs/09`.
+
+Mechanism (design, locked 2026-09-05 follow-up session — see docs/11
+"Locked decisions"): unmodified WireGuard via `defguard/wireguard-rs`
+(unifies kernel-netlink and `boringtun`-userspace config behind one API) as
+the tunnel data plane between an edge proxy and an origin — no new crypto/
+framing protocol, and one shared interface per side with many peers, not
+one interface per origin. `connect_backend`/`connect_upstream`/
+`health.rs`'s dials need no changes, since a tunneled backend is just a
+routable `SocketAddr` once the interface exists. An origin is modeled as a
+new `BackendSource` (ADR 12a) — `backend_sources[].type: tunnel` — not a
+new schema concept. The two genuinely new pieces: a small origin-side
+`gsp-agent` crate that manages the local WireGuard interface and registers
+its pubkey/backend addresses, and a "backend peers" registry on the
+existing Tier-1 `gsp-controller` that distributes peer configuration to
+every subscribed edge proxy the same way config revisions already are.
+WireGuard's own roaming + keepalive mean only the proxy side ever needs a
+public endpoint — an origin behind a home NAT needs no port forwarding.
+
+Slices (not yet numbered/started):
+
+- `gsp-controller`'s new backend-peers registry (write side: `gsp-agent`
+  registration; read side: proxy subscribe + reconcile).
+- New `gsp-agent` crate: `wireguard-rs`-managed interface lifecycle +
+  controller registration.
+- `gsp`'s own subscribe-and-reconcile task (mirrors `controller_client.rs`),
+  managing the shared proxy-side interface's peer list via `wireguard-rs`.
+- The new `tunnel` `BackendSource` implementation (`gsp` binary, same seam
+  as the existing DNS-SRV/Consul/Kubernetes sources) resolving an origin's
+  registered addresses through the peers registry.
+- `gsp-config` schema: `backend_sources[].type: tunnel` + its fields,
+  `gsp-config` raw+resolved types, `validate()`, `config.example.yaml`,
+  `docs/05`.
+
+Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
+NAT fallback (documented v1 limitation, no code); nothing else blocks
+starting slice 1.
+
 ## Later / optional
 - QUIC-CID-aware sniffer & session keying.
 - Cross-instance session handover (shared *session* state) — still out of scope;

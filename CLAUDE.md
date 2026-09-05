@@ -35,7 +35,7 @@ Cargo.toml                  workspace (resolver 2, edition 2021)
 rust-toolchain.toml         pins stable
 config.example.yaml         reduced v0 config schema
 Makefile                    make check / test / run / fmt / lint
-docs/                       the plan (00–10) — source of truth for design
+docs/                       the plan (00–11) — source of truth for design
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
     fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
