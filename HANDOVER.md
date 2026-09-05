@@ -3,6 +3,62 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 14 slice 3 done (2026-09-05, same day as slices 1-2)**: the new
+`gsp-agent` crate — origin-side agent, `defguard_wireguard_rs` 0.12
+(`WGApi<Kernel>`/`WGApi<Userspace>` behind one API, exactly the "unifies
+kernel-netlink and boringtun-userspace" ADR 25 called for). Declared
+directly in `crates/gsp-agent/Cargo.toml`, not the workspace table — same
+precedent as `openraft`/`foca`, a dependency used by exactly one crate.
+
+Three small modules: `keypair.rs` (`load_or_generate` — persists this
+origin's WireGuard private key at `<data_dir>/private.key`, base64 via
+`Key`'s own `Display`/`FromStr`, `0600` permissions on Unix; a stable
+identity is the whole point, so it's generated once and never rotated by
+this code), `interface.rs` (`bring_up_with` — tries the kernel backend
+first, falls back to boringtun userspace unless `--userspace` forces it
+directly; returns `Box<dyn WireguardInterfaceApi>` since `WGApi<Kernel>`
+and `WGApi<Userspace>` are different concrete types and the caller needs to
+hold "whichever one actually came up" without knowing which at compile
+time), `register.rs` (`POST /peers` client against slice 2's registry —
+wire shape duplicated rather than shared as a library, same precedent
+`controller_client`'s hand-parsed SSE and `aggregator_client`'s duplicated
+`IngestPayload` already set; `run` re-registers on a fixed interval since
+this agent has no "did anything change" signal yet, matching `health.rs`'s
+sweep / `aggregator_client`'s push shape). `main.rs` wires them in order:
+load/generate the key → bring up the interface → spawn the registration
+loop → wait for `ctrl_c` → `remove_interface()` on shutdown.
+
+7 new tests (`keypair`'s persistence/permissions/corruption cases,
+`register`'s JSON-shape and connection-refused cases). `make check` green
+across the whole workspace (this crate has none of `gsp-core`/`gsp-config`'s
+dependency restrictions — it's a plain binary like `gsp`/`gsp-controller`).
+
+**Live verification, with an honest limitation**: this sandbox has no
+`CAP_NET_ADMIN` and is not root (`sudo -n` confirmed no passwordless sudo),
+so a real WireGuard interface could not be brought up here — confirmed
+`--userspace` (boringtun) *also* needs the capability for the TUN device
+despite `/dev/net/tun` being world-writable; `gsp-agent` correctly refuses
+to register when the interface can't come up (verified: it prints a clear
+chained error — "bringing up the local WireGuard interface" → "creating
+interface" → the OS's own "Operation not permitted" — and exits non-zero
+rather than registering a phantom origin). The registration path itself
+*was* verified live end-to-end in slice 2's own testing (the identical
+`POST /peers` `gsp-controller` endpoint), plus this slice's own unit tests
+cover the request shape. **A real interface-creation run needs a host (or
+container) with `CAP_NET_ADMIN`** — the user can verify with `sudo
+./target/debug/gsp-agent --controller-url ... --name ... --address
+10.60.0.2/24 --backends ...` (kernel backend) or add `--userspace` for
+boringtun without root if the host's `/dev/net/tun` policy allows it; not
+done in this session since it needs a privilege this sandbox doesn't grant
+and wasn't asked for.
+
+**Next**: slice 4, `gsp`'s own subscribe-and-reconcile task — mirrors
+`controller_client.rs`'s shape, subscribes to the peers registry and
+reconciles the proxy's own shared WireGuard interface's peer list to match;
+verifiable standalone against a real slice-3 agent (the proxy's interface
+should show the agent as a peer within one subscribe cycle, independent of
+any actual game traffic).
+
 **Phase 14 slice 2 done (2026-09-05, same day as slice 1)**:
 `gsp-controller`'s backend-peers registry — new `peers` module (`peers.rs` +
 `peers/api.rs`), a third resource alongside the config-revision and intent

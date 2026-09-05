@@ -8,6 +8,7 @@ members = [
     "crates/gsp-controller",
     "crates/gsp-aggregator",
     "crates/gsp-ui",
+    "crates/gsp-agent",
     "crates/gsp-fleet-tests",
 ]
 

@@ -92,6 +92,10 @@ crates/
     fleet_feed.rs           single shared subscription to the aggregator's `/fleet/subscribe` SSE feed, fanned out via a broadcast channel
     ws.rs                   GET /ws/fleet — the browser's live-updates WebSocket, fed by fleet_feed
     web/                    standalone npm project (own package.json, never a Cargo workspace member) — the React + Vite + TS frontend; `make ui` builds it to `dist/`, served by `--static-dir`
+  gsp-agent/                 binary — phase 14 (backend transport, `docs/11`) origin-side agent; brings up a local WireGuard interface (`defguard/wireguard-rs`: kernel primary, `boringtun` userspace fallback) and registers its pubkey + fronted backend addresses with `gsp-controller`'s backend-peers registry
+    keypair.rs              persists this origin's WireGuard private key across restarts — a stable identity, never regenerated
+    interface.rs            `bring_up_with` — creates/configures the interface, kernel backend first unless `--userspace` forces boringtun
+    register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as

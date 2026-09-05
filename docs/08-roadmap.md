@@ -1019,12 +1019,12 @@ needs it; none started):
    `gsp` integration needed yet, same as how the config/intent logs were
    each built and tested standalone before any client integrated with
    them.
-3. 🔜 **New `gsp-agent` crate**: creates/maintains one local WireGuard
+3. ✅ **New `gsp-agent` crate**: creates/maintains one local WireGuard
    interface via `defguard/wireguard-rs`, registers with slice 2's
    registry on startup and on change. Verifiable standalone: point a real
    `gsp-agent` at a real `gsp-controller`, confirm its registration lands
    and a real local WireGuard interface comes up with the right key.
-4. ⬜ **`gsp`'s subscribe-and-reconcile task**: mirrors
+4. 🔜 **`gsp`'s subscribe-and-reconcile task**: mirrors
    `controller_client.rs`'s shape, subscribes to slice 2's registry, and
    reconciles the proxy's own shared WireGuard interface's peer list (via
    `wireguard-rs`) to match. Verifiable standalone against slice 3's real
