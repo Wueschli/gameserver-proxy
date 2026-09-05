@@ -925,11 +925,29 @@ Slices:
    perform the one and only merge (the `sender: None` case in
    `BroadcastHandler::receive_item` exists exactly for this "adding it
    myself" path).
-4. **Pool/health integration**: `Backend` gains `domain_down: AtomicBool`
-   (additive, `healthy` untouched); `is_healthy()` = `healthy &&
-   !domain_down`; new `Backend::observe_domain(quorum_down)` called by the
-   gossip module on every quorum-verdict change; `gsp_backend_domain_down`
-   gauge.
+4. ✅ **Pool/health integration** (done): `Backend` gained `domain_down:
+   AtomicBool` alongside the existing `healthy` (untouched); `is_healthy()`
+   = `local_healthy() && !domain_down_flag()`. New `Backend::
+   observe_domain(quorum_down)` can only set/clear `domain_down`, never
+   `healthy` — a backend still only returns healthy on this instance's own
+   `rise` streak. `health.rs::sweep` gained an optional `GossipFabric`
+   (handle + `quorum_fraction`, `None` when `settings.gossip` is unset):
+   every active-check result also calls `GossipHandle::
+   publish_backend_health(addr, ok)` (only for backends this sweep itself
+   just probed — the "only ever asserts what it checks itself" rule from
+   the design), and after every sweep, every backend's `domain_down` is
+   refreshed from `GossipHandle::quorum_down`. `Runtime::start_with_discovery`
+   builds one `GossipFabric` (if `settings.gossip` is set) and hands it to
+   both the health task and the gossip task, so `sweep` never has to reach
+   across tasks. `gsp_backend_domain_down{pool,backend}` gauge added. 5 new
+   tests: 3 pure `pool.rs` unit tests (domain-down overrides but local
+   `rise` alone clears it; domain-down clearing never revives a locally-down
+   backend; `domain_down` carries across a reload by address, mirroring how
+   `healthy` already does) + 2 `health.rs` tests, one proving `sweep` never
+   touches `domain_down` with no gossip fabric, one driving a real
+   single-node mesh through the full real pipeline (channel → mesh task →
+   `add_broadcast` → merge) and confirming a repeated `sweep` eventually
+   reads its own published verdict back and overrides the backend down.
 5. **Verification**: multi-process live test — several real `gsp`
    instances in one `failure_domain`, confirm quorum-down suppresses a pool
    member domain-wide from one instance's own bad vantage point, confirm a

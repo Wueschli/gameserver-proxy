@@ -119,6 +119,17 @@ pub struct GossipHandle {
 /// publish requests.
 pub struct GossipInbox(mpsc::UnboundedReceiver<(SocketAddr, bool)>);
 
+/// Everything `health.rs` needs to talk to the Tier-2 mesh: a handle plus
+/// this domain's configured quorum fraction (`settings.gossip.
+/// quorum_fraction`) — bundled so a caller doesn't have to thread the two
+/// separately. `None` (no `settings.gossip`) means "fabric disabled",
+/// exactly today's local-only behaviour.
+#[derive(Clone)]
+pub struct GossipFabric {
+    pub handle: GossipHandle,
+    pub quorum_fraction: f64,
+}
+
 impl GossipHandle {
     pub fn new() -> (Self, GossipInbox) {
         let (tx, rx) = mpsc::unbounded_channel();

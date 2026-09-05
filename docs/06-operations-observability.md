@@ -95,6 +95,11 @@
 - `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
   datagrams dropped for a missing/invalid HMAC tag; never trusted, never
   forwarded to the SWIM state machine.
+- `gsp_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
+  the Tier-2 domain quorum is currently overriding this backend to down.
+  Independent of, and unable to clear, the backend's own local `healthy`
+  flag (`gsp_pool_backends`'s `healthy`/`unhealthy` counts already reflect
+  the combined result).
 
 **Added RTT**: no built-in RTT SLO metric exists yet — `make bench`'s added
 p50/p99 (vs. NFR N1/N2) is the closest thing today, measured out-of-band, not

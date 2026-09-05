@@ -84,6 +84,12 @@ pub struct Backend {
     pub addr: SocketAddr,
     pool: Arc<str>,
     healthy: AtomicBool,
+    /// Tier-2 regional health fabric override (phase 13, docs/10 "Tier 2").
+    /// Additive to `healthy`, never replacing it: `is_healthy()` requires
+    /// both. Only [`Backend::observe_domain`] ever sets this — it can only
+    /// push a backend *down*, never revive one; only this instance's own
+    /// `rise` streak (via [`Backend::observe`]) can clear `healthy`.
+    domain_down: AtomicBool,
     admin_state: AtomicU8,
     active: AtomicUsize,
     last_check_ms: AtomicU64,
@@ -107,6 +113,7 @@ impl Backend {
         hc: &HealthCheck,
         max_sessions: Option<usize>,
         initially_healthy: bool,
+        initially_domain_down: bool,
         initial_state: AdminState,
         weight: u32,
     ) -> Arc<Self> {
@@ -114,6 +121,7 @@ impl Backend {
             addr,
             pool,
             healthy: AtomicBool::new(initially_healthy),
+            domain_down: AtomicBool::new(initially_domain_down),
             admin_state: AtomicU8::new(initial_state.to_u8()),
             active: AtomicUsize::new(0),
             last_check_ms: AtomicU64::new(0),
@@ -128,8 +136,45 @@ impl Backend {
         })
     }
 
-    pub fn is_healthy(&self) -> bool {
+    /// This instance's own local verdict (active/passive checks), ignoring
+    /// any Tier-2 domain override. Not exposed outside `pool.rs` — carrying
+    /// state across a reload (see [`Pool::new`]) is the only caller that
+    /// needs to distinguish it from [`Backend::is_healthy`].
+    fn local_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
+    }
+
+    /// Whether the Tier-2 regional health fabric currently overrides this
+    /// backend to down (phase 13). Not exposed outside `pool.rs`, same
+    /// reason as [`Backend::local_healthy`].
+    fn domain_down_flag(&self) -> bool {
+        self.domain_down.load(Ordering::Acquire)
+    }
+
+    /// Healthy overall: this instance's own checks say so **and** the Tier-2
+    /// domain view isn't overriding it down (phase 13, docs/10 "Tier 2" — a
+    /// no-op, always `true`, until something calls [`Backend::observe_domain`]).
+    pub fn is_healthy(&self) -> bool {
+        self.local_healthy() && !self.domain_down_flag()
+    }
+
+    /// Feed the Tier-2 regional health fabric's current quorum verdict for
+    /// this backend (phase 13). Can only ever push this backend *down* or
+    /// clear that override — it never touches the local `healthy` flag, so a
+    /// backend still only returns healthy on this instance's own `rise`
+    /// streak (docs/10 "Tier 2" authority model). Returns `Some(new_state)`
+    /// when `is_healthy()` actually flips as a result.
+    pub fn observe_domain(&self, quorum_down: bool) -> Option<bool> {
+        let was_healthy = self.is_healthy();
+        self.domain_down.store(quorum_down, Ordering::Release);
+        metrics::gauge!(
+            m::BACKEND_DOMAIN_DOWN,
+            "pool" => self.pool.to_string(),
+            "backend" => self.addr.to_string(),
+        )
+        .set(if quorum_down { 1.0 } else { 0.0 });
+        let now_healthy = self.is_healthy();
+        (was_healthy != now_healthy).then_some(now_healthy)
     }
 
     pub fn admin_state(&self) -> AdminState {
@@ -277,7 +322,9 @@ impl Pool {
             .iter()
             .map(|&addr| {
                 let prev_backend = prev.and_then(|p| p.backends.iter().find(|b| b.addr == addr));
-                let carried_healthy = prev_backend.map(|b| b.is_healthy()).unwrap_or(true);
+                let carried_healthy = prev_backend.map(|b| b.local_healthy()).unwrap_or(true);
+                let carried_domain_down =
+                    prev_backend.map(|b| b.domain_down_flag()).unwrap_or(false);
                 let carried_state = prev_backend
                     .map(|b| b.admin_state())
                     .unwrap_or(AdminState::Enabled);
@@ -287,6 +334,7 @@ impl Pool {
                     &cfg.health_check,
                     cfg.max_sessions,
                     carried_healthy,
+                    carried_domain_down,
                     carried_state,
                     cfg.weights.get(&addr).copied().unwrap_or(1),
                 )
@@ -690,5 +738,52 @@ mod tests {
         assert_eq!(b.observe(false), Some(false)); // 3 fails -> down
         assert_eq!(b.observe(true), None); // 1 ok
         assert_eq!(b.observe(true), Some(true)); // 2 oks -> up (rise = 2)
+    }
+
+    #[test]
+    fn domain_down_overrides_healthy_but_local_rise_still_clears_it() {
+        let p = Pool::new(&pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None), None);
+        let b = &p.backends()[0];
+        assert!(b.is_healthy()); // starts healthy, no domain override yet
+
+        assert_eq!(b.observe_domain(true), Some(false)); // domain says down
+        assert!(!b.is_healthy());
+        assert_eq!(b.observe_domain(true), None); // no change, no flip reported
+
+        // A local passive/active success does NOT clear a domain override.
+        assert_eq!(b.observe(true), None);
+        assert!(!b.is_healthy());
+
+        // Only the domain view clearing it brings it back.
+        assert_eq!(b.observe_domain(false), Some(true));
+        assert!(b.is_healthy());
+    }
+
+    #[test]
+    fn domain_down_never_revives_a_locally_unhealthy_backend() {
+        let p = Pool::new(&pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None), None);
+        let b = &p.backends()[0];
+        b.observe(false);
+        b.observe(false);
+        assert_eq!(b.observe(false), Some(false)); // locally down (fall = 3)
+        assert!(!b.is_healthy());
+
+        // Clearing the domain override alone must not revive it — only this
+        // instance's own `rise` streak can.
+        assert_eq!(b.observe_domain(false), None);
+        assert!(!b.is_healthy());
+    }
+
+    #[test]
+    fn domain_down_carries_across_a_reload_by_address() {
+        let p1 = Pool::new(&pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None), None);
+        p1.backends()[0].observe_domain(true);
+        assert!(!p1.backends()[0].is_healthy());
+
+        let p2 = Pool::new(
+            &pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None),
+            Some(&Arc::new(p1)),
+        );
+        assert!(!p2.backends()[0].is_healthy());
     }
 }

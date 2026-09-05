@@ -3,6 +3,87 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 slice 4 done (2026-09-05, same day as slices 1-3)**: the last
+building-block slice — wires the mesh into real backend health. `Backend`
+(`pool.rs`) gained a `domain_down: AtomicBool` field, additive to the
+existing `healthy` (completely untouched): `is_healthy()` is now
+`local_healthy() && !domain_down_flag()` (both new private accessors —
+`local_healthy`/`domain_down_flag` — needed because `Pool::new`'s
+carry-across-reload logic has to distinguish the two, where every other
+caller just wants the combined `is_healthy()`). New `Backend::
+observe_domain(quorum_down: bool) -> Option<bool>` mirrors `observe`'s
+"return `Some(new_state)` only on an actual flip" contract, but can only
+ever touch `domain_down` — it is structurally incapable of setting
+`healthy` true, so "only this instance's own `rise` streak can revive a
+backend" is enforced by the type signature, not just by convention. Reload
+now carries `domain_down` across by address the same way it already carried
+`healthy`.
+
+`health.rs::sweep` gained an optional `gossip: Option<&GossipFabric>`
+parameter (`GossipFabric` = `{handle: GossipHandle, quorum_fraction: f64}`,
+new in `gossip.rs`, bundling what `health.rs` needs so it isn't threading
+two separate things). Two additions, both additive to the existing
+active-check loop: (1) every probe result also calls `fabric.handle.
+publish_backend_health(addr, ok)` — deliberately only for the backend that
+specific probe just checked, never a blanket "publish everything in the
+snapshot," so "an instance only ever asserts an opinion about a backend it
+actually checks itself" (docs/10 "Tier 2") is structural, not a comment; (2)
+after every sweep (not gated on anything being due — the domain view can
+change between probe intervals even if this instance's own checks haven't
+run again), every backend's `domain_down` is refreshed from `fabric.handle.
+quorum_down(addr, fabric.quorum_fraction)`.
+
+**Wiring point**: `Runtime::start_with_discovery` now builds the
+`GossipFabric` *before* spawning either task (health or gossip), so it can
+hand the health task a `GossipFabric` (cheap `Clone`) and the gossip task
+the matching `GossipHandle`/`GossipInbox` pair from the exact same
+construction — `sweep` never has to reach into another task's state, it
+just reads its own already-injected fabric. `gsp_backend_domain_down
+{pool,backend}` gauge added, set inside `observe_domain` itself (same
+pattern as `BackendGuard`'s active-session gauge — the state-owning method
+sets its own metric, not a caller).
+
+5 new tests. Three pure `pool.rs` unit tests needed no gossip machinery at
+all (`Backend::observe_domain` is plain, synchronous, testable in
+isolation): domain-down overrides `is_healthy()` but only local `rise`
+clears it, not a domain-down-clearing alone; a locally-down backend is
+never revived by clearing the domain override; `domain_down` carries across
+a `Pool::new` reload by address. Two `health.rs` tests exercise the real
+integration: one confirms `sweep` never touches `domain_down` when no
+gossip fabric is configured (today's exact behaviour, unchanged); the other
+spins up one real single-node `gossip::run` task (not a stub — the actual
+channel → mesh task → `add_broadcast` → `BroadcastMerger` merge pipeline
+slice 3 built) and polls repeated `sweep` calls until the instance's own
+just-published "down" verdict round-trips back through its own domain view
+and overrides `is_healthy()` — while confirming the backend is still
+"locally healthy" underneath (`fall = 3`, only probed once), proving the
+override really came from the domain view and not a local flip.
+
+`make check` (fmt + clippy `-D warnings` + full `cargo test --all`, 80
+total gsp-core tests) green. **Verified live** with two real separate `gsp`
+processes sharing a `failure_domain` (`quorum_fraction: 0.66`, an
+unreachable `127.0.0.1:1` backend): both converged (`gsp_gossip_members 1`
+on each) and both `GET /metrics` showed `gsp_backend_domain_down{pool="p",
+backend="127.0.0.1:1"} 1` alongside `GET /pools` reporting the backend
+`unhealthy` — confirming the metric and the full sweep→publish→mesh→
+quorum→`observe_domain` wiring all work end to end in a real process, not
+just the in-tokio unit tests. (This run's local checks *also* independently
+found the backend down, so it doesn't isolate "domain view alone overrides
+a locally-healthy backend" the way the `health.rs` unit test does — a real
+multi-node test with a genuinely mixed local/domain view is exactly what
+slice 5 is for.)
+
+This closes out slices 1-4 (config schema,
+membership, per-backend broadcast, pool/health integration) — everything
+phase 13 needs mechanically now exists and is wired together within one
+instance. **Not yet done**: slice 5, the multi-process live
+verification — several real `gsp` processes in one `failure_domain`,
+confirming a bad vantage point gets outvoted domain-wide and that a
+killed/partitioned mesh degrades cleanly, plus `crates/gsp-fleet-tests`
+coverage. Everything built so far has only been exercised within one
+process (real sockets, real separate tokio tasks, but one OS process) — a
+real multi-process run is still owed before calling phase 13 done.
+
 **Phase 13 slice 3 done (2026-09-05, same day as slices 1-2)**: the
 per-backend health broadcast. `gossip.rs` gained `BackendHealthRegister
 {addr, up, changed_at, origin}` (a last-writer-wins register — a newer

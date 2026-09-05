@@ -262,24 +262,32 @@ impl Runtime {
         );
         listeners.start_all(&initial);
 
+        // Built before the health task so it can hand `sweep` a
+        // `GossipFabric` from the start (phase 13, docs/10 "Tier 2").
+        let gossip_fabric = gossip.as_ref().map(|cfg| {
+            let (handle, inbox) = crate::gossip::GossipHandle::new();
+            (
+                crate::gossip::GossipFabric {
+                    handle,
+                    quorum_fraction: cfg.quorum_fraction,
+                },
+                inbox,
+            )
+        });
+
         let mut tasks = Vec::new();
         {
             let snap = snapshot.clone();
             let mut sd = shutdown_rx.clone();
+            let fabric = gossip_fabric.as_ref().map(|(f, _)| f.clone());
             tasks.push(tokio::spawn(async move {
-                crate::health::run(snap, &mut sd).await;
+                crate::health::run(snap, &mut sd, fabric).await;
             }));
         }
-        if let Some(gossip_cfg) = gossip {
+        if let (Some(gossip_cfg), Some((fabric, inbox))) = (gossip, gossip_fabric) {
             let sd = shutdown_rx.clone();
-            // Slice 3: the handle carries the merged domain view and a
-            // publish channel, but nothing calls either yet. Slice 4 wires
-            // `health.rs` to `publish_backend_health` and `Backend::
-            // domain_down` to `quorum_down` — this handle will need to be
-            // retained on `Runtime`/`RuntimeHandle` then, not just moved in.
-            let (gossip_handle, gossip_inbox) = crate::gossip::GossipHandle::new();
             tasks.push(tokio::spawn(async move {
-                crate::gossip::run(gossip_cfg, gossip_handle, gossip_inbox, sd).await;
+                crate::gossip::run(gossip_cfg, fabric.handle, inbox, sd).await;
             }));
         }
         let sources = source_factory.map(|factory| {

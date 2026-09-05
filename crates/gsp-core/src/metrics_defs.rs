@@ -122,3 +122,8 @@ pub const GOSSIP_MESSAGES_TOTAL: &str = "gsp_gossip_messages_total";
 /// Counter, no labels. Gossip datagrams dropped for a missing or invalid HMAC
 /// tag (phase 13) — never trusted, never a panic.
 pub const GOSSIP_AUTH_REJECTED_TOTAL: &str = "gsp_gossip_auth_rejected_total";
+
+/// Gauge (0/1). Labels: `pool`, `backend`. Whether the Tier-2 domain quorum
+/// is currently overriding this backend to down (phase 13) — independent of
+/// (and never able to clear) the backend's own local `healthy` flag.
+pub const BACKEND_DOMAIN_DOWN: &str = "gsp_backend_domain_down";
