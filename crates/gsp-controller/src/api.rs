@@ -43,7 +43,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::role::Role;
+use crate::role::{Role, RoleHandle};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 /// Capacity of the update-notification broadcast: how many accepted
@@ -66,11 +66,11 @@ pub struct AppState {
     /// slice 1) never does — every revision it holds arrived via
     /// [`crate::parent_client`], which writes the store directly and is the
     /// only caller allowed to bypass this gate. See `crate::role`.
-    pub role: Role,
+    pub role: RoleHandle,
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: Role) -> Self {
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
@@ -130,7 +130,7 @@ async fn submit_config(State(state): State<AppState>, body: String) -> Response 
 /// parsing — a slave's only source of new revisions is
 /// [`crate::parent_client`], which never calls this function.
 async fn submit(state: &AppState, text: String) -> Response {
-    if state.role == Role::Slave {
+    if state.role.get() == Role::Slave {
         return slave_rejects_write();
     }
 
@@ -443,7 +443,10 @@ mod tests {
     fn test_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        (AppState::new(store, None, Role::Standalone), dir)
+        (
+            AppState::new(store, None, RoleHandle::new(Role::Standalone)),
+            dir,
+        )
     }
 
     const VALID_CONFIG: &str = r#"
@@ -767,7 +770,11 @@ listeners:
     async fn a_missing_token_is_unauthorized_when_one_is_configured() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, Some("secret".into()), Role::Standalone);
+        let state = AppState::new(
+            store,
+            Some("secret".into()),
+            RoleHandle::new(Role::Standalone),
+        );
         let app = router(state);
 
         let resp = app
@@ -797,7 +804,7 @@ listeners:
         // never `submit()`) so the rollback path below has something to
         // find before it hits the role gate.
         store.put(VALID_CONFIG.as_bytes().to_vec()).unwrap();
-        let state = AppState::new(store, None, Role::Slave);
+        let state = AppState::new(store, None, RoleHandle::new(Role::Slave));
         let app = router(state);
 
         let resp = app
@@ -830,7 +837,7 @@ listeners:
         // still rejecting direct writes through the HTTP API.
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, None, Role::Slave);
+        let state = AppState::new(store, None, RoleHandle::new(Role::Slave));
         let revision = state.apply_revision(b"pools: []".to_vec()).unwrap();
         assert_eq!(revision, 1);
         assert_eq!(state.store.current_revision().unwrap(), Some(1));
@@ -840,7 +847,11 @@ listeners:
     async fn the_right_token_is_admitted() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, Some("secret".into()), Role::Standalone);
+        let state = AppState::new(
+            store,
+            Some("secret".into()),
+            RoleHandle::new(Role::Standalone),
+        );
         let app = router(state);
 
         let resp = app

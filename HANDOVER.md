@@ -102,11 +102,31 @@ serves it under its own local revision number; direct writes to the slave
 still `403` on both `/config` and `/intent`; killing the root freezes the
 slave on both logs, each retrying independently with backoff.
 
+**Phase 12 slice 5 done (same day)**: `POST /admin/adopt
+{"parent_url":...}` flips a running `standalone` controller to `slave`
+without a restart — `docs/10`'s "Adoption" section, previously explicitly
+deferred. Solves the design doc's two named open questions ("the child's
+own revision history must not outrank the parent's", "adoption should
+require the child to be quiescent") the same simple way: refuse (`409`)
+unless **both the config and intent stores are still empty** — a tier that
+already accepted real writes must be replaced by a fresh one to join a
+hierarchy, not reconciled in place, and an empty store trivially has
+nothing in flight to reorder. New `role::RoleHandle` (`Arc<RwLock<Role>>`)
+replaces the plain `Role` field `AppState`/`IntentState` each held — needed
+so `adopt`'s flip is visible to both write gates instantly, since they now
+hold clones of the same cell instead of independent copies. On success:
+seeds from the new parent's config (mirrors `main.rs`'s own boot-time seed)
+and spawns the same `parent_client`/`intent::relay` tasks a `--role slave`
+boot would have — a freshly-adopted tier is indistinguishable from one
+that started as a slave. 6 new tests. Verified live with two real
+`gsp-controller` processes: adopting a fresh child returned
+`{"seeded_config_revision":1}`, its `GET /config` immediately served the
+root's config, and a direct write to it was `403` from that point on,
+freezing cleanly with backoff when the root was killed.
+
 **Not yet built for phase 12**: intra-tier HA (Raft/etcd consensus group per
-tier), staged/canary rollout, RBAC, and the adoption flow
-(`standalone`→`slave` role flip post-install). See `docs/08-roadmap.md`
-phase 12 and `docs/10-distributed-control-plane.md` for the full remaining
-scope.
+tier), staged/canary rollout, and RBAC. See `docs/08-roadmap.md` phase 12
+and `docs/10-distributed-control-plane.md` for the full remaining scope.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This

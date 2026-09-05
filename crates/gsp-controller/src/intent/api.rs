@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use super::IntentOp;
-use crate::role::Role;
+use crate::role::{Role, RoleHandle};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
@@ -34,7 +34,7 @@ const UPDATES_CAPACITY: usize = 64;
 pub struct IntentState {
     pub store: Arc<Store>,
     pub updates: broadcast::Sender<u64>,
-    pub role: Role,
+    pub role: RoleHandle,
     /// Bearer token every `/intent*` request must present, or `None` to
     /// leave the API open — same posture as `crate::api::AppState`'s own
     /// `auth_token`, deliberately a separate field/check (not shared
@@ -44,7 +44,7 @@ pub struct IntentState {
 }
 
 impl IntentState {
-    pub fn new(store: Arc<Store>, role: Role, auth_token: Option<String>) -> Self {
+    pub fn new(store: Arc<Store>, role: RoleHandle, auth_token: Option<String>) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         IntentState {
             store,
@@ -107,7 +107,7 @@ struct ErrorResponse {
 /// ([`IntentOp::validate`]) and structurally parsed before it ever reaches
 /// the store — a malformed or invalid op is rejected here, never broadcast.
 async fn submit_intent(State(state): State<IntentState>, body: String) -> Response {
-    if state.role == Role::Slave {
+    if state.role.get() == Role::Slave {
         return (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -266,7 +266,10 @@ mod tests {
     fn test_state() -> (IntentState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        (IntentState::new(store, Role::Standalone, None), dir)
+        (
+            IntentState::new(store, RoleHandle::new(Role::Standalone), None),
+            dir,
+        )
     }
 
     #[tokio::test]
@@ -323,7 +326,7 @@ mod tests {
     async fn a_slave_tier_rejects_a_direct_intent_write() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = IntentState::new(store, Role::Slave, None);
+        let state = IntentState::new(store, RoleHandle::new(Role::Slave), None);
         let app = router(state);
         let resp = app
             .oneshot(

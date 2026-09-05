@@ -20,6 +20,7 @@
 //! revision history/diff/rollback endpoints, and [`auth`]'s bearer-token
 //! gate on the whole `/config*` surface.
 
+pub mod adopt;
 pub mod api;
 pub mod auth;
 pub mod intent;

@@ -756,7 +756,26 @@ additive, no rework of what shipped there.
   processes: root submits an intent op → slave relays and serves it under
   its own local revision number; direct writes to the slave still `403`;
   killing the root freezes the slave on both logs, retrying with backoff.
-  **Still not built**: intra-tier HA, RBAC, canary rollout, adoption.
+  **Not yet built at the time**: intra-tier HA, RBAC, canary rollout,
+  adoption.
+- ✅ **Slice 5 (adoption)**: `POST /admin/adopt {"parent_url":...}` flips a
+  running `standalone` tier to `slave` without a restart (`docs/10`
+  "Adoption"). Solves the design doc's two open correctness questions the
+  same simple way: adoption is refused (`409`) unless **both the config and
+  intent stores are still empty** — a tier with its own revision history
+  must be replaced by a fresh one to join a hierarchy, not reconciled in
+  place; an empty store trivially has nothing in flight to reorder either.
+  New shared `role::RoleHandle` (an `Arc<RwLock<Role>>`, replacing the
+  plain `Role` field `AppState`/`IntentState` held) so the flip is visible
+  to both write gates instantly, from every clone. On success: seeds from
+  the new parent's config (mirrors `main.rs`'s own boot-time seed) and
+  spawns the same `parent_client`/`intent::relay` tasks a `--role slave`
+  boot would have — a freshly-adopted tier is indistinguishable from one
+  that started as a slave. 6 new tests. Verified live with two real
+  `gsp-controller` processes: adopting a fresh child returned
+  `{"seeded_config_revision":1}`, its `GET /config` immediately served the
+  root's config, and a direct write to it was `403` from that point on.
+  **Still not built**: intra-tier HA, RBAC, canary rollout.
 - `standalone` / `slave` role per controller and aggregator tier (static,
   install-time, never inferred from connectivity) so a deployment can nest
   regions under a root tier.

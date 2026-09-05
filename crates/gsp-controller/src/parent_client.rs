@@ -212,13 +212,13 @@ mod tests {
 
     #[tokio::test]
     async fn apply_sse_event_lands_the_revision_in_the_local_store() {
-        use crate::role::Role;
+        use crate::role::{Role, RoleHandle};
         use crate::store::Store;
         use std::sync::Arc as StdArc;
 
         let dir = tempfile::tempdir().unwrap();
         let store = StdArc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, None, Role::Slave);
+        let state = AppState::new(store, None, RoleHandle::new(Role::Slave));
 
         let event = r#"data: {"revision":5,"config":"pools: []"}"#;
         let parent_revision = apply_sse_event(event, &state).unwrap();

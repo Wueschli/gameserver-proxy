@@ -142,7 +142,7 @@ fn apply_sse_event(event: &str, state: &IntentState) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::role::Role;
+    use crate::role::{Role, RoleHandle};
     use crate::store::Store;
 
     #[test]
@@ -168,7 +168,7 @@ mod tests {
     async fn apply_sse_event_lands_the_op_in_the_local_store() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = IntentState::new(store, Role::Slave, None);
+        let state = IntentState::new(store, RoleHandle::new(Role::Slave), None);
 
         let event =
             r#"data: {"revision":9,"op":{"op":"backend_remove","pool":"mc","addr":"127.0.0.1:1"}}"#;

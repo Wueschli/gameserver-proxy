@@ -318,6 +318,17 @@ a `slave` tier also relays the intent log from its parent, the same way it
 relays config — a `slave` controller now holds a full copy of both of its
 parent's logs while still never originating either one itself.
 
+**Adoption (phase 12 slice 5)**: `POST /admin/adopt
+{"parent_url":"...","parent_token":"..."}` flips a running `standalone`
+tier to `slave` without a restart. Refused with `409` unless this tier's
+config *and* intent stores are both still empty (a tier with existing
+history must be replaced by a fresh one to join a hierarchy, per `docs/10`
+"Adoption") or it's already a slave. On success, seeds from the new
+parent's current config and starts relaying both logs, exactly like a
+`--role slave` boot — the response body's `seeded_config_revision` is the
+parent's revision number seeded from (`null` if the parent's config log was
+empty at that moment). Same `--auth-token` gate as `/config*`/`/intent*`.
+
 ### `gsp-aggregator` — fleet reads and operational fan-out
 
 One `--auth-token`-gated (optional) surface fed by every instance's own push,

@@ -13,9 +13,10 @@ use axum::Router;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use gsp_controller::adopt::AdoptState;
 use gsp_controller::api::{self, AppState};
 use gsp_controller::intent::api::IntentState;
-use gsp_controller::role::Role;
+use gsp_controller::role::{Role, RoleHandle};
 use gsp_controller::store::Store;
 
 #[derive(Parser, Debug)]
@@ -98,10 +99,19 @@ async fn main() -> anyhow::Result<()> {
         "intent store opened"
     );
 
-    let state = Arc::new(AppState::new(store, args.auth_token.clone(), args.role));
+    // Shared, mutable across `AppState` and `IntentState` — `adopt` flips
+    // this one cell and both write gates see it instantly (see
+    // `role::RoleHandle`'s doc for why a plain `Role` field per state
+    // wouldn't work once adoption exists).
+    let role_handle = RoleHandle::new(args.role);
+    let state = Arc::new(AppState::new(
+        store,
+        args.auth_token.clone(),
+        role_handle.clone(),
+    ));
     let intent_state = Arc::new(IntentState::new(
         intent_store,
-        args.role,
+        role_handle.clone(),
         args.auth_token.clone(),
     ));
 
@@ -154,10 +164,18 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    let adopt_state = AdoptState {
+        role: role_handle,
+        config: state.clone(),
+        intent: intent_state.clone(),
+        auth_token: args.auth_token.map(Arc::from),
+    };
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router((*state).clone()))
-        .merge(gsp_controller::intent::api::router((*intent_state).clone()));
+        .merge(gsp_controller::intent::api::router((*intent_state).clone()))
+        .merge(gsp_controller::adopt::router(adopt_state));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");
