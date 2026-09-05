@@ -24,6 +24,14 @@ intra-tier HA, adoption, and shared intent are phase 12 — a real, already
 fully designed extension, deliberately built *after* something works
 end-to-end, not before.
 
+**Phase 12 status (2026-09-05)**: the hierarchy, both relay logs (config +
+intent), and adoption (slices 1–5) are **built** — see `docs/08-roadmap.md`.
+**Intra-tier HA, staged/canary rollout, and RBAC + audit are now fully
+designed below (this session) but not yet built** — each gets its own
+section ("Intra-tier HA", "Staged / canary rollout", "RBAC and audit") with
+concrete mechanisms, wire shapes, and ADR entries (`docs/09` ADRs 21–23), the
+same level of detail the now-built pieces had before their slice landed.
+
 ---
 
 ## Why
@@ -317,7 +325,9 @@ the GUI's route to any fact in the fleet.
 - **HA** is the intra-tier replica-count knob above: N controllers in one
   tier behind a leader lock for writes originating at that tier; reads are
   stateless. A whole tier's outage stops *changes for its subtree*, not the
-  data plane — every instance under it serves its last replica.
+  data plane — every instance under it serves its last replica. See
+  "Intra-tier HA (design)" below for the concrete mechanism (`openraft`, one
+  Raft group per tier replicating both logs).
 
 ---
 
@@ -342,6 +352,374 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
   relays observations up, and relays operator intent verbs down to the
   instances that actually hold the atomics. The controller (Tier 1) is the
   only place a *decision* is durably recorded.
+
+---
+
+## Intra-tier HA (design)
+
+Answers "how does one tier survive a node loss" — orthogonal to `standalone`/
+`slave` (that answers "does this tier have a parent"). Two very different
+components, two very different designs:
+
+### The aggregator: stateless replication, no consensus
+
+`gsp-aggregator` already carries no durable state (`IngestStore` is
+in-memory, latest-write-wins, deliberately unpersisted — see its own
+`lib.rs`). HA for a tier's aggregator is therefore **just running N
+identical, uncoordinated replicas behind one stable address** (a VIP, DNS
+round-robin, or a k8s `Service`) — no leader, no consensus, no shared
+storage:
+
+- Every proxy in the tier pushes to the tier's **one stable address**, never
+  to a specific replica — whichever replica the load balancer picks that
+  tick ingests the push. Same rule for a child aggregator's upward push
+  (`--parent-url` names the tier's address, never a node).
+- A `GET /fleet/*` read also goes through the same stable address, so a
+  client sees *some* replica's view, not necessarily the freshest — replicas
+  are not required to agree with each other at any instant.
+- **Accepted inconsistency**: two replicas can hold different subsets of a
+  tier's instances until every instance's next push interval (default 10s)
+  reaches whichever replica currently answers reads. This is not a
+  regression from the single-replica design — it already showed up as
+  "stale/absent" in the Failure behaviour table, HA just spreads it across
+  replicas instead of across time. Self-heals every push interval with zero
+  coordination code.
+- **Rejected**: gossiping ingested state between aggregator replicas so they
+  converge faster. Adds a real distributed system (membership, anti-entropy)
+  to a component whose entire design point is "carries no authority, forgets
+  nothing important because everything re-arrives on the next tick" — not
+  worth it for shaving one push interval off a view that was never meant to
+  be strongly consistent in the first place.
+
+### The controller: Raft, replicated log, single leader accepts writes
+
+`gsp-controller` **does** hold durable, order-sensitive state (two revision
+logs), so its HA needs an actual consensus protocol — a tier that must keep
+*accepting new writes* (`standalone`) or *stay live for its children*
+(`slave`) through a node loss needs agreement on "what got written and in
+what order," which a stateless replica set cannot give.
+
+- **Library: `openraft`** (a Raft implementation, storage-and-transport
+  agnostic), not a hand-rolled consensus algorithm and not an external `etcd`
+  dependency. Rationale, extending ADR 20's reasoning: this project has
+  already chosen to embed a KV (`sled`) rather than run an extra service for
+  the Tier-1 store; embedding Raft continues that "one binary, no external
+  service" story instead of trading it away the moment HA enters the
+  picture. `etcd` would work but reintroduces exactly the operational
+  dependency `sled` was chosen to avoid, for a fleet-control-plane component
+  whose own write volume is human-paced (config/intent changes, not a hot
+  path) — a full etcd cluster is a lot of operational machinery for that
+  load. A hand-rolled Raft was never seriously considered: Raft's subtlety
+  (log matching, leader lease safety, snapshot/log truncation) is exactly
+  the kind of thing worth a maintained, audited crate rather than a bespoke
+  implementation for a security-relevant (per the existing "Tier 1 is a
+  high-value target" security note) component.
+- **One Raft group per controller *tier*, replicating both logs together.**
+  Not two independent groups (one per log): a tier's config log and intent
+  log already share a lifecycle (both come from the same set of peers, fail
+  over together, and a `slave` tier already relays both from the same
+  parent) — one group means one leader election, one peer list, one leader
+  lease to reason about, instead of two that could disagree about who leads.
+  The Raft log's state machine applies an entry to **whichever** of the two
+  `Store`s (config or intent) the entry names; each entry carries a
+  `{log: "config" | "intent", bytes}` envelope.
+- **State machine = the existing `sled` `Store`, unchanged.** `openraft`'s
+  storage trait needs a state machine and a log store; the state machine is
+  today's `Store::put`/`get`/`revisions_after` exactly as built (slice 1),
+  fed by `openraft` applying a committed entry instead of a direct HTTP
+  handler call. The Raft log itself (openraft's own append-only log of
+  proposals, distinct from the config/intent revision logs it carries) lives
+  in a **third** `sled` tree, `<data_dir>/raft`, on every replica.
+- **Writes go through Raft; reads don't.** `POST /config`, `POST /intent`,
+  and `POST /admin/adopt` propose a Raft entry and wait for it to commit
+  before responding (this is where "who is the leader" matters). `GET
+  /config`, `/config/subscribe`, `/config/revisions*`, `GET /intent`-side
+  reads, and `/healthz` are served by **whichever replica received the
+  request**, straight from its own local `Store` — no `ReadIndex` /
+  leader-lease read protocol. This is a deliberate relaxation of Raft's
+  usual linearizable-read guarantee, justified the same way the whole
+  chapter already justifies it: principle 4 ("freeze on last-known-good")
+  already accepts a subscriber seeing a slightly stale replica during a
+  partition; a follower a few commits behind its leader is the *same*
+  acceptable staleness, not a new risk. **Never a risk of serving state
+  *out of order*** — `sled`'s local apply only ever appends, so a follower's
+  view is always a strict prefix of the leader's, never a divergent one.
+- **Non-leader write handling: transparent HTTP forward, not a redirect.** A
+  replica that receives a write it isn't the leader for forwards the request
+  to the current leader over plain HTTP (`openraft` tracks the current
+  leader; the follower proxies the request body byte-for-byte, same
+  `forwardable_headers` pattern `gsp-ui`'s proxies already use) and relays
+  the leader's response back verbatim. **Rejected**: an HTTP redirect
+  (`307` + `Location`) — every existing client of this API (`gsp`,
+  `gsp-ui`, a human with `curl`) would need new leader-following logic; a
+  transparent forward means literally nothing downstream of this ADR needs
+  to know HA exists. The one-hop latency cost only applies to writes (rare,
+  human-paced), never to reads or to the data plane.
+- **Raft RPCs travel over the same `axum` server, a separate route prefix**
+  (`/raft/*`), gated by a **separate peer-only shared secret** (`--ha-token`,
+  distinct from `--auth-token`) rather than mTLS or a new transport — mirrors
+  every other cross-service credential in this fleet (`--instance-token`,
+  `--parent-token`, …), which are all shared-secret bearer tokens over plain
+  HTTP on a trusted internal network, not a new trust model for this one
+  link. `openraft`'s async network trait is implemented as a thin
+  `reqwest`-based client, matching every other outbound HTTP call in these
+  crates.
+- **A `slave` tier's upward relay runs only on the leader.** `parent_client`
+  / `intent::relay` (slices 1 and 4) become leader-only tasks — every
+  follower would otherwise apply the same parent revision independently and
+  each assign it a *different* local revision number, corrupting the
+  replicated log. On a leader failover, the newly-elected leader must resume
+  the relay from **where the group left off, not where it personally last
+  ran one** — so the relay's cursor (`last_applied_parent_revision`, one per
+  log) becomes part of the replicated state machine (a small extra key per
+  `Store`, committed alongside each relayed entry) instead of a
+  process-local variable. This is the one genuinely new piece of state HA
+  introduces beyond "replicate what already exists."
+- **Cluster membership: static at bootstrap, dynamic membership deferred.**
+  `--ha-peers node1=http://host1:9901,node2=http://host2:9901,...` on every
+  replica forms the initial voter set (`openraft`'s single-step static
+  bootstrap, not the joint-consensus dynamic membership change API). Adding
+  or removing a peer from a running group needs `openraft`'s membership-
+  change support and is **explicitly out of scope for the first HA slice** —
+  documented as a known limitation, not silently unsupported: growing a
+  tier's replica count means a coordinated restart of the whole group with a
+  new `--ha-peers` list until that slice lands.
+- **`replicas: 1` (today's shape) needs no code path change.** A one-node
+  Raft group trivially elects itself leader and commits every entry
+  immediately (no network round trip) — `openraft` handles the degenerate
+  case for free, so the phase 10+11 single-controller deployment shape isn't
+  a special case of the HA design, it's the `N=1` instance of it.
+
+### What this buys, and what it costs
+
+Per the existing Failure behaviour table, a `standalone` (or `slave`) tier's
+single-node outage today "freezes changes for its subtree" — every proxy
+under it keeps running on its last replica, which is already the acceptable
+degradation this whole design is built around. HA's benefit is narrower than
+it might sound: it turns "changes are frozen until an operator restarts the
+node" into "changes keep flowing through the surviving majority," for
+deployments where that freeze window is unacceptable (a large region, or a
+root tier serving many children). It adds real operational cost (N processes
+per tier instead of 1, a peer list to manage, a new failure mode — a lost
+Raft quorum, which degrades to the *same* frozen-changes behavior a
+single-node outage already has) for that benefit, which is why `docs/08`
+correctly scopes it as an explicit later slice, opted into per tier via
+`replicas: 2..N`, never a default.
+
+---
+
+## Staged / canary rollout (design)
+
+A subset of a tier's instances take a config revision before the rest of the
+fleet — "The controller" section above already named this as part of the
+Config API; this is the concrete mechanism.
+
+### Instances self-report a rollout group
+
+Every `gsp` instance gains an optional `settings.controller.canary_group:
+<string>` (default: unset, meaning "not enrolled in any canary group" — the
+overwhelmingly common case, and the entire mechanism is invisible to an
+instance that never sets it). `controller_client`'s `GET
+/config/subscribe?since=<cursor>` gains a `&group=<canary_group>` query
+parameter (omitted when unset).
+
+**Self-reported, not independently verified** — the same trust level
+`IngestPayload::admin_url` already has in the aggregator: every instance in
+a tier already holds that tier's controller/aggregator credentials and is
+therefore already inside the trust boundary this whole control plane
+operates within. Verifying group membership against some external source of
+truth would be a real feature (ties into the open "region-scoped intent"
+question) but isn't needed for "let an operator try a change on the three
+instances they labelled `canary` before the other three hundred."
+
+### One log, revisions tagged with a rollout stage — not a forked history
+
+A canary revision is **still one entry in the same monotonic config log**
+(never a second, parallel history to reconcile later) — it just carries
+rollout metadata alongside its bytes:
+
+```
+{ "promoted": bool, "canary_groups": ["groupA", "groupB"] }
+```
+
+stored in a new small `sled` tree (`stage`, keyed by revision number,
+alongside `revisions`/`meta`) rather than folded into the revision bytes
+themselves — `Store::put`'s existing content-agnostic contract (never
+inspects what it's storing) stays exactly as it is; the API layer writes an
+extra `stage` entry in the same transaction.
+
+- **`POST /config`** (today's plain submission) implicitly writes
+  `{promoted: true, canary_groups: []}` — **byte-for-byte today's existing
+  behavior** when the feature is never used. This is the compatibility
+  anchor: nothing about slices 1–5's tests or wire shape changes.
+- **`POST /config?stage=canary&group=<name>`** writes
+  `{promoted: false, canary_groups: [<name>]}` (repeatable — `&group=` may
+  appear more than once for a multi-group canary).
+- **`POST /config/promote/{revision}`** flips that revision's `promoted` to
+  `true` in place — **the one exception to "every accepted change is a new
+  revision"** in this whole design, deliberately: promotion isn't new
+  content, it's a visibility change to content that already exists and
+  already has a revision number: minting a second revision with identical
+  bytes just to mark "this one's fleet-wide now" would make `GET
+  /config/revisions` show two entries for one real change, and would need
+  its own reconciliation if a promoted revision needs a *further* canary
+  step (it doesn't — promotion is terminal).
+
+### What a subscriber actually receives
+
+"Current, for group G" is defined as: **the highest-numbered revision that
+is either `promoted` or has `G` in its `canary_groups`.** `GET
+/config?group=<G>` and the `/config/subscribe?group=<G>` catch-up range both
+compute this by scanning `stage` from the current pointer backward until a
+match — accepted as an **O(revisions)** operation rather than adding an
+index, matching this codebase's general bias against building for a scale
+problem that doesn't exist yet: this runs at human-paced write rates against
+a log sized in the hundreds to low thousands of entries for any deployment
+this design targets, not a hot path and not `gsp-core`. Revisit with an
+index (e.g. a `sled` tree keyed by group, pointing at its latest visible
+revision) if a real fleet's revision count ever makes the scan measurable.
+
+An instance with **no `canary_group` set** behaves exactly as it does today:
+it only ever sees `promoted` revisions, so an in-flight canary is completely
+invisible to the rest of the fleet until someone explicitly promotes it.
+
+### Rollback and diff are unaffected; intent is explicitly out of scope
+
+`POST /config/rollback/{revision}` keeps re-submitting the target revision's
+exact bytes as a **new, immediately-promoted** revision (a rollback is
+presumably urgent, never something to stage) — no change to slice 5's
+rollback semantics. `GET /config/revisions` gains `promoted` and
+`canary_groups` columns; diff is unaffected (it already compares two
+revisions' bytes, unrelated to visibility).
+
+**Canary staging applies to config revisions only, not the intent log** — a
+deliberate scope cut, not an oversight. An intent op is already a narrowly
+targeted, single mutation (add one backend, patch one backend's state); "give
+this whole document to a subset of the fleet first" has a clean meaning for
+a structural config swap and no equally clean one for "apply this one
+backend-add to a subset" (an add/remove is either safe everywhere it makes
+sense or it isn't — there's no natural partial-rollout story for a single
+op the way there is for a whole document). Revisit if a real use case
+surfaces; not designed here.
+
+---
+
+## RBAC and audit (design)
+
+`docs/10`'s original text placed "Auth / RBAC / audit log" on the
+controller. The phase 10+11 slice-11 redesign (see `HANDOVER.md`) already
+diverged from that once, for a good reason that still holds: **`gsp-ui` is
+the only place a *human* ever authenticates** — the controller and
+aggregator each still gate on one shared machine bearer token apiece, and
+that stays true here too. So this design keeps that split and completes
+it: **RBAC is enforced in `gsp-ui`**, the one place with human identity;
+the controller gains only what it's missing to make the resulting audit
+trail meaningful — knowing *who* (not just *that*) a revision came from.
+
+### Multiple human identities, replacing the single shared password
+
+`gsp-ui --ui-password` (one shared secret for every operator) is replaced by
+`--users-file <path>`, a YAML list:
+
+```yaml
+users:
+  - username: alice
+    password_hash: "$argon2id$v=19$..."
+    role: admin
+  - username: bob
+    password_hash: "$argon2id$v=19$..."
+    role: operator
+```
+
+- **`argon2`** (the `argon2` crate, pure Rust) for password hashing — the
+  conventional, currently-recommended choice for this exact job; not
+  `bcrypt` (older, smaller work-factor ceiling) and not a hand-rolled
+  scheme (this is precisely the kind of security-critical, well-solved
+  problem this codebase already defers to a maintained crate for, the same
+  reasoning ADR 16's sniffer sandboxing and this session's HA `openraft`
+  choice both use).
+- A companion `gsp-ui --hash-password` CLI mode (prints an argon2 hash for a
+  password read from stdin) is the intended way an operator populates
+  `users-file` — never handling plaintext passwords in a config file at
+  rest.
+- **`--ui-password` is retained** as a legacy single-shared-secret mode
+  (mutually exclusive with `--users-file`) rather than removed outright:
+  unlike this codebase's usual "clean break over compat shim" pre-1.0
+  stance, forcing every existing single-operator deployment to mint a
+  `users-file` for a single-user setup is pure friction with no correctness
+  upside — RBAC only matters once there is more than one identity to
+  distinguish. A single-password deployment implicitly runs as `admin`.
+
+### Three roles, matching the verb tiers the API surface already has
+
+- **`viewer`** — every `GET`: fleet reads, config/revision reads and diffs.
+  No verb that changes anything.
+- **`operator`** — `viewer` + the phase-5 intent verbs already fanned out
+  through the aggregator (drain / undrain an instance, backend add / patch /
+  delete, route-hint) and their controller-intent-log equivalents (slice 3).
+  Cannot touch structural config or fleet topology.
+- **`admin`** — `operator` + config submit / rollback / promote (staged
+  rollout, above) and `POST /admin/adopt` (a role/topology change, correctly
+  gated at the top).
+
+Three roles, not a fully general permission-matrix model: every route in
+`gsp-ui`'s existing surface already falls cleanly into one of these three
+buckets (see `docs/06`'s "Fleet control plane" endpoint reference), so a
+richer model would be solving a problem this API surface doesn't yet have.
+Region/subtree-scoped roles ("operator, but only for region X") are
+explicitly deferred — `gsp-ui` only ever talks to the *root* tier (per the
+existing "GUI served only by the topmost tier" rule) and today's intent
+verbs have no region selector to scope against (the same open question
+`docs/10` already tracks as "Region-scoped intent"); scoped RBAC is only
+meaningful once that lands.
+
+### Enforcement point and session shape
+
+`session::SessionStore`'s `HashSet<String>` (a session id is either valid or
+it isn't) becomes a `HashMap<String, Role>` (a session id maps to the role
+its login resolved to). `auth::require_session` is joined by a new
+`require_role(min: Role)` middleware, layered per route group in
+`api::router` exactly the way `require_session` itself is layered today —
+`viewer`-level routes get `require_session` alone, `operator`-level routes
+get `require_session` then `require_role(Operator)`, `admin`-level routes
+`require_role(Admin)`. A role check failing is `403`, distinct from
+`require_session`'s `401`, so the frontend can tell "not logged in" from
+"logged in, not allowed" and render accordingly.
+
+### Audit trail: the controller learns *who*, not just *what*
+
+Every accepted revision (config or intent) already answers "what changed and
+when" via `GET /config/revisions`. It has never recorded **who** submitted
+it — `gsp-controller` only ever sees `gsp-ui`'s single shared
+`--controller-token`/`--aggregator-token`, identical for every human behind
+it. Closing this gap needs one addition at each hop:
+
+- `gsp-ui` sets a new `X-Actor: <username>` header on every write it
+  proxies to the controller or aggregator (`aggregator_proxy`/
+  `controller_proxy`, using `proxy_util`'s existing header-forwarding path
+  in reverse — an outbound header added, not an inbound one preserved).
+- `gsp-controller`'s `submit()`/intent `submit_intent()` read `X-Actor` (
+  `Option<String>`, defaulting to `"unknown"` for a request that didn't
+  carry one — e.g. a direct `curl` against the controller's own token,
+  which stays valid break-glass access and simply produces a less specific
+  audit entry) and store it in a new `actors` `sled` tree, keyed by
+  revision number, alongside `stage` — same pattern, another small
+  parallel tree rather than widening `Store`'s core content-agnostic
+  contract.
+- `GET /config/revisions` gains an `actor` field per entry. `gsp-aggregator`
+  does the same for the fan-out verbs it forwards, logging `(instance,
+  actor, verb, timestamp)` — in-memory only, matching its existing
+  "carries no durable state" design; a durable fleet-wide *audit log*
+  (as opposed to "the last actor value attached to a controller revision,
+  which is already durable via `sled`") is not designed here — the
+  controller's revision history already gives a durable, complete audit
+  trail for every fact that has lasting effect (config, intent); the
+  aggregator's own verb log is a convenience for "who just did this," not a
+  compliance record.
+
+This is intentionally a thin audit story, not a full authorization/audit
+framework — proportionate to a three-role model with one human-facing
+process, not a multi-tenant compliance product.
 
 ---
 
@@ -430,11 +808,19 @@ authentication and authorization.
 
 ## Open questions
 
-- **Tier-1 backing store**: embed Raft in the controller vs. lean on etcd vs.
-  git-as-source-of-truth. Drives the HA story and operational familiarity.
-- **One revision stream or two?** Structural config and operator intent could
-  share a single ordered stream (simpler to reason about) or be split (intent
-  moves faster, with looser durability requirements).
+Resolved by this session's design pass (each now has its own section above,
+plus an ADR in `docs/09`): **Tier-1 backing store / HA mechanism** (`sled` +
+embedded `openraft`, one group per tier, ADR 21) — the "git-as-source-of-
+truth" option was dropped once the concrete design confirmed `sled` already
+does everything needed and a git-backed store would need its own
+Raft-equivalent replication story anyway; **one revision stream or two**
+(kept **two**, config and intent, confirmed by their independent slice 1/3/4
+implementations and reaffirmed by "canary staging applies to config only" in
+the rollout design — the two logs have different visibility and staging
+needs, splitting was the right call); **adoption flow** (built, slice 5).
+
+Still open:
+
 - **Tier-2 transport**: an existing gossip crate (`foca` for SWIM, a
   `memberlist`-style mesh) vs. a minimal hand-rolled CRDT sync. Measure message
   volume with realistic backend / instance counts before committing.
@@ -442,16 +828,13 @@ authentication and authorization.
   become shared-within-a-domain state (so a rehashed client keeps its instance's
   affinity)? Overlaps chapter 03 scheme C and the deferred `sticky_key` design.
 - **Region-scoped intent**: is "drain backend X" ever meant to apply to one
-  domain only, needing intent records with a failure-domain selector?
+  domain only, needing intent records with a failure-domain selector? Also
+  now a prerequisite for region-scoped RBAC (see "RBAC and audit" above,
+  which explicitly deferred it for the same reason).
 - **Controller ↔ discovery**: when phase-8 discovery already supplies backend
   membership from k8s / Consul / DNS, the controller's intent surface shrinks to
   *overrides* on top of discovery. Confirm the precedence order
   (discovery ∪ overlay − removed, then admin state) and where it is evaluated.
-- **Adoption flow** (a `standalone` tier becoming a `slave` post-install, via
-  the admin UI): revision-history reconciliation and a quiescence
-  precondition before the role flip — see "Adoption" above. Not needed for
-  phases 10/11's first release; pick this up when a real multi-region
-  deployment needs it.
 - **Aggregator push transport**: a bespoke small protocol (HTTP + a batched
   JSON body, simplest, consistent with the rest of the admin API) vs. an
   existing wire format (OTLP for metrics-shaped data) — the OTLP path buys
@@ -461,3 +844,12 @@ authentication and authorization.
   when its parent link is down before it starts dropping — a fixed ring
   buffer sized in the same spirit as the existing recv-buffer caps
   (`docs/06`), not unbounded growth.
+- **Dynamic Raft membership** (add/remove a controller replica in a running
+  HA group without a coordinated restart): explicitly deferred in "Intra-tier
+  HA (design)" above — `openraft` supports it, this design just doesn't use
+  that support yet.
+- **A durable, fleet-wide audit *log*** (as opposed to the per-revision
+  `actor` field this session's RBAC design adds, which is durable but lives
+  one field per revision, not as its own queryable log): deferred in "RBAC
+  and audit" above as disproportionate to a three-role, single-human-facing-
+  process model.

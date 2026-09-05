@@ -128,6 +128,75 @@ freezing cleanly with backoff when the root was killed.
 tier), staged/canary rollout, and RBAC. See `docs/08-roadmap.md` phase 12
 and `docs/10-distributed-control-plane.md` for the full remaining scope.
 
+**Design session (2026-09-05, same day, no code changes)**: at the user's
+request, fully designed all three remaining phase 12 items before building
+any of them — `docs/10-distributed-control-plane.md` gained three new
+sections ("Intra-tier HA (design)", "Staged / canary rollout (design)",
+"RBAC and audit (design)") and `docs/09-technology-choices.md` gained ADRs
+21–23. Roadmap slices renumbered as 6 (HA), 7 (canary), 8 (RBAC) — design
+complete, implementation not started. Headline decisions, each with
+rejected alternatives written down in the ADR:
+
+- **HA (ADR 21)**: embedded `openraft`, **one Raft group per controller
+  tier** replicating *both* the config and intent logs together (not two
+  groups) — continues ADR 20's "embed, don't run an extra service" story
+  rather than pulling in `etcd`. `sled` stays the state machine unchanged.
+  Writes propose a Raft entry and commit only on the leader; a non-leader
+  **transparently HTTP-forwards** a write to the leader (no redirect —
+  keeps every existing client, `gsp`/`gsp-ui`/`curl`, unaware HA exists at
+  all). Reads are served by whichever replica got the request, straight
+  from local `sled` — a deliberate relaxation of linearizable reads,
+  justified by the same "freeze on last-known-good" principle the whole
+  chapter already leans on. A `slave` tier's upward relay
+  (`parent_client`/`intent::relay`) runs **only on the leader**, and its
+  cursor becomes replicated state so a new leader resumes from the group's
+  position, not its own last position — the one genuinely new piece of
+  state HA needs beyond "replicate what already exists." The aggregator's
+  HA needs none of this: it's already stateless, so HA there is just N
+  uncoordinated replicas behind one address.
+- **Canary rollout (ADR 22)**: kept the config log as **one monotonic
+  sequence, never forked** — each revision gets `{promoted, canary_groups}`
+  in a new side `stage` sled tree. An instance self-reports an optional
+  `canary_group` at subscribe time (same trust level as every other
+  self-reported fact in this control plane, e.g. `admin_url`). `POST
+  /config/promote/{revision}` is the **one deliberate exception** to "every
+  change is a new revision" — promotion changes visibility of existing
+  content, not the content itself, and minting a new revision for it would
+  make the revision history double-count real changes. "Current for group
+  G" is an O(revisions) backward scan, not an index — proportionate to a
+  human-paced, hundreds-of-entries log. Canary staging applies to **config
+  only**, explicitly not the intent log (no clean partial-rollout meaning
+  for a single already-narrow op).
+- **RBAC (ADR 23)**: enforced **in `gsp-ui`**, not the controller/aggregator
+  — continues, rather than reopens, the phase 10+11 slice-11 divergence
+  from `docs/10`'s original "RBAC lives on the controller" text (the
+  controller/aggregator keep their existing single shared-token gates,
+  unchanged). `--users-file` (username + `argon2` hash + one of
+  `viewer`/`operator`/`admin`, matching the API's existing verb tiers)
+  replaces `--ui-password` for multi-operator deployments; `--ui-password`
+  is **kept**, not removed, as a legacy single-shared-secret (`admin`) mode
+  — the one place this design deliberately doesn't take this codebase's
+  usual "clean break over compat shim" stance, since forcing single-operator
+  deployments onto a users file has no correctness upside. Audit: `gsp-ui`
+  adds `X-Actor: <username>` on every write it proxies; the controller
+  records it per revision in a new `actors` tree (`GET /config/revisions`
+  gains an `actor` field) — a durable per-revision attribution, explicitly
+  **not** a separate durable audit-log service (judged disproportionate to
+  a three-role, single-human-facing-process model).
+
+Also folded into `docs/10`'s "Open questions": the long-standing "Tier-1
+backing store" and "one revision stream or two" questions are now marked
+resolved (answered by ADR 21 and by the already-built independent slice
+1/3/4 implementations, respectively); "region-scoped intent" gained a note
+that it's now also a prerequisite for region-scoped RBAC, which this design
+explicitly deferred for the same reason.
+
+Next step for phase 12: pick one of slices 6/7/8 and build it — none
+depend on the others, so any order works. HA (slice 6) is the largest
+single implementation effort (a real `openraft` integration); canary
+(slice 7) and RBAC (slice 8) are each closer in size to the slice 1–5 work
+already done.
+
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This
 file is the *current-state + gotchas* layer on top of that — per-phase

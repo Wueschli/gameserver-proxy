@@ -776,24 +776,33 @@ additive, no rework of what shipped there.
   `{"seeded_config_revision":1}`, its `GET /config` immediately served the
   root's config, and a direct write to it was `403` from that point on.
   **Still not built**: intra-tier HA, RBAC, canary rollout.
-- `standalone` / `slave` role per controller and aggregator tier (static,
-  install-time, never inferred from connectivity) so a deployment can nest
-  regions under a root tier.
-- Intra-tier HA: a Raft/etcd-backed multi-replica group per tier (controller)
-  and a horizontally-replicated stateless group per tier (aggregator) — an
-  orthogonal setting from the role, per-tier.
-- Operator intent (backend overlay, admin state, route hints, resolver pins)
-  moves into the controller's revision log, fleet-wide and persisted across
-  restarts; the phase-5 admin verbs become "controller writes a revision",
-  direct per-instance admin stays as break-glass.
-- Staged / canary rollout (a subset of instances/tiers take a revision
-  first). RBAC on the controller/aggregator APIs.
-- Adoption flow: an admin-UI action that flips a running `standalone` tier to
-  `slave` under a newly-configured parent, reconciling its revision history
-  and subtree.
-- **Result**: the design in `docs/10` fully realized — config/intent
-  consistent and durable across an arbitrarily large, regionally structured
-  fleet, with no single point of failure at any tier.
+
+**Slices 6–8 are fully designed (2026-09-05 design session) but not yet
+built** — each has its own `docs/10` section (with wire shapes, storage
+layout, and rejected alternatives) and a `docs/09` ADR (21–23):
+
+- **Slice 6 — Intra-tier HA**: embedded `openraft`, one Raft group per
+  controller tier replicating both the config and intent logs (`sled`
+  unchanged as the state machine); the aggregator's HA is just stateless
+  replicas behind one address, no consensus needed. See `docs/10`
+  "Intra-tier HA (design)", ADR 21.
+- **Slice 7 — Staged / canary rollout**: one monotonic config log, revisions
+  tagged `{promoted, canary_groups}` in a new `stage` tree; an instance
+  self-reports a `canary_group` when subscribing; `POST
+  /config/promote/{revision}` is the one deliberate exception to "every
+  change is a new revision." Config only, not the intent log. See `docs/10`
+  "Staged / canary rollout (design)", ADR 22.
+- **Slice 8 — RBAC and audit**: multi-operator accounts (`--users-file`,
+  `argon2` hashes) and three roles (`viewer`/`operator`/`admin`) enforced in
+  `gsp-ui` — the controller/aggregator keep their existing single
+  shared-token gates unchanged. A new `X-Actor` header + a per-revision
+  `actors` `sled` tree gives the controller's revision history a "who," not
+  just a "what." See `docs/10` "RBAC and audit (design)", ADR 23.
+
+**Result once all three land**: the design in `docs/10` fully realized —
+config/intent consistent and durable across an arbitrarily large, regionally
+structured fleet, with no single point of failure at any tier and per-role
+accountability for every change.
 
 ## Phase 13 – Regional health fabric
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
