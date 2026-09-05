@@ -30,8 +30,26 @@ serves its own `X-Config-Revision: 1`; a direct `POST /config` on the slave
 → `403`; killing the root leaves the slave still serving what it had,
 retrying with growing backoff, never promoting itself.
 
-**Not yet built for phase 12**: aggregator-side hierarchy (push fan-in
-leaf→root through tiers), intra-tier HA (Raft/etcd consensus group per
+**Phase 12 slice 2 done (same day)**: `gsp-aggregator` gained the
+aggregator-of-aggregators hierarchy (`docs/10` "Fleet topology": "a tier's
+aggregator is itself a valid leaf to its parent aggregator"). New
+`parent_push.rs` — `--parent-url` (+ required `--tier-name`,
+`--parent-token`, `--parent-push-interval-sec`) makes this tier push its own
+merged view up to a parent aggregator on a fixed interval, reusing `gsp`'s
+own `aggregator_client` interval/no-retry-buffer shape almost exactly.
+**Namespaces rather than merges**: every instance this tier currently knows
+is pushed individually with `instance` rewritten `"{tier_name}/{instance}"`,
+so the parent needs zero new payload shape, storage, or endpoint changes —
+it's the identical `IngestPayload` a proxy would send, just more of them,
+under longer names; namespacing only touches the copy sent upward; this
+tier's own `/fleet/*` view and `admin_url` fan-out keep the local names. 3
+new tests (a pure namespacing unit test + a real mock-parent-server
+integration test). Verified live with three real processes: a child
+aggregator (`--tier-name region-a`) ingested `proxy-1`, and a separate real
+parent aggregator's `GET /fleet/sessions` showed it as
+`region-a/proxy-1` within one push interval.
+
+**Not yet built for phase 12**: intra-tier HA (Raft/etcd consensus group per
 tier), operator intent migrating into the controller's revision log, staged/
 canary rollout, RBAC, and the adoption flow (`standalone`→`slave` role flip
 post-install). See `docs/08-roadmap.md` phase 12 and

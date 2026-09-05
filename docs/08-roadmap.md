@@ -688,9 +688,26 @@ additive, no rework of what shipped there.
   root submits a revision → slave relays and serves it with its own
   `X-Config-Revision`; a direct write to the slave is `403`; killing the
   root leaves the slave serving what it had and retrying with backoff.
-  **Not yet built**: aggregator-side hierarchy (push fan-in through tiers),
-  intra-tier HA (Raft/etcd), intent migration into the revision log, RBAC,
-  canary rollout, adoption.
+  **Not yet built at the time**: aggregator-side hierarchy, intra-tier HA
+  (Raft/etcd), intent migration into the revision log, RBAC, canary
+  rollout, adoption.
+- ✅ **Slice 2 (`gsp-aggregator` hierarchy)**: `--parent-url` (+
+  `--tier-name`, `--parent-token`, `--parent-push-interval-sec`) makes a
+  `gsp-aggregator` tier also push its own merged view up to a parent
+  aggregator's `POST /ingest`, on a fixed interval, via new
+  `parent_push.rs` — "a tier's aggregator is itself a valid leaf to its
+  parent aggregator" (`docs/10`). Deliberately namespaces rather than
+  merges: every instance this tier currently knows is pushed individually
+  with its `instance` renamed `"{tier_name}/{instance}"`, so the parent's
+  `IngestStore`/`/fleet/*` need no new payload shape or special-casing —
+  it just sees more, longer-named instances (namespacing only touches the
+  copy sent upward; this tier's own local names and `/fleet/*` view are
+  untouched). 3 new tests, incl. one against a real mock parent
+  `axum::serve` listener. Verified live: a child aggregator ingesting
+  `proxy-1` shows up on a real parent aggregator's `GET /fleet/sessions`
+  as `region-a/proxy-1`.
+  **Still not built**: intra-tier HA, intent migration, RBAC, canary
+  rollout, adoption.
 - `standalone` / `slave` role per controller and aggregator tier (static,
   install-time, never inferred from connectivity) so a deployment can nest
   regions under a root tier.

@@ -12,10 +12,14 @@
 //! every fact it holds is a proxy's own state, re-pushed on the next tick.
 //! Restarting it loses nothing that isn't already about to arrive again.
 //!
-//! **This first release is a single tier**: one process, `gsp` instances
-//! push directly to it. The recursive aggregator-of-aggregators hierarchy in
-//! `docs/10` ("Fleet topology") is phase 12 — additive on top of this, not
-//! required to make this crate work.
+//! **Phase 10+11 release is a single tier**: one process, `gsp` instances
+//! push directly to it. Phase 12 slice 2 adds the recursive
+//! aggregator-of-aggregators hierarchy in `docs/10` ("Fleet topology") on
+//! top of that: `--parent-url` makes this tier also push its own merged
+//! view — every instance it currently knows, namespaced
+//! `"{tier_name}/{instance}"` — up to a parent aggregator's `POST /ingest`,
+//! via [`parent_push`]. See that module's doc for why namespacing existing
+//! instances beats inventing a new "subtree summary" payload shape.
 //!
 //! Slice 6 (this module set): [`ingest::IngestStore`] + `POST /ingest`
 //! ([`api`]). Slice 7 is `gsp`'s push client (in the `gsp` binary). Slice 8
@@ -27,4 +31,5 @@ pub mod api;
 pub mod auth;
 pub mod fanout;
 pub mod ingest;
+pub mod parent_push;
 mod util;

@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
@@ -14,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 use gsp_aggregator::api::{self, AppState};
 use gsp_aggregator::ingest::IngestStore;
+use gsp_aggregator::parent_push;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -37,11 +39,36 @@ struct Args {
     /// aggregator, this one is what it presents going out.
     #[arg(long)]
     instance_token: Option<String>,
+
+    /// Parent aggregator's base URL — when set, this tier also pushes its
+    /// own merged view up to it (phase 12 slice 2, see `docs/10` "Fleet
+    /// topology"). Requires `--tier-name`.
+    #[arg(long)]
+    parent_url: Option<String>,
+
+    /// This tier's name, used to namespace instances pushed to
+    /// `--parent-url` as `"{tier_name}/{instance}"` so two tiers' instances
+    /// never collide in the parent's flat store. Required with
+    /// `--parent-url`.
+    #[arg(long)]
+    tier_name: Option<String>,
+
+    /// Bearer token this tier presents pushing to `--parent-url`.
+    #[arg(long)]
+    parent_token: Option<String>,
+
+    /// How often this tier pushes its merged view to `--parent-url`.
+    #[arg(long, default_value_t = 10)]
+    parent_push_interval_sec: u64,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.parent_url.is_some() && args.tier_name.is_none() {
+        anyhow::bail!("--parent-url requires --tier-name");
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -58,8 +85,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         auth = args.auth_token.is_some(),
+        parent = args.parent_url.is_some(),
         "aggregator store initialized"
     );
+
+    if let Some(parent_url) = args.parent_url {
+        let cfg = parent_push::PushConfig {
+            base_url: parent_url,
+            tier_name: args.tier_name.expect("checked above"),
+            interval: Duration::from_secs(args.parent_push_interval_sec),
+            token: args.parent_token,
+        };
+        tokio::spawn(parent_push::run(cfg, state.store.clone()));
+    }
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))

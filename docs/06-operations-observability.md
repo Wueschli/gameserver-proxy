@@ -302,6 +302,18 @@ plus a `--instance-token` this aggregator presents going back out to each
 instance's admin API (a separate secret from `--auth-token` — one gates calls
 in, the other authenticates calls out):
 
+**Hierarchy (phase 12 slice 2)**: `--parent-url` (+ `--tier-name`, required;
+`--parent-token`; `--parent-push-interval-sec`, default 10) makes this tier
+also push its own merged view — every instance it currently knows,
+individually, with its name rewritten `"{tier_name}/{instance}"` — up to a
+parent aggregator's `POST /ingest`, on the same interval shape `gsp`'s own
+`--aggregator` push uses. A parent needs no configuration to accept this: a
+child aggregator's push looks exactly like a proxy's own push, just under a
+namespaced instance name, so it shows up in the parent's `/fleet/*` views
+with no special-casing. Namespacing only affects what's pushed upward — this
+tier's own local `/fleet/*` view and `admin_url`-based fan-out still use the
+un-namespaced names.
+
 - `POST /ingest` — an instance's periodic self-reported summary (pool/backend
   health + admin state, session *counts*, its own `admin_url`). Latest-write-wins,
   **never persisted** — every fact here is a proxy's own state, re-pushed on
