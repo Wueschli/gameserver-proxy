@@ -24,13 +24,15 @@ intra-tier HA, adoption, and shared intent are phase 12 — a real, already
 fully designed extension, deliberately built *after* something works
 end-to-end, not before.
 
-**Phase 12 status (2026-09-05)**: the hierarchy, both relay logs (config +
-intent), and adoption (slices 1–5) are **built** — see `docs/08-roadmap.md`.
-**Intra-tier HA, staged/canary rollout, and RBAC + audit are now fully
-designed below (this session) but not yet built** — each gets its own
-section ("Intra-tier HA", "Staged / canary rollout", "RBAC and audit") with
-concrete mechanisms, wire shapes, and ADR entries (`docs/09` ADRs 21–23), the
-same level of detail the now-built pieces had before their slice landed.
+**Phase 12 status (2026-09-05): fully built**, all 8 slices (hierarchy, both
+relay logs, adoption, intra-tier HA, staged/canary rollout, RBAC + audit) —
+see `docs/08-roadmap.md`.
+
+**Phase 13 (Tier 2, regional health fabric) is now fully designed (this
+session, 2026-09-05) but not yet built** — see "Mechanism (design)" under
+"Tier 2 — regional health fabric" below, and ADR 24 in `docs/09`, at the same
+level of detail phase 12's design session gave ADRs 21–23 before their
+slices landed.
 
 ---
 
@@ -198,6 +200,115 @@ Local checks stay in charge; the domain view is **quorum-weighted advice**:
 This removes both failure modes: one flapping instance cannot poison the pool
 (quorum gate on "down"), and one instance cannot ignore a domain-wide outage
 (the `OR`).
+
+### Mechanism (design, 2026-09-05 — not yet built)
+
+**Membership: embedded `foca` (SWIM), not hand-rolled.** Same reasoning ADR 21
+already used for Raft: SWIM's subtlety — indirect probing, suspicion timeouts,
+incarnation numbers to un-suspect a member that was never actually down — is
+exactly the kind of protocol correctness this codebase defers to a maintained,
+audited crate for rather than reimplementing. `foca` is transport-agnostic (an
+application provides the socket and timers), which fits this codebase's
+existing preference for owning its own plain UDP socket (`net.rs`) rather than
+depending on a batteries-included clustering framework. One `foca::Foca`
+instance per `gsp` process when gossip is enabled, identified by
+`(instance_name, gossip bind addr)`.
+
+**Application payload: a per-backend LWW register, piggybacked on foca's own
+broadcast/anti-entropy.** `foca`'s `BroadcastHandler` extension point already
+re-gossips "active" application data alongside membership traffic with a
+decreasing invalidation count until it's fully propagated — exactly the
+anti-entropy behaviour Tier 2 needs, so no second gossip pass or separate CRDT
+sync framework is layered on top. The payload itself:
+
+```rust
+struct BackendHealthRegister {
+    addr: SocketAddr,   // the backend this is about
+    up: bool,           // this instance's own local health.rs verdict
+    changed_at: u64,    // this instance's monotonic clock at the last flip
+    origin: InstanceId, // who is asserting this
+}
+```
+
+Merge rule: last-writer-wins by `changed_at`, ties broken by `origin` — fully
+deterministic, no coordination, no vector clock. **An instance only ever
+publishes a register for a backend it actually health-checks itself** — it
+never relays or invents an opinion about a backend outside its own snapshot,
+which is what makes "everyone in a domain reaches the same backends the same
+way" (the failure-domain definition above) hold in practice, not just in
+theory.
+
+**Wire format and auth.** `postcard` (new workspace dep) for a compact binary
+encoding of both foca's envelopes and the broadcast payload — no schema
+evolution concerns here the way `gsp-config`'s YAML has, since this is
+ephemeral wire state, not anything persisted. Every datagram carries an
+HMAC-SHA256 tag (new `hmac` dep; `sha2` is already a workspace dependency via
+`crates/gsp/Cargo.toml`, promoted to a `gsp-core` dependency too) computed over
+a per-domain pre-shared key (`settings.gossip.psk`); a bad or missing tag is
+dropped silently and bumps a metric, the same "malformed input is discarded,
+never trusted, never a panic" posture `sniff.rs` already has for plugin
+input. **Deliberately not full mTLS**: a client-cert mesh is proportionate to
+Tier 1, which actually accepts writes; Tier 2 is advisory-only and can never
+independently move traffic (see the authority model above — it can only
+*nudge* a decision local checks already gate), so a shared-secret HMAC is the
+right amount of ceremony for what's at stake, not the maximum available.
+
+**Config schema** (new `gsp-config` fields — not yet added to the real
+`config.example.yaml`, this is still design-stage syntax):
+
+```yaml
+settings:
+  failure_domain: "eu-west-1a"     # optional; omitted = gossip fully disabled,
+                                    # byte-for-byte today's behaviour
+  gossip:
+    bind: "0.0.0.0:7946"
+    seeds: ["10.0.1.5:7946", "10.0.1.6:7946"]
+    quorum_fraction: 0.66           # default; the ">⅔" from the authority model
+    psk: "${GOSSIP_PSK}"
+```
+
+`validate()` rejects `gossip` set without `failure_domain` or vice versa — a
+domain identity with no mesh, or a mesh with no domain identity, is always a
+misconfiguration, never a valid degenerate case (unlike `standalone` with no
+children, which *is* a valid degenerate case for the controller).
+
+**Health integration — additive, not a rewrite of `pool.rs`.** `Backend` gains
+one new field, `domain_down: AtomicBool`, alongside the existing `healthy:
+AtomicBool` (untouched — still driven only by `observe()`'s local `rise`/
+`fall` streaks, exactly as today). `is_healthy()` becomes `healthy.load() &&
+!domain_down.load()`. A new `gsp-core::gossip` module (control-plane, sits
+next to `health.rs`, spawned by `runtime.rs` only when `settings.gossip` is
+present) owns the `foca` instance, maintains the merged per-backend register
+map, computes the domain-quorum verdict per backend on every membership
+change, and calls a new `Backend::observe_domain(quorum_down: bool)` that only
+ever sets `domain_down` — it can never clear `healthy`, and can never set
+`healthy` true on its own, matching "return to healthy only on this instance's
+own `rise` streak" above word for word. `AdminState::Disabled` (Tier-1
+force-down) already gates selection independently of both flags, so "Tier-1
+force-down always wins" needs no new mechanism — it already does, today.
+
+**New metrics** (`metrics_defs.rs`, once built): `gsp_gossip_members` (gauge,
+per domain), `gsp_gossip_messages_total` (counter, sent/received), a per
+backend `gsp_backend_domain_down` (gauge 0/1 — whether the domain quorum is
+currently overriding to down), and `gsp_gossip_auth_rejected_total` (counter —
+bad HMAC or malformed datagram).
+
+**Rejected alternatives** (full reasoning in ADR 24, `docs/09`): hand-rolled
+SWIM (reimplements exactly the subtlety a maintained crate already gets
+right); etcd/Consul-backed membership (a real extra service for an ephemeral,
+advisory, AP-by-design signal — contradicts both the "embed, don't add a
+service" thread through ADRs 20/21 and Tier 2's own AP framing above); full
+mTLS (real certificate lifecycle for a signal that can only nudge, never
+independently act); a general anti-entropy/CRDT-sync library on top of foca
+(foca's own broadcast invalidation already gives eventual convergence for a
+payload this small — a second framework would duplicate it).
+
+**Explicitly out of scope for the first slice of this feature** (docs/08
+Phase 13, same "don't half-land a phase" discipline as everywhere else):
+per-domain capacity/load signals (docs/10 already flagged these as "later,
+optionally"); `failure_domain` *discovery* (cloud-metadata autodetection,
+etc.) — v1 is configured-only, matching the same "never inferred, always
+explicit" bias already used for the controller's `standalone`/`slave` role.
 
 ---
 

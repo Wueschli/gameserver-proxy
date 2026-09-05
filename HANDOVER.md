@@ -3,6 +3,38 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 (regional health fabric) design session done (2026-09-05, same
+day as phase 12 closing out — no code changes)**: at the user's request,
+fully designed phase 13 before building any of it, matching the depth of
+the phase-12 pre-slice design session. `docs/10-distributed-control-plane.md`
+gained a "Mechanism (design)" subsection under "Tier 2 — regional health
+fabric"; `docs/09-technology-choices.md` gained ADR 24; `docs/08-roadmap.md`'s
+Phase 13 section gained a 5-slice implementation plan. Locked decisions:
+
+- **Membership**: embedded `foca` (SWIM) over a plain UDP socket, not a
+  hand-rolled protocol — same "defer to a maintained crate for a subtle,
+  security-relevant protocol" reasoning ADR 21 already used for Raft.
+- **Per-backend health**: a `(instance, backend)` last-writer-wins register,
+  piggybacked on foca's own `BroadcastHandler` anti-entropy (no second CRDT
+  sync framework needed). An instance only ever publishes registers for
+  backends it health-checks itself.
+- **Auth**: HMAC-SHA256 over a per-domain pre-shared key (`settings.gossip.
+  psk`), not mTLS — deliberately less ceremony than Tier 1, justified by
+  Tier 2 being advisory-only (can nudge, never independently move traffic).
+- **Health integration is purely additive**: `Backend` gains a new
+  `domain_down: AtomicBool` next to the existing `healthy` flag (untouched);
+  `is_healthy()` becomes `healthy && !domain_down`. The gossip module can
+  only ever set `domain_down`; only local `rise` streaks can clear
+  `healthy`. `AdminState::Disabled` (Tier-1 force-down) already wins over
+  both today, needing no new mechanism.
+- New config: `settings.failure_domain` + `settings.gossip {bind, seeds,
+  quorum_fraction, psk}` (both-or-neither validated); new deps `foca`,
+  `postcard`, `hmac` (`sha2` promoted from a `gsp`-only dep to `gsp-core`
+  too).
+- Explicitly deferred past the first slice: per-domain capacity/load
+  signals, `failure_domain` auto-discovery (v1 is configured-only, matching
+  the controller role's "never inferred" bias).
+
 **Phase 12 slice 1 done (2026-09-05, same day as the Dependabot cleanup
 above)**: `gsp-controller` gained a `standalone`/`slave` `--role` (`docs/10`
 "Fleet topology"). `standalone` is phase 10+11's behaviour, byte-for-byte

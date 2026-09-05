@@ -877,17 +877,44 @@ Phase 13 (the regional health fabric, Tier 2) remains **design only**.
 
 ## Phase 13 – Regional health fabric
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
-(Tier 2). Advisory, rebuildable, off the data path.
-- `failure_domain` / `region` identity per instance (`settings`, or discovered)
-  — a reachability-equivalence class, not a building.
-- A gossip / anti-entropy mesh among the instances in one domain (crate TBD —
-  `foca` / SWIM, or a hand-rolled `(instance, backend)` LWW CRDT),
-  authenticated (mTLS mesh / signed messages).
+(Tier 2). Advisory, rebuildable, off the data path. **Fully designed
+(2026-09-05) — see "Mechanism (design)" in `docs/10` and ADR 24 in
+`docs/09` — not yet built.** Locked mechanism: membership via embedded
+`foca` (SWIM); per-backend health as a last-writer-wins `(instance,
+backend)` register piggybacked on foca's own broadcast/anti-entropy;
+HMAC-SHA256 over a per-domain pre-shared key, not mTLS.
+
+Planned slices (not yet started):
+
+1. **Config schema**: `settings.failure_domain` + `settings.gossip {bind,
+   seeds, quorum_fraction, psk}` in `gsp-config` (raw + resolved types,
+   `validate()` rejects one without the other), `config.example.yaml`,
+   `docs/05`.
+2. **Membership**: new `gsp-core::gossip` module wrapping `foca::Foca` over
+   a plain UDP socket, spawned by `runtime.rs` only when `settings.gossip`
+   is set; HMAC-tagged/authenticated datagrams (bad tag ⇒ dropped +
+   metric); `gsp_gossip_members` / `gsp_gossip_messages_total` /
+   `gsp_gossip_auth_rejected_total` in `metrics_defs.rs`.
+3. **Per-backend health broadcast**: the `BackendHealthRegister` LWW
+   payload piggybacked via foca's `BroadcastHandler`, an instance only ever
+   publishing registers for backends it health-checks itself; merged
+   per-backend domain view maintained in the gossip module.
+4. **Pool/health integration**: `Backend` gains `domain_down: AtomicBool`
+   (additive, `healthy` untouched); `is_healthy()` = `healthy &&
+   !domain_down`; new `Backend::observe_domain(quorum_down)` called by the
+   gossip module on every quorum-verdict change; `gsp_backend_domain_down`
+   gauge.
+5. **Verification**: multi-process live test — several real `gsp`
+   instances in one `failure_domain`, confirm quorum-down suppresses a pool
+   member domain-wide from one instance's own bad vantage point, confirm a
+   killed/partitioned mesh degrades to today's local-only behaviour with no
+   stuck state; `crates/gsp-fleet-tests` coverage alongside the phase 10+11
+   multi-process harness.
+
 - Each instance publishes its per-backend `up | down`; consumes the domain view.
 - Health decision becomes quorum-weighted: **unhealthy** on local `fall` **or**
   domain quorum-down; **healthy** only on local `rise`; Tier-1 `force-down`
   overrides.
-- Metrics: per-backend domain agreement, fabric membership, gossip rate.
 - Cold start / total partition ⇒ identical to today (own checks only).
 - **Result**: faster, multi-vantage-point backend health across a domain; one
   bad vantage point no longer flaps a pool.
