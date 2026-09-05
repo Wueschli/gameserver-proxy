@@ -904,10 +904,27 @@ Slices:
    live with two real separate `gsp` processes on real sockets (not
    in-process): both converged to `gsp_gossip_members 1` with real
    send/receive traffic on `/metrics` within the SWIM probe period.
-3. **Per-backend health broadcast**: the `BackendHealthRegister` LWW
-   payload piggybacked via foca's `BroadcastHandler`, an instance only ever
-   publishing registers for backends it health-checks itself; merged
-   per-backend domain view maintained in the gossip module.
+3. ✅ **Per-backend health broadcast** (done): `BackendHealthRegister {addr,
+   up, changed_at, origin}` is a last-writer-wins payload piggybacked via a
+   new `BroadcastMerger: foca::BroadcastHandler<SocketAddr>` — `foca`'s own
+   anti-entropy re-gossips it until fully propagated, no second sync pass.
+   `GossipHandle::publish_backend_health(addr, up)` (an `mpsc` channel into
+   the mesh task; the actual `health.rs` caller is slice 4) asserts this
+   instance's own verdict; `GossipHandle::domain_votes(addr)` /
+   `quorum_down(addr, fraction)` read the merged view (`(0, 0)` votes ⇒
+   `quorum_down` is always `false` — an empty view never overrides, only a
+   real quorum can). 5 new tests: pure `domain_votes`/`quorum_down` unit
+   tests, and a real two-process-equivalent in-tokio test proving a
+   published register actually reaches the other instance through foca's
+   own gossip (not a direct map share) and that `quorum_down` reads it back
+   correctly. **One real bug found by that test, not by inspection**: an
+   early draft merged the register into the domain map *before* calling
+   `foca.add_broadcast`, which made `foca`'s own internal
+   `receive_item(data, None)` call see an already-known key and silently
+   skip queuing it for dissemination — fixed by letting `add_broadcast`
+   perform the one and only merge (the `sender: None` case in
+   `BroadcastHandler::receive_item` exists exactly for this "adding it
+   myself" path).
 4. **Pool/health integration**: `Backend` gains `domain_down: AtomicBool`
    (additive, `healthy` untouched); `is_healthy()` = `healthy &&
    !domain_down`; new `Backend::observe_domain(quorum_down)` called by the

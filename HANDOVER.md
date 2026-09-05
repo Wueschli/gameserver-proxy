@@ -3,6 +3,54 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 slice 3 done (2026-09-05, same day as slices 1-2)**: the
+per-backend health broadcast. `gossip.rs` gained `BackendHealthRegister
+{addr, up, changed_at, origin}` (a last-writer-wins register — a newer
+`changed_at` from the same `origin` about the same `addr` replaces the old
+one, via `foca::Invalidates` on its `BackendHealthKey`) and a new
+`BroadcastMerger: foca::BroadcastHandler<SocketAddr>` that merges every
+received register into a shared `domain: Arc<Mutex<HashMap<backend_addr,
+HashMap<origin, BackendHealthRegister>>>>` — `foca`'s own custom-broadcast
+anti-entropy re-gossips it until every member has seen it, so no second
+sync mechanism was needed. `Foca` switched from `NoCustomBroadcast` to this
+handler (`Foca::with_custom_broadcast`).
+
+`GossipHandle` gained three things: `publish_backend_health(addr, up)` (an
+`mpsc::UnboundedSender` into the mesh task — the actual caller asserting
+real health verdicts is slice 4's job, `health.rs`; this slice only builds
+the plumbing), and read-side `domain_votes(addr) -> (up, down)` /
+`quorum_down(addr, quorum_fraction) -> bool`. `quorum_down` is `false`
+whenever nobody has voted (`(0, 0)`) — "fully rebuildable, empty mesh never
+overrides" applied literally, not just in the design doc prose.
+`GossipHandle::new()` now returns `(GossipHandle, GossipInbox)` instead of
+implementing `Default` — the receiver half is a separate type held only by
+`run`, so `GossipHandle` itself stays freely cloneable.
+
+**A real bug found by a real test, not by inspection**: the first draft had
+the `inbox.recv()` branch merge the freshly-published register into
+`domain` *itself*, then call `foca.add_broadcast(&data)` — but
+`add_broadcast` already runs the payload through
+`BroadcastMerger::receive_item(data, None)` internally (the `sender: None`
+branch of that trait method exists precisely for "I'm adding this myself").
+Since the register was already present with an equal `changed_at`, foca's
+own internal call saw a non-newer key and silently declined to queue it for
+dissemination — the broadcast never left the process. A live two-instance
+propagation test caught this immediately (B never saw A's published
+verdict); the fix was deleting the manual merge and trusting
+`add_broadcast`'s own internal one, which is the *only* place merging needs
+to happen.
+
+11 new tests (2 pure `domain_votes`/`quorum_down` unit tests on a
+directly-populated domain map; 1 real in-tokio two-instance test proving a
+register published on A actually arrives at B through foca's own gossip
+rounds, not a shared-memory shortcut, and that B's `quorum_down` reads it
+back correctly — this is the test that caught the bug above; plus small
+signature-threading updates to the 2 existing slice-2 convergence tests for
+the new `(handle, inbox)` pair). `make check` (fmt + clippy `-D warnings` +
+full `cargo test --all`) green. No `pool.rs` / `health.rs` changes yet —
+nothing calls `publish_backend_health` or reads `quorum_down` for real; that
+wiring, plus `Backend::domain_down`, is slice 4.
+
 **Phase 13 slice 2 done (2026-09-05, same day as slice 1)**: real SWIM
 membership, no application payload yet (that's slice 3). New
 `gsp-core::gossip` module wraps `foca` 2.0 (`Foca<SocketAddr, PostcardCodec,

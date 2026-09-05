@@ -272,8 +272,14 @@ impl Runtime {
         }
         if let Some(gossip_cfg) = gossip {
             let sd = shutdown_rx.clone();
+            // Slice 3: the handle carries the merged domain view and a
+            // publish channel, but nothing calls either yet. Slice 4 wires
+            // `health.rs` to `publish_backend_health` and `Backend::
+            // domain_down` to `quorum_down` — this handle will need to be
+            // retained on `Runtime`/`RuntimeHandle` then, not just moved in.
+            let (gossip_handle, gossip_inbox) = crate::gossip::GossipHandle::new();
             tasks.push(tokio::spawn(async move {
-                crate::gossip::run(gossip_cfg, crate::gossip::GossipHandle::default(), sd).await;
+                crate::gossip::run(gossip_cfg, gossip_handle, gossip_inbox, sd).await;
             }));
         }
         let sources = source_factory.map(|factory| {
