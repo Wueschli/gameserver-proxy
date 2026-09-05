@@ -4,12 +4,10 @@
 //! action, not a document worth diffing against another one): just submit
 //! and the catch-up-then-tail subscribe `gsp`'s `intent_client` consumes.
 //!
-//! **Slave relay is not wired up for intent in this slice** — a `slave`
-//! tier's [`crate::parent_client`] only relays the config log today. The
-//! `slave` write gate below is still applied for consistency (a slave must
-//! never *originate* an intent op locally, same rule as config), it just
-//! means a `slave` tier's intent log stays empty until a later slice adds
-//! the second relay.
+//! A `slave` tier never *originates* an intent op locally (the `slave`
+//! write gate below), but does hold a relayed copy of its parent's intent
+//! log — see [`crate::intent::relay`] (phase 12 slice 4), the intent-log
+//! counterpart to [`crate::parent_client`]'s config relay.
 
 use std::convert::Infallible;
 use std::sync::Arc;

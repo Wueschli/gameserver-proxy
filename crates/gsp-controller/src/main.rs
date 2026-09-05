@@ -99,14 +99,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let state = Arc::new(AppState::new(store, args.auth_token.clone(), args.role));
-    let intent_state = IntentState::new(intent_store, args.role, args.auth_token);
+    let intent_state = Arc::new(IntentState::new(
+        intent_store,
+        args.role,
+        args.auth_token.clone(),
+    ));
 
     if args.role == Role::Slave {
         let parent_url = args.parent_url.expect("checked above");
         // Seed from the parent's current revision before serving, same as
         // `gsp --controller`'s initial `fetch_current` — a slave starting
         // cold shouldn't serve `404` for however long the first subscribe
-        // catch-up takes if the parent already has something.
+        // catch-up takes if the parent already has something. The intent
+        // log has no equivalent seed (see `intent::relay`'s doc) — its
+        // relay just subscribes from `since=0` directly.
         let mut initial_cursor = 0u64;
         match gsp_controller::parent_client::fetch_initial(
             &parent_url,
@@ -135,19 +141,23 @@ async fn main() -> anyhow::Result<()> {
             ),
         }
 
-        let relay_state = state.clone();
         tokio::spawn(gsp_controller::parent_client::run(
+            parent_url.clone(),
+            args.parent_token.clone(),
+            initial_cursor,
+            state.clone(),
+        ));
+        tokio::spawn(gsp_controller::intent::relay::run(
             parent_url,
             args.parent_token,
-            initial_cursor,
-            relay_state,
+            intent_state.clone(),
         ));
     }
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router((*state).clone()))
-        .merge(gsp_controller::intent::api::router(intent_state));
+        .merge(gsp_controller::intent::api::router((*intent_state).clone()));
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

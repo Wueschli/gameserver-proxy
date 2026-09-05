@@ -34,6 +34,7 @@
 //! duplicated `IngestPayload`.
 
 pub mod api;
+pub mod relay;
 
 use serde::{Deserialize, Serialize};
 

@@ -313,9 +313,10 @@ new *source* for an existing mutation, never a new code path. **Not part of
 this log**: whole-instance drain/undrain (targets one instance, not "every
 instance with pool X" — use the aggregator's targeted fan-out or the
 instance's own `/admin/drain`) and resolver pins (still open, `docs/01`).
-The `slave`-role write gate applies to `/intent` too, but slave-tier relay
-for the intent log is not built yet — only the config log relays through a
-parent today.
+The `slave`-role write gate applies to `/intent` too, and (phase 12 slice 4)
+a `slave` tier also relays the intent log from its parent, the same way it
+relays config — a `slave` controller now holds a full copy of both of its
+parent's logs while still never originating either one itself.
 
 ### `gsp-aggregator` — fleet reads and operational fan-out
 

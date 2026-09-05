@@ -739,8 +739,24 @@ additive, no rework of what shipped there.
   Verified live end-to-end: `gsp-controller` + `gsp --controller` running
   for real, a `POST /intent` `backend_add` landed in `gsp`'s own
   `GET /pools` output within one debounce window.
-  **Still not built**: intra-tier HA, slave-tier intent relay (only config
-  relays through a parent today), RBAC, canary rollout, adoption.
+  **Not yet built at the time**: intra-tier HA, slave-tier intent relay
+  (only config relayed through a parent then), RBAC, canary rollout,
+  adoption.
+- ✅ **Slice 4 (slave-tier intent relay)**: the intent-log counterpart to
+  slice 1's config relay. New `gsp-controller::intent::relay`, structurally
+  identical to `parent_client` (subscribe-with-backoff, land via
+  `IntentState::apply_revision` — the same role-gate bypass) with one
+  difference: no `fetch_initial` seed step, since an intent log has no
+  single "current document" to seed from — `since=0`'s catch-up on the
+  first subscribe already replays the parent's whole history, unlike
+  config's "must serve *something* the moment a fresh slave comes up." A
+  `slave` tier now relays *both* logs from its parent, still never
+  originating either directly (`403` on both `/config` and `/intent`
+  writes). 4 new tests. Verified live with two real `gsp-controller`
+  processes: root submits an intent op → slave relays and serves it under
+  its own local revision number; direct writes to the slave still `403`;
+  killing the root freezes the slave on both logs, retrying with backoff.
+  **Still not built**: intra-tier HA, RBAC, canary rollout, adoption.
 - `standalone` / `slave` role per controller and aggregator tier (static,
   install-time, never inferred from connectivity) so a deployment can nest
   regions under a root tier.

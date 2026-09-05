@@ -86,10 +86,24 @@ could drift. Verified live end-to-end with real `gsp-controller` + `gsp
 --controller` processes: `POST /intent` a `backend_add` → landed in `GET
 /pools` within one debounce window.
 
+**Phase 12 slice 4 done (2026-09-05, after a `cargo clean` freed ~75GiB from
+an overgrown `target/`)**: the intent-log counterpart to slice 1's config
+relay. New `gsp-controller::intent::relay`, structurally identical to
+`parent_client` (subscribe-with-backoff, lands ops via
+`IntentState::apply_revision` — the same role-gate bypass) but with no
+`fetch_initial` seed step: an intent log has no single "current document"
+to seed a fresh slave with, so `since=0`'s catch-up on the very first
+subscribe already replays the parent's whole history — unlike config,
+which needs a seed so a cold slave has *something* to serve immediately.
+A `slave` tier now relays both logs from its parent while still never
+originating either directly. 4 new tests. Verified live with two real
+`gsp-controller` processes: root submits an intent op → slave relays and
+serves it under its own local revision number; direct writes to the slave
+still `403` on both `/config` and `/intent`; killing the root freezes the
+slave on both logs, each retrying independently with backoff.
+
 **Not yet built for phase 12**: intra-tier HA (Raft/etcd consensus group per
-tier), slave-tier intent relay (only the config log relays through a parent
-today — the intent log's `slave` write gate is applied but nothing feeds a
-slave's intent log yet), staged/canary rollout, RBAC, and the adoption flow
+tier), staged/canary rollout, RBAC, and the adoption flow
 (`standalone`→`slave` role flip post-install). See `docs/08-roadmap.md`
 phase 12 and `docs/10-distributed-control-plane.md` for the full remaining
 scope.
