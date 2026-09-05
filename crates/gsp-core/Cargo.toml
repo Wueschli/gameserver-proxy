@@ -19,6 +19,15 @@ lru.workspace = true
 maxminddb.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
+# Phase 13 (Tier-2 regional health fabric, docs/10). `foca` needs its own
+# `rand` major version (0.10) for its `RngExt` trait bound — aliased to avoid
+# colliding with the workspace's `rand = "0.8"` (used by gsp-ui), which is an
+# unrelated, semver-incompatible major version living happily alongside it.
+foca = { version = "2.0", default-features = false, features = ["std", "postcard-codec"] }
+rand10 = { package = "rand", version = "0.10", default-features = false, features = ["std_rng", "sys_rng"] }
+bytes = "1"
+hmac = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "test-util"] }

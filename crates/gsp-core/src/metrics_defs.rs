@@ -110,3 +110,15 @@ pub const FD_OPEN: &str = "gsp_fd_open";
 /// Gauge, no labels. The process's `RLIMIT_NOFILE` soft limit, sampled once at
 /// startup (it does not change at runtime).
 pub const FD_LIMIT: &str = "gsp_fd_limit";
+
+/// Gauge, no labels. Current SWIM member count in this instance's gossip mesh
+/// (phase 13, `gsp-core::gossip`). Present only when `settings.gossip` is set.
+pub const GOSSIP_MEMBERS: &str = "gsp_gossip_members";
+
+/// Counter. Labels: `direction` (`sent` | `received`). Gossip datagrams that
+/// passed HMAC verification (phase 13).
+pub const GOSSIP_MESSAGES_TOTAL: &str = "gsp_gossip_messages_total";
+
+/// Counter, no labels. Gossip datagrams dropped for a missing or invalid HMAC
+/// tag (phase 13) — never trusted, never a panic.
+pub const GOSSIP_AUTH_REJECTED_TOTAL: &str = "gsp_gossip_auth_rejected_total";

@@ -261,6 +261,7 @@ async fn run(
         sniffers.clone(),
         discovery,
         source_factory,
+        cfg.gossip.clone(),
         cfg.workers,
     );
     let handle = runtime.handle();

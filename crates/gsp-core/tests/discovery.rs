@@ -221,6 +221,7 @@ async fn runtime_reconciles_sources_when_backend_sources_change() {
         Default::default(),
         discovery.clone(),
         Some(Arc::new(FixedFactory)),
+        None,
         1,
     );
     let handle = runtime.handle();

@@ -11,6 +11,7 @@
 pub mod discovery;
 pub mod drain;
 pub mod geo;
+pub mod gossip;
 pub mod health;
 pub mod limits;
 pub mod listener;

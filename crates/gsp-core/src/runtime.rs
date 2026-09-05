@@ -200,6 +200,7 @@ impl Runtime {
             sniffers,
             Arc::new(Discovery::new()),
             None,
+            None,
             workers,
         )
     }
@@ -211,6 +212,10 @@ impl Runtime {
     /// and reconciles them on reload. The caller (the `gsp` binary) validates
     /// the specs and does a best-effort initial fetch into `discovery` before
     /// `initial` is built.
+    ///
+    /// `gossip`, when `Some` (`settings.gossip`, phase 13), spawns the
+    /// [`crate::gossip`] SWIM mesh task. Like `geo`/`sniffers`, it is
+    /// startup-only — a reload does not start or stop the mesh.
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_discovery(
         initial: Arc<Snapshot>,
@@ -219,6 +224,7 @@ impl Runtime {
         sniffers: Arc<Sniffers>,
         discovery: Arc<Discovery>,
         source_factory: Option<Arc<dyn SourceFactory>>,
+        gossip: Option<gsp_config::GossipConfig>,
         workers: usize,
     ) -> Self {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
@@ -262,6 +268,12 @@ impl Runtime {
             let mut sd = shutdown_rx.clone();
             tasks.push(tokio::spawn(async move {
                 crate::health::run(snap, &mut sd).await;
+            }));
+        }
+        if let Some(gossip_cfg) = gossip {
+            let sd = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                crate::gossip::run(gossip_cfg, crate::gossip::GossipHandle::default(), sd).await;
             }));
         }
         let sources = source_factory.map(|factory| {

@@ -87,6 +87,14 @@
 - `gsp_fd_limit` (gauge, no labels) — this process's `RLIMIT_NOFILE` soft
   limit (`getrlimit`, via `nix`), sampled once at startup (it doesn't change
   at runtime).
+- `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this
+  instance's Tier-2 gossip mesh (phase 13, `docs/10` "Tier 2", `gsp-core::
+  gossip`). Present only when `settings.gossip` is set.
+- `gsp_gossip_messages_total{direction="sent"|"received"}` (counter, phase
+  13) — gossip datagrams that passed HMAC verification.
+- `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
+  datagrams dropped for a missing/invalid HMAC tag; never trusted, never
+  forwarded to the SWIM state machine.
 
 **Added RTT**: no built-in RTT SLO metric exists yet — `make bench`'s added
 p50/p99 (vs. NFR N1/N2) is the closest thing today, measured out-of-band, not

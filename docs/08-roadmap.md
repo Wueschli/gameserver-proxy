@@ -884,17 +884,26 @@ Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 backend)` register piggybacked on foca's own broadcast/anti-entropy;
 HMAC-SHA256 over a per-domain pre-shared key, not mTLS.
 
-Planned slices (not yet started):
+Slices:
 
-1. **Config schema**: `settings.failure_domain` + `settings.gossip {bind,
-   seeds, quorum_fraction, psk}` in `gsp-config` (raw + resolved types,
-   `validate()` rejects one without the other), `config.example.yaml`,
-   `docs/05`.
-2. **Membership**: new `gsp-core::gossip` module wrapping `foca::Foca` over
-   a plain UDP socket, spawned by `runtime.rs` only when `settings.gossip`
-   is set; HMAC-tagged/authenticated datagrams (bad tag ⇒ dropped +
-   metric); `gsp_gossip_members` / `gsp_gossip_messages_total` /
-   `gsp_gossip_auth_rejected_total` in `metrics_defs.rs`.
+1. ✅ **Config schema** (done): `settings.failure_domain` +
+   `settings.gossip {bind, seeds, quorum_fraction, psk}` in `gsp-config`
+   (raw + resolved types, `validate()` rejects one without the other),
+   `config.example.yaml`, `docs/05`.
+2. ✅ **Membership** (done): new `gsp-core::gossip` module wrapping
+   `foca::Foca` (SWIM) over a plain UDP socket, spawned by
+   `Runtime::start_with_discovery` only when `settings.gossip` is set
+   (`gsp/src/main.rs` passes `cfg.gossip.clone()`; startup-only, like
+   `geo`/`sniffers` — a reload does not start or stop the mesh).
+   HMAC-SHA256-tagged/authenticated datagrams (bad or missing tag ⇒ dropped
+   silently + `gsp_gossip_auth_rejected_total`); `gsp_gossip_members` /
+   `gsp_gossip_messages_total` in `metrics_defs.rs`. This slice's
+   `NoCustomBroadcast` means no application payload rides the mesh yet — pure
+   membership. 8 new tests (6 unit incl. two real two-process-equivalent
+   in-tokio SWIM convergence tests; a wrong-PSK-never-joins test). Verified
+   live with two real separate `gsp` processes on real sockets (not
+   in-process): both converged to `gsp_gossip_members 1` with real
+   send/receive traffic on `/metrics` within the SWIM probe period.
 3. **Per-backend health broadcast**: the `BackendHealthRegister` LWW
    payload piggybacked via foca's `BroadcastHandler`, an instance only ever
    publishing registers for backends it health-checks itself; merged

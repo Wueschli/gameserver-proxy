@@ -3,6 +3,74 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 slice 2 done (2026-09-05, same day as slice 1)**: real SWIM
+membership, no application payload yet (that's slice 3). New
+`gsp-core::gossip` module wraps `foca` 2.0 (`Foca<SocketAddr, PostcardCodec,
+_, NoCustomBroadcast>`) over one plain UDP socket per instance, run as a
+single control-plane task (one `tokio::select!` loop over shutdown / a SWIM
+timer heap / socket recv — no separate scheduler task or channel plumbing,
+matching `health.rs`'s own single-task shape rather than foca's own
+multi-task reference example). Every datagram carries an HMAC-SHA256 tag
+computed with `settings.gossip.psk`; a bad/missing tag is dropped silently
+(`verify_and_strip`) and counted, never handed to foca — same "malformed
+input never trusted" posture as `sniff.rs`. This instance's own gossip
+identity is just its `bind` address (`Identity::renew` left at its default
+`None` — no auto-rejoin bump; a documented simplification, revisit if a
+declared-down instance needs to rejoin faster than `remove_down_after`).
+
+**Dependency note**: `foca` needs its own `rand` major version (0.10) for a
+trait bound (`RngExt`) it doesn't re-export; aliased as `rand10` in
+`gsp-core/Cargo.toml` (`package = "rand"`) specifically so it doesn't
+collide with the workspace's existing `rand = "0.8"` (used by `gsp-ui`) —
+two semver-incompatible majors of the same crate coexist fine in one
+dependency graph, they just can't share one Cargo.toml key. `foca`,
+`bytes`, `hmac` are declared directly in `gsp-core/Cargo.toml` rather than
+the workspace table (same precedent as `openraft` in `gsp-controller` —
+a dependency used by exactly one crate doesn't need to be a shared
+workspace entry).
+
+**Wiring into `runtime.rs`**: `Runtime::start_with_discovery` gained one new
+parameter, `gossip: Option<gsp_config::GossipConfig>` — spawns
+`gossip::run` as one more entry in the existing `tasks: Vec<JoinHandle<_>>`
+(same shutdown-`watch::Receiver` plumbing the health checker already uses)
+when `Some`. The three thinner wrapper constructors (`start`,
+`start_with_geo`, `start_with_sniffers`) were left untouched — they already
+pass fixed defaults down to `start_with_discovery` for everything past their
+own parameters, so only that one signature plus its 2 real call sites
+(`gsp/src/main.rs`, `crates/gsp-core/tests/discovery.rs`) needed a new
+`None`/`cfg.gossip.clone()` argument. `gsp/src/main.rs` passes
+`cfg.gossip.clone()` straight through — like `geo_db`/`sniffers`, this is
+startup-only, a reload never starts or stops the mesh.
+
+8 new tests (6 `gossip` unit tests, including two real in-tokio two-instance
+SWIM convergence checks — one confirming a shared PSK converges to
+`member_count() >= 1` on both sides, one confirming two different PSKs never
+converge at all — plus HMAC round-trip/tamper/truncation tests; 2 more from
+threading the new `Option<GossipConfig>` parameter through existing call
+sites). `make check` (fmt + clippy `-D warnings` + full `cargo test --all`,
+90 total gsp-core tests) green.
+
+**Verified live with two real separate `gsp` processes** (not just the
+in-tokio unit test): two full `gsp` binaries, `--config` files each
+declaring `settings.gossip` with instance B seeding off instance A, both
+came up, and within the SWIM probe period both `/metrics` endpoints showed
+`gsp_gossip_members 1` with real non-zero `gsp_gossip_messages_total{sent|
+received}` counts.
+
+**Unrelated flake found and ruled out while testing this, not fixed (not
+this session's code)**: a `gsp` config file living directly under `/tmp`
+triggers a continuous ~200ms `configuration reloaded source=file` log spam
+that a config file in the project directory does not. Confirmed unrelated
+to phase 13 by reproducing it with a plain `settings.gossip`-free config
+too, and confirmed harmless to this slice specifically because `reload.rs`
+only ever swaps the `Snapshot` — it never re-invokes
+`Runtime::start_with_discovery`, so the gossip UDP socket (spawned once at
+startup) isn't affected; the two-process live test above ran from a
+non-`/tmp` directory specifically to avoid the noise. Likely a `notify`
+crate / tmpfs mtime-granularity interaction; worth a real look if it ever
+shows up somewhere that matters (a real deployment's config lives on a real
+filesystem, not `/tmp`), not chased further here.
+
 **Phase 13 slice 1 done (2026-09-05, same day as the design session below)**:
 config schema only, no gossip mesh code yet. `gsp-config` gained
 `settings.failure_domain: Option<String>` and `settings.gossip:
