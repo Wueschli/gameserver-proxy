@@ -1,19 +1,22 @@
 //! Proxies `gsp-controller`'s config API — `GET`/`POST /config`, revision
-//! history/diff, rollback — to the browser, via `--controller-url`/
-//! `--controller-token`. Same shape as `crate::aggregator_proxy`: thin,
-//! stateless, the browser's session cookie never becomes a bearer token,
-//! `gsp-ui` holds the controller's own credential and presents it
-//! server-side. This is phase 10's "full management" GUI capability level
-//! (`docs/10`) — structural config editing, on top of slice 11c's
-//! operational level.
+//! history/diff, rollback, promote — to the browser, via
+//! `--controller-url`/`--controller-token`. Same shape as
+//! `crate::aggregator_proxy`: thin, stateless, the browser's session cookie
+//! never becomes a bearer token, `gsp-ui` holds the controller's own
+//! credential and presents it server-side. [`viewer_router`]'s reads are
+//! `Role::Viewer`; [`admin_router`]'s writes (submit, rollback, promote —
+//! phase 10's "full management" GUI level, `docs/10`) are `Role::Admin`.
 //!
 //! The controller's `POST /config` body is raw YAML text, not JSON (it
 //! accepts a `String` extractor, content-type-agnostic) — forwarded
 //! byte-for-byte with no content-type forced on it, unlike
-//! `aggregator_proxy`'s JSON bodies.
+//! `aggregator_proxy`'s JSON bodies. [`admin_router`]'s writes each add an
+//! `X-Actor` header (phase 12 slice 8) naming the session's username, if
+//! any — `gsp-controller` records it per revision (`GET /config/revisions`'
+//! `actor` field), the durable half of this release's audit trail.
 
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -21,26 +24,51 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::api::AppState;
+use crate::auth::Actor;
 
-pub fn router() -> Router<AppState> {
+/// `GET` config reads — `Role::Viewer`.
+pub fn viewer_router() -> Router<AppState> {
     Router::new()
-        .route("/api/config", get(get_config).post(submit_config))
+        .route("/api/config", get(get_config))
         .route("/api/config/revisions", get(list_revisions))
         .route("/api/config/revisions/{revision}", get(get_revision))
         .route("/api/config/revisions/{revision}/diff", get(diff_revision))
+}
+
+/// Config-changing writes — `Role::Admin`.
+pub fn admin_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/config", post(submit_config))
         .route("/api/config/rollback/{revision}", post(rollback))
+        .route("/api/config/promote/{revision}", post(promote))
 }
 
 async fn get_config(State(state): State<AppState>) -> Response {
-    proxy(&state, Method::GET, "/config".to_string(), None).await
+    proxy(&state, Method::GET, "/config".to_string(), None, None).await
 }
 
-async fn submit_config(State(state): State<AppState>, body: Bytes) -> Response {
-    proxy(&state, Method::POST, "/config".to_string(), Some(body)).await
+async fn submit_config(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    let suffix = match query {
+        Some(q) => format!("/config?{q}"),
+        None => "/config".to_string(),
+    };
+    proxy(&state, Method::POST, suffix, Some(body), actor).await
 }
 
 async fn list_revisions(State(state): State<AppState>) -> Response {
-    proxy(&state, Method::GET, "/config/revisions".to_string(), None).await
+    proxy(
+        &state,
+        Method::GET,
+        "/config/revisions".to_string(),
+        None,
+        None,
+    )
+    .await
 }
 
 async fn get_revision(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
@@ -48,6 +76,7 @@ async fn get_revision(State(state): State<AppState>, Path(revision): Path<u64>) 
         &state,
         Method::GET,
         format!("/config/revisions/{revision}"),
+        None,
         None,
     )
     .await
@@ -62,15 +91,35 @@ async fn diff_revision(
         Some(q) => format!("/config/revisions/{revision}/diff?{q}"),
         None => format!("/config/revisions/{revision}/diff"),
     };
-    proxy(&state, Method::GET, suffix, None).await
+    proxy(&state, Method::GET, suffix, None, None).await
 }
 
-async fn rollback(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+async fn rollback(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(revision): Path<u64>,
+) -> Response {
     proxy(
         &state,
         Method::POST,
         format!("/config/rollback/{revision}"),
         None,
+        actor,
+    )
+    .await
+}
+
+async fn promote(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(revision): Path<u64>,
+) -> Response {
+    proxy(
+        &state,
+        Method::POST,
+        format!("/config/promote/{revision}"),
+        None,
+        actor,
     )
     .await
 }
@@ -89,6 +138,7 @@ async fn proxy(
     method: Method,
     path_suffix: String,
     body: Option<Bytes>,
+    actor: Option<String>,
 ) -> Response {
     let Some(controller) = &state.controller else {
         return (
@@ -104,6 +154,9 @@ async fn proxy(
     let mut req = state.http.request(method, &url);
     if let Some(token) = &controller.token {
         req = req.bearer_auth(token);
+    }
+    if let Some(actor) = actor {
+        req = req.header("X-Actor", actor);
     }
     if let Some(body) = body {
         req = req.body(body); // raw YAML text — no content-type forced

@@ -292,9 +292,66 @@ plain `GET /config` and `GET /config?group=region-b` both still answered
 v1; `GET /config?group=region-a` answered v2; `POST /config/promote/2`
 made v2 the plain `GET /config` answer too, exactly as designed.
 
-Next step for phase 12: slice 8 (RBAC and audit) is the one item left, per
-`docs/10` "RBAC and audit (design)" and `docs/09` ADR 23. It's independent
-of slices 6 and 7 and lives mostly in `gsp-ui`, not `gsp-controller`.
+**Slice 8 (RBAC and audit) done (2026-09-05, same day) — phase 12 is now
+fully built.** Multi-operator accounts on top of the legacy single
+`--ui-password`: `--users-file` (a YAML list of `{username, password_hash,
+role}`, `argon2` PHC hashes — a new `gsp_ui::users` module, plus `gsp-ui
+--hash-password` reading a password from stdin to produce one). New
+`gsp_ui::role::Role` (`Viewer < Operator < Admin`, derived `Ord`, so
+"does this role satisfy that minimum" is just `role >= min`).
+`SessionStore` now maps a session id to `{role, username}` instead of just
+"valid or not." `crate::auth::check_role(min)` replaces the old flat
+`require_session`: `401` for no/invalid session (unchanged), a new `403`
+for a valid session whose role is too low.
+
+The router restructuring that made three-level gating clean: split
+`aggregator_proxy`'s and `controller_proxy`'s single flat router each into
+a `viewer_router`/`operator_router` (aggregator) and `viewer_router`/
+`admin_router` (controller) pair, then `api::router` gives each its own
+`route_layer` before merging — `route_layer` only applies to routes
+already on the `Router` it's called on, so three groups get three
+different minimums with zero ordering subtlety between stacked layers (a
+real risk with axum middleware otherwise). Confirmed axum happily merges
+two sub-routers that both define a route for `/api/config` as long as
+their methods don't overlap (`GET` in `viewer_router`, `POST` in
+`admin_router`) — no special handling needed.
+
+**Audit, the other half of this slice**: `gsp-ui` adds `X-Actor:
+<username>` to every write it proxies (`None` in legacy `--ui-password`
+mode — no per-session identity there). `gsp-controller`'s `AppState`
+gained an `actors` `sled` tree (a third sibling to `Store`'s own trees and
+slice 7's `stage`, opened the same way via `Store::db()`) — `GET
+/config/revisions` now has an `actor` field. Threaded through HA too:
+`WriteRequest::Config` gained an `actor: Option<String>` field carried
+through the Raft log so every replica's state machine attributes the
+revision the same way regardless of which node actually proposed it; the
+leader-forwarding path in `ha::client` preserves the `X-Actor` header on
+its outgoing forward, so the leader's own handler (which re-parses
+headers independently — the forward is a full HTTP replay, not a Raft-
+level detail) picks it up exactly as if the browser had called it
+directly. `gsp-aggregator`'s fan-out verbs (`fanout.rs`) forward the same
+header to each instance and log `(instance/pool, actor, verb)` via
+`tracing` — deliberately **not** a queryable durable log, matching this
+aggregator's "carries no durable state" design; the durable half of the
+audit trail is entirely the controller's per-revision `actor` field.
+
+17 new tests (`gsp-ui`: role ordering, password hashing/verification,
+users-file parsing, multi-user login, cross-role `403`s; `gsp-controller`:
+`X-Actor` recorded and surfaced, absent when not sent;
+`gsp-aggregator`: `X-Actor` forwarded to a fanned-out instance). `make
+check` green across the whole workspace. **Verified live end-to-end**:
+hashed a real password with `gsp-ui --hash-password`, wrote a
+`--users-file`, started a real `gsp-controller` + `gsp-ui
+--users-file ...`, logged in as that user over HTTP, submitted a config
+through the full `gsp-ui` → `gsp-controller` chain, and confirmed `GET
+/config/revisions` on the real controller showed
+`"actor":"alice"` on the resulting revision.
+
+**Phase 12 is now fully built** — all 8 slices (role hierarchy, both relay
+logs, adoption, intra-tier HA, staged/canary rollout, RBAC and audit)
+implemented, individually verified live, covered by `make check`. Phase 13
+(the regional health fabric) remains **design only** — see
+`docs/10-distributed-control-plane.md`.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This

@@ -154,6 +154,7 @@ async fn submit_intent(State(state): State<IntentState>, body: String) -> Respon
             crate::ha::WriteRequest::Intent(body.clone().into_bytes()),
             "/intent",
             body,
+            None, // intent has no audit-trail actor in this slice — config only
         )
         .await;
     }

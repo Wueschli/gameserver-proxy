@@ -839,17 +839,41 @@ layout, and rejected alternatives) and a `docs/09` ADR (21–23):
   region-a` showed v2; `POST /config/promote/2` then made v2 the plain
   `GET /config` answer too. See `docs/10` "Staged / canary rollout
   (design)", ADR 22.
-- **Slice 8 — RBAC and audit**: multi-operator accounts (`--users-file`,
-  `argon2` hashes) and three roles (`viewer`/`operator`/`admin`) enforced in
-  `gsp-ui` — the controller/aggregator keep their existing single
-  shared-token gates unchanged. A new `X-Actor` header + a per-revision
-  `actors` `sled` tree gives the controller's revision history a "who," not
-  just a "what." See `docs/10` "RBAC and audit (design)", ADR 23.
+- ✅ **Slice 8 — RBAC and audit**: multi-operator accounts (`--users-file`,
+  `argon2` PHC hashes, `gsp-ui --hash-password` to produce one) and three
+  roles (`viewer`/`operator`/`admin`) enforced in `gsp-ui` — the
+  controller/aggregator keep their existing single shared-token gates
+  unchanged, per the design's explicit continuation of the phase 10+11
+  slice-11 divergence. `--ui-password` is kept (not replaced) as a legacy
+  single-shared-secret, implicitly-`admin` mode. New `gsp_ui::role::Role`
+  (`Viewer < Operator < Admin`, derived `Ord`) and a `SessionStore` that now
+  maps a session id to `{role, username}`; `crate::auth::check_role(min)`
+  gates three separately-`route_layer`ed sub-routers (`viewer`/`operator`
+  from `aggregator_proxy`, `viewer`/`admin` from `controller_proxy`) — `401`
+  for no/invalid session, a new `403` for a valid session below the route's
+  minimum. A new `X-Actor` header (the session's username, if any) rides
+  every write `gsp-ui` proxies; `gsp-controller` records it per revision in
+  a new `actors` `sled` tree (`GET /config/revisions` gained an `actor`
+  field — through HA too: `WriteRequest::Config` now carries `actor`
+  alongside `stage`, and leader-forwarding preserves the header so
+  whichever node ends up proposing the write has it); `gsp-aggregator`
+  forwards it to each instance and logs `(instance/pool, actor, verb)` via
+  `tracing` (a convenience, not a durable record — this aggregator holds no
+  durable state by design). 17 new tests across `gsp-ui`/`gsp-controller`/
+  `gsp-aggregator`. Verified live: hashed a password with
+  `--hash-password`, logged in as that user against a real `gsp-ui` with
+  `--users-file`, submitted a config through the full `gsp-ui` → real
+  `gsp-controller` chain, and confirmed `GET /config/revisions` showed
+  `"actor":"alice"` on the resulting revision. See `docs/10` "RBAC and
+  audit (design)", ADR 23.
 
-**Result once all three land**: the design in `docs/10` fully realized —
-config/intent consistent and durable across an arbitrarily large, regionally
-structured fleet, with no single point of failure at any tier and per-role
-accountability for every change.
+**Phase 12 is now fully built** — all 8 slices (hierarchy, both relay
+logs, adoption, intra-tier HA, staged/canary rollout, RBAC and audit) are
+implemented, individually verified live, and covered by `make check`. The
+design in `docs/10` is realized: config/intent consistent and durable
+across an arbitrarily large, regionally structured fleet, no single point
+of failure at any tier, and per-role accountability for every change.
+Phase 13 (the regional health fabric, Tier 2) remains **design only**.
 
 ## Phase 13 – Regional health fabric
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)

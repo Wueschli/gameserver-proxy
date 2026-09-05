@@ -26,8 +26,11 @@ serde_json.workspace = true
 reqwest.workspace = true
 rand.workspace = true
 tower-http = { version = "0.6", features = ["fs"] }
+serde_yaml.workspace = true
+argon2 = "0.6.0"
 
 [dev-dependencies]
 tower = "0.5"
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false }
+tempfile.workspace = true

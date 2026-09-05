@@ -156,9 +156,13 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                 EntryPayload::Blank => WriteResponse { revision: None },
                 EntryPayload::Normal(req) => {
                     let revision = match req {
-                        WriteRequest::Config { bytes, stage } => self
+                        WriteRequest::Config {
+                            bytes,
+                            stage,
+                            actor,
+                        } => self
                             .config
-                            .apply_revision_with_stage(bytes, stage)
+                            .apply_revision_with_stage_and_actor(bytes, stage, actor.as_deref())
                             .map_err(|e| StorageIOError::write_state_machine(&e))?,
                         WriteRequest::Intent(bytes) => self
                             .intent
@@ -313,6 +317,7 @@ mod tests {
             WriteRequest::Config {
                 bytes: b"pools: []".to_vec(),
                 stage: crate::api::Stage::promoted(),
+                actor: None,
             },
         )];
         let responses = sm.apply(entries).await.unwrap();
@@ -383,6 +388,7 @@ mod tests {
             WriteRequest::Config {
                 bytes: b"pools: []".to_vec(),
                 stage: crate::api::Stage::promoted(),
+                actor: None,
             },
         )])
         .await

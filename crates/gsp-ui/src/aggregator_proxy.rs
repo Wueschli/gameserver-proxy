@@ -1,18 +1,24 @@
 //! Proxies fleet reads and the slice-9 operational verbs to `gsp-aggregator`
 //! (`--aggregator-url`/`--aggregator-token`) — the browser's session cookie
 //! never becomes a bearer token; `gsp-ui` holds the aggregator's token
-//! itself and presents it server-side on every call. Every route here is
-//! gated by [`crate::auth::require_session`] (applied by `crate::api::router`,
-//! not here — matches `gsp-aggregator::fanout`'s "route definitions only"
-//! shape, since this module composes into a router another module finishes
-//! building).
+//! itself and presents it server-side on every call. [`viewer_router`]'s
+//! reads and [`operator_router`]'s intent verbs are gated separately, at
+//! `Role::Viewer` and `Role::Operator` respectively (applied by
+//! `crate::api::router`, not here — matches `gsp-aggregator::fanout`'s
+//! "route definitions only" shape, since this module composes into a router
+//! another module finishes building).
 //!
 //! Thin and stateless, the same as `gsp-aggregator::fanout` it calls
 //! through to: `gsp-ui` decides nothing and stores no intent, it only
-//! relays.
+//! relays. [`operator_router`]'s verbs each add an `X-Actor` header (phase
+//! 12 slice 8, `docs/10` "RBAC and audit (design)") naming the session's
+//! username, if any (`crate::auth::Actor`, stashed by
+//! `crate::auth::check_role`) — `gsp-aggregator` doesn't persist this today
+//! (it's stateless by design), but forwards it the same way to each
+//! instance's own admin API, where the eventual effect lands.
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -20,12 +26,20 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::api::AppState;
+use crate::auth::Actor;
 
-pub fn router() -> Router<AppState> {
+/// `GET` fleet reads — `Role::Viewer`.
+pub fn viewer_router() -> Router<AppState> {
     Router::new()
         .route("/api/fleet/pools", get(get_pools))
         .route("/api/fleet/sessions", get(get_sessions))
         .route("/api/fleet/healthz", get(get_healthz))
+}
+
+/// The phase-5 intent verbs, fanned out through the aggregator —
+/// `Role::Operator`.
+pub fn operator_router() -> Router<AppState> {
+    Router::new()
         .route(
             "/api/fleet/instances/{instance}/drain",
             post(drain_instance),
@@ -43,39 +57,50 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn get_pools(State(state): State<AppState>) -> Response {
-    proxy(&state, Method::GET, "/fleet/pools", None).await
+    proxy(&state, Method::GET, "/fleet/pools", None, None).await
 }
 
 async fn get_sessions(State(state): State<AppState>) -> Response {
-    proxy(&state, Method::GET, "/fleet/sessions", None).await
+    proxy(&state, Method::GET, "/fleet/sessions", None, None).await
 }
 
 async fn get_healthz(State(state): State<AppState>) -> Response {
-    proxy(&state, Method::GET, "/fleet/healthz", None).await
+    proxy(&state, Method::GET, "/fleet/healthz", None, None).await
 }
 
-async fn drain_instance(State(state): State<AppState>, Path(instance): Path<String>) -> Response {
+async fn drain_instance(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(instance): Path<String>,
+) -> Response {
     proxy(
         &state,
         Method::POST,
         &format!("/fleet/instances/{instance}/drain"),
         None,
+        actor,
     )
     .await
 }
 
-async fn undrain_instance(State(state): State<AppState>, Path(instance): Path<String>) -> Response {
+async fn undrain_instance(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(instance): Path<String>,
+) -> Response {
     proxy(
         &state,
         Method::POST,
         &format!("/fleet/instances/{instance}/undrain"),
         None,
+        actor,
     )
     .await
 }
 
 async fn add_backend(
     State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
     Path(pool): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -84,12 +109,14 @@ async fn add_backend(
         Method::POST,
         &format!("/fleet/pools/{pool}/backends"),
         Some(body),
+        actor,
     )
     .await
 }
 
 async fn patch_backend(
     State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
     Path((pool, addr)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
@@ -98,12 +125,14 @@ async fn patch_backend(
         Method::PATCH,
         &format!("/fleet/pools/{pool}/backends/{addr}"),
         Some(body),
+        actor,
     )
     .await
 }
 
 async fn delete_backend(
     State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
     Path((pool, addr)): Path<(String, String)>,
 ) -> Response {
     proxy(
@@ -111,12 +140,17 @@ async fn delete_backend(
         Method::DELETE,
         &format!("/fleet/pools/{pool}/backends/{addr}"),
         None,
+        actor,
     )
     .await
 }
 
-async fn route_hint(State(state): State<AppState>, body: Bytes) -> Response {
-    proxy(&state, Method::POST, "/fleet/route-hint", Some(body)).await
+async fn route_hint(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    body: Bytes,
+) -> Response {
+    proxy(&state, Method::POST, "/fleet/route-hint", Some(body), actor).await
 }
 
 #[derive(Serialize)]
@@ -127,12 +161,15 @@ struct ErrorResponse {
 /// Forwards one call to the configured aggregator, passing its response
 /// (status + body) straight through. `503` if no `--aggregator-url` was
 /// given at all — a configuration gap, not a runtime failure; `502` if the
-/// aggregator was configured but couldn't be reached.
+/// aggregator was configured but couldn't be reached. `actor` (the session's
+/// username, if any) rides along as `X-Actor` — phase 12 slice 8's audit
+/// trail, see the module doc.
 async fn proxy(
     state: &AppState,
     method: Method,
     path_suffix: &str,
     body: Option<Bytes>,
+    actor: Option<String>,
 ) -> Response {
     let Some(aggregator) = &state.aggregator else {
         return (
@@ -148,6 +185,9 @@ async fn proxy(
     let mut req = state.http.request(method, &url);
     if let Some(token) = &aggregator.token {
         req = req.bearer_auth(token);
+    }
+    if let Some(actor) = actor {
+        req = req.header("X-Actor", actor);
     }
     if let Some(body) = body {
         req = req.header("content-type", "application/json").body(body);
@@ -224,7 +264,10 @@ mod tests {
         let state =
             crate::api::AppState::new(Some("secret".into())).with_aggregator(aggregator_url, token);
         let sessions = state.sessions.clone();
-        let session_id = sessions.create();
+        let session_id = sessions.create(crate::session::Session {
+            role: crate::role::Role::Admin,
+            username: None,
+        });
         (crate::api::router(state), session_id)
     }
 
@@ -348,7 +391,10 @@ mod tests {
         let state =
             crate::api::AppState::new(None).with_aggregator("http://127.0.0.1:1".to_string(), None);
         let sessions = state.sessions.clone();
-        let session_id = sessions.create();
+        let session_id = sessions.create(crate::session::Session {
+            role: crate::role::Role::Admin,
+            username: None,
+        });
         let app = crate::api::router(state);
 
         let resp = app

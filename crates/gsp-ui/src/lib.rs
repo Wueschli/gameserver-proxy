@@ -34,5 +34,7 @@ pub mod auth;
 pub mod controller_proxy;
 pub mod fleet_feed;
 mod proxy_util;
+pub mod role;
 pub mod session;
+pub mod users;
 pub mod ws;

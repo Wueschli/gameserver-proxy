@@ -19,9 +19,19 @@ struct ErrorBody {
 
 /// Proposes `req` via Raft. `path` is this write's own route (`/config` or
 /// `/intent`) — used only to forward `body` to the leader's copy of the same
-/// route if this replica isn't it. Returns the committed revision on
-/// success (always `Some` for a real `WriteRequest`).
-pub async fn propose_write(ha: &HaHandle, req: WriteRequest, path: &str, body: String) -> Response {
+/// route if this replica isn't it; `actor` (phase 12 slice 8's `X-Actor`, if
+/// any) rides along on that forward so the leader's own handler — which
+/// re-parses it independently, exactly as if the browser/`gsp`/`curl` had
+/// called the leader directly — attributes the write to the same actor.
+/// Returns the committed revision on success (always `Some` for a real
+/// `WriteRequest`).
+pub async fn propose_write(
+    ha: &HaHandle,
+    req: WriteRequest,
+    path: &str,
+    body: String,
+    actor: Option<&str>,
+) -> Response {
     match ha.raft.client_write(req).await {
         Ok(resp) => {
             let revision = resp.response().revision;
@@ -31,7 +41,7 @@ pub async fn propose_write(ha: &HaHandle, req: WriteRequest, path: &str, body: S
             )
                 .into_response()
         }
-        Err(e) => handle_write_error(ha, e, path, body).await,
+        Err(e) => handle_write_error(ha, e, path, body, actor).await,
     }
 }
 
@@ -40,6 +50,7 @@ async fn handle_write_error(
     err: typ::RaftError<typ::ClientWriteError>,
     path: &str,
     body: String,
+    actor: Option<&str>,
 ) -> Response {
     let openraft::error::RaftError::APIError(api_err) = err else {
         return service_unavailable("raft internal error; retry shortly");
@@ -60,12 +71,21 @@ async fn handle_write_error(
         return service_unavailable("this replica just lost leadership; retry shortly");
     }
 
-    forward_to_leader(&leader_node.addr, path, body).await
+    forward_to_leader(&leader_node.addr, path, body, actor).await
 }
 
-async fn forward_to_leader(leader_addr: &str, path: &str, body: String) -> Response {
+async fn forward_to_leader(
+    leader_addr: &str,
+    path: &str,
+    body: String,
+    actor: Option<&str>,
+) -> Response {
     let url = format!("http://{leader_addr}{path}");
-    match reqwest::Client::new().post(&url).body(body).send().await {
+    let mut req = reqwest::Client::new().post(&url).body(body);
+    if let Some(actor) = actor {
+        req = req.header("X-Actor", actor);
+    }
+    match req.send().await {
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();

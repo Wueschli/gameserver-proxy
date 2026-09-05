@@ -5,8 +5,11 @@
 //! 11e: `gsp-controller`'s config API, proxied the same way. Slice 11f:
 //! `--static-dir` serves the built React/Vite/TS frontend (`web/`) as a
 //! fallback under every route the API doesn't claim — `gsp-ui` is the one
-//! process, one port an operator's browser ever talks to.
+//! process, one port an operator's browser ever talks to. Phase 12 slice 8:
+//! `--users-file` (multi-operator RBAC) alongside legacy `--ui-password`,
+//! and a `--hash-password` mode for populating one.
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -29,11 +32,26 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9903")]
     listen: SocketAddr,
 
-    /// Password required to log in. Omit to leave the UI open (no login
-    /// required) — network-boundary-only auth, same posture every other
-    /// optional-auth surface in this fleet has.
+    /// Password required to log in — one shared secret, implicitly `admin`.
+    /// Omit to leave the UI open (no login required) — network-boundary-only
+    /// auth, same posture every other optional-auth surface in this fleet
+    /// has. Mutually exclusive with `--users-file`.
     #[arg(long)]
     ui_password: Option<String>,
+
+    /// Multi-operator accounts (phase 12 slice 8): a YAML file of
+    /// `{username, password_hash, role}` entries — see `gsp_ui::users`'s
+    /// doc for the shape, and `--hash-password` for producing a hash.
+    /// Mutually exclusive with `--ui-password`.
+    #[arg(long)]
+    users_file: Option<PathBuf>,
+
+    /// Print an argon2 hash for a password read from stdin, then exit —
+    /// does not start the server. The intended way to populate a
+    /// `--users-file` entry's `password_hash`; never handle a plaintext
+    /// password in a config file at rest.
+    #[arg(long)]
+    hash_password: bool,
 
     /// `gsp-aggregator` base URL (e.g. "http://127.0.0.1:9902") that fleet
     /// reads and operational actions proxy to. Omitted: those routes return
@@ -70,14 +88,35 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    if args.hash_password {
+        // No server, no logging setup — a one-shot CLI utility mode.
+        let mut password = String::new();
+        std::io::stdin().read_to_string(&mut password)?;
+        println!("{}", gsp_ui::users::hash_password(password.trim_end()));
+        return Ok(());
+    }
+
+    if args.ui_password.is_some() && args.users_file.is_some() {
+        anyhow::bail!("--ui-password and --users-file are mutually exclusive");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    let login_required = args.ui_password.is_some();
+    let login_required = args.ui_password.is_some() || args.users_file.is_some();
     let mut state = AppState::new(args.ui_password);
+    if let Some(users_file) = &args.users_file {
+        let users = gsp_ui::users::load(users_file)?;
+        tracing::info!(
+            users_file = %users_file.display(),
+            user_count = users.len(),
+            "loaded multi-operator accounts"
+        );
+        state = state.with_users(users);
+    }
     let mut feed_task = None;
     if let Some(aggregator_url) = args.aggregator_url {
         state = state.with_aggregator(aggregator_url.clone(), args.aggregator_token.clone());
@@ -94,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(
         login_required,
+        multi_user = state.users.is_some(),
         aggregator_configured = state.aggregator.is_some(),
         controller_configured = state.controller.is_some(),
         "gsp-ui starting"

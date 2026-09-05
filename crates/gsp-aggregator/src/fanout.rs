@@ -29,10 +29,21 @@
 //! always JSON per the phase-5 admin API contract, so there's no reason to
 //! make every caller remember a header the aggregator already knows the
 //! answer to.
+//!
+//! Phase 12 slice 8 (`docs/10` "RBAC and audit (design)"): every verb here
+//! logs `(instance(s), actor, verb)` via `tracing` — `actor` is whatever
+//! `X-Actor` named (set by `gsp-ui` when it proxies a write; absent for a
+//! direct call against this aggregator's own token). Forwarded to each
+//! target instance too, for consistency, though no instance reads it today.
+//! Deliberately **not** a queryable, durable audit log — this aggregator
+//! carries no durable state by design (`crate::ingest`'s doc); a `tracing`
+//! line is the proportionate amount of "who did this" for a component whose
+//! entire job is relaying, not deciding. The durable half of this release's
+//! audit trail is `gsp-controller`'s per-revision `actor` field.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{patch, post};
 use axum::{Json, Router};
@@ -61,57 +72,114 @@ pub fn router() -> Router<AppState> {
         .route("/fleet/route-hint", post(route_hint))
 }
 
-async fn drain_instance(State(state): State<AppState>, Path(instance): Path<String>) -> Response {
-    proxy_to_instance(&state, &instance, Method::POST, "/admin/drain", None).await
+/// `X-Actor`, if present — see the module doc.
+fn actor_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-Actor")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
-async fn undrain_instance(State(state): State<AppState>, Path(instance): Path<String>) -> Response {
-    proxy_to_instance(&state, &instance, Method::POST, "/admin/undrain", None).await
+async fn drain_instance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(instance): Path<String>,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%instance, ?actor, verb = "drain", "fan-out verb");
+    proxy_to_instance(
+        &state,
+        &instance,
+        Method::POST,
+        "/admin/drain",
+        None,
+        actor.as_deref(),
+    )
+    .await
+}
+
+async fn undrain_instance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(instance): Path<String>,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%instance, ?actor, verb = "undrain", "fan-out verb");
+    proxy_to_instance(
+        &state,
+        &instance,
+        Method::POST,
+        "/admin/undrain",
+        None,
+        actor.as_deref(),
+    )
+    .await
 }
 
 async fn add_backend(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(pool): Path<String>,
     body: Bytes,
 ) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%pool, ?actor, verb = "add_backend", "fan-out verb");
     broadcast(
         &state,
         Method::POST,
         &format!("/pools/{pool}/backends"),
         Some(body),
+        actor.as_deref(),
     )
     .await
 }
 
 async fn patch_backend(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((pool, addr)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%pool, %addr, ?actor, verb = "patch_backend", "fan-out verb");
     broadcast(
         &state,
         Method::PATCH,
         &format!("/pools/{pool}/backends/{addr}"),
         Some(body),
+        actor.as_deref(),
     )
     .await
 }
 
 async fn delete_backend(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((pool, addr)): Path<(String, String)>,
 ) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%pool, %addr, ?actor, verb = "delete_backend", "fan-out verb");
     broadcast(
         &state,
         Method::DELETE,
         &format!("/pools/{pool}/backends/{addr}"),
         None,
+        actor.as_deref(),
     )
     .await
 }
 
-async fn route_hint(State(state): State<AppState>, body: Bytes) -> Response {
-    broadcast(&state, Method::POST, "/route-hint", Some(body)).await
+async fn route_hint(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(?actor, verb = "route_hint", "fan-out verb");
+    broadcast(
+        &state,
+        Method::POST,
+        "/route-hint",
+        Some(body),
+        actor.as_deref(),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -127,6 +195,7 @@ async fn proxy_to_instance(
     method: Method,
     path_suffix: &str,
     body: Option<Bytes>,
+    actor: Option<&str>,
 ) -> Response {
     let Some(inst) = state.store.get(instance) else {
         return (
@@ -142,6 +211,9 @@ async fn proxy_to_instance(
     let mut req = state.http.request(method, &url);
     if let Some(token) = &state.instance_token {
         req = req.bearer_auth(token);
+    }
+    if let Some(actor) = actor {
+        req = req.header("X-Actor", actor);
     }
     if let Some(body) = body {
         req = req.header("content-type", "application/json").body(body);
@@ -201,9 +273,11 @@ async fn broadcast(
     method: Method,
     path_suffix: &str,
     body: Option<Bytes>,
+    actor: Option<&str>,
 ) -> Response {
     let instances = state.store.snapshot();
     let instance_token = state.instance_token.clone();
+    let actor = actor.map(str::to_string);
     let mut calls = tokio::task::JoinSet::new();
     for inst in instances {
         let client = state.http.clone();
@@ -212,10 +286,14 @@ async fn broadcast(
         let body = body.clone();
         let instance = inst.payload.instance;
         let instance_token = instance_token.clone();
+        let actor = actor.clone();
         calls.spawn(async move {
             let mut req = client.request(method, &url);
             if let Some(token) = &instance_token {
                 req = req.bearer_auth(token);
+            }
+            if let Some(actor) = &actor {
+                req = req.header("X-Actor", actor.as_str());
             }
             if let Some(body) = body {
                 req = req.header("content-type", "application/json").body(body);
@@ -364,6 +442,47 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers().get("x-drain-note").unwrap(), "graceful");
+    }
+
+    #[tokio::test]
+    async fn drain_forwards_the_x_actor_header_to_the_instance() {
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_for_handler = captured.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = Router::new().route(
+            "/admin/drain",
+            post(move |headers: axum::http::HeaderMap| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    *captured.lock().unwrap() = headers
+                        .get("X-Actor")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    "draining\n"
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("proxy-1", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+
+        app.oneshot(
+            Request::post("/fleet/instances/proxy-1/drain")
+                .header("X-Actor", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(captured.lock().unwrap().as_deref(), Some("alice"));
     }
 
     #[tokio::test]

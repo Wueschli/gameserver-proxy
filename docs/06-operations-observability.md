@@ -410,8 +410,8 @@ config are unrelated axes.
 
 A dedicated process holding both the controller's and the aggregator's own
 bearer tokens on the operator's behalf; the browser only ever holds a session
-cookie (`--ui-password`, `POST /ui/login`/`/ui/logout`, `GET /ui/session`),
-never a bearer token. Everything else is a thin, header-preserving proxy:
+cookie (`POST /ui/login`/`/ui/logout`, `GET /ui/session`), never a bearer
+token. Everything else is a thin, header-preserving proxy:
 `/api/fleet/*` → the `gsp-aggregator` routes above (`--aggregator-url`/
 `--aggregator-token`), `/api/config*` → the `gsp-controller` routes above
 (`--controller-url`/`--controller-token`), and `GET /ws/fleet` — a browser
@@ -423,6 +423,38 @@ frontend as a fallback under whatever the API routes above don't claim — it's
 the one process, one port an operator's browser ever talks to. Either proxy
 target is optional; fleet reads/config actions 503 cleanly if the
 corresponding `--*-url` was never given.
+
+**RBAC and audit (phase 12 slice 8, `docs/10` "RBAC and audit (design)")**:
+two login modes, mutually exclusive.
+
+- **`--ui-password <secret>`** (legacy, unchanged from phase 10+11) — one
+  shared secret, `POST /ui/login {"password":"..."}`, every session
+  implicitly `admin`.
+- **`--users-file <path>`** — multi-operator accounts, a YAML list of
+  `{username, password_hash, role}` (`role` one of `viewer`/`operator`/
+  `admin`); login is `POST /ui/login {"username":"...","password":"..."}`.
+  `password_hash` is an argon2 PHC string — `gsp-ui --hash-password` reads a
+  password from stdin and prints one, the intended way to populate an entry
+  (never put a plaintext password in the file).
+
+With neither flag, the UI is fully open and every session is implicitly
+`admin` — same posture every other optional-auth surface in this fleet has.
+
+Three roles gate three route groups: `viewer` (every `GET` — fleet reads,
+config/revision reads/diffs, `GET /ws/fleet`), `operator` (+ the phase-5
+intent verbs — drain/undrain, backend add/patch/delete, route-hint),
+`admin` (+ config submit/rollback/promote). A session below a route's
+minimum role gets `403` (distinct from `401`, which means no valid session
+at all).
+
+**Audit**: every write `gsp-ui` proxies carries an `X-Actor: <username>`
+header (`--ui-password` mode never sets it — there's no per-session
+identity there). `gsp-controller` records it per revision — `GET
+/config/revisions`' new `actor` field is the durable half of this audit
+trail. `gsp-aggregator` logs `(instance/pool, actor, verb)` via `tracing`
+for the fan-out verbs and forwards the header on to each instance — a
+convenience, not a durable record (this aggregator holds no durable state
+by design).
 
 ### Fronting layer: anycast vs. L4 load balancer
 

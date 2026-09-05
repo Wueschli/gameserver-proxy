@@ -64,6 +64,11 @@ pub enum WriteRequest {
     Config {
         bytes: Vec<u8>,
         stage: crate::api::Stage,
+        /// Phase 12 slice 8's `X-Actor`, if any — carried through the Raft
+        /// log so every replica's state machine attributes the revision to
+        /// the same actor, not just whichever node happened to originate
+        /// the `client_write` call.
+        actor: Option<String>,
     },
     Intent(Vec<u8>),
     /// Phase 12 slice 7: flips an existing config revision's `Stage::promoted`

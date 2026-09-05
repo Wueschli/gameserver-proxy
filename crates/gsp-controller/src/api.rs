@@ -127,6 +127,10 @@ pub struct AppState {
     /// [`crate::parent_client`], which writes the store directly and is the
     /// only caller allowed to bypass this gate. See `crate::role`.
     pub role: RoleHandle,
+    /// Per-revision submitter, phase 12 slice 8's audit trail — the
+    /// `X-Actor` header `gsp-ui` sets on a proxied write, if any. Another
+    /// sibling `sled` tree, same pattern as `stage`.
+    pub actors: sled::Tree,
     /// `Some` when `--ha-peers` is set (phase 12 slice 6): `submit()`
     /// proposes via Raft instead of writing `store` directly. `None` (the
     /// default, `replicas: 1`) is today's behaviour, byte-for-byte —
@@ -144,12 +148,17 @@ impl AppState {
             .db()
             .open_tree("stage")
             .expect("opening the stage tree");
+        let actors = store
+            .db()
+            .open_tree("actors")
+            .expect("opening the actors tree");
         AppState {
             store,
             stage,
             updates,
             auth_token: auth_token.map(Arc::from),
             role,
+            actors,
             ha: None,
         }
     }
@@ -174,17 +183,29 @@ impl AppState {
         self.apply_revision_with_stage(bytes, Stage::promoted())
     }
 
-    /// The general form `apply_revision` is a convenience wrapper over —
-    /// used by `submit()` (this tier's own direct writes) and by
-    /// `crate::ha::state_machine` (a committed Raft entry, which already
-    /// carries whatever stage the original submission specified).
+    /// [`apply_revision`] with an explicit [`Stage`] but no actor (a relay
+    /// or `adopt` seed has no `X-Actor` to carry — it isn't a submission).
     pub fn apply_revision_with_stage(
         &self,
         bytes: RevisionBytes,
         stage: Stage,
     ) -> Result<u64, StoreError> {
+        self.apply_revision_with_stage_and_actor(bytes, stage, None)
+    }
+
+    /// The general form the others wrap — used by `submit()` (this tier's
+    /// own direct writes, `actor` from `X-Actor`) and by
+    /// `crate::ha::state_machine` (a committed Raft entry, which already
+    /// carries whatever stage/actor the original submission specified).
+    pub fn apply_revision_with_stage_and_actor(
+        &self,
+        bytes: RevisionBytes,
+        stage: Stage,
+        actor: Option<&str>,
+    ) -> Result<u64, StoreError> {
         let revision = self.store.put(bytes)?;
         self.set_stage(revision, &stage)?;
+        self.set_actor(revision, actor)?;
         let _ = self.updates.send(revision);
         Ok(revision)
     }
@@ -221,6 +242,23 @@ impl AppState {
         let bytes = serde_json::to_vec(stage).expect("Stage always serializes");
         self.stage.insert(encode_rev(revision), bytes)?;
         self.stage.flush()?;
+        Ok(())
+    }
+
+    /// `revision`'s submitter, if `X-Actor` named one at submission time —
+    /// phase 12 slice 8's audit trail.
+    pub fn actor_of(&self, revision: u64) -> Option<String> {
+        self.actors
+            .get(encode_rev(revision))
+            .ok()
+            .flatten()
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+    }
+
+    fn set_actor(&self, revision: u64, actor: Option<&str>) -> Result<(), StoreError> {
+        let Some(actor) = actor else { return Ok(()) };
+        self.actors.insert(encode_rev(revision), actor.as_bytes())?;
+        self.actors.flush()?;
         Ok(())
     }
 
@@ -302,8 +340,10 @@ async fn submit_config(
     State(state): State<AppState>,
     Query(params): Query<SubmitParams>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    headers: axum::http::HeaderMap,
     body: String,
 ) -> Response {
+    let actor = actor_header(&headers);
     let stage = match params.stage.as_deref() {
         None => Stage::promoted(),
         Some("canary") => match params.group {
@@ -329,19 +369,46 @@ async fn submit_config(
         }
     };
     let query_suffix = raw_query.map(|q| format!("?{q}")).unwrap_or_default();
-    submit(&state, body, stage, &format!("/config{query_suffix}")).await
+    submit(
+        &state,
+        body,
+        stage,
+        &format!("/config{query_suffix}"),
+        actor,
+    )
+    .await
 }
 
-/// Validates `text` and persists it (at `stage`) as a new revision on
-/// success — shared by [`submit_config`] and [`rollback`] (a rollback is
-/// just an immediately-promoted re-submission of an old revision's bytes,
-/// never a rewrite of history). Rejects outright on a `slave` tier
-/// (`docs/10` "never accepts a write directly") before even parsing — a
-/// slave's only source of new revisions is [`crate::parent_client`], which
-/// never calls this function. `forward_path` is this write's own route +
-/// query string, forwarded byte-for-byte to the raft leader if this replica
-/// isn't it (`crate::ha::client::propose_write`) — irrelevant when HA is off.
-async fn submit(state: &AppState, text: String, stage: Stage, forward_path: &str) -> Response {
+/// The `X-Actor` header, if present — phase 12 slice 8's audit trail.
+/// `gsp-ui` sets this on every write it proxies (the browser session's
+/// username, if `--users-file` mode named one); a direct `curl` against
+/// this controller's own token simply carries none, which is still valid
+/// break-glass access, just a less specific audit entry.
+fn actor_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("X-Actor")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Validates `text` and persists it (at `stage`, attributed to `actor`) as
+/// a new revision on success — shared by [`submit_config`] and [`rollback`]
+/// (a rollback is just an immediately-promoted re-submission of an old
+/// revision's bytes, never a rewrite of history). Rejects outright on a
+/// `slave` tier (`docs/10` "never accepts a write directly") before even
+/// parsing — a slave's only source of new revisions is
+/// [`crate::parent_client`], which never calls this function.
+/// `forward_path` is this write's own route + query string, forwarded
+/// byte-for-byte (`actor` along with it, as `X-Actor` again) to the raft
+/// leader if this replica isn't it (`crate::ha::client::propose_write`) —
+/// irrelevant when HA is off.
+async fn submit(
+    state: &AppState,
+    text: String,
+    stage: Stage,
+    forward_path: &str,
+    actor: Option<String>,
+) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
     }
@@ -363,16 +430,18 @@ async fn submit(state: &AppState, text: String, stage: Stage, forward_path: &str
             crate::ha::WriteRequest::Config {
                 bytes: text.clone().into_bytes(),
                 stage,
+                actor: actor.clone(),
             },
             forward_path,
             text,
+            actor.as_deref(),
         )
         .await;
     }
 
-    match state.apply_revision_with_stage(text.into_bytes(), stage) {
+    match state.apply_revision_with_stage_and_actor(text.into_bytes(), stage, actor.as_deref()) {
         Ok(revision) => {
-            tracing::info!(revision, "accepted a new config revision");
+            tracing::info!(revision, ?actor, "accepted a new config revision");
             (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
         }
         Err(e) => store_error_response(e),
@@ -383,17 +452,23 @@ async fn submit(state: &AppState, text: String, stage: Stage, forward_path: &str
 /// `Stage::promoted` to `true` (see the module doc). `404` if the revision
 /// never existed; promoting an already-promoted revision is a harmless
 /// no-op, not a conflict.
-async fn promote(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+async fn promote(
+    State(state): State<AppState>,
+    Path(revision): Path<u64>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
     }
 
     if let Some(ha) = &state.ha {
+        let actor = actor_header(&headers);
         return crate::ha::client::propose_write(
             ha,
             crate::ha::WriteRequest::Promote(revision),
             &format!("/config/promote/{revision}"),
             String::new(),
+            actor.as_deref(),
         )
         .await;
     }
@@ -464,6 +539,8 @@ struct RevisionSummary {
     /// Slice 7: this revision's rollout visibility — see [`Stage`].
     promoted: bool,
     canary_groups: Vec<String>,
+    /// Slice 8: who submitted it, if `X-Actor` named someone.
+    actor: Option<String>,
 }
 
 /// `GET /config/revisions` — every revision, oldest first, with its size,
@@ -489,6 +566,7 @@ async fn list_revisions(State(state): State<AppState>) -> Response {
                         current: Some(revision) == current,
                         promoted: stage.promoted,
                         canary_groups: stage.canary_groups,
+                        actor: state.actor_of(revision),
                     }
                 })
                 .collect();
@@ -574,13 +652,24 @@ async fn diff_revision(
 /// `POST /config/rollback/{revision}` — re-submits an old revision's exact
 /// bytes as a brand-new one (see the module doc: this never rewrites
 /// history). Same response shape as `POST /config`.
-async fn rollback(State(state): State<AppState>, Path(revision): Path<u64>) -> Response {
+async fn rollback(
+    State(state): State<AppState>,
+    Path(revision): Path<u64>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     match state.store.get(revision) {
         Ok(Some(bytes)) => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             // A rollback is always immediately promoted — it's presumably
             // urgent, never something to stage (see the module doc).
-            let resp = submit(&state, text, Stage::promoted(), "/config").await;
+            let resp = submit(
+                &state,
+                text,
+                Stage::promoted(),
+                "/config",
+                actor_header(&headers),
+            )
+            .await;
             tracing::info!(from_revision = revision, "rolled back");
             resp
         }
@@ -1378,6 +1467,56 @@ listeners:
         assert_eq!(list[0]["promoted"], true);
         assert_eq!(list[1]["promoted"], false);
         assert_eq!(list[1]["canary_groups"], serde_json::json!(["region-a"]));
+    }
+
+    #[tokio::test]
+    async fn an_x_actor_header_is_recorded_and_surfaced() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        app.clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("X-Actor", "alice")
+                    .body(Body::from(VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::get("/config/revisions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list[0]["actor"], "alice");
+    }
+
+    #[tokio::test]
+    async fn no_x_actor_header_leaves_actor_null() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        submit(&app, VALID_CONFIG).await;
+
+        let resp = app
+            .oneshot(
+                Request::get("/config/revisions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list[0]["actor"], serde_json::Value::Null);
     }
 
     #[tokio::test]
