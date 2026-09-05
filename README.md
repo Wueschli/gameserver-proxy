@@ -103,8 +103,14 @@ below). TCP and UDP listener → backend pool forwarding with:
   template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
   real plugins, loopback) — see `docs/07`
 
-**Phase 10+11 complete** (single-tier PoC — hierarchy/HA/shared intent is
-phase 12, design only): three additional binaries alongside `gsp` itself —
+**Phase 10+11 complete** (single-tier PoC), **phase 12 complete** (fleet
+hierarchy: `standalone`/`slave` controller tiers, intra-tier Raft HA,
+staged/canary config rollout, RBAC + audit — see `docs/10`), and **phase 13
+complete** (Tier-2 regional health fabric: an authenticated SWIM gossip mesh
+per `failure_domain`, sharing per-backend health as a quorum-weighted advisory
+signal that only ever nudges — never overrides — an instance's own local
+checks; `settings.failure_domain` / `settings.gossip` in `docs/05`). Three
+additional binaries alongside `gsp` itself —
 `gsp-controller` (a `sled`-backed config revision store: `POST`/`GET /config`,
 `GET /config/subscribe` SSE, revision history/diff/rollback — a `gsp
 --controller <url>` instance pulls from it instead of a local file, with

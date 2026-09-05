@@ -873,13 +873,16 @@ implemented, individually verified live, and covered by `make check`. The
 design in `docs/10` is realized: config/intent consistent and durable
 across an arbitrarily large, regionally structured fleet, no single point
 of failure at any tier, and per-role accountability for every change.
-Phase 13 (the regional health fabric, Tier 2) remains **design only**.
+Phase 13 (the regional health fabric, Tier 2) is now **fully built** — see
+below.
 
 ## Phase 13 – Regional health fabric
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
-(Tier 2). Advisory, rebuildable, off the data path. **Fully designed
-(2026-09-05) — see "Mechanism (design)" in `docs/10` and ADR 24 in
-`docs/09` — not yet built.** Locked mechanism: membership via embedded
+(Tier 2). Advisory, rebuildable, off the data path. **Fully built
+(2026-09-05)** — all 5 slices below, verified live including two real
+multi-process tests in `crates/gsp-fleet-tests`; see "Mechanism (design)" in
+`docs/10` and ADR 24 in `docs/09` for the locked design this implements.
+Mechanism: membership via embedded
 `foca` (SWIM); per-backend health as a last-writer-wins `(instance,
 backend)` register piggybacked on foca's own broadcast/anti-entropy;
 HMAC-SHA256 over a per-domain pre-shared key, not mTLS.
@@ -948,12 +951,21 @@ Slices:
    single-node mesh through the full real pipeline (channel → mesh task →
    `add_broadcast` → merge) and confirming a repeated `sweep` eventually
    reads its own published verdict back and overrides the backend down.
-5. **Verification**: multi-process live test — several real `gsp`
-   instances in one `failure_domain`, confirm quorum-down suppresses a pool
-   member domain-wide from one instance's own bad vantage point, confirm a
-   killed/partitioned mesh degrades to today's local-only behaviour with no
-   stuck state; `crates/gsp-fleet-tests` coverage alongside the phase 10+11
-   multi-process harness.
+5. ✅ **Verification** (done, `crates/gsp-fleet-tests/tests/gossip.rs`): two
+   real multi-process tests, spawning actual `gsp` binaries the same way
+   every other fleet slice was verified. `domain_quorum_overrides_an_
+   instance_with_a_lenient_local_threshold` gives 3 real processes the
+   *same* real (unreachable) backend but a per-instance-different `fall`
+   threshold (2 instances `fall: 1`, one `fall: 1000`) — a genuinely mixed
+   local view achieved with plain config, no faked wire data — and confirms
+   the lenient instance's combined `is_healthy()` still goes false purely
+   from the domain quorum, live proof of "an instance cannot ignore a
+   domain-wide outage." `instances_with_different_psks_never_merge_and_
+   neither_gets_stuck` confirms two real processes with mismatched PSKs
+   never converge (`gsp_gossip_members` stays `0` on both) yet each still
+   correctly runs its own local-only health checks and neither process
+   hangs or crashes — the "fully rebuildable, falls back to local-only"
+   property with a real empty mesh, not a config that merely looks empty.
 
 - Each instance publishes its per-backend `up | down`; consumes the domain view.
 - Health decision becomes quorum-weighted: **unhealthy** on local `fall` **or**

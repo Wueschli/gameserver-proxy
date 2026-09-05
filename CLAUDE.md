@@ -52,7 +52,8 @@ crates/
     discovery.rs            `BackendSource` seam + `Discovery` last-known-good cache + refresh_loop (Phase 8)
     sources.rs              `SourceManager` — runtime `backend_sources:` reconcile on reload (discovery analogue of ListenerManager)
     route_hint.rs           push-resolver src_ip→pool table (POST /route-hint), lock-free read
-    health.rs               active health-check sweep task (tcp_connect + udp_probe)
+    health.rs               active health-check sweep task (tcp_connect + udp_probe); phase 13: publishes each result into the gossip fabric and refreshes each backend's domain_down from it
+    gossip.rs               Tier-2 regional health fabric (phase 13, docs/10 "Tier 2"): embedded `foca` SWIM mesh + HMAC-authenticated UDP transport + a per-backend LWW health broadcast, spawned only when `settings.gossip` is set
     ratelimit.rs            per-listener token-bucket rate limiter (src_ip + /24 / /64)
     src_conns.rs            per-listener concurrent per-source connection / session cap
     limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)

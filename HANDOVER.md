@@ -3,6 +3,65 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 slice 5 done (2026-09-05, same day as slices 1-4) — phase 13 is
+now fully built.** New `crates/gsp-fleet-tests/tests/gossip.rs`, mirroring
+the same "spawn the real binaries, drive them over real sockets" shape
+`tests/fleet.rs` already established for phase 10+11. New `gossip_gsp_config`
+helper in `src/lib.rs` (a `minimal_gsp_config` variant adding `settings.
+failure_domain`/`settings.gossip` plus a caller-chosen `fall` threshold).
+
+**The key design problem this slice had to solve**: every process in this
+test suite runs on `127.0.0.1`, so two instances checking the *same* backend
+address always see the *same* real reachability — there's no way to fake
+"instance C's network path to this backend is different" the way a real
+multi-region partition would produce. Solved without adding any test-only
+backdoor to the gossip code: `health.rs::sweep` publishes a check's raw
+result into the mesh *before* `Backend::observe` applies the local `rise`/
+`fall` logic (this was already true from slice 4, not a new behavior) — so
+giving one instance a very high `fall` (e.g. `1000`) makes its own local
+`healthy` flag immune to a single bad check, while its *published vote* is
+exactly as honest as everyone else's. `domain_quorum_overrides_an_instance_
+with_a_lenient_local_threshold`: 3 real `gsp` processes, one shared
+`failure_domain`, all three targeting the same real unreachable backend; A
+and B use `fall: 1` (flip locally-unhealthy almost immediately), C uses
+`fall: 1000`. The test confirms C's *combined* `is_healthy()` still goes
+false — live proof that a domain-wide outage overrides an instance that
+hasn't (and, within this test's window, couldn't have) caught it locally
+itself, not a simulated one.
+
+The second test, `instances_with_different_psks_never_merge_and_neither_
+gets_stuck`, is the mirror case: two real processes with mismatched PSKs
+never share a mesh (`gsp_gossip_members` stays `0` on both, confirmed via
+`/metrics`), yet both keep running their own correct local-only health
+checks the whole time — a real demonstration of "fully rebuildable, falls
+back to local-only" with an actually-never-formed mesh, not a mesh that
+merely looks empty because nothing happened to publish yet.
+
+Both tests passed on the first real run and were re-run 3 more times back
+to back with no flakiness (~13s each, dominated by the shared `cargo build
+-p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui` the `ensure_built()`
+helper already amortizes across every test in the crate — this run added 2
+more test functions to that existing amortized cost, not a new build step).
+
+`make check` (fmt + clippy `-D warnings` + full `cargo test --all`,
+including these 2 new multi-process tests) green. Also updated `README.md`'s
+status block (phase 12/13 were still described as "phase 12, design only"
+there — a documentation gap from earlier in this same session, caught and
+fixed now, same category of gap CLAUDE.md's own history notes for
+`gsp-controller`/`gsp-aggregator`), `docs/10`'s top-level Status section
+(was still the original "Design only. Nothing here is built." from before
+any of phase 10+11 existed — long stale, fixed to reflect phases 10–13 all
+now built), and `docs/09`'s ADR 24 row / the "Tier-2 health gossip" bullet
+(both still described the choice as open/design-stage).
+
+**Phase 13 — all 5 slices done, fully built and verified live**: config
+schema (1), SWIM membership via embedded `foca` (2), the per-backend health
+broadcast (3), `Backend`/`health.rs` integration (4), and now real
+multi-process verification (5) proving a genuinely mixed local/domain view
+resolves the way docs/10 "Tier 2" specifies. The regional health fabric
+chapter of `docs/10` is no longer aspirational — every mechanism it
+describes now has running code and a real process-level test behind it.
+
 **Phase 13 slice 4 done (2026-09-05, same day as slices 1-3)**: the last
 building-block slice — wires the mesh into real backend health. `Backend`
 (`pool.rs`) gained a `domain_down: AtomicBool` field, additive to the

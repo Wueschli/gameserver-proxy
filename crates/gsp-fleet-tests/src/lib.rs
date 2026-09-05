@@ -186,6 +186,63 @@ listeners:
     )
 }
 
+/// Like [`minimal_gsp_config`], plus `settings.failure_domain` /
+/// `settings.gossip` (phase 13, docs/10 "Tier 2") and a caller-chosen
+/// `fall` threshold — the one knob the gossip fleet tests vary per instance
+/// to create a real, live "this instance's own local view differs from the
+/// domain's" scenario without needing to fake any wire data: every instance
+/// still runs a real active health check against the same real (unreachable)
+/// target, but a high `fall` means *this* instance's own `Backend::observe`
+/// never flips its local `healthy` flag, even though it still (truthfully)
+/// publishes its raw per-check result into the mesh like everyone else.
+#[allow(clippy::too_many_arguments)]
+pub fn gossip_gsp_config(
+    admin_port: u16,
+    listen_port: u16,
+    target_port: u16,
+    gossip_port: u16,
+    seed_gossip_port: Option<u16>,
+    fall: u32,
+    quorum_fraction: f64,
+    failure_domain: &str,
+    psk: &str,
+) -> String {
+    let seeds = match seed_gossip_port {
+        Some(p) => format!("[\"127.0.0.1:{p}\"]"),
+        None => "[]".to_string(),
+    };
+    format!(
+        r#"
+settings:
+  workers: 1
+  shutdown_grace_sec: 1
+  admin:
+    listen: "127.0.0.1:{admin_port}"
+  failure_domain: "{failure_domain}"
+  gossip:
+    bind: "127.0.0.1:{gossip_port}"
+    seeds: {seeds}
+    quorum_fraction: {quorum_fraction}
+    psk: "{psk}"
+pools:
+  - name: local
+    targets: ["127.0.0.1:{target_port}"]
+    balancer: round_robin
+    health_check:
+      type: tcp_connect
+      interval_sec: 1
+      timeout_ms: 200
+      rise: 1
+      fall: {fall}
+listeners:
+  - name: tcp-in
+    bind: "127.0.0.1:{listen_port}"
+    protocol: tcp
+    pool: local
+"#
+    )
+}
+
 /// A config that fails `gsp_config::validate()` on purpose (negative
 /// `rise`), for the "bad submission never displaces the current revision"
 /// test — this needs to be a *schema* rejection, not a YAML syntax error,

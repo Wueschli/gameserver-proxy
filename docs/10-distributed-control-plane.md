@@ -2,8 +2,10 @@
 
 ## Status
 
-**Design only. Nothing here is built.** Targets roadmap phases 10–12
-([08-roadmap.md](08-roadmap.md)). The v1 data plane and the single-instance
+**Phases 10 through 13 are all now built** — see the phase-by-phase status
+notes below and [08-roadmap.md](08-roadmap.md) for the slice-by-slice
+record. This chapter remains the design source of truth for the mechanisms
+those phases implement. The v1 data plane and the single-instance
 control plane (chapters [02](02-architecture.md), [05](05-configuration.md),
 [06](06-operations-observability.md)) are unchanged by this: every mechanism
 below is either an **additional writer** feeding the same validated `Snapshot`
@@ -28,11 +30,12 @@ end-to-end, not before.
 relay logs, adoption, intra-tier HA, staged/canary rollout, RBAC + audit) —
 see `docs/08-roadmap.md`.
 
-**Phase 13 (Tier 2, regional health fabric) is now fully designed (this
-session, 2026-09-05) but not yet built** — see "Mechanism (design)" under
-"Tier 2 — regional health fabric" below, and ADR 24 in `docs/09`, at the same
-level of detail phase 12's design session gave ADRs 21–23 before their
-slices landed.
+**Phase 13 status (2026-09-05): fully built**, all 5 slices (config schema,
+SWIM membership via embedded `foca`, the per-backend health broadcast,
+`Backend`/`health.rs` integration, and multi-process live verification in
+`crates/gsp-fleet-tests`) — see "Mechanism (built)" under "Tier 2 —
+regional health fabric" below, ADR 24 in `docs/09`, and
+`docs/08-roadmap.md` for the slice-by-slice build record.
 
 ---
 
@@ -201,7 +204,7 @@ This removes both failure modes: one flapping instance cannot poison the pool
 (quorum gate on "down"), and one instance cannot ignore a domain-wide outage
 (the `OR`).
 
-### Mechanism (design, 2026-09-05 — not yet built)
+### Mechanism (built, 2026-09-05 — designed and implemented same day)
 
 **Membership: embedded `foca` (SWIM), not hand-rolled.** Same reasoning ADR 21
 already used for Raft: SWIM's subtlety — indirect probing, suspicion timeouts,
@@ -253,8 +256,11 @@ independently move traffic (see the authority model above — it can only
 *nudge* a decision local checks already gate), so a shared-secret HMAC is the
 right amount of ceremony for what's at stake, not the maximum available.
 
-**Config schema** (new `gsp-config` fields — not yet added to the real
-`config.example.yaml`, this is still design-stage syntax):
+**Config schema** (built exactly as designed — `settings.gossip.psk` is a
+plain string, not env-substituted like the `${GOSSIP_PSK}` sketch below;
+this codebase has no env-substitution mechanism anywhere else in
+`gsp-config` either, so that stayed a design-stage placeholder, see
+`config.example.yaml` for the real, commented-out syntax):
 
 ```yaml
 settings:
