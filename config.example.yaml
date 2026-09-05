@@ -42,6 +42,20 @@ settings:
   #     - name: regex_firstbytes
   #       sha256: "..."
   #       config: "^GET /"       # opaque to the loader; the plugin's own format
+  # Tier-2 regional health fabric (phase 13, design only — not yet built, see
+  # docs/10 "Tier 2"). `failure_domain` and `gossip` must be set together, or
+  # not at all. `failure_domain` is this instance's reachability-equivalence
+  # class (an AZ, a region, a rack row) — instances in the same domain share
+  # per-backend up/down opinions over an authenticated gossip mesh; a Tier-1
+  # `force-down` always overrides, and local health checks stay in charge
+  # (a backend only returns healthy on this instance's own checks).
+  # failure_domain: "eu-west-1a"
+  # gossip:
+  #   bind: "0.0.0.0:7946"
+  #   seeds: ["10.0.1.5:7946", "10.0.1.6:7946"]  # any subset of live members
+  #   quorum_fraction: 0.66   # > 0.5, <= 1.0 — fraction of the domain that
+  #                           # must report a backend down to override "up"
+  #   psk: "change-me"        # every gossip datagram is HMAC-SHA256-tagged
 
 # Backend discovery (phase 8). A named source hands a pool its backend set
 # instead of a static `targets:` list. Level-triggered: the adapter returns the

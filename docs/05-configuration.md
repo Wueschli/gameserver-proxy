@@ -148,6 +148,26 @@
 > `wasmtime::Engine` and its epoch-ticker thread are built once (like
 > `settings.workers`).
 >
+> **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — config
+> schema landed, the gossip mesh itself is design only, not yet built):
+> `settings.failure_domain` (a string identity — this instance's
+> reachability-equivalence class, e.g. an AZ or region) and
+> `settings.gossip: { bind, seeds?, quorum_fraction?, psk }` must be set
+> together, or not at all — `validate()` rejects either one alone. `bind` /
+> `seeds[]` are UDP socket addresses; `seeds` is optional (any subset of a
+> domain's live members is enough to join, membership then discovers the
+> rest) and defaults to empty. `quorum_fraction` (default 0.66) must be
+> `> 0.5` and `<= 1.0` — the fraction of the domain that must report a
+> backend down before that verdict can override this instance's own "up"
+> reading; a same-or-under-half quorum could contradict itself between two
+> overlapping majorities, hence the `> 0.5` floor. `psk` (a pre-shared key,
+> must not be empty) authenticates every gossip datagram with an
+> HMAC-SHA256 tag. When the mesh itself lands, it will only ever be able to
+> push a backend's flag *down*, never revive it — a backend returns healthy
+> only on this instance's own local `rise` streak, and a Tier-1
+> `force-down` (`AdminState::Disabled`) always wins over the domain view.
+> Startup-only, like `settings.workers`.
+>
 > **Global caps:** `settings.limits: { max_connections, max_udp_sessions,
 > max_new_sessions_per_sec }` are process-wide ceilings (all optional; omit for no
 > cap). `max_connections` / `max_udp_sessions` bound the live counts across every
@@ -397,6 +417,10 @@ listeners:
   `max_memory_bytes` must be `>= 1`; each `modules[].sha256` must be a 64-char
   hex digest and `name` must not be empty; a `modules[].config`, if given, must
   be non-empty.
+- `settings.failure_domain` and `settings.gossip` must both be set, or
+  neither; `gossip.bind` / each `gossip.seeds[]` entry must be a valid socket
+  address; `quorum_fraction` must be `> 0.5` and `<= 1.0`; `psk` must not be
+  empty.
 - `match.type: dst` needs the destination address to be known: on TCP it comes
   from `getsockname()` for free; on UDP it needs either `transparent: true`
   (any dest) or `prefix: <cidr>` (dest within that prefix) on the listener —

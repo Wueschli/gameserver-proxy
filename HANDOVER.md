@@ -3,6 +3,25 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 13 slice 1 done (2026-09-05, same day as the design session below)**:
+config schema only, no gossip mesh code yet. `gsp-config` gained
+`settings.failure_domain: Option<String>` and `settings.gossip:
+Option<GossipConfig>` (raw `RawGossip { bind, seeds, quorum_fraction, psk }`
++ resolved `GossipConfig { bind: SocketAddr, seeds: Vec<SocketAddr>,
+quorum_fraction: f64, psk: String }`). `validate()`'s new `validate_gossip`
+enforces: `failure_domain` and `gossip` must both be set or neither; `bind`/
+each `seeds[]` entry parses as a socket address; `quorum_fraction` is
+`> 0.5` and `<= 1.0` (the `> 0.5` floor is deliberate — a same-or-under-half
+quorum could let two overlapping majorities both claim "quorum-down"
+simultaneously, contradicting the whole point of a single quorum verdict);
+`psk` must not be empty. 6 new tests. `config.example.yaml` and `docs/05`
+gained the commented-out example block / validation-rules entry, matching
+the `settings.sniffers` precedent exactly — real, parseable syntax, no
+runnable mesh behind it yet. `make check` green (fmt + clippy `-D warnings`
++ full `cargo test --all`); also smoke-tested `cargo run -p gsp -- --config
+config.example.yaml --check` to confirm the schema addition doesn't disturb
+existing parsing.
+
 **Phase 13 (regional health fabric) design session done (2026-09-05, same
 day as phase 12 closing out — no code changes)**: at the user's request,
 fully designed phase 13 before building any of it, matching the depth of

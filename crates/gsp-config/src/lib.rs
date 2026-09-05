@@ -72,6 +72,15 @@ struct RawSettings {
     /// reload once the loader lands — phase 9 slice 4).
     #[serde(default)]
     sniffers: Option<RawSniffers>,
+    /// Tier-2 regional health fabric (phase 13, docs/10 "Tier 2"). This
+    /// instance's reachability-equivalence class. Must be set together with
+    /// `gossip`, or not at all. Startup-only.
+    #[serde(default)]
+    failure_domain: Option<String>,
+    /// Tier-2 gossip mesh membership (phase 13). Must be set together with
+    /// `failure_domain`, or not at all. Startup-only.
+    #[serde(default)]
+    gossip: Option<RawGossip>,
 }
 
 impl Default for RawSettings {
@@ -83,8 +92,34 @@ impl Default for RawSettings {
             limits: RawLimits::default(),
             geo_db: None,
             sniffers: None,
+            failure_domain: None,
+            gossip: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGossip {
+    /// UDP address this instance's gossip mesh listens/sends on.
+    bind: String,
+    /// Known peers to bootstrap membership from (any subset of the domain's
+    /// live members is enough — foca's own SWIM traffic discovers the rest).
+    #[serde(default)]
+    seeds: Vec<String>,
+    /// Fraction of the domain's known members that must report a backend
+    /// down for that verdict to override this instance's own "up" reading.
+    /// Must be > 0.5 and <= 1.0 (a same-or-under-half quorum could contradict
+    /// itself between two overlapping majorities).
+    #[serde(default = "default_gossip_quorum_fraction")]
+    quorum_fraction: f64,
+    /// Pre-shared key: every gossip datagram carries an HMAC-SHA256 tag
+    /// computed with it. A wrong or missing tag is dropped silently.
+    psk: String,
+}
+
+fn default_gossip_quorum_fraction() -> f64 {
+    0.66
 }
 
 #[derive(Debug, Deserialize)]
@@ -1215,6 +1250,21 @@ pub struct Config {
     pub geo_db: Option<String>,
     /// Sniffer plugin loader settings (phase 9). `None` ⇒ no plugins load.
     pub sniffers: Option<SniffersConfig>,
+    /// Tier-2 regional health fabric identity (phase 13). `None` ⇒ gossip
+    /// fully disabled, today's local-only health behaviour.
+    pub failure_domain: Option<String>,
+    pub gossip: Option<GossipConfig>,
+}
+
+/// Resolved `settings.gossip` (phase 13, docs/10 "Tier 2"). The mesh itself
+/// (`foca`, the UDP socket, the HMAC auth) lives in `gsp-core::gossip` — this
+/// is just the validated config it reads.
+#[derive(Debug, Clone)]
+pub struct GossipConfig {
+    pub bind: SocketAddr,
+    pub seeds: Vec<SocketAddr>,
+    pub quorum_fraction: f64,
+    pub psk: String,
 }
 
 /// Resolved `settings.sniffers` (phase 9). The loader itself (`wasmtime`, the
@@ -2224,6 +2274,21 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         None => None,
     };
 
+    let gossip = match (raw.settings.failure_domain.clone(), raw.settings.gossip) {
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(Invalid(
+                "settings.failure_domain is set but settings.gossip is missing".into(),
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(Invalid(
+                "settings.gossip is set but settings.failure_domain is missing".into(),
+            ))
+        }
+        (Some(_), Some(rg)) => Some(validate_gossip(rg)?),
+    };
+
     Ok(Config {
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
@@ -2235,6 +2300,40 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         limits,
         geo_db: raw.settings.geo_db,
         sniffers,
+        failure_domain: raw.settings.failure_domain,
+        gossip,
+    })
+}
+
+fn validate_gossip(rg: RawGossip) -> Result<GossipConfig, ConfigError> {
+    use ConfigError::Invalid;
+    let bind = rg.bind.parse().map_err(|_| {
+        Invalid(format!(
+            "settings.gossip.bind is not a valid socket address: {}",
+            rg.bind
+        ))
+    })?;
+    let mut seeds = Vec::with_capacity(rg.seeds.len());
+    for s in &rg.seeds {
+        seeds.push(s.parse().map_err(|_| {
+            Invalid(format!(
+                "settings.gossip.seeds: not a valid socket address: {s}"
+            ))
+        })?);
+    }
+    if !(rg.quorum_fraction > 0.5 && rg.quorum_fraction <= 1.0) {
+        return Err(Invalid(
+            "settings.gossip.quorum_fraction must be > 0.5 and <= 1.0".into(),
+        ));
+    }
+    if rg.psk.is_empty() {
+        return Err(Invalid("settings.gossip.psk must not be empty".into()));
+    }
+    Ok(GossipConfig {
+        bind,
+        seeds,
+        quorum_fraction: rg.quorum_fraction,
+        psk: rg.psk,
     })
 }
 
@@ -4313,5 +4412,96 @@ listeners: [{ name: l, bind: "0.0.0.0:7777", pool: p }]
 "#
         )
         .is_err());
+    }
+
+    fn gossip_fixture(settings_extra: &str) -> String {
+        format!(
+            "settings:\n{settings_extra}\
+             pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+        )
+    }
+
+    #[test]
+    fn absent_gossip_is_none() {
+        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                    listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
+        let cfg = parse_str(yaml).unwrap();
+        assert!(cfg.failure_domain.is_none());
+        assert!(cfg.gossip.is_none());
+    }
+
+    #[test]
+    fn parses_gossip_settings_with_defaults() {
+        let yaml = gossip_fixture(
+            "  failure_domain: \"eu-west-1a\"\n\
+             \x20 gossip:\n    bind: \"0.0.0.0:7946\"\n    psk: \"secret\"\n",
+        );
+        let cfg = parse_str(&yaml).unwrap();
+        assert_eq!(cfg.failure_domain.as_deref(), Some("eu-west-1a"));
+        let g = cfg.gossip.unwrap();
+        assert_eq!(g.bind, "0.0.0.0:7946".parse().unwrap());
+        assert!(g.seeds.is_empty());
+        assert_eq!(g.quorum_fraction, 0.66);
+        assert_eq!(g.psk, "secret");
+    }
+
+    #[test]
+    fn parses_gossip_seeds_and_quorum_fraction() {
+        let yaml = gossip_fixture(
+            "  failure_domain: \"eu-west-1a\"\n\
+             \x20 gossip:\n    bind: \"0.0.0.0:7946\"\n    psk: \"secret\"\n    \
+             quorum_fraction: 0.75\n    seeds: [\"10.0.0.1:7946\", \"10.0.0.2:7946\"]\n",
+        );
+        let g = parse_str(&yaml).unwrap().gossip.unwrap();
+        assert_eq!(g.quorum_fraction, 0.75);
+        assert_eq!(
+            g.seeds,
+            vec![
+                "10.0.0.1:7946".parse().unwrap(),
+                "10.0.0.2:7946".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_gossip_without_failure_domain_and_vice_versa() {
+        let gossip_only =
+            gossip_fixture("  gossip:\n    bind: \"0.0.0.0:7946\"\n    psk: \"secret\"\n");
+        assert!(parse_str(&gossip_only).is_err());
+
+        let domain_only = gossip_fixture("  failure_domain: \"eu-west-1a\"\n");
+        assert!(parse_str(&domain_only).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_gossip_settings() {
+        for bad in [
+            // bad bind address
+            gossip_fixture(
+                "  failure_domain: \"d\"\n  gossip:\n    bind: \"nope\"\n    psk: \"secret\"\n",
+            ),
+            // bad seed address
+            gossip_fixture(
+                "  failure_domain: \"d\"\n  gossip:\n    bind: \"0.0.0.0:7946\"\n    \
+                 psk: \"secret\"\n    seeds: [\"nope\"]\n",
+            ),
+            // empty psk
+            gossip_fixture(
+                "  failure_domain: \"d\"\n  gossip:\n    bind: \"0.0.0.0:7946\"\n    psk: \"\"\n",
+            ),
+            // quorum_fraction too low
+            gossip_fixture(
+                "  failure_domain: \"d\"\n  gossip:\n    bind: \"0.0.0.0:7946\"\n    \
+                 psk: \"secret\"\n    quorum_fraction: 0.5\n",
+            ),
+            // quorum_fraction too high
+            gossip_fixture(
+                "  failure_domain: \"d\"\n  gossip:\n    bind: \"0.0.0.0:7946\"\n    \
+                 psk: \"secret\"\n    quorum_fraction: 1.5\n",
+            ),
+        ] {
+            assert!(parse_str(&bad).is_err(), "should reject: {bad}");
+        }
     }
 }
