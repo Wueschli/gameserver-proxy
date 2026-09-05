@@ -3,6 +3,40 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-05.
 
+**Phase 12 slice 1 done (2026-09-05, same day as the Dependabot cleanup
+above)**: `gsp-controller` gained a `standalone`/`slave` `--role` (`docs/10`
+"Fleet topology"). `standalone` is phase 10+11's behaviour, byte-for-byte
+unchanged. `slave` (`--parent-url` + `--parent-token`) is a relay: new
+`role.rs` (the `Role` enum), new `parent_client.rs` (deliberately mirrors
+`gsp`'s own `controller_client.rs` almost line for line — initial `GET
+/config` seed, then a `GET /config/subscribe` tail with capped-backoff
+reconnect — since a `slave` controller subscribing to its parent is
+`docs/10` principle 5 applied recursively, not a new mechanism; the wire
+shape is duplicated rather than shared as a library, matching this
+codebase's existing precedent at `gsp`'s `aggregator_client`/`gsp-ui`'s
+proxies). `AppState` gained a `role` field and a new `pub fn
+apply_revision` — the one path that actually writes a revision + notifies
+subscribers; `submit()` (both `POST /config` and `/config/rollback/*`, which
+calls `submit()` under the hood) checks `role == Slave` first and returns
+`403` before ever calling it, while `parent_client` calls `apply_revision`
+directly, deliberately bypassing that gate — the sanctioned way a slave
+gets a new revision. A slave numbers its own revisions locally; only the
+config text is shared across the relay, not a counter (`docs/10`'s
+homogeneous-schema requirement is about payload shape). 6 new tests (3
+`parent_client` SSE-parsing unit tests + 2 role-gate tests in `api.rs` + 1
+relay-lands-in-the-local-store test). Verified live end-to-end with two real
+`gsp-controller` processes: root submits revision 1 → slave relays it and
+serves its own `X-Config-Revision: 1`; a direct `POST /config` on the slave
+→ `403`; killing the root leaves the slave still serving what it had,
+retrying with growing backoff, never promoting itself.
+
+**Not yet built for phase 12**: aggregator-side hierarchy (push fan-in
+leaf→root through tiers), intra-tier HA (Raft/etcd consensus group per
+tier), operator intent migrating into the controller's revision log, staged/
+canary rollout, RBAC, and the adoption flow (`standalone`→`slave` role flip
+post-install). See `docs/08-roadmap.md` phase 12 and
+`docs/10-distributed-control-plane.md` for the full remaining scope.
+
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This
 file is the *current-state + gotchas* layer on top of that — per-phase

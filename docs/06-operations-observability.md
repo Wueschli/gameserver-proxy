@@ -281,6 +281,20 @@ mutually exclusive. On a controller outage `gsp` keeps running its
 last-applied config and retries the subscribe connection with capped
 exponential backoff (500ms → 30s); nothing about the data path pauses.
 
+**Role (phase 12 slice 1)**: `--role standalone` (default) is everything
+above unchanged. `--role slave --parent-url <url> [--parent-token <token>]`
+makes this controller a relay: it never accepts a write of its own (`POST
+/config` and `POST /config/rollback/*` both `403`, `"this controller is a
+slave tier..."`) and instead seeds from the parent's `GET /config` at
+startup, then holds a `GET /config/subscribe` connection to the parent and
+re-lands every revision it receives in its own store (its own local revision
+numbers — not required to match the parent's, only the config text is
+shared). A `gsp` instance, or a further `slave` tier, points at *this*
+controller exactly as it would at a `standalone` one — the relay is
+transparent below this tier. Losing the parent freezes this tier on
+last-known-good with the same reconnect-with-backoff behavior `gsp`'s own
+`--controller` client has; it never promotes itself to `standalone`.
+
 ### `gsp-aggregator` — fleet reads and operational fan-out
 
 One `--auth-token`-gated (optional) surface fed by every instance's own push,

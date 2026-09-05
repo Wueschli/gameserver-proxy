@@ -673,6 +673,24 @@ token, is ever exposed to a human directly.
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 ("Fleet topology", "Adoption"). Builds on phase 10+11's single-tier PoC —
 additive, no rework of what shipped there.
+- ✅ **Slice 1 (`gsp-controller` role)**: `standalone` / `slave` role, static
+  and install-time (`--role`, never inferred from connectivity). A
+  `standalone` tier is unchanged from phase 10+11. A `slave` tier
+  (`--parent-url` + `--parent-token`) never accepts a write directly
+  (`POST /config` and `/config/rollback/*` both `403`) — instead
+  `parent_client` seeds from the parent's `GET /config` at startup, then
+  subscribes to `GET /config/subscribe` and relays every accepted revision
+  into its own store (its own local revision numbers, not the parent's —
+  only the payload shape is shared). Reuses `gsp`'s own
+  `controller_client`'s reconnect-with-backoff shape; a lost parent freezes
+  the slave on last-known-good and keeps serving/relaying it downward, same
+  "never clear" rule as the proxy-to-controller hop. Verified live:
+  root submits a revision → slave relays and serves it with its own
+  `X-Config-Revision`; a direct write to the slave is `403`; killing the
+  root leaves the slave serving what it had and retrying with backoff.
+  **Not yet built**: aggregator-side hierarchy (push fan-in through tiers),
+  intra-tier HA (Raft/etcd), intent migration into the revision log, RBAC,
+  canary rollout, adoption.
 - `standalone` / `slave` role per controller and aggregator tier (static,
   install-time, never inferred from connectivity) so a deployment can nest
   regions under a root tier.

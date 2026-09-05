@@ -43,6 +43,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
+use crate::role::Role;
 use crate::store::{RevisionBytes, Store, StoreError};
 
 /// Capacity of the update-notification broadcast: how many accepted
@@ -61,16 +62,33 @@ pub struct AppState {
     /// Bearer token every `/config*` request must present, or `None` to
     /// leave the API open (`crate::auth`).
     pub auth_token: Option<Arc<str>>,
+    /// `standalone` (default) accepts writes directly; `slave` (phase 12
+    /// slice 1) never does — every revision it holds arrived via
+    /// [`crate::parent_client`], which writes the store directly and is the
+    /// only caller allowed to bypass this gate. See `crate::role`.
+    pub role: Role,
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>) -> Self {
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: Role) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
             updates,
             auth_token: auth_token.map(Arc::from),
+            role,
         }
+    }
+
+    /// Persists `bytes` as a new revision and notifies subscribers — the one
+    /// path both a local `submit()` and [`crate::parent_client`]'s relay use
+    /// to actually land a revision, after each has done its own role check
+    /// (a local submit must be rejected first; a parent relay is always
+    /// allowed regardless of role).
+    pub fn apply_revision(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
+        let revision = self.store.put(bytes)?;
+        let _ = self.updates.send(revision);
+        Ok(revision)
     }
 }
 
@@ -107,8 +125,15 @@ async fn submit_config(State(state): State<AppState>, body: String) -> Response 
 
 /// Validates `text` and persists it as a new revision on success — shared by
 /// [`submit_config`] and [`rollback`] (a rollback is just a re-submission of
-/// an old revision's bytes, never a rewrite of history).
+/// an old revision's bytes, never a rewrite of history). Rejects outright on
+/// a `slave` tier (`docs/10` "never accepts a write directly") before even
+/// parsing — a slave's only source of new revisions is
+/// [`crate::parent_client`], which never calls this function.
 async fn submit(state: &AppState, text: String) -> Response {
+    if state.role == Role::Slave {
+        return slave_rejects_write();
+    }
+
     if let Err(e) = gsp_config::parse_str(&text) {
         tracing::warn!(error = %e, "rejected an invalid config submission");
         return (
@@ -120,18 +145,25 @@ async fn submit(state: &AppState, text: String) -> Response {
             .into_response();
     }
 
-    match state.store.put(text.into_bytes()) {
+    match state.apply_revision(text.into_bytes()) {
         Ok(revision) => {
             tracing::info!(revision, "accepted a new config revision");
-            // No receivers (no subscriber connected right now) is not an
-            // error — the revision is durably stored regardless; a
-            // subscriber that connects later just gets it in its catch-up
-            // range.
-            let _ = state.updates.send(revision);
             (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
         }
         Err(e) => store_error_response(e),
     }
+}
+
+fn slave_rejects_write() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "this controller is a slave tier and does not accept writes directly; \
+                    submit to the root controller instead"
+                .into(),
+        }),
+    )
+        .into_response()
 }
 
 /// `GET /config` — the current revision's raw text, or 404 before the first
@@ -411,7 +443,7 @@ mod tests {
     fn test_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        (AppState::new(store, None), dir)
+        (AppState::new(store, None, Role::Standalone), dir)
     }
 
     const VALID_CONFIG: &str = r#"
@@ -735,7 +767,7 @@ listeners:
     async fn a_missing_token_is_unauthorized_when_one_is_configured() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, Some("secret".into()));
+        let state = AppState::new(store, Some("secret".into()), Role::Standalone);
         let app = router(state);
 
         let resp = app
@@ -758,10 +790,57 @@ listeners:
     }
 
     #[tokio::test]
+    async fn a_slave_tier_rejects_direct_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path()).unwrap());
+        // Seed a revision the way a real slave would (via `apply_revision`,
+        // never `submit()`) so the rollback path below has something to
+        // find before it hits the role gate.
+        store.put(VALID_CONFIG.as_bytes().to_vec()).unwrap();
+        let state = AppState::new(store, None, Role::Slave);
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .body(Body::from(VALID_CONFIG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Rollback is a re-submission under the hood — must be rejected too.
+        let resp = app
+            .oneshot(
+                Request::post("/config/rollback/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn apply_revision_bypasses_the_slave_write_gate() {
+        // `crate::parent_client` calls `apply_revision` directly, never
+        // `submit()` — this is what lets a slave *hold* revisions while
+        // still rejecting direct writes through the HTTP API.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let state = AppState::new(store, None, Role::Slave);
+        let revision = state.apply_revision(b"pools: []".to_vec()).unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(state.store.current_revision().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
     async fn the_right_token_is_admitted() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = AppState::new(store, Some("secret".into()));
+        let state = AppState::new(store, Some("secret".into()), Role::Standalone);
         let app = router(state);
 
         let resp = app

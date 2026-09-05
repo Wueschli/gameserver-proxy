@@ -991,6 +991,7 @@ dependencies = [
  "axum 0.8.9",
  "clap",
  "gsp-config",
+ "reqwest",
  "serde",
  "serde_json",
  "similar",

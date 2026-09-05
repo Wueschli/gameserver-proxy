@@ -4,10 +4,14 @@
 //! ("The controller"). Slice plan: [`docs/08-roadmap.md`](../../../docs/08-roadmap.md)
 //! phase 10+11.
 //!
-//! **This first release is deliberately a single `standalone` tier**: one
-//! process, one embedded store (ADR 20, `docs/09`), no Raft/etcd, no `slave`
-//! role, no HA. The hierarchy/replication/adoption design in `docs/10` is
-//! phase 12 — additive on top of this, not required to make this crate work.
+//! **Phase 10+11 release is a single `standalone` tier**: one process, one
+//! embedded store (ADR 20, `docs/09`), no Raft/etcd, no HA. Phase 12 slice 1
+//! adds an optional `slave` role ([`role`]) on top of that, unchanged
+//! otherwise: a `slave` tier never accepts a write directly (`api::submit`
+//! rejects with `403`), instead relaying a parent controller's revision
+//! stream into its own store via [`parent_client`]. Intra-tier HA
+//! (Raft/etcd), RBAC, canary rollout, and adoption remain phase 12 work not
+//! yet built — see `docs/10-distributed-control-plane.md`.
 //!
 //! Slice 1: [`store::Store`] persists config revisions. Slice 2 ([`api`]):
 //! `POST`/`GET /config`, validated with the same `gsp_config::parse_str` a
@@ -18,4 +22,6 @@
 
 pub mod api;
 pub mod auth;
+pub mod parent_client;
+pub mod role;
 pub mod store;
