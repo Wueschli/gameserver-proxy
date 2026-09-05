@@ -67,6 +67,12 @@ pub struct AppState {
     /// [`crate::parent_client`], which writes the store directly and is the
     /// only caller allowed to bypass this gate. See `crate::role`.
     pub role: RoleHandle,
+    /// `Some` when `--ha-peers` is set (phase 12 slice 6): `submit()`
+    /// proposes via Raft instead of writing `store` directly. `None` (the
+    /// default, `replicas: 1`) is today's behaviour, byte-for-byte —
+    /// see `crate::ha`'s module doc for the scope cut (HA and `slave` are
+    /// mutually exclusive in this slice).
+    pub ha: Option<Arc<crate::ha::HaHandle>>,
 }
 
 impl AppState {
@@ -77,7 +83,13 @@ impl AppState {
             updates,
             auth_token: auth_token.map(Arc::from),
             role,
+            ha: None,
         }
+    }
+
+    pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
+        self.ha = ha;
+        self
     }
 
     /// Persists `bytes` as a new revision and notifies subscribers — the one
@@ -143,6 +155,16 @@ async fn submit(state: &AppState, text: String) -> Response {
             }),
         )
             .into_response();
+    }
+
+    if let Some(ha) = &state.ha {
+        return crate::ha::client::propose_write(
+            ha,
+            crate::ha::WriteRequest::Config(text.clone().into_bytes()),
+            "/config",
+            text,
+        )
+        .await;
     }
 
     match state.apply_revision(text.into_bytes()) {

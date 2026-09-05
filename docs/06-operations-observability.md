@@ -318,6 +318,22 @@ a `slave` tier also relays the intent log from its parent, the same way it
 relays config — a `slave` controller now holds a full copy of both of its
 parent's logs while still never originating either one itself.
 
+**Intra-tier HA (phase 12 slice 6)**: `--ha-node-id <id>` + `--ha-peers
+id=host:port,...` (identical on every replica) turn a `standalone` tier into
+an `N`-node Raft group (embedded `openraft`) replicating both the config and
+intent logs together. `POST /config` and `POST /intent` propose a Raft entry
+and only return once it's committed; a replica that isn't the current leader
+transparently forwards the request to whichever one is (never a redirect —
+every existing client stays unaware HA exists). Reads (`GET
+/config`/`/config/subscribe`/`/intent/subscribe`/etc.) are served by
+whichever replica gets the request, straight from its own local copy — not
+a linearizable read, a deliberate relaxation justified in `docs/10`
+"Intra-tier HA (design)". `--ha-token` gates the new peer-only `/raft/*`
+routes (`append`, `vote`, `snapshot`) — a separate secret from
+`--auth-token`. **Mutually exclusive with `--role slave` in this release**
+(rejected at startup) — see `docs/10` for the scope cut and what combining
+them would need.
+
 **Adoption (phase 12 slice 5)**: `POST /admin/adopt
 {"parent_url":"...","parent_token":"..."}` flips a running `standalone`
 tier to `slave` without a restart. Refused with `409` unless this tier's

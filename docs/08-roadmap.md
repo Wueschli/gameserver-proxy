@@ -781,11 +781,38 @@ additive, no rework of what shipped there.
 built** — each has its own `docs/10` section (with wire shapes, storage
 layout, and rejected alternatives) and a `docs/09` ADR (21–23):
 
-- **Slice 6 — Intra-tier HA**: embedded `openraft`, one Raft group per
-  controller tier replicating both the config and intent logs (`sled`
-  unchanged as the state machine); the aggregator's HA is just stateless
-  replicas behind one address, no consensus needed. See `docs/10`
-  "Intra-tier HA (design)", ADR 21.
+- ✅ **Slice 6 — Intra-tier HA** (`gsp-controller` only; the aggregator's HA
+  design — stateless replicas behind one address, no consensus needed —
+  stays design-only, not built): embedded `openraft` 0.9, one Raft group
+  per controller tier replicating both the config and intent logs. New
+  `gsp_controller::ha` module: a `sled`-backed `LogStore`
+  (`RaftLogStorage`/`RaftLogReader`, its own `<data_dir>/ha` database —
+  durable across a restart, unlike `openraft`'s own in-memory reference
+  implementation this was adapted from), a `StateMachineStore`
+  (`RaftStateMachine`/`RaftSnapshotBuilder`) that applies a committed entry
+  by calling the *exact same* `AppState`/`IntentState::apply_revision` a
+  direct write already used, a `reqwest`-based `RaftNetwork` posting to
+  peers' `/raft/*` routes (gated by a new peer-only `--ha-token`), and
+  `ha::client::propose_write` — the one call `api::submit`/
+  `intent::api::submit_intent` make instead of `apply_revision` directly
+  when `--ha-peers` is set: proposes via Raft, and **transparently
+  HTTP-forwards to the current leader** (never a redirect) if this replica
+  isn't it, so no client anywhere needs to know HA exists. New CLI:
+  `--ha-node-id`, `--ha-peers id=host:port,...` (identical on every
+  replica; each boots and calls `raft.initialize()` with the same static
+  set — harmless no-op on every node but the one that wins the race),
+  `--ha-token`. **Scope cut, stated in the module doc**: HA and the `slave`
+  role are mutually exclusive in this slice (enforced at startup) —
+  combining them needs the upward relay to run leader-only with a
+  replicated cursor, designed in `docs/10` but not built here. 16 new
+  tests. **Verified live with a real 3-node cluster**: booted nodes 1/2/3,
+  confirmed node 3 elected leader; submitted a config write to node 1 (not
+  the leader) — transparently forwarded, `200`, `{"revision":1}`; submitted
+  to node 2 — `{"revision":2}`; all three nodes' `GET /config` agreed on
+  revision 2. Then **killed the leader (node 3)** and confirmed real
+  failover: node 1 was elected the new leader within seconds, and both a
+  config write (revision 3) and an intent write both succeeded through the
+  surviving 2-node majority.
 - **Slice 7 — Staged / canary rollout**: one monotonic config log, revisions
   tagged `{promoted, canary_groups}` in a new `stage` tree; an instance
   self-reports a `canary_group` when subscribing; `POST

@@ -41,6 +41,9 @@ pub struct IntentState {
     /// middleware) since `IntentState` and `crate::api::AppState` are
     /// distinct `axum` states.
     pub auth_token: Option<Arc<str>>,
+    /// `Some` when `--ha-peers` is set (phase 12 slice 6) — see
+    /// `crate::api::AppState::ha`'s doc, the config side of the same knob.
+    pub ha: Option<Arc<crate::ha::HaHandle>>,
 }
 
 impl IntentState {
@@ -51,7 +54,13 @@ impl IntentState {
             updates,
             role,
             auth_token: auth_token.map(Arc::from),
+            ha: None,
         }
+    }
+
+    pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
+        self.ha = ha;
+        self
     }
 
     /// Same bypass [`crate::api::AppState::apply_revision`] provides for
@@ -137,6 +146,16 @@ async fn submit_intent(State(state): State<IntentState>, body: String) -> Respon
             Json(ErrorResponse { error: e }),
         )
             .into_response();
+    }
+
+    if let Some(ha) = &state.ha {
+        return crate::ha::client::propose_write(
+            ha,
+            crate::ha::WriteRequest::Intent(body.clone().into_bytes()),
+            "/intent",
+            body,
+        )
+        .await;
     }
 
     match state.apply_revision(body.into_bytes()) {

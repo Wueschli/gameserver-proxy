@@ -4,9 +4,11 @@
 //! `GET /config/subscribe`. Slice 5: revision history/diff/rollback +
 //! `--auth-token`.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
@@ -15,6 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 use gsp_controller::adopt::AdoptState;
 use gsp_controller::api::{self, AppState};
+use gsp_controller::ha::{self, HaHandle, NodeId as HaNodeId};
 use gsp_controller::intent::api::IntentState;
 use gsp_controller::role::{Role, RoleHandle};
 use gsp_controller::store::Store;
@@ -54,6 +57,44 @@ struct Args {
     /// Bearer token this tier presents to its parent's `/config*` API.
     #[arg(long)]
     parent_token: Option<String>,
+
+    /// This node's own ID within its tier's Raft group. Required with
+    /// `--ha-peers` (phase 12 slice 6, see `docs/10` "Intra-tier HA
+    /// (design)").
+    #[arg(long)]
+    ha_node_id: Option<HaNodeId>,
+
+    /// The tier's full replica set, `id=host:port` pairs separated by
+    /// commas (e.g. `1=127.0.0.1:9901,2=127.0.0.1:9911,3=127.0.0.1:9921`),
+    /// identical on every replica. Setting this turns on HA: writes
+    /// propose a Raft entry instead of writing the store directly, and a
+    /// non-leader replica transparently forwards a write to the current
+    /// leader. Requires `--ha-node-id`. **Mutually exclusive with `--role
+    /// slave`** in this slice — combining HA with the slave role needs the
+    /// upward relay to run leader-only with a replicated cursor, designed
+    /// in `docs/10` but not yet built (see `crate::ha`'s module doc).
+    #[arg(long, value_delimiter = ',')]
+    ha_peers: Vec<String>,
+
+    /// Peer-only shared secret gating `/raft/*` — a separate secret from
+    /// `--auth-token` (client-facing), matching every other peer-to-peer
+    /// credential in this fleet.
+    #[arg(long)]
+    ha_token: Option<String>,
+}
+
+fn parse_ha_peers(raw: &[String]) -> anyhow::Result<BTreeMap<HaNodeId, openraft::BasicNode>> {
+    let mut peers = BTreeMap::new();
+    for pair in raw {
+        let (id, addr) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--ha-peers entry {pair:?} is not id=host:port"))?;
+        let id: HaNodeId = id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("--ha-peers entry {pair:?} has an invalid id: {e}"))?;
+        peers.insert(id, openraft::BasicNode::new(addr));
+    }
+    Ok(peers)
 }
 
 #[tokio::main]
@@ -62,6 +103,17 @@ async fn main() -> anyhow::Result<()> {
 
     if args.role == Role::Slave && args.parent_url.is_none() {
         anyhow::bail!("--role slave requires --parent-url");
+    }
+    if !args.ha_peers.is_empty() && args.ha_node_id.is_none() {
+        anyhow::bail!("--ha-peers requires --ha-node-id");
+    }
+    if !args.ha_peers.is_empty() && args.role == Role::Slave {
+        // Scope cut for this slice — see `gsp_controller::ha`'s module doc.
+        anyhow::bail!(
+            "--ha-peers cannot be combined with --role slave yet: the upward relay needs to \
+             run leader-only with a replicated cursor, which is designed (docs/10) but not \
+             built in this slice"
+        );
     }
 
     tracing_subscriber::fmt()
@@ -104,16 +156,97 @@ async fn main() -> anyhow::Result<()> {
     // `role::RoleHandle`'s doc for why a plain `Role` field per state
     // wouldn't work once adoption exists).
     let role_handle = RoleHandle::new(args.role);
-    let state = Arc::new(AppState::new(
-        store,
-        args.auth_token.clone(),
-        role_handle.clone(),
-    ));
-    let intent_state = Arc::new(IntentState::new(
-        intent_store,
-        role_handle.clone(),
-        args.auth_token.clone(),
-    ));
+    let mut config_state = AppState::new(store, args.auth_token.clone(), role_handle.clone());
+    let mut intent_state_val =
+        IntentState::new(intent_store, role_handle.clone(), args.auth_token.clone());
+
+    // Intra-tier HA (phase 12 slice 6): one Raft group per tier replicating
+    // both the config and intent logs together — see `gsp_controller::ha`'s
+    // module doc. `None` (no `--ha-peers`, the default `replicas: 1` shape)
+    // leaves every write on the exact same direct-to-`Store` path phase
+    // 10+11 shipped.
+    let ha_handle: Option<Arc<HaHandle>> = if args.ha_peers.is_empty() {
+        None
+    } else {
+        let node_id = args.ha_node_id.expect("checked above");
+        let peers = parse_ha_peers(&args.ha_peers)?;
+        let self_addr = peers
+            .get(&node_id)
+            .map(|n| n.addr.clone())
+            .unwrap_or_else(|| args.listen.to_string());
+        let ha_token: Option<Arc<str>> = args.ha_token.clone().map(Arc::from);
+
+        let ha_dir = args.data_dir.join("ha");
+        let db = sled::open(&ha_dir)
+            .map_err(|e| anyhow::anyhow!("opening HA store at {ha_dir:?}: {e}"))?;
+        let log_store = ha::log_store::LogStore::open(&db)
+            .map_err(|e| anyhow::anyhow!("opening raft log at {ha_dir:?}: {e}"))?;
+        let state_machine = Arc::new(
+            ha::state_machine::StateMachineStore::open(
+                &db,
+                Arc::new(config_state.clone()),
+                Arc::new(intent_state_val.clone()),
+            )
+            .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?,
+        );
+
+        let network = ha::network::Network {
+            ha_token: ha_token.clone(),
+        };
+        // Relaxed from the library defaults (150/300/50ms) — this is a
+        // control-plane group on plain HTTP over `reqwest`, not a
+        // low-latency data-path link; a wider election window trades a
+        // slightly slower failover for fewer spurious elections under
+        // ordinary scheduling/network jitter in a test or a loaded host.
+        let raft_config = Arc::new(
+            openraft::Config {
+                heartbeat_interval: 250,
+                election_timeout_min: 800,
+                election_timeout_max: 1500,
+                ..Default::default()
+            }
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid raft config: {e}"))?,
+        );
+        let raft = openraft::Raft::new(node_id, raft_config, network, log_store, state_machine)
+            .await
+            .map_err(|e| anyhow::anyhow!("starting raft: {e}"))?;
+
+        // Bootstrap: every replica in a fresh cluster calls `initialize`
+        // with the identical static peer set from `--ha-peers`; `openraft`
+        // requires an empty log for it to succeed, so at most one call
+        // actually wins the race (the rest error harmlessly once any node's
+        // log has content — logged at `debug`, not a real failure). A
+        // brief delay gives every peer's HTTP server (this one included)
+        // time to come up first.
+        let bootstrap_raft = raft.clone();
+        let members = peers.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            match bootstrap_raft.initialize(members).await {
+                Ok(()) => tracing::info!("raft cluster initialized"),
+                Err(e) => tracing::debug!(
+                    error = %e,
+                    "raft initialize was a no-op (already initialized by this node or a peer, \
+                     which is the expected outcome for every node but the one that won the race)"
+                ),
+            }
+        });
+
+        let handle = Arc::new(HaHandle {
+            raft,
+            node_id,
+            self_addr,
+            ha_token,
+        });
+        config_state = config_state.with_ha(Some(handle.clone()));
+        intent_state_val = intent_state_val.with_ha(Some(handle.clone()));
+        tracing::info!(node_id, peers = ?peers.keys().collect::<Vec<_>>(), "intra-tier HA enabled");
+        Some(handle)
+    };
+
+    let state = Arc::new(config_state);
+    let intent_state = Arc::new(intent_state_val);
 
     if args.role == Role::Slave {
         let parent_url = args.parent_url.expect("checked above");
@@ -171,11 +304,14 @@ async fn main() -> anyhow::Result<()> {
         auth_token: args.auth_token.map(Arc::from),
     };
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router((*state).clone()))
         .merge(gsp_controller::intent::api::router((*intent_state).clone()))
         .merge(gsp_controller::adopt::router(adopt_state));
+    if let Some(handle) = ha_handle {
+        app = app.merge(ha::routes::router(handle));
+    }
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "gsp-controller listening");

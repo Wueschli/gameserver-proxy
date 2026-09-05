@@ -124,9 +124,8 @@ that started as a slave. 6 new tests. Verified live with two real
 root's config, and a direct write to it was `403` from that point on,
 freezing cleanly with backoff when the root was killed.
 
-**Not yet built for phase 12**: intra-tier HA (Raft/etcd consensus group per
-tier), staged/canary rollout, and RBAC. See `docs/08-roadmap.md` phase 12
-and `docs/10-distributed-control-plane.md` for the full remaining scope.
+**Not yet built for phase 12 at the time**: intra-tier HA (Raft/etcd
+consensus group per tier), staged/canary rollout, and RBAC.
 
 **Design session (2026-09-05, same day, no code changes)**: at the user's
 request, fully designed all three remaining phase 12 items before building
@@ -191,11 +190,79 @@ resolved (answered by ADR 21 and by the already-built independent slice
 that it's now also a prerequisite for region-scoped RBAC, which this design
 explicitly deferred for the same reason.
 
-Next step for phase 12: pick one of slices 6/7/8 and build it — none
-depend on the others, so any order works. HA (slice 6) is the largest
-single implementation effort (a real `openraft` integration); canary
-(slice 7) and RBAC (slice 8) are each closer in size to the slice 1–5 work
-already done.
+**Slice 6 (intra-tier HA) done (2026-09-05, same day)**: `gsp-controller`
+gained real embedded-Raft HA via `openraft` 0.9 — a real 3-node cluster,
+not a stub. New `gsp_controller::ha` module, adapted from `openraft`'s own
+`examples/memstore`/`raft-kv-memstore` reference (fetched from GitHub at
+the pinned `v0.9.25` tag to get the exact trait signatures right — the
+crate's own `storage-v2` traits are undocumented outside that example, and
+`RaftStorage`'s "sealed trait" design means there's no way to discover the
+right shape from the compiler alone without a working reference):
+
+- `ha::log_store::LogStore` — `RaftLogStorage`/`RaftLogReader`, **`sled`-
+  backed** unlike the upstream example's in-memory `BTreeMap` (a real
+  divergence, not cosmetic: this crate's whole point is a log that survives
+  a restart). Its own `<data_dir>/ha` database, two trees (`raft_log`,
+  `raft_log_meta` for vote + last-purged).
+- `ha::state_machine::StateMachineStore` — `RaftStateMachine` +
+  `RaftSnapshotBuilder`. `apply()` calls the **exact same**
+  `AppState`/`IntentState::apply_revision` a direct (non-HA) write already
+  used — applying a committed Raft entry is a new *source*, never a new
+  code path, matching the same principle slice 1's `parent_client` and
+  slice 5's `adopt` both already established for that function. Snapshot
+  build/install round-trips both `Store`s' full revision history through
+  `apply_revision` too — correct, though never actually exercised in
+  practice since this slice's log never purges (accepted per the design
+  doc's "log grows unbounded, compact later" tradeoff).
+- `ha::network` — `RaftNetworkFactory`/`RaftNetwork` over `reqwest`, posting
+  to peers' `/raft/*` (`ha::routes`, gated by a new peer-only `--ha-token`).
+- `ha::client::propose_write` — the one call `api::submit`/
+  `intent::api::submit_intent` make instead of `apply_revision` directly
+  when `--ha-peers` is set: proposes via `raft.client_write`, and on a
+  `ForwardToLeader` error **transparently HTTP-forwards** the original
+  request to the current leader's copy of the same route — never a
+  redirect, so `gsp`/`gsp-ui`/`curl` need zero HA-awareness.
+
+New CLI: `--ha-node-id`, `--ha-peers id=host:port,...` (identical on every
+replica — each independently calls `raft.initialize()` at boot with the
+same static set; harmless no-op on every node but whichever wins the race),
+`--ha-token`. `AppState`/`IntentState` gained an `ha: Option<Arc<HaHandle>>`
+field (`with_ha` builder, mirroring `gsp-aggregator`'s `with_auth_token`
+pattern) — `None` (no `--ha-peers`) is the exact pre-slice-6 code path,
+byte-for-byte.
+
+**Scope cut, stated up front in the module doc**: HA and `--role slave` are
+mutually exclusive in this slice (rejected at startup with a clear error)
+— combining them needs the upward relay to run leader-only with its cursor
+promoted to replicated state, which `docs/10` designs but this slice
+doesn't build.
+
+Two real clippy findings fixed along the way (both legitimate, not
+false positives): `clone()` on `LogId`/`Option<LogId>` (both `Copy`) in the
+log store, and `#[allow(clippy::result_large_err)]` (with a one-line
+justification each, per `CLAUDE.md`'s guardrail) on two spots where the
+`Err` type is `openraft`'s own `StorageError`/`RPCError` — sized by a
+third-party crate, not something a caller here can shrink.
+
+16 new tests (`ha::log_store`, `ha::state_machine`). `make check` green
+(full workspace, fmt + clippy `-D warnings` + all tests).
+
+**Verified live with a real 3-node cluster** (not a single-node smoke
+test): booted 3 `gsp-controller` processes with `--ha-peers` naming all
+three; confirmed node 3 self-elected leader from the logs; `POST /config`
+against node 1 (not the leader) → transparently forwarded → `200`,
+`{"revision":1}`; against node 2 → `{"revision":2}`; all three nodes' `GET
+/config` agreed on revision 2 with identical content. Then **killed the
+leader (node 3)** outright and confirmed real failover: node 1 was elected
+the new leader within a couple of seconds (well within the configured
+800–1500ms election timeout plus one retry), and both a config write
+(landed as revision 3) and an intent write (revision 1) succeeded through
+the surviving 2-node majority — proving the whole write path, not just
+election, survives a leader loss.
+
+Next step for phase 12: slices 7 (staged/canary rollout) and 8 (RBAC and
+audit) remain, per their `docs/10` design sections and `docs/09` ADRs
+22–23. Neither depends on slice 6 or on each other.
 
 Design is the source of truth in [`docs/`](docs/); locked decisions are the ADR
 table in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). This
