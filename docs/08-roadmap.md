@@ -980,8 +980,8 @@ Full design: [11-backend-transport.md](11-backend-transport.md). Closes the
 gap `docs/01-requirements.md`'s Assumptions section states outright
 ("Backends are reachable over a trusted internal network") — not true once
 proxy instances are distributed globally (phase 10–13's whole point) in
-front of game servers on a different network entirely. **Complete — all 6
-slices built and verified live**, see ADR 25 in `docs/09`.
+front of game servers on a different network entirely. **Complete — all 7
+slices built**, see ADR 25 in `docs/09`.
 
 Mechanism (design, locked 2026-09-05 follow-up session — see docs/11
 "Locked decisions"): unmodified WireGuard via `defguard/wireguard-rs`
@@ -1053,6 +1053,26 @@ needs it; none started):
    (boringtun panics on a same-pubkey `configure_peer`, and the constant
    churn never let a handshake stabilize) — fixed by skipping a
    registration identical to the last one applied.
+
+7. ✅ **Proxy-peers registry — the mirror-image direction**: slice 6's
+   end-to-end verification shipped `gsp-agent --peer-pubkey`/
+   `--peer-endpoint` as a static single-proxy pin, which proved the tunnel
+   data plane but doesn't scale — a growing proxy fleet, or a proxy added
+   after an origin was already deployed, needed the origin's `gsp-agent`
+   restarted with new flags to learn about it. Closed by mirroring slices
+   2+4's mechanism in the other direction: a new `gsp-controller`
+   "proxy peers" registry (`gsp_controller::proxy_peers`, `POST`/`GET
+   /proxy-peers(+/{name})`, `GET /proxy-peers/subscribe`) that every
+   `gsp --tunnel-*` instance registers itself into (new `gsp::
+   proxy_register`, mirrors `gsp-agent::register`), and a new `gsp-agent`
+   subscribe-and-reconcile task (`proxy_subscribe.rs`, mirrors `gsp`'s own
+   `tunnel_client.rs`, including the same remove-then-add + skip-unchanged
+   fix slice 6 needed) that reconciles every registered proxy onto the
+   origin's interface. `--peer-pubkey`/`--peer-endpoint` still work
+   alongside it as a manual pin — the two converge to the same state, no
+   conflict. Not re-verified live in containers (the mechanism and its
+   failure modes are identical to slice 6's, already proven there); covered
+   by unit + in-crate HTTP tests only.
 
 Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
 NAT fallback (documented v1 limitation, no code) — does not block starting

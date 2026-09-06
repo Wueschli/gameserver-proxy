@@ -10,6 +10,7 @@ mod controller_client;
 mod discovery;
 mod intent_client;
 mod procinfo;
+mod proxy_register;
 mod reload;
 mod resolver;
 mod sniffer_loader;
@@ -117,6 +118,24 @@ struct Args {
     /// directly — see `gsp-agent --userspace`'s doc for why.
     #[arg(long)]
     tunnel_userspace: bool,
+
+    /// This proxy's stable identity in `--tunnel-controller-url`'s
+    /// proxy-peers registry (phase 14 slice 7) — arbitrary, just needs to
+    /// be unique fleet-wide. Required with `--tunnel-iface`.
+    #[arg(long)]
+    tunnel_name: Option<String>,
+
+    /// This proxy's public dial-out address to register (`ip:port`) — every
+    /// origin's `gsp-agent` learns it from here and peers with it. Required
+    /// (not optional like an origin's `--endpoint`): `docs/11`'s whole
+    /// premise is that only the proxy side needs a stable public address.
+    #[arg(long)]
+    tunnel_endpoint: Option<String>,
+
+    /// How often to re-register with `--tunnel-controller-url`'s
+    /// proxy-peers registry.
+    #[arg(long, default_value_t = 30)]
+    tunnel_register_interval_sec: u64,
 }
 
 /// Resolved `--tunnel-*` settings, built once in `async_main` after
@@ -130,6 +149,9 @@ struct TunnelConfig {
     controller_url: String,
     controller_token: Option<String>,
     userspace: bool,
+    name: String,
+    endpoint: String,
+    register_interval: Duration,
 }
 
 /// Where this process's config comes from, decided once at startup from
@@ -168,6 +190,14 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             let controller_url = args.tunnel_controller_url.clone().ok_or_else(|| {
                 anyhow::anyhow!("--tunnel-iface requires --tunnel-controller-url")
             })?;
+            let name = args
+                .tunnel_name
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-name"))?;
+            let endpoint = args
+                .tunnel_endpoint
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-endpoint"))?;
             Some(TunnelConfig {
                 iface: iface.clone(),
                 listen_port: args.tunnel_listen_port,
@@ -176,6 +206,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
                 controller_url,
                 controller_token: args.tunnel_controller_token.clone(),
                 userspace: args.tunnel_userspace,
+                name,
+                endpoint,
+                register_interval: Duration::from_secs(args.tunnel_register_interval_sec),
             })
         }
         None => None,
@@ -374,11 +407,24 @@ async fn run(
                 "wireguard tunnel interface up; subscribing to backend-peers updates"
             );
             let task = tokio::spawn(tunnel_client::run(
-                tc.controller_url,
-                tc.controller_token,
+                tc.controller_url.clone(),
+                tc.controller_token.clone(),
                 wg.clone(),
             ));
-            Some((task, wg))
+            // Phase 14 slice 7: register ourselves with the same
+            // controller's proxy-peers registry, so every origin's
+            // `gsp-agent` can peer with us without any origin-side
+            // reconfiguration — the mirror image of `task` above.
+            let register_task = tokio::spawn(proxy_register::run(
+                reqwest::Client::new(),
+                tc.controller_url,
+                tc.controller_token,
+                tc.name,
+                private_key.public_key().to_string(),
+                tc.endpoint,
+                tc.register_interval,
+            ));
+            Some((task, register_task, wg))
         }
         None => None,
     };
@@ -500,8 +546,9 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
-    if let Some((task, wg)) = tunnel {
+    if let Some((task, register_task, wg)) = tunnel {
         task.abort();
+        register_task.abort();
         if let Err(e) = wg.remove_interface() {
             tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
         }

@@ -22,7 +22,10 @@ use defguard_wireguard_rs::{
 /// `WGApi<Userspace>` are different concrete types — a trait object is the
 /// only way the caller can hold "whichever one actually came up" without
 /// knowing which at compile time) so the caller can later remove the
-/// interface on shutdown regardless of which backend won.
+/// interface on shutdown regardless of which backend won. `+ Send + Sync`
+/// (matching `gsp::tunnel_client::bring_up`'s identical bound) so the same
+/// handle can be shared with `proxy_subscribe`'s background reconcile task
+/// (phase 14 slice 7) via an `Arc`.
 pub fn bring_up_with(
     ifname: &str,
     private_key: &Key,
@@ -30,7 +33,7 @@ pub fn bring_up_with(
     address: IpAddrMask,
     peers: Vec<Peer>,
     prefer_userspace: bool,
-) -> anyhow::Result<Box<dyn WireguardInterfaceApi>> {
+) -> anyhow::Result<Box<dyn WireguardInterfaceApi + Send + Sync>> {
     let config = InterfaceConfiguration {
         name: ifname.to_string(),
         prvkey: private_key.to_string(),
@@ -58,7 +61,7 @@ pub fn bring_up_with(
 
 fn configure<API>(ifname: &str, config: &InterfaceConfiguration) -> anyhow::Result<WGApi<API>>
 where
-    WGApi<API>: WireguardInterfaceApi,
+    WGApi<API>: WireguardInterfaceApi + Send + Sync,
 {
     let mut api = WGApi::<API>::new(ifname.to_string())
         .with_context(|| format!("creating a WGApi handle for interface {ifname:?}"))?;

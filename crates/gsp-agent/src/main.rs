@@ -10,18 +10,24 @@
 //!
 //! **Peering with the edge proxy**: `gsp`'s side (phase 14 slice 4) only
 //! adds *this* agent as a peer once it sees the registration — it never
-//! tells this agent about itself. So this agent also takes `--peer-pubkey`/
-//! `--peer-endpoint` for the proxy's own identity, statically pinned (a
-//! fleet of proxies per origin isn't a locked design yet, `docs/11`), and
-//! configures it as a peer with a keepalive so the tunnel actually forms
-//! end to end instead of each side only ever seeing half a picture.
+//! tells this agent about itself. So this agent also subscribes to
+//! `gsp-controller`'s proxy-peers registry ([`proxy_subscribe`], phase 14
+//! slice 7) and reconciles every registered proxy onto this interface, the
+//! mirror image of `gsp`'s own subscribe-and-reconcile task — a growing
+//! proxy fleet, or one added after this origin was deployed, needs no
+//! restart here. `--peer-pubkey`/`--peer-endpoint` still exist alongside
+//! it as a manual pin (handy for a bootstrap proxy or a deployment too
+//! small to bother with the registry) — see [`proxy_subscribe`]'s module
+//! doc for why the two don't conflict.
 
 mod interface;
 mod keypair;
+mod proxy_subscribe;
 mod register;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -96,13 +102,11 @@ struct Args {
     #[arg(long)]
     userspace: bool,
 
-    /// The edge proxy's WireGuard pubkey — closes the gap flagged in this
-    /// module's doc comment (previously: nothing told this agent's
-    /// interface about the proxy at all, so no tunnel could form even with
-    /// `CAP_NET_ADMIN`). Requires `--peer-endpoint`. A static pinned peer is
-    /// the simplest thing that works for a single edge proxy; a fleet of
-    /// proxies is future work (`docs/11` doesn't lock a discovery story for
-    /// the origin's side of this yet).
+    /// A manually-pinned edge proxy's WireGuard pubkey, in addition to
+    /// whatever `--controller-url`'s proxy-peers registry already supplies
+    /// (see `proxy_subscribe`'s module doc) — a bootstrap proxy that
+    /// predates the registry, or a deployment too small to bother with it.
+    /// Requires `--peer-endpoint`.
     #[arg(long, requires = "peer_endpoint")]
     peer_pubkey: Option<String>,
 
@@ -162,15 +166,17 @@ async fn main() -> anyhow::Result<()> {
         peers.push(peer);
     }
 
-    let wg = interface::bring_up_with(
-        &args.iface,
-        &private_key,
-        args.listen_port,
-        address,
-        peers,
-        args.userspace,
-    )
-    .context("bringing up the local WireGuard interface")?;
+    let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> = Arc::from(
+        interface::bring_up_with(
+            &args.iface,
+            &private_key,
+            args.listen_port,
+            address,
+            peers,
+            args.userspace,
+        )
+        .context("bringing up the local WireGuard interface")?,
+    );
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
 
     let client = reqwest::Client::new();
@@ -186,11 +192,19 @@ async fn main() -> anyhow::Result<()> {
         },
         Duration::from_secs(args.register_interval_sec),
     ));
+    // Phase 14 slice 7: learn about every edge proxy, not just a manually
+    // pinned one — see `proxy_subscribe`'s module doc.
+    let subscribe_task = tokio::spawn(proxy_subscribe::run(
+        args.controller_url.clone(),
+        args.controller_token.clone(),
+        wg.clone(),
+    ));
 
     tokio::signal::ctrl_c()
         .await
         .context("waiting for a shutdown signal")?;
     tracing::info!("shutting down, removing the wireguard interface");
+    subscribe_task.abort();
     if let Err(e) = wg.remove_interface() {
         tracing::warn!(error = %e, "failed to remove the wireguard interface cleanly");
     }

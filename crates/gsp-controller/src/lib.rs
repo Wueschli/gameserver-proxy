@@ -27,5 +27,6 @@ pub mod ha;
 pub mod intent;
 pub mod parent_client;
 pub mod peers;
+pub mod proxy_peers;
 pub mod role;
 pub mod store;

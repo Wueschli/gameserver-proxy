@@ -143,6 +143,21 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   rotating an origin's key is a controller-side removal that propagates the
   same way a config change does — no manual per-proxy key exchange, ever,
   for a fleet of N proxies × M origins.
+- **...and a mirror-image "proxy peers" registry, built in slice 7.** The
+  bullet above only solves proxy→origin discovery. `gsp-agent`'s "every
+  proxy PoP it's paired with as a peer" premise two bullets up needs the
+  other direction too: an origin has to learn about every proxy, including
+  ones added after it was deployed, without being restarted. So every
+  `gsp --tunnel-*` instance also registers itself (pubkey + its own public
+  endpoint — always known, unlike an origin's) with a second registry, and
+  every `gsp-agent` subscribes to it and reconciles proxies onto its own
+  interface, the exact mirror of the first bullet's mechanism run in the
+  other direction. `gsp-agent --peer-pubkey`/`--peer-endpoint` (a manual
+  static pin, what slice 6's first end-to-end verification used before
+  this existed) still work alongside it for a bootstrap proxy or a
+  deployment too small to bother with the registry — they converge to the
+  same interface state a registered proxy would reach anyway, so there's no
+  conflict between the two paths.
 - **Key material stays out of the config-revision log.** A peer table is
   security-sensitive, high-churn (origins come and go), and has nothing to
   do with routing/pool structure — it belongs in its own resource on the

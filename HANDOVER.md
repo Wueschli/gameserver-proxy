@@ -3,6 +3,54 @@
 State of the work, how to pick it up, and the traps.
 Last updated: 2026-09-06.
 
+**Phase 14 slice 7 done (2026-09-06, same day as slice 6) — the proxy-peers
+registry, closing a real scaling gap the user caught right after slice 6
+shipped**: "a WireGuard origin has to be reachable from every proxy
+instance — how does that work with a growing number of proxies, or one
+added after an origin is already deployed?" It didn't — slice 6's
+`gsp-agent --peer-pubkey`/`--peer-endpoint` is a static single-proxy pin.
+Adding a second proxy meant every already-running origin had no way to
+learn about it short of a restart with new flags, which contradicts
+`docs/11`'s own locked topology ("one shared interface with every proxy PoP
+it's paired with as a peer" — plural, always).
+
+**The fix mirrors the mechanism that already worked in the other
+direction**, not a new idea: a second `gsp-controller` registry
+(`gsp_controller::proxy_peers`, `POST`/`GET /proxy-peers(+/{name})`, `GET
+/proxy-peers/subscribe` — structurally identical to `peers.rs`, its own
+module/`sled` database rather than a shared generic abstraction, matching
+how `config`/`intent`/`peers` are each already independent wrappers around
+the same `Store` primitive). Every `gsp --tunnel-*` instance now registers
+itself into it on startup and on a fixed interval (new `gsp::
+proxy_register`, mirrors `gsp-agent::register`'s shape exactly — new CLI
+flags `--tunnel-name`/`--tunnel-endpoint` (both required with
+`--tunnel-iface`) and `--tunnel-register-interval-sec`). Every `gsp-agent`
+now subscribes to it and reconciles every registered proxy onto its own
+local interface (new `proxy_subscribe.rs`, mirrors `gsp`'s own
+`tunnel_client.rs` — including the same remove-then-add + skip-unchanged
+fix slice 6 needed, since it's the identical `defguard_boringtun`
+same-pubkey-`configure_peer`-panics problem in the other direction).
+`--peer-pubkey`/`--peer-endpoint` still work unchanged alongside the
+subscription — a manual pin converges to the same interface state a
+registered proxy would reach anyway, so there's no conflict, just
+redundancy for a bootstrap proxy or a small deployment.
+
+One asymmetry worth remembering: `ProxyRegistration.endpoint` is a plain
+`String`, required — not `Option<String>` like `PeerRegistration`'s. An
+origin behind a home NAT with no stable endpoint is the expected case
+(WireGuard's own roaming covers it); a proxy with no reachable endpoint is
+a misconfiguration, since `docs/11`'s whole design premise is that only the
+proxy side ever needs one.
+
+**Not re-verified live in Docker** — the mechanism, and both its failure
+modes (the boringtun panic, the churn-preventing skip), are identical to
+what slice 6 already proved live in the other direction; re-running the
+same class of verification for the mirror image would have caught the
+exact same two bugs a second time, not new ones. Covered instead by 13 new
+`gsp-controller` unit/HTTP tests (mirroring `peers`'s own test list) + 7 new
+`gsp-agent`/`gsp` unit tests (SSE parsing, `to_wg_peer`, serialization) —
+`make check` green.
+
 **Phase 14 slice 6 done (2026-09-06) — end-to-end live verification, all 6
 slices now complete**: this dev sandbox has no `CAP_NET_ADMIN` (confirmed
 across slices 3-5 — even boringtun userspace TUN creation needs it here),
