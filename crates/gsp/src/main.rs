@@ -369,6 +369,7 @@ async fn run(
             tracing::info!(
                 iface = %tc.iface,
                 port = tc.listen_port,
+                pubkey = %private_key.public_key(),
                 controller = %tc.controller_url,
                 "wireguard tunnel interface up; subscribing to backend-peers updates"
             );

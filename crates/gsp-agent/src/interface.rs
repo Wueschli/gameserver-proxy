@@ -9,6 +9,7 @@
 use anyhow::Context;
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::net::IpAddrMask;
+use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::{
     InterfaceConfiguration, Kernel, Userspace, WGApi, WireguardInterfaceApi,
 };
@@ -27,6 +28,7 @@ pub fn bring_up_with(
     private_key: &Key,
     listen_port: u16,
     address: IpAddrMask,
+    peers: Vec<Peer>,
     prefer_userspace: bool,
 ) -> anyhow::Result<Box<dyn WireguardInterfaceApi>> {
     let config = InterfaceConfiguration {
@@ -34,7 +36,7 @@ pub fn bring_up_with(
         prvkey: private_key.to_string(),
         addresses: vec![address],
         port: listen_port,
-        peers: Vec::new(),
+        peers,
         mtu: None,
         fwmark: None,
     };

@@ -74,7 +74,8 @@ settings:
 #   type: kubernetes   — Endpoints of a Service (polled; SA token + CA in-pod)
 #   type: tunnel        — backend addresses a `gsp-agent`-managed origin behind
 #                         a WireGuard tunnel has registered with the controller
-#                         (phase 14, schema only so far — no runtime behavior yet)
+#                         (phase 14; requires `gsp --tunnel-*` on this proxy —
+#                         see docs/11-backend-transport.md)
 backend_sources:
   - name: local-static
     type: static

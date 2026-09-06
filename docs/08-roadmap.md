@@ -975,13 +975,13 @@ Slices:
 - **Result**: faster, multi-vantage-point backend health across a domain; one
   bad vantage point no longer flaps a pool.
 
-## Phase 14 – Backend transport (design only)
+## Phase 14 – Backend transport
 Full design: [11-backend-transport.md](11-backend-transport.md). Closes the
 gap `docs/01-requirements.md`'s Assumptions section states outright
 ("Backends are reachable over a trusted internal network") — not true once
 proxy instances are distributed globally (phase 10–13's whole point) in
-front of game servers on a different network entirely. **Design only, not
-started** — see ADR 25 in `docs/09`.
+front of game servers on a different network entirely. **Complete — all 6
+slices built and verified live**, see ADR 25 in `docs/09`.
 
 Mechanism (design, locked 2026-09-05 follow-up session — see docs/11
 "Locked decisions"): unmodified WireGuard via `defguard/wireguard-rs`
@@ -1037,14 +1037,22 @@ needs it; none started):
    pool's `source: <origin>` produce live, tunnel-internal backend
    addresses through the existing discovery reconcile path — no changes
    needed to `Snapshot::build_with_sources` itself.
-6. 🔜 **End-to-end live verification**: a real `gsp-agent` + real backend
-   process on one side of a real (or netns-simulated) NAT boundary, a real
-   `gsp` proxy + `gsp-controller` on the other, actual game traffic routed
-   proxy → WireGuard tunnel → agent → backend, confirmed live — matching
-   the "verified live with real processes" bar every phase so far has
-   used, not just in-tokio unit tests. A `crates/gsp-fleet-tests`-style
-   integration test (spawn the real binaries, drive them over real
-   sockets) is the natural home for a repeatable version of this.
+6. ✅ **End-to-end live verification**: a real `gsp-controller` +
+   `gsp-agent` (+ a plain TCP echo backend) + `gsp` proxy in four Docker
+   containers (`NET_ADMIN` + `/dev/net/tun` on the two WireGuard sides —
+   this project's own dev sandbox has neither, so containers were the
+   practical way to get a `CAP_NET_ADMIN`-capable host), a real payload
+   round-tripped through client → `gsp`'s public listener → WireGuard
+   tunnel (boringtun userspace backend) → `gsp-agent`'s interface → the
+   echo backend → back, confirmed stable (a live handshake surviving many
+   re-registration cycles, not just a one-shot connect) — see `HANDOVER.md`
+   for the two real bugs this surfaced and fixed: `gsp-agent` never added
+   the edge proxy as a peer at all (closed with `--peer-pubkey`/
+   `--peer-endpoint`), and `tunnel_client::run` tore down and rebuilt the
+   WireGuard session on every re-registration even when nothing changed
+   (boringtun panics on a same-pubkey `configure_peer`, and the constant
+   churn never let a handshake stabilize) — fixed by skipping a
+   registration identical to the last one applied.
 
 Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
 NAT fallback (documented v1 limitation, no code) — does not block starting

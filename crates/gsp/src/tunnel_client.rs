@@ -5,7 +5,9 @@
 //! not one interface per origin) and holds a long-lived `GET
 //! /peers/subscribe` connection against `gsp-controller`'s backend-peers
 //! registry (phase 14 slice 2), reconciling every registered origin onto
-//! this interface's peer list as a `configure_peer` upsert.
+//! this interface's peer list (skipping a registration that hasn't changed
+//! since the last one applied — see [`run`]'s doc for why that isn't just
+//! an optimization).
 //!
 //! Mirrors `controller_client.rs`'s subscribe/reconnect-with-backoff shape
 //! almost exactly — a dropped connection just retries with capped
@@ -23,14 +25,10 @@
 //! carries one (i.e. this proxy could dial out); the common case — an
 //! origin behind a home NAT — leaves the peer endpoint-less, and this
 //! proxy passively waits for the origin's own `gsp-agent` to initiate the
-//! WireGuard handshake. **How the origin's `gsp-agent` learns *this*
-//! proxy's own pubkey/endpoint to dial isn't built yet** — `gsp-agent`
-//! (phase 14 slice 3) only manages its own interface and registers itself;
-//! closing that loop is one of the things slice 6's end-to-end
-//! verification still has to land, most likely as a static
-//! `gsp-agent --peer-endpoint/--peer-pubkey` pair rather than a second
-//! registry round trip (the proxy already always has the known public
-//! address in this design, so there's no discovery problem on that side).
+//! WireGuard handshake (`gsp-agent --peer-endpoint/--peer-pubkey`, verified
+//! end to end in slice 6 — a static pin, since the proxy already always has
+//! a known public address in this design, so there's no discovery problem
+//! on that side).
 
 use std::path::Path;
 use std::time::Duration;
@@ -188,18 +186,32 @@ fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
 
 /// Runs forever, reconnecting with backoff on disconnect — mirrors
 /// `controller_client::run`'s shape. Always subscribes from `since=0`: this
-/// task holds no persisted local peer table across a reconnect, and
-/// `configure_peer` is an idempotent upsert, so replaying every past
-/// registration again on reconnect is harmless (just a little redundant
-/// `wg` syscall traffic on an already-rare event).
+/// task holds no persisted local revision cursor across a reconnect, but it
+/// does hold `last_applied` (this origin's last-applied registration, by
+/// name) across reconnects and across every event on a live connection —
+/// found necessary by live end-to-end testing (`docs/08` phase 14 slice 6):
+/// [`reconcile_peer`] removes-then-adds the peer (see its doc for why), and
+/// `gsp-agent` re-registers on a fixed interval regardless of whether
+/// anything changed, so without this skip a stable tunnel would never stay
+/// up — every re-registration would tear down the handshake the previous
+/// one just completed.
 pub async fn run(
     controller_url: String,
     token: Option<String>,
     wg: std::sync::Arc<dyn WireguardInterfaceApi + Send + Sync>,
 ) {
     let mut backoff = RECONNECT_MIN;
+    let mut last_applied: std::collections::HashMap<String, PeerRegistration> =
+        std::collections::HashMap::new();
     loop {
-        match subscribe_once(&controller_url, token.as_deref(), wg.as_ref()).await {
+        match subscribe_once(
+            &controller_url,
+            token.as_deref(),
+            wg.as_ref(),
+            &mut last_applied,
+        )
+        .await
+        {
             Ok(()) => {
                 backoff = RECONNECT_MIN;
                 tracing::warn!(
@@ -224,6 +236,7 @@ async fn subscribe_once(
     base_url: &str,
     token: Option<&str>,
     wg: &(dyn WireguardInterfaceApi + Send + Sync),
+    last_applied: &mut std::collections::HashMap<String, PeerRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/peers/subscribe");
     let mut req = reqwest::Client::new().get(&url);
@@ -254,7 +267,12 @@ async fn subscribe_once(
             let event = buf[..end].to_string();
             buf.drain(..end + 2);
             if let Some(reg) = parse_sse_event(&event) {
-                reconcile_peer(wg, reg);
+                if last_applied.get(&reg.name) == Some(&reg) {
+                    continue; // unchanged since last apply — don't churn the session
+                }
+                let name = reg.name.clone();
+                reconcile_peer(wg, &reg);
+                last_applied.insert(name, reg);
             }
         }
     }
@@ -274,20 +292,38 @@ fn parse_sse_event(event: &str) -> Option<PeerRegistration> {
     serde_json::from_value(payload.get("registration")?.clone()).ok()
 }
 
-fn reconcile_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), reg: PeerRegistration) {
-    match to_wg_peer(&reg) {
-        Ok(peer) => match wg.configure_peer(&peer) {
-            Ok(()) => tracing::info!(
-                origin = %reg.name,
-                backends = ?reg.backends,
-                has_endpoint = reg.endpoint.is_some(),
-                "reconciled wireguard peer for origin"
-            ),
-            Err(e) => tracing::error!(
-                origin = %reg.name, error = %e,
-                "failed to configure wireguard peer for origin"
-            ),
-        },
+/// Removes any existing peer under this pubkey before adding it back with
+/// the latest fields — found by live end-to-end testing (`docs/08` phase 14
+/// slice 6) to be required, not just defensive: `defguard_boringtun`'s
+/// userspace backend panics ("Modifying existing peers is not yet
+/// supported") if `configure_peer` is called for a pubkey it already has,
+/// unlike the kernel backend's netlink upsert. `remove_peer` on a pubkey
+/// that isn't configured yet is a harmless no-op on both backends, so this
+/// is safe to do unconditionally on every registration, including the
+/// first one for a given origin.
+fn reconcile_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), reg: &PeerRegistration) {
+    match to_wg_peer(reg) {
+        Ok(peer) => {
+            if let Err(e) = wg.remove_peer(&peer.public_key) {
+                tracing::debug!(
+                    origin = %reg.name, error = %e,
+                    "removing any existing wireguard peer before reconfiguring it \
+                     (harmless if it wasn't configured yet)"
+                );
+            }
+            match wg.configure_peer(&peer) {
+                Ok(()) => tracing::info!(
+                    origin = %reg.name,
+                    backends = ?reg.backends,
+                    has_endpoint = reg.endpoint.is_some(),
+                    "reconciled wireguard peer for origin"
+                ),
+                Err(e) => tracing::error!(
+                    origin = %reg.name, error = %e,
+                    "failed to configure wireguard peer for origin"
+                ),
+            }
+        }
         Err(e) => tracing::error!(
             origin = %reg.name, error = %e,
             "skipping a malformed peer registration"

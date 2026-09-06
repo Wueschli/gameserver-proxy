@@ -8,14 +8,13 @@
 //! ([`register`], phase 14 slice 2), keyed by a persisted identity
 //! ([`keypair`]) so re-registering never changes this origin's pubkey.
 //!
-//! **Scope of this slice**: this agent creates and registers its own
-//! interface; it does not yet add the edge proxy as a WireGuard peer
-//! itself (that comes from whichever proxies subscribe to this origin's
-//! registration and reconcile their own peer list — `gsp`'s side of that,
-//! phase 14 slice 4, isn't built yet). Until slice 4 exists, a `gsp-agent`
-//! brings up a real local interface and a real registration lands on the
-//! controller, but no tunnel actually forms end to end yet — that's slice
-//! 6's job to verify.
+//! **Peering with the edge proxy**: `gsp`'s side (phase 14 slice 4) only
+//! adds *this* agent as a peer once it sees the registration — it never
+//! tells this agent about itself. So this agent also takes `--peer-pubkey`/
+//! `--peer-endpoint` for the proxy's own identity, statically pinned (a
+//! fleet of proxies per origin isn't a locked design yet, `docs/11`), and
+//! configures it as a peer with a keepalive so the tunnel actually forms
+//! end to end instead of each side only ever seeing half a picture.
 
 mod interface;
 mod keypair;
@@ -27,7 +26,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
+use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::net::IpAddrMask;
+use defguard_wireguard_rs::peer::Peer;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -94,6 +95,23 @@ struct Args {
     /// a guaranteed, logged failure on every run.
     #[arg(long)]
     userspace: bool,
+
+    /// The edge proxy's WireGuard pubkey — closes the gap flagged in this
+    /// module's doc comment (previously: nothing told this agent's
+    /// interface about the proxy at all, so no tunnel could form even with
+    /// `CAP_NET_ADMIN`). Requires `--peer-endpoint`. A static pinned peer is
+    /// the simplest thing that works for a single edge proxy; a fleet of
+    /// proxies is future work (`docs/11` doesn't lock a discovery story for
+    /// the origin's side of this yet).
+    #[arg(long, requires = "peer_endpoint")]
+    peer_pubkey: Option<String>,
+
+    /// The edge proxy's public `ip:port` to dial. Required to actually
+    /// initiate the handshake — an origin behind NAT can't rely on the
+    /// proxy dialing in first, since the proxy only learns of an origin's
+    /// endpoint from this agent's own (often NAT-invisible) `--endpoint`.
+    #[arg(long, requires = "peer_pubkey")]
+    peer_endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -123,11 +141,33 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("--address {:?} is not a valid ip/cidr: {e}", args.address))?;
 
+    let mut peers = Vec::new();
+    if let (Some(peer_pubkey), Some(peer_endpoint)) = (&args.peer_pubkey, &args.peer_endpoint) {
+        let public_key: Key = peer_pubkey
+            .parse()
+            .map_err(|e| anyhow::anyhow!("--peer-pubkey {peer_pubkey:?} is not valid: {e}"))?;
+        let endpoint: SocketAddr = peer_endpoint
+            .parse()
+            .with_context(|| format!("--peer-endpoint {peer_endpoint:?} is not a valid ip:port"))?;
+        let mut peer = Peer::new(public_key);
+        peer.endpoint = Some(endpoint);
+        // Single static peer (the edge proxy) — route everything through
+        // it. A fleet of proxies per origin isn't a locked design yet
+        // (`docs/11`), so this stays a single pinned peer for now.
+        peer.allowed_ips = vec!["0.0.0.0/0".parse().unwrap()];
+        // The proxy may sit behind NAT too (or this origin does) —
+        // keepalive is what keeps the mapping alive between handshakes.
+        peer.persistent_keepalive_interval = Some(25);
+        tracing::info!(pubkey = %peer_pubkey, endpoint = %endpoint, "peering with the edge proxy");
+        peers.push(peer);
+    }
+
     let wg = interface::bring_up_with(
         &args.iface,
         &private_key,
         args.listen_port,
         address,
+        peers,
         args.userspace,
     )
     .context("bringing up the local WireGuard interface")?;

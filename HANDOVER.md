@@ -1,7 +1,72 @@
 # HANDOVER
 
 State of the work, how to pick it up, and the traps.
-Last updated: 2026-09-05.
+Last updated: 2026-09-06.
+
+**Phase 14 slice 6 done (2026-09-06) — end-to-end live verification, all 6
+slices now complete**: this dev sandbox has no `CAP_NET_ADMIN` (confirmed
+across slices 3-5 — even boringtun userspace TUN creation needs it here),
+so the real verification ran in 4 Docker containers instead
+(`--cap-add=NET_ADMIN --device=/dev/net/tun` on the two WireGuard sides):
+`gsp-controller`, `gsp-agent` (+ a `socat` TCP echo server standing in for a
+real game server, bound to the agent's own tunnel address), and `gsp` with
+`--tunnel-*`. A one-shot `keygen` container pre-generates both sides' WG
+keys into a shared volume before either starts, since each side's config
+statically pins the other's pubkey.
+
+**This surfaced and fixed two real bugs, not just environment friction**:
+
+1. **`gsp-agent` never added the edge proxy as a peer at all** — the gap
+   flagged in `tunnel_client.rs`'s module doc turned out to be real: an
+   origin's interface came up with zero peers, so nothing ever dialed out
+   even with `CAP_NET_ADMIN`. Fixed by adding `--peer-pubkey`/
+   `--peer-endpoint` to `gsp-agent` (`crates/gsp-agent/src/main.rs`,
+   `interface.rs`): a single statically-pinned peer (allowed_ips
+   `0.0.0.0/0`, `persistent_keepalive_interval: 25`) — a fleet of proxies
+   per origin isn't a locked design yet (`docs/11`), so one static peer is
+   the simplest thing that works. `gsp`'s own tunnel bring-up now also logs
+   its pubkey (`main.rs`), since an operator needs it to configure the
+   agent's `--peer-pubkey`.
+2. **`tunnel_client::reconcile_peer` tore down and rebuilt the WireGuard
+   session on every re-registration, even when nothing changed** —
+   `gsp-agent` re-registers on a fixed interval (`--register-interval-sec`)
+   regardless of whether anything changed, and `reconcile_peer` called
+   `wg.configure_peer` unconditionally on every event. Two failures from
+   this, found live: `defguard_boringtun`'s userspace backend **panics**
+   ("Modifying existing peers is not yet supported. Remove and add again
+   instead.") if `configure_peer` is called for a pubkey it already has —
+   fixed by having `reconcile_peer` always `remove_peer` first (a harmless
+   no-op if the peer isn't configured yet) before `configure_peer`. But
+   that alone meant every re-registration wiped the peer and forced a fresh
+   handshake — the tunnel would never stabilize. Fixed properly by tracking
+   `last_applied: HashMap<origin_name, PeerRegistration>` across the
+   subscribe loop's lifetime (`tunnel_client::run`/`subscribe_once`) and
+   skipping remove+reconfigure entirely when a registration is unchanged
+   from the last one actually applied.
+
+**Verified live, not just unit-tested**: with both fixes in, `docker
+compose up` brings up a stable tunnel — `wg show` on the proxy shows a
+live handshake age that keeps advancing (not resetting every
+re-registration) and growing tx/rx byte counters; `GET /pools` reports the
+tunneled backend `healthy`; a real payload sent to the proxy's public
+`0.0.0.0:9000` round-trips through proxy → WireGuard → agent → the `socat`
+echo backend → back byte-for-byte, confirmed both immediately after startup
+and again after 30+ seconds (several re-registration cycles) to prove the
+"unchanged skip" fix actually holds the session steady rather than just
+delaying the same churn. Also fixed along the way: `TunnelSource`
+discovery's origin-name matching requirement (`backend_sources[].name` must
+equal the origin's registered `--name`) was already correct in the code —
+my first test config had them mismatched (`home-origin` vs. `origin1`),
+which is worth remembering if this environment gets rebuilt: the two names
+are intentionally the same string, not independently chosen.
+
+The Docker environment (Dockerfile, `docker-compose.yml`, keygen/origin/
+proxy startup scripts, `run.sh`/`verify.sh`) lives only in this session's
+scratchpad, not the repo — it's a one-off verification harness, not a
+`crates/gsp-fleet-tests`-style repeatable CI integration test (that's
+still a reasonable follow-up: the roadmap slice 6 entry suggested it, and
+this session's harness would be a solid starting point for one, minus the
+Docker/`CAP_NET_ADMIN` dependency an in-CI test can't assume).
 
 **Phase 14 slice 5 done (2026-09-05, same day as slices 1-4)**: the new
 `tunnel` `BackendSource` — closes the loop slice 1's schema opened, so a
