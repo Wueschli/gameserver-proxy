@@ -187,6 +187,20 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   some consumer ISPs/CGNAT)? Out of scope for v1; the honest fallback is a
   documented limitation, with a relay-of-last-resort (closer to Steam
   Datagram Relay's actual shape) as a possible v2, not designed now.
+- **Tunnel-internal address collision/exhaustion at fleet scale** (raised
+  2026-09-06, not designed): every origin's `--address`/`--backends` and
+  every proxy's `--tunnel-address` are self-reported and operator-chosen —
+  nothing allocates or checks uniqueness fleet-wide. Two origins picking
+  overlapping addresses (easy to do by both starting from the same example
+  config) means a proxy's WireGuard interface gets asked to route the same
+  `/32` to two different peers, which is undefined/last-write-wins, not a
+  clean error. A large enough fleet can also just run out of addresses in
+  whatever private range was chosen. A real fix would make
+  `gsp-controller` the address authority — hand out a unique address per
+  origin at registration time instead of trusting a self-reported one — but
+  that's a registration protocol change (request an address, don't just
+  state one), not a small patch. Out of scope for now; noted so it isn't
+  lost, not because it's expected to bite soon.
 - **Does this replace or sit alongside the existing "trusted internal
   network" assumption?** Alongside — a same-network deployment still needs
   none of this and keeps working exactly as today; backend transport is
