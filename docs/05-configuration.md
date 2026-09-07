@@ -153,8 +153,7 @@
 > `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
 > see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
 >
-> **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — config
-> schema landed, the gossip mesh itself is design only, not yet built):
+> **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — built):
 > `settings.failure_domain` (a string identity — this instance's
 > reachability-equivalence class, e.g. an AZ or region) and
 > `settings.gossip: { bind, seeds?, quorum_fraction?, psk }` must be set
@@ -275,7 +274,7 @@ backend_sources:
     record: "_game._udp.us.internal.example.com"
     refresh_interval_sec: 10
   - name: home-origin
-    type: tunnel               # phase 14, schema only — no runtime behavior yet.
+    type: tunnel               # phase 14 (built) — the `tunnel` BackendSource.
                                 # Resolves backend addresses a `gsp-agent`-managed
                                 # origin behind a WireGuard tunnel has registered
                                 # with the controller's backend-peers registry.

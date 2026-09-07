@@ -669,7 +669,7 @@ token, is ever exposed to a human directly.
   are the next release on top of this, not blocking it.
 - **All 13 slices of phase 10+11 are now complete.**
 
-## Phase 12 – Fleet hierarchy, HA, and shared intent
+## Phase 12 – Fleet hierarchy, HA, and shared intent ✅
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 ("Fleet topology", "Adoption"). Builds on phase 10+11's single-tier PoC —
 additive, no rework of what shipped there.
@@ -777,9 +777,9 @@ additive, no rework of what shipped there.
   root's config, and a direct write to it was `403` from that point on.
   **Still not built**: intra-tier HA, RBAC, canary rollout.
 
-**Slices 6–8 are fully designed (2026-09-05 design session) but not yet
-built** — each has its own `docs/10` section (with wire shapes, storage
-layout, and rejected alternatives) and a `docs/09` ADR (21–23):
+**Slices 6–8 (2026-09-05 design session, now all built)** — each has its own
+`docs/10` section (with wire shapes, storage layout, and rejected
+alternatives) and a `docs/09` ADR (21–23):
 
 - ✅ **Slice 6 — Intra-tier HA** (`gsp-controller` only; the aggregator's HA
   design — stateless replicas behind one address, no consensus needed —
@@ -876,11 +876,11 @@ of failure at any tier, and per-role accountability for every change.
 Phase 13 (the regional health fabric, Tier 2) is now **fully built** — see
 below.
 
-## Phase 13 – Regional health fabric
+## Phase 13 – Regional health fabric ✅
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 (Tier 2). Advisory, rebuildable, off the data path. **Fully built
 (2026-09-05)** — all 5 slices below, verified live including two real
-multi-process tests in `crates/gsp-fleet-tests`; see "Mechanism (design)" in
+multi-process tests in `crates/gsp-fleet-tests`; see "Mechanism (built)" in
 `docs/10` and ADR 24 in `docs/09` for the locked design this implements.
 Mechanism: membership via embedded
 `foca` (SWIM); per-backend health as a last-writer-wins `(instance,
@@ -975,7 +975,7 @@ Slices:
 - **Result**: faster, multi-vantage-point backend health across a domain; one
   bad vantage point no longer flaps a pool.
 
-## Phase 14 – Backend transport
+## Phase 14 – Backend transport ✅
 Full design: [11-backend-transport.md](11-backend-transport.md). Closes the
 gap `docs/01-requirements.md`'s Assumptions section states outright
 ("Backends are reachable over a trusted internal network") — not true once
@@ -1000,8 +1000,8 @@ every subscribed edge proxy the same way config revisions already are.
 WireGuard's own roaming + keepalive mean only the proxy side ever needs a
 public endpoint — an origin behind a home NAT needs no port forwarding.
 
-Slices, ordered by dependency (each buildable and testable before the next
-needs it; none started):
+Slices, ordered by dependency (each was buildable and testable before the
+next needed it; all now built):
 
 1. ✅ **Config schema**: `backend_sources[].type: tunnel` (`gsp-config` raw +
    resolved types, `validate()`, `config.example.yaml`, `docs/05`) —

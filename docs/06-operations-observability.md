@@ -256,12 +256,13 @@ rest; affected sessions reconnect.
 
 ## Fleet control plane (phase 10+11)
 
-Three additional, independent binaries — a single-tier PoC (`docs/10`'s
-`standalone`/`slave` hierarchy, intra-tier HA, and moving intent into the
-controller's revision log are phase 12, design-only). None of them expose
-`GET /metrics`; the Prometheus surface stays per-`gsp`-instance as above. All
-three serve unauthenticated `GET /healthz` for liveness regardless of their
-auth settings below.
+Three additional, independent binaries. Originally a single-tier PoC
+(phase 10+11); the `docs/10` `standalone`/`slave` hierarchy, intra-tier HA,
+adoption, staged/canary rollout, RBAC, and moving operator intent into the
+controller's revision log are phase 12 — **all built**, documented per-flag in
+the subsections below. None of them expose `GET /metrics`; the Prometheus
+surface stays per-`gsp`-instance as above. All three serve unauthenticated
+`GET /healthz` for liveness regardless of their auth settings below.
 
 ### `gsp-controller` — structural config distribution
 

@@ -1,7 +1,12 @@
-# 11 – Backend transport (design)
+# 11 – Backend transport
 
-**Status: design only, 2026-09-05. No code written yet** — matches the depth of
-the phase-12/13 pre-build design sessions (`docs/10`) before any of it was built.
+**Status: built (2026-09-06).** All 7 Phase 14 slices are implemented and
+verified live end-to-end in Docker (see `docs/08-roadmap.md` "Phase 14" for the
+slice-by-slice record and `HANDOVER.md` for the bugs the live run surfaced).
+This chapter remains the design source of truth for the mechanism. The design
+was locked in a 2026-09-05 session at the depth of the phase-12/13 pre-build
+sessions; the "Locked decisions" and "Open questions" sections below are kept
+as written then.
 
 ## Problem
 

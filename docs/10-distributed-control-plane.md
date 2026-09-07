@@ -396,7 +396,13 @@ the software. A lone proxy: `standalone` + 1. A globally distributed fleet: a
 `standalone` Raft group at the root, `slave` groups (sized to taste) at each
 region.
 
-### Adoption (deferred — not in the phase 10/11 slices)
+### Adoption (built — phase 12 slice 5)
+
+> **Status:** built (phase 12 slice 5, 2026-09-05) — `POST /admin/adopt`, see
+> `docs/06` "Adoption" and ADR 21/`docs/09`. Was not part of the phase 10/11
+> slices. The two "correctness details to solve when this is built" below are
+> both resolved in the shipped version (it refuses with `409` unless the
+> child's config *and* intent stores are still empty).
 
 Turning a `standalone` tier into a `slave` of a newly-introduced parent — e.g.
 an operator adding a higher tier's address + token in the admin UI after the
@@ -473,6 +479,12 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
 ---
 
 ## Intra-tier HA (design)
+
+> **Status:** the `gsp-controller` half is **built** (phase 12 slice 6,
+> `openraft`, `--ha-node-id`/`--ha-peers`/`--ha-token` — see `docs/06` and ADR
+> 21). The **aggregator** half below (stateless replicas behind one address)
+> stays design-only — it needs no code, just running N replicas. The heading
+> keeps "(design)" because other docs and code comments cite it by that name.
 
 Answers "how does one tier survive a node loss" — orthogonal to `standalone`/
 `slave` (that answers "does this tier have a parent"). Two very different
@@ -627,17 +639,30 @@ correctly scopes it as an explicit later slice, opted into per tier via
 
 ## Staged / canary rollout (design)
 
+> **Status:** built (phase 12 slice 7) on the **controller** side —
+> `POST /config?stage=canary&group=<name>`, `GET /config?group=<name>`,
+> `GET /config/subscribe?since=<rev>&group=<name>`, `POST
+> /config/promote/{revision}`, and the `{promoted, canary_groups}` `stage`
+> `sled` tree. See `docs/06` and ADR 22. **Not yet wired on the `gsp` side:**
+> a real `gsp --controller` instance has no way to enroll itself in a group
+> yet — there is no `settings.controller.canary_group` config field (the
+> design sketch below), and `controller_client` does not pass `&group=`. The
+> feature is exercisable today only with a manual `curl` subscribe. The
+> heading keeps "(design)" because `gsp-controller`'s module docs cite it by
+> that name.
+
 A subset of a tier's instances take a config revision before the rest of the
 fleet — "The controller" section above already named this as part of the
 Config API; this is the concrete mechanism.
 
 ### Instances self-report a rollout group
 
-Every `gsp` instance gains an optional `settings.controller.canary_group:
-<string>` (default: unset, meaning "not enrolled in any canary group" — the
-overwhelmingly common case, and the entire mechanism is invisible to an
-instance that never sets it). `controller_client`'s `GET
-/config/subscribe?since=<cursor>` gains a `&group=<canary_group>` query
+*(Design as sketched; the `gsp`-side field below is not built — see the Status
+note above.)* Every `gsp` instance gains an optional
+`settings.controller.canary_group: <string>` (default: unset, meaning "not
+enrolled in any canary group" — the overwhelmingly common case, and the entire
+mechanism is invisible to an instance that never sets it). `controller_client`'s
+`GET /config/subscribe?since=<cursor>` gains a `&group=<canary_group>` query
 parameter (omitted when unset).
 
 **Self-reported, not independently verified** — the same trust level
@@ -722,6 +747,13 @@ surfaces; not designed here.
 ---
 
 ## RBAC and audit (design)
+
+> **Status:** built (phase 12 slice 8) — `gsp-ui --users-file` (argon2 hashes,
+> `viewer`/`operator`/`admin`), `--ui-password` kept as legacy single-secret
+> mode, `X-Actor` on every proxied write, and the controller's per-revision
+> `actors` `sled` tree (`GET /config/revisions` gained an `actor` field). See
+> `docs/06` and ADR 23. The heading keeps "(design)" because other docs cite
+> it by that name.
 
 `docs/10`'s original text placed "Auth / RBAC / audit log" on the
 controller. The phase 10+11 slice-11 redesign (see `HANDOVER.md`) already
