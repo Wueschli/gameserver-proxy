@@ -178,7 +178,7 @@ Admin endpoints (default `127.0.0.1:9900`): `GET /healthz` `/readyz` `/metrics`
 
 ## Contributing / continuing the work
 
-- [`CLAUDE.md`](CLAUDE.md) — working agreement, guardrails, "when you touch X also
+- [`AGENTS.md`](AGENTS.md) — working agreement, guardrails, "when you touch X also
   touch Y" (written for AI agents; doubles as the contributor reference).
 - [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, and what's
   deferred / next.

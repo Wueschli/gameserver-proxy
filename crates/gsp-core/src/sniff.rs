@@ -15,7 +15,7 @@
 //! an empty registry (it logs a warning at listener start).
 //!
 //! Sniffers are read-only: they never see later bytes and never write. See
-//! `docs/03`, `CLAUDE.md` "agnostic core".
+//! `docs/03`, `AGENTS.md` "agnostic core".
 
 use std::collections::HashMap;
 use std::sync::Arc;

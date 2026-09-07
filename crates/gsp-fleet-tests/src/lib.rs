@@ -28,7 +28,7 @@ use tokio::time::Instant;
 /// An OS-assigned loopback port, freed immediately before the caller binds
 /// it again in a spawned child. Carries the usual tiny TOCTOU race of this
 /// technique; acceptable here the same way `crates/gsp-core/tests/` already
-/// leans on `127.0.0.1:0` for ephemeral sockets (CLAUDE.md's testing rule).
+/// leans on `127.0.0.1:0` for ephemeral sockets (AGENTS.md's testing rule).
 pub fn free_port() -> Result<u16> {
     let listener = StdTcpListener::bind("127.0.0.1:0").context("binding an ephemeral port")?;
     Ok(listener.local_addr()?.port())

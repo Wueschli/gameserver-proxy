@@ -1,7 +1,7 @@
 /**
  * A status pill: a colored dot plus its text label, always both — never
  * color alone, so state reads the same for a colorblind viewer as anyone
- * else (CLAUDE.md-adjacent principle for this whole app: never hide state
+ * else (AGENTS.md-adjacent principle for this whole app: never hide state
  * behind color only).
  */
 const TONES = {

@@ -307,7 +307,7 @@ fn default_source_refresh_sec() -> u64 {
 /// Minimal standard-alphabet base64 decoder, just enough to validate a
 /// WireGuard key (32 bytes, i.e. exactly 44 chars with one trailing `=`).
 /// `gsp-config` may only depend on `serde`/`serde_yaml`/`thiserror` (see
-/// CLAUDE.md's crate-boundary rule), so this doesn't pull in a `base64` crate
+/// AGENTS.md's crate-boundary rule), so this doesn't pull in a `base64` crate
 /// for one validation check. `pub` (not just used by this crate's own
 /// `validate()`) so `gsp-controller`'s phase 14 backend-peers registry
 /// (slice 2) can apply the exact same pubkey check without duplicating it —

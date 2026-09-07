@@ -185,7 +185,7 @@ listeners:
         assert_eq!(payload.pools[0].backends.len(), 1);
         assert_eq!(payload.pools[0].backends[0].addr, "127.0.0.1:9001");
         // Optimistically healthy before the first health-check sweep runs
-        // (docs/09 ADR 3 / CLAUDE.md's "reload carries health by address").
+        // (docs/09 ADR 3 / AGENTS.md's "reload carries health by address").
         assert!(payload.pools[0].backends[0].healthy);
         assert_eq!(payload.pools[0].backends[0].state, "enabled");
         assert_eq!(payload.sessions.tcp, 0);

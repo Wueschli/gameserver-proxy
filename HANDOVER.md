@@ -385,7 +385,7 @@ gained `RawBackendSource.pubkey: Option<String>` (`tunnel` only) and
 `SourceKind::Tunnel { pubkey: String }`; `validate()`'s new `tunnel` branch
 requires `pubkey` and checks it decodes as a base64-encoded 32-byte WireGuard
 key. **No new dependency**: `gsp-config`'s crate-boundary rule
-(`serde`/`serde_yaml`/`thiserror` only, see `CLAUDE.md` guardrail 7) meant
+(`serde`/`serde_yaml`/`thiserror` only, see `AGENTS.md` guardrail 7) meant
 pulling in a `base64` crate for one validation check wasn't an option, so
 `base64_decode_32` is a small hand-rolled standard-alphabet decoder local to
 this module — good enough to reject a malformed key, not a general-purpose
@@ -413,7 +413,7 @@ internal network"), true for a single-region deployment but not for what
 phase 10–13 actually built. New `docs/11-backend-transport.md`, ADR 25 in
 `docs/09-technology-choices.md`, a new Phase 14 section in
 `docs/08-roadmap.md`, and a superseded-note added to `docs/01`'s Assumptions
-bullet (same-network deployments are unaffected). `CLAUDE.md`'s repo-layout
+bullet (same-network deployments are unaffected). `AGENTS.md`'s repo-layout
 line updated `docs/ (00–10)` → `(00–11)`.
 
 **Locked decisions, explicitly reusing existing solutions per the user's
@@ -599,7 +599,7 @@ more test functions to that existing amortized cost, not a new build step).
 including these 2 new multi-process tests) green. Also updated `README.md`'s
 status block (phase 12/13 were still described as "phase 12, design only"
 there — a documentation gap from earlier in this same session, caught and
-fixed now, same category of gap CLAUDE.md's own history notes for
+fixed now, same category of gap AGENTS.md's own history notes for
 `gsp-controller`/`gsp-aggregator`), `docs/10`'s top-level Status section
 (was still the original "Design only. Nothing here is built." from before
 any of phase 10+11 existed — long stale, fixed to reflect phases 10–13 all
@@ -1099,7 +1099,7 @@ doesn't build.
 Two real clippy findings fixed along the way (both legitimate, not
 false positives): `clone()` on `LogId`/`Option<LogId>` (both `Copy`) in the
 log store, and `#[allow(clippy::result_large_err)]` (with a one-line
-justification each, per `CLAUDE.md`'s guardrail) on two spots where the
+justification each, per `AGENTS.md`'s guardrail) on two spots where the
 `Err` type is `openraft`'s own `StorageError`/`RPCError` — sized by a
 third-party crate, not something a caller here can shrink.
 
@@ -1392,7 +1392,7 @@ verified both, plus the happy path and an overwrite, live over real HTTP).
 12 new tests (4 store, 8 API). `GET /healthz` served the same way as
 `gsp`/`gsp-controller`.
 
-CLAUDE.md's repository-layout listing gained `gsp-controller/` and
+AGENTS.md's repository-layout listing gained `gsp-controller/` and
 `gsp-aggregator/` entries — a gap from slice 1, caught and fixed now.
 
 **Slice 7 done**: `crates/gsp/src/aggregator_client.rs` — `--aggregator
@@ -1872,7 +1872,7 @@ covers later edits. Piping `make check` through `tail` also hides an early
 
 ## Invariants that bite if you forget them
 
-(Full list in [`CLAUDE.md`](CLAUDE.md) "Architecture invariants". These are the
+(Full list in [`AGENTS.md`](AGENTS.md) "Architecture invariants". These are the
 ones with a subtlety.)
 
 - **Exactly one place builds + stores a `Snapshot`: `reload::apply`.** Runtime
