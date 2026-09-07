@@ -1,7 +1,21 @@
 # HANDOVER
 
 State of the work, how to pick it up, and the traps.
-Last updated: 2026-09-06.
+Last updated: 2026-09-07.
+
+**New: `docs/12-deployment.md` (2026-09-07)** — container image sizing
+(measured, not guessed: `debian:trixie-slim` vs `distroless/cc-debian12`
+for all 5 binaries) and the Docker/Kubernetes networking question that
+came up in conversation after phase 14 wrapped: neither platform lets a
+container dynamically claim a new externally-reachable port at runtime,
+which matters because `gsp`'s own `ListenerManager` reconciles listeners
+live from config. Documents the two patterns that actually work (host
+networking, matching `gsp`'s live-reconcile design most directly; or a
+pre-reserved port range via `bind: "host:lo-hi"`, the same shape Agones
+uses for Kubernetes `GameServer` pods) and the `CAP_NET_ADMIN`/
+`/dev/net/tun` requirement for `--tunnel-*`/`gsp-agent` (already verified
+live in phase 14 slice 6's Docker harness). Linked from `README.md`'s docs
+table, which was also missing a `docs/11` link — added both.
 
 **Phase 14 slice 7 done (2026-09-06, same day as slice 6) — the proxy-peers
 registry, closing a real scaling gap the user caught right after slice 6

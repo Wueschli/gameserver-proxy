@@ -23,6 +23,8 @@ and access control.
 | [docs/08-roadmap.md](docs/08-roadmap.md) | Phased implementation / milestones |
 | [docs/09-technology-choices.md](docs/09-technology-choices.md) | Language, libraries, alternatives |
 | [docs/10-distributed-control-plane.md](docs/10-distributed-control-plane.md) | *(v2, design only)* Fleet-shared config/intent + regional health, controller, GUI |
+| [docs/11-backend-transport.md](docs/11-backend-transport.md) | WireGuard backend transport for origins behind NAT/a different network (`gsp-agent`, backend/proxy peers registries) |
+| [docs/12-deployment.md](docs/12-deployment.md) | Container images, sizes, and how a many-port proxy works under Docker/Kubernetes networking |
 
 ## Status
 
