@@ -8,11 +8,13 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
+use gsp_fleet_tests::tunnel::{TunnelLab, PUBLIC_PORT};
 use gsp_fleet_tests::{spawn_controller_on, wait_http_up};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
@@ -123,5 +125,40 @@ async fn proc_captures_output_for_failure_reports() -> Result<()> {
         "controller output to be captured",
     )
     .await?;
+    Ok(())
+}
+
+fn ensure_built() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| gsp_fleet_tests::build_fleet_bins().expect("building binaries"));
+}
+
+/// Scenario 1. Real `gsp-controller` + `gsp-agent` + `gsp --tunnel-*`, real
+/// WireGuard, the echo server started LAST (Review Focus 4: the backend is
+/// first seen unhealthy and must recover on its own), then payloads that cross
+/// the WireGuard MTU (Review Focus 3).
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(false).await?; // agent up, nothing listening on :7000 yet
+    let edge = t.start_edge("edge-1", 1, None).await?;
+
+    t.wait_backends(edge, false).await?; // nothing answers on :7000 -> unhealthy
+    t.start_echo()?;
+    t.wait_backends(edge, true).await?; // recovers with no restart
+    t.wait_roundtrip(edge).await?; // proves the tunnel, not just /pools
+
+    let public = t.public_addr(edge);
+    let big: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    assert_eq!(tcp_roundtrip(public, &big).await?, big, "256 KiB over TCP");
+    let dgram = vec![0xa5; 1200];
+    assert_eq!(
+        udp_roundtrip(public, &dgram).await?,
+        dgram,
+        "1200 B over UDP"
+    );
+    assert_eq!(public.port(), PUBLIC_PORT);
     Ok(())
 }

@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 pub mod echo;
 pub mod netns;
+pub mod tunnel;
 
 /// An OS-assigned loopback port, freed immediately before the caller binds
 /// it again in a spawned child. Carries the usual tiny TOCTOU race of this

@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -61,6 +61,22 @@ ui:
 ## ui-test: run the gsp-ui frontend tests (vitest + Testing Library; needs Node/npm)
 ui-test:
 	cd crates/gsp-ui/web && npm install && npm test
+
+# Rootless when not already root: a user+net+mount namespace gives us
+# CAP_NET_ADMIN inside it. `--kill-child` reaps everything if we die.
+ifeq ($(shell id -u),0)
+TUNNEL_NS := unshare -m -n --kill-child
+else
+TUNNEL_NS := unshare -Urnm --kill-child
+endif
+
+## tunnel-e2e: phase-14 WireGuard tunnel end-to-end test in rootless network
+## namespaces (TUNNEL_BACKEND=kernel|userspace, default kernel); see
+## docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md
+tunnel-e2e:
+	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+	cargo test -p gsp-fleet-tests --test tunnel --no-run
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## help: list targets
 help:
