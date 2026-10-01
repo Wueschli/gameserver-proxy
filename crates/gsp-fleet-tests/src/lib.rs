@@ -25,6 +25,8 @@ use anyhow::{bail, ensure, Context, Result};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
+pub mod netns;
+
 /// An OS-assigned loopback port, freed immediately before the caller binds
 /// it again in a spawned child. Carries the usual tiny TOCTOU race of this
 /// technique; acceptable here the same way `crates/gsp-core/tests/` already

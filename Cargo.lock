@@ -1420,6 +1420,7 @@ name = "gsp-fleet-tests"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "nix 0.29.0",
  "reqwest",
  "serde_json",
  "tempfile",
