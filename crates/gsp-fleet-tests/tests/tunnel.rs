@@ -260,3 +260,37 @@ async fn known_bug_two_proxies_cannot_share_one_origin() -> Result<()> {
     t.pass();
     Ok(())
 }
+
+/// Scenario 4 — Review Focus 5. `gsp`'s tunnel source pins the origin's
+/// pubkey; if the registry's key for that name differs, `fetch` must refuse
+/// ("a key change is refused loudly"), so the pool stays empty and nothing
+/// reaches the backend.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn a_pinned_key_that_does_not_match_the_registry_is_refused() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    // 32 zero bytes, base64 — a valid key, just not the origin's.
+    let wrong = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    assert_ne!(t.origin_pubkey(), wrong);
+    let edge = t.start_edge("edge-bad", 1, Some(wrong)).await?;
+
+    // Bounded negative window: the source refreshes every 1 s, so 8 s is
+    // several refresh cycles — long enough that "never got a backend" means
+    // something. This is the one deliberate fixed wait in the suite.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let pools = t.pools(edge).await?;
+        assert!(
+            !pools.lines().any(|l| l.starts_with("  ")),
+            "a mismatched key must never yield a backend, but /pools shows:\n{pools}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let attempt = tcp_roundtrip(t.public_addr(edge), b"nope").await;
+    assert!(attempt.is_err(), "traffic must not flow, got {attempt:?}");
+    t.pass();
+    Ok(())
+}
