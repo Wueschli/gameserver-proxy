@@ -20,20 +20,21 @@ must be on the same Debian release, or a binary can fail to start on an older gl
 
 `[profile.release]` sets `strip = true`, which trims roughly 15-20% off every binary.
 
-Measured image sizes (stripped release binaries, 2026-09-07, **on
-`cc-debian12` — not yet re-measured on the `cc-debian13` base `deploy/` now uses;
-the CI `deploy` job prints the new sizes**):
+Measured image sizes (`docker images`, stripped release binaries, `deploy/Dockerfile`
+on `distroless/cc-debian13:nonroot`, CI run 36922142697, 2026-10-01):
 
-| Binary | on `debian:trixie-slim` + `ca-certificates` | on `gcr.io/distroless/cc-debian12` |
-|---|---|---|
-| `gsp` | 161 MB | **65 MB** |
-| `gsp-controller` | 148 MB | **52 MB** |
-| `gsp-agent` | 143 MB | **47 MB** |
-| `gsp-ui` | 141 MB | **45 MB** |
-| `gsp-aggregator` | 141 MB | **45 MB** |
+| Binary | image size |
+|---|---|
+| `gsp` | **47.4 MB** |
+| `gsp-controller` | **37.9 MB** |
+| `gsp-agent` | 34.3 MB |
+| `gsp-ui` | 34.3 MB (includes the built frontend) |
+| `gsp-aggregator` | 33.3 MB |
+
+For comparison, an earlier 2026-09-07 measurement on `cc-debian12` gave 45-65 MB.
 
 The base image dominates, not the binary — `debian:trixie-slim` alone is
-~118 MB before anything is added; `distroless/cc-debian12` (glibc +
+~118 MB before anything is added; `distroless/cc-debian13` (glibc +
 libgcc/libstdc++, no shell, no package manager) is a fraction of that and
 was confirmed to actually run these binaries (no runtime shell-out, so
 distroless's missing shell is never a problem). Trade-off: no
@@ -53,9 +54,8 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
-`hostNetwork` DaemonSet). Both are reference only. CI is set up to smoke-test the compose demo and
-schema-validate the manifests (the `deploy` job, non-blocking); as of writing that job
-has not run yet. Known limitation: aggregator intent fan-out (drain etc.) cannot reach
+`hostNetwork` DaemonSet). Both are reference only. CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
+job, non-blocking until it has a few more green runs; first green run 2026-10-01). Known limitation: aggregator intent fan-out (drain etc.) cannot reach
 a `gsp` from these examples, because the `admin_url` it reports is derived from
 `settings.admin.listen` and no flag overrides it.
 

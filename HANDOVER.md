@@ -20,12 +20,12 @@ Most recent landings (newest first; full history in `git log`):
 
 - `deploy/` — reference `Dockerfile` (five distroless targets), compose
   control-plane demo + tunnel override, plain k8s manifests, `deploy/smoke.sh`, CI job
-  `deploy` (non-blocking until stable). **Verified locally only as far as Docker-less
-  checks go** (smoke.sh against the real binaries started natively, `docker compose
-  config`, `kubeconform`, `gsp --check` on the embedded configs); the image builds and
-  `compose up` have **not run anywhere yet** — the Docker daemon was unavailable in the
-  dev sandbox, so the first real result is the CI `deploy` run after a push. Expect a
-  fix-up commit if it fails (a fresh-context review already caught one that would have: curl 8.11.1 rejects `--opt=value`, so the `seed` args are separate; `make deploy-lint` pins that and other render-time facts). docs/12's size table is still the `cc-debian12` one.
+  `deploy` (non-blocking until stable). **First CI run (36922142697, 2026-10-01) was
+fully green**: all five images built and ran `--version`, the compose smoke passed
+end to end, kubeconform passed. Not exercised anywhere: the tunnel override and the
+k8s manifests on a real cluster. A pre-push fresh-context review caught one bug that
+would have failed that first run (curl 8.11.1 rejects `--opt=value`, so the `seed`
+args are separate); `make deploy-lint` pins that and other render-time facts.
 - `docs/12-deployment.md` — container image sizing + the Docker/Kubernetes
   port-exposure model (host networking vs. a pre-reserved `bind: "host:lo-hi"`
   range; `CAP_NET_ADMIN` / `/dev/net/tun` for `--tunnel-*` / `gsp-agent`).
