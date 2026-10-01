@@ -6,14 +6,14 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-09-07.
+Last updated: 2026-10-01.
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work is the "Known follow-ups" table below plus the `gsp-ui` frontend
-polish pass.
+Remaining work is the "Known follow-ups" table below, the remaining `gsp-ui`
+gaps (confirmation dialogs, frontend tests), and phase-14 CI coverage.
 
 Most recent landings (newest first; full history in `git log`):
 
@@ -69,7 +69,11 @@ Most recent landings (newest first; full history in `git log`):
   `GET /ws/fleet` live feed off one shared aggregator SSE subscription, RBAC
   (`viewer` < `operator` < `admin` via `--users-file` argon2 hashes; legacy
   single `--ui-password` kept). React + Vite + TS frontend in `crates/gsp-ui/web/`
-  (`make ui`, `--static-dir`) — functional PoC, polish pass deferred.
+  (`make ui`, `--static-dir`) — redesigned in `d86c786` (Tailwind + Radix,
+  react-router, grouped fleet tree via `settings.group`, schema-driven settings
+  form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
+  /admin/sniffers`). Still missing: confirmation dialogs on destructive actions
+  and any frontend test suite.
 - **Tier-2 regional health gossip** — embedded `foca` SWIM mesh over one HMAC-auth
   UDP socket, per-backend last-writer-wins health broadcast piggybacked on foca's
   own anti-entropy, quorum-based `Backend::domain_down` override (additive to the
@@ -116,10 +120,14 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **CGNAT / both-sides-behind-restrictive-NAT** (phase 14) — documented v1
   limitation. A relay-of-last-resort (closer to Steam Datagram Relay's shape) is a
   possible v2, not designed.
-- **`gsp-ui` frontend overhaul** — styling, confirmations on destructive actions,
-  loading states, client-side routing. Every backend path it drives is real and
-  tested; only the presentation layer needs a pass. Tracked in `docs/08`
-  "Later / optional".
+- **`gsp-ui` remaining gaps** — the visual redesign landed (see above); still
+  open are confirmation dialogs before drain / remove-backend / rollback, a
+  frontend test setup (no `test` script in `web/package.json`), and a
+  wire-shape contract test (see the Rust↔TS mismatch gotcha below).
+- **Tunnel address authority** (phase 14, `docs/11` "Open questions") — origin
+  and proxy tunnel addresses are self-reported; nothing guarantees fleet-wide
+  uniqueness. Making `gsp-controller` allocate them is a registration-protocol
+  change, not designed.
 - **HA + `--role slave` together** — rejected at startup today. Needs the upward
   relay to run leader-only with its cursor promoted to replicated state (designed in
   `docs/10`, not built).

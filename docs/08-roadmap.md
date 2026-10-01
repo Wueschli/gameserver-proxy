@@ -635,8 +635,9 @@ token, is ever exposed to a human directly.
   been verified live end-to-end, repeatedly, against real running
   `gsp`/`gsp-controller`/`gsp-aggregator` processes, not just against unit
   tests.
-- **The 11f frontend itself is a functional PoC, not a finished operator
-  UI** (confirmed by the user actually clicking through it in a browser) —
+- **The 11f frontend itself was a functional PoC, not a finished operator
+  UI** (confirmed by the user actually clicking through it in a browser; since
+  redesigned — see "Later / optional" below) —
   every backend path it drives is real and solid, but the UI layer is
   deliberately bare: no styling/design pass, no confirmation dialogs before
   a destructive action (drain, remove-backend fire immediately), no loading
@@ -1084,16 +1085,16 @@ slice 1.
   the phase 10–13 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
-- **`gsp-ui` frontend overhaul** — phase 10+11 slice 11f shipped a
-  functional PoC (every backend path real and tested), not a finished
-  operator UI: no design/styling pass, no confirmation dialogs before a
-  destructive action, no loading states beyond a bare notice, no
-  client-side routing. A real pass needs an actual design decision (which
-  component library / design system, if any), confirmation flows for
-  drain/remove-backend/rollback, better error surfacing than a single
-  notice line, and probably a routing library once there's more than one
-  page's worth of state. Explicitly deferred — doesn't block phase 10+11
-  closing out (slices 12–13) or phase 12.
+- **`gsp-ui` remaining gaps** — phase 10+11 slice 11f shipped a functional PoC;
+  the visual redesign has since landed (commit `d86c786`, see `docs/10` "The
+  admin GUI" → Redesign: Tailwind + Radix, client-side routing, grouped fleet
+  tree, schema-driven settings form, Plugins page). Still open: confirmation
+  dialogs before drain / remove-backend / rollback, better error surfacing,
+  and frontend tests (a contract test that response headers and body shapes
+  survive the Rust↔TS hop).
+- **Phase 14 follow-ups** — a CI-friendly tunnel end-to-end test (the Docker
+  harness used for slice 6 lives only in a session scratchpad), and a
+  controller-allocated tunnel address scheme (`docs/11` "Open questions").
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).
@@ -1107,3 +1108,6 @@ slice 1.
   health fabric) — the multi-region, no-single-point-of-failure realization of
   the phase 10+11 PoC — see
   [10-distributed-control-plane.md](10-distributed-control-plane.md).
+- **v2.1**: + phase 14 (WireGuard backend transport — `gsp-agent`, backend /
+  proxy-peers registries; proxies reach origins on a different network) — see
+  [11-backend-transport.md](11-backend-transport.md).

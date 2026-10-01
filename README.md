@@ -22,15 +22,16 @@ and access control.
 | [docs/07-security-ddos.md](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
 | [docs/08-roadmap.md](docs/08-roadmap.md) | Phased implementation / milestones |
 | [docs/09-technology-choices.md](docs/09-technology-choices.md) | Language, libraries, alternatives |
-| [docs/10-distributed-control-plane.md](docs/10-distributed-control-plane.md) | *(v2, design only)* Fleet-shared config/intent + regional health, controller, GUI |
+| [docs/10-distributed-control-plane.md](docs/10-distributed-control-plane.md) | *(v2, built — phases 10–13)* Fleet-shared config/intent + regional health, controller, aggregator, GUI |
 | [docs/11-backend-transport.md](docs/11-backend-transport.md) | WireGuard backend transport for origins behind NAT/a different network (`gsp-agent`, backend/proxy peers registries) |
 | [docs/12-deployment.md](docs/12-deployment.md) | Container images, sizes, and how a many-port proxy works under Docker/Kubernetes networking |
 
 ## Status
 
-**Roadmap phases 1–9 complete** (resolver `sticky_key` deferred), plus
-**phase 10+11** (fleet controller + aggregator + admin GUI, PoC-scoped — see
-below). TCP and UDP listener → backend pool forwarding with:
+**All roadmap phases 0–14 are built** (resolver `sticky_key` deferred): the data
+plane (phases 0–9), the distributed control plane (phases 10–13) and the
+WireGuard backend transport (phase 14) — see the sections below and
+[docs/08-roadmap.md](docs/08-roadmap.md). TCP and UDP listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
   `hash_on: src_ip | src_ip_port`) balancing
@@ -125,11 +126,25 @@ tokens so the browser only ever needs a session cookie, serving a built
 React/Vite/TS frontend). Independent optional bearer-token auth on each hop.
 See `docs/06`'s "Fleet control plane" section for the full endpoint
 reference, `docs/10` for the design, and `crates/gsp-fleet-tests` for the
-multi-process integration tests. The `gsp-ui` frontend itself is a functional
-PoC (every backend path it drives is real and tested), not a polished
-operator UI — tracked as deferred future work in `docs/08-roadmap.md`.
+multi-process integration tests. The `gsp-ui` frontend was redesigned after the
+PoC (Tailwind + Radix, client-side routing, a grouped fleet tree, a
+schema-driven settings form with a raw-YAML escape hatch, plugin management);
+confirmation dialogs for destructive actions and frontend tests are still
+open — see `docs/08-roadmap.md` "Later / optional".
 
-**Phases 1–9 complete** (`sticky_key` deferred). Phase 9
+**Phase 14 complete** (backend transport, `docs/11`): proxies can reach game
+servers that are *not* on a shared trusted network. An origin-side
+`gsp-agent` brings up a local WireGuard interface (kernel module, `boringtun`
+userspace fallback) and registers its public key and fronted backend
+addresses with `gsp-controller`'s backend-peers registry; `gsp --tunnel-*`
+subscribes to that registry and peers every origin onto its own interface,
+and a mirror proxy-peers registry lets agents learn every proxy without a
+restart. A `backend_sources[].type: tunnel` source turns a registered origin
+into ordinary routable backends, so the data plane is unchanged. Needs
+`CAP_NET_ADMIN` + `/dev/net/tun`; container and port-exposure guidance is in
+`docs/12`. CGNAT / both-sides-restrictive-NAT is a documented v1 limitation.
+
+Phase 9
 (sniffer plugin loader): the WASM sandbox above, plus `crates/plugins/` and
 its `README.md`. Phase 8
 (discovery & scaling): the `backend_sources` adapters above plus an HA
@@ -171,10 +186,16 @@ Admin endpoints (default `127.0.0.1:9900`): `GET /healthz` `/readyz` `/metrics`
 
 | Crate | Responsibility |
 |-------|----------------|
-| `crates/gsp-config` | YAML config types, parsing, validation (the reduced v0 schema) |
+| `crates/gsp-config` | YAML config types, parsing, validation  |
 | `crates/gsp-core` | data plane: config snapshot, backend pools, TCP + UDP listeners, byte pump, UDP session tables |
-| `crates/gsp` | binary: CLI, logging, admin API, process lifecycle |
+| `crates/gsp` | binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
+| `crates/gsp-controller` | Tier-1 config + operator-intent distribution (`sled` revision logs, SSE, Raft HA, canary rollout, backend/proxy-peers registries) |
+| `crates/gsp-aggregator` | fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent-verb fan-out |
+| `crates/gsp-ui` | admin GUI BFF (session/RBAC auth) + React/Vite/TS frontend in `web/` (`make ui`) |
+| `crates/gsp-agent` | origin-side WireGuard agent (phase 14, `docs/11`) |
+| `crates/gsp-fleet-tests` | multi-process integration tests over the real binaries (part of `make check`) |
 | `crates/gsp-bench` | latency / load harness (`make bench`) — added p50/p99 vs. NFR N1/N2 |
+| `crates/plugins` | first-party WASM sniffer plugins (`a2s`, `minecraft`, `regex-firstbytes`) — standalone workspace, `make plugins` |
 
 ## Contributing / continuing the work
 

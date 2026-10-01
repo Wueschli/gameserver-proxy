@@ -39,7 +39,7 @@ Cargo.toml                  workspace (resolver 2, edition 2021)
 rust-toolchain.toml         pins stable
 config.example.yaml         reduced v0 config schema
 Makefile                    make check / test / run / fmt / lint
-docs/                       the plan (00–11) — source of truth for design
+docs/                       the plan (00–12) — source of truth for design
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
     fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
@@ -79,7 +79,7 @@ crates/
     controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
     tunnel_client.rs        `--tunnel-*` (phase 14 slice 4, `docs/11`): brings up this proxy's shared WireGuard interface and subscribes to `gsp-controller`'s backend-peers registry, reconciling every registered origin onto the interface's peer list
     proxy_register.rs       `--tunnel-*` (phase 14 slice 7, `docs/11`): registers this proxy's own pubkey + public endpoint with `gsp-controller`'s proxy-peers registry, so every origin's `gsp-agent` can peer with it without origin-side reconfiguration
-  gsp-controller/            binary — Tier-1 config distribution (phase 10+11, docs/10 "The controller"; single standalone node, no HA/hierarchy yet)
+  gsp-controller/            binary — Tier-1 config distribution (phases 10–14, docs/10 "The controller" + docs/11: `standalone`/`slave` roles, Raft HA, canary rollout, backend/proxy-peers registries)
     store.rs                `Store` — embedded sled KV (ADR 20): revisions + current-pointer trees, catch-up range scan
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
     auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
@@ -240,13 +240,13 @@ client from `crates/gsp/proto/resolver.proto`.
 
 ## Roadmap position
 
-**Roadmap phases 0–9 are complete**, plus a data-plane-completion pass (live
-reload of `resolvers:`/`backend_sources:`, `weighted` balancer, per-plugin
-sniffer config, `GET /sessions`, ClientHello reassembly) and a perf pass
-(`splice(2)` TCP pump, `recvmmsg` UDP ingress batching, timing-wheel UDP idle
-expiry). Phases 10–12 (fleet aggregation, global config/intent store, regional
-health gossip) are **design only** — see
-[`docs/10-distributed-control-plane.md`](docs/10-distributed-control-plane.md).
+**All roadmap phases 0–14 are built**: the data plane (0–9, plus a
+data-plane-completion pass and a perf pass — `splice(2)` TCP pump, `recvmmsg`
+UDP ingress, timing-wheel idle expiry), the distributed control plane (10–13:
+fleet aggregation, global config/intent store with hierarchy / HA / canary /
+RBAC, regional health gossip — [`docs/10`](docs/10-distributed-control-plane.md))
+and the WireGuard backend transport (14 — [`docs/11`](docs/11-backend-transport.md)).
+No slice is in flight; remaining work is the follow-ups in `HANDOVER.md`.
 
 For what shipped, what's deferred, and per-feature latency cost, see
 [`HANDOVER.md`](HANDOVER.md); for the full phase-by-phase plan and status,
