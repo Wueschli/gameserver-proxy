@@ -140,6 +140,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Deploy images | `make deploy-images` (needs Docker; builds the five `deploy/Dockerfile` targets and runs `--version` on each; `BIN_SOURCE=prebuilt` uses binaries from `deploy/prebuilt/`) |
 | Deploy smoke | `make deploy-smoke` (needs Docker; compose demo + `deploy/smoke.sh`; also the `deploy` CI job) |
+| Tunnel e2e (nextest) | `make tunnel-e2e-ci` (needs `cargo install cargo-nextest --locked`; writes `target/nextest/ci/junit.xml`; what the CI `tunnel` job runs) |
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |

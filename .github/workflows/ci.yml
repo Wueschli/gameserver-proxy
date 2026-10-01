@@ -44,8 +44,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Self-test the change detection
-        run: sh .github/scripts/changes_test.sh
+      - name: Self-test the change detection and the report renderer
+        run: |
+          sh .github/scripts/changes_test.sh
+          python3 .github/scripts/test_summary_test.py
       - name: Detect changed areas
         id: f
         env:
@@ -83,8 +85,21 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
       - name: Test
-        run: cargo test --all
+        run: cargo nextest run --profile ci --workspace
+      - name: Test report
+        if: always()
+        run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-test
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
   # One release compile shared by the jobs that need release binaries: the
   # plugins tests restore this job's cache snapshot (same `release` namespace and
@@ -140,9 +155,13 @@ jobs:
         with:
           name: plugins-wasm
           target-dirs: crates/plugins/target
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
       - name: Native unit tests
         working-directory: crates/plugins
-        run: cargo test --workspace
+        # Separate workspace => point nextest at the root config for the `ci` profile.
+        run: cargo nextest run --profile ci --workspace --config-file ../../.config/nextest.toml
       - name: Build to wasm32-unknown-unknown
         working-directory: crates/plugins
         run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p regex-firstbytes
@@ -153,7 +172,19 @@ jobs:
         # Runs the #[ignore]d gsp tests that need crates/plugins built above:
         # the end-to-end artifact test and the WASM-boundary latency bench
         # vs. NFR N1 (release matters for real numbers — see docs/07).
-        run: cargo test -p gsp --release -- --ignored --nocapture
+        run: cargo nextest run -p gsp --release --profile ci --run-ignored only --no-capture
+      - name: Test report
+        if: always()
+        run: python3 .github/scripts/test_summary.py --title "plugins" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-plugins
+          path: |
+            crates/plugins/target/nextest/ci/junit.xml
+            target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
   ui:
     # gsp-ui frontend (crates/gsp-ui/web) — a standalone npm project, so it
@@ -173,7 +204,18 @@ jobs:
           cache-dependency-path: crates/gsp-ui/web/package-lock.json
       - run: npm ci
       - name: Tests
-        run: npm test
+        run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
+      - name: Test report
+        if: always()
+        working-directory: .
+        run: python3 .github/scripts/test_summary.py --title "ui (vitest)" crates/gsp-ui/web/junit.xml >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-ui
+          path: crates/gsp-ui/web/junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Typecheck + build
         run: npm run build
 
@@ -202,8 +244,21 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Load the wireguard kernel module
         run: sudo modprobe wireguard || true
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
       - name: Tunnel e2e
-        run: make tunnel-e2e
+        run: make tunnel-e2e-ci
+      - name: Test report
+        if: always()
+        run: python3 .github/scripts/test_summary.py --title "tunnel (${{ matrix.backend }})" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-tunnel-${{ matrix.backend }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
   deploy:
     # deploy/ reference images + compose demo + k8s manifests

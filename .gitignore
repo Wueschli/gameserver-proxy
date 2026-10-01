@@ -15,3 +15,6 @@ crates/gsp-ui/web/*.tsbuildinfo
 
 # binaries staged for `BIN_SOURCE=prebuilt` image builds (CI)
 deploy/prebuilt/
+
+# test reports (vitest --reporter=junit; CI renders them on the run page)
+crates/gsp-ui/web/junit.xml

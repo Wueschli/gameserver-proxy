@@ -453,7 +453,18 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   hash, so its snapshot froze at the last `Cargo.lock` change and a release-profile edit
   (`strip = true`) left `plugins` recompiling all 342 crates every run. `fuzz` still uses
   `rust-cache` (nightly only, tiny). A lockfile or toolchain bump starts cold by design.
-  Unverified until it has run twice on `main` (first run saves, second should be warm).
+  Verified: a cold run took test 8m41 / build-release 10m53 / deploy 11m25; the next run
+  restored the previous commit's snapshot (build-release recompiled 7 crates, 4m02, the rest
+  is the thin-LTO link) and test took 3m53, deploy 1m22.
+  **Test reports:** CI runs Rust tests with `cargo nextest run --profile ci` (config:
+  `.config/nextest.toml`; installed via a SHA-pinned `taiki-e/install-action`) and vitest with
+  `--reporter=junit`; `.github/scripts/test_summary.py` (tested by `test_summary_test.py`,
+  self-run in the `changes` job) renders the JUnit XML to the run's summary page and the XML is
+  uploaded as a `junit-*` artifact. `make check` / `make tunnel-e2e` stay on plain `cargo test`
+  (nextest optional locally); `make tunnel-e2e-ci` is the nextest variant. Ignored tests are
+  not listed in the JUnit XML. **Nextest runs every test in its own process** — anything that
+  assumed one shared process breaks (found: the tunnel lab's in-process namespace counter,
+  fixed by probing for a free index in `Lab::add_ns`).
   **Shared release stage:** a `build-release` job compiles the five release binaries once
   (cache namespace `release`); `plugins` restores that snapshot (same key => exact hit) and
   `deploy` downloads the binaries as an artifact and builds the images with

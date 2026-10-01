@@ -1,0 +1,13 @@
+# cargo-nextest profiles. CI runs `cargo nextest run --profile ci ...` so each job
+# writes a JUnit report (target/nextest/ci/junit.xml) that
+# .github/scripts/test_summary.py renders on the run page. Locally `make check`
+# still uses plain `cargo test`; nextest is optional here.
+
+[profile.ci]
+fail-fast = false          # report every failure, not just the first
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
