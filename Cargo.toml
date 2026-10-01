@@ -77,3 +77,4 @@ defguard_wireguard_rs = "0.12"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+strip = true
