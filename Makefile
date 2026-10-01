@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -57,6 +57,10 @@ plugins:
 ## ui: build the gsp-ui frontend (needs Node/npm) — output gsp-ui serves via --static-dir
 ui:
 	cd crates/gsp-ui/web && npm install && npm run build
+
+## ui-test: run the gsp-ui frontend tests (vitest + Testing Library; needs Node/npm)
+ui-test:
+	cd crates/gsp-ui/web && npm install && npm test
 
 ## help: list targets
 help:

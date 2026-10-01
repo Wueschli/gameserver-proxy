@@ -2,12 +2,15 @@ import { useEffect, useState } from "react";
 import { ApiError, diffRevision, listRevisions, rollbackTo } from "../api";
 import type { RevisionSummary } from "../types";
 import { Badge } from "../components/ui/Badge";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 
 export function ConfigHistoryPage() {
   const [revisions, setRevisions] = useState<RevisionSummary[]>([]);
   const [diff, setDiff] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   async function refresh() {
     try {
@@ -33,12 +36,21 @@ export function ConfigHistoryPage() {
   }
 
   async function doRollback(rev: number) {
+    const ok = await confirm({
+      title: `Roll back to revision ${rev}?`,
+      description: `Re-submits revision ${rev} as a new revision; every subscribed proxy picks it up. History is not rewritten.`,
+      confirmLabel: "Roll back",
+    });
+    if (!ok) return;
+    setBusy(true);
     try {
       const result = await rollbackTo(rev);
       setNotice(`rolled back to revision ${rev} as new revision ${result.revision}`);
       await refresh();
     } catch (err) {
       setNotice(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -76,7 +88,11 @@ export function ConfigHistoryPage() {
                       diff vs. current
                     </button>
                     {!r.current && (
-                      <button onClick={() => doRollback(r.revision)} className="text-warn hover:underline">
+                      <button
+                        onClick={() => doRollback(r.revision)}
+                        disabled={busy}
+                        className="text-warn hover:underline disabled:opacity-50"
+                      >
                         roll back to this
                       </button>
                     )}
@@ -94,6 +110,7 @@ export function ConfigHistoryPage() {
           <pre className="overflow-x-auto rounded bg-bg p-3 font-mono text-xs text-ink-muted">{diff}</pre>
         </section>
       )}
+      {dialog}
     </div>
   );
 }

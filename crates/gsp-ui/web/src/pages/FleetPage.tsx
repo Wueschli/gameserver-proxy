@@ -18,6 +18,14 @@ import {
 } from "../lib/groupTree";
 import { Badge } from "../components/ui/Badge";
 import { Button, Input } from "../components/ui/Button";
+import { useConfirm, type ConfirmOptions } from "../components/ui/ConfirmDialog";
+
+/** What every row/form needs to act: run a request, ask first, and know if one is in flight. */
+interface Actions {
+    report: (label: string, p: Promise<unknown>) => void;
+    confirm: (o: ConfirmOptions) => Promise<boolean>;
+    busy: boolean;
+}
 
 function summarizeFanout(result: FanoutResponse): string {
     const parts = result.results.map((r) =>
@@ -29,8 +37,11 @@ function summarizeFanout(result: FanoutResponse): string {
 export function FleetPage() {
     const { instances, connected } = useFleetSocket();
     const [notice, setNotice] = useState<string | null>(null);
+    const [busy, setBusy] = useState(false);
+    const { confirm, dialog } = useConfirm();
 
     function report(label: string, promise: Promise<unknown>) {
+        setBusy(true);
         promise
             .then((result) => {
                 const text =
@@ -45,9 +56,11 @@ export function FleetPage() {
                 setNotice(
                     `${label} failed: ${err instanceof ApiError ? err.message : err}`,
                 ),
-            );
+            )
+            .finally(() => setBusy(false));
     }
 
+    const actions: Actions = { report, confirm, busy };
     const tree = buildGroupTree(instances);
 
     return (
@@ -79,7 +92,7 @@ export function FleetPage() {
                             key={child.path}
                             node={child}
                             depth={0}
-                            report={report}
+                            actions={actions}
                         />
                     ))}
                     {tree.instances.map((inst) => (
@@ -87,13 +100,14 @@ export function FleetPage() {
                             key={inst.instance}
                             inst={inst}
                             depth={0}
-                            report={report}
+                            actions={actions}
                         />
                     ))}
                 </div>
             )}
 
-            <BroadcastForms report={report} />
+            <BroadcastForms actions={actions} />
+            {dialog}
         </div>
     );
 }
@@ -101,11 +115,11 @@ export function FleetPage() {
 function GroupRow({
     node,
     depth,
-    report,
+    actions,
 }: {
     node: GroupNode;
     depth: number;
-    report: (label: string, p: Promise<unknown>) => void;
+    actions: Actions;
 }) {
     const [open, setOpen] = useState(depth < 1);
     const unhealthy = subtreeUnhealthyCount(node);
@@ -136,7 +150,7 @@ function GroupRow({
                             key={child.path}
                             node={child}
                             depth={depth + 1}
-                            report={report}
+                            actions={actions}
                         />
                     ))}
                     {node.instances.map((inst) => (
@@ -144,7 +158,7 @@ function GroupRow({
                             key={inst.instance}
                             inst={inst}
                             depth={depth + 1}
-                            report={report}
+                            actions={actions}
                         />
                     ))}
                 </div>
@@ -156,12 +170,13 @@ function GroupRow({
 function InstanceBlock({
     inst,
     depth,
-    report,
+    actions,
 }: {
     inst: FleetInstanceView;
     depth: number;
-    report: (label: string, p: Promise<unknown>) => void;
+    actions: Actions;
 }) {
+    const { report, confirm, busy } = actions;
     const [open, setOpen] = useState(true);
     const rows = inst.pools.flatMap((pool) =>
         pool.backends.map((b) => ({ pool, b })),
@@ -202,17 +217,26 @@ function InstanceBlock({
                     <div className="mb-2 flex gap-2">
                         <Button
                             variant="ghost"
-                            onClick={() =>
-                                report(
-                                    `drain ${inst.instance}`,
-                                    drainInstance(inst.instance),
-                                )
-                            }
+                            disabled={busy}
+                            onClick={async () => {
+                                const ok = await confirm({
+                                    title: `Drain ${inst.instance}?`,
+                                    description:
+                                        "It stops accepting new sessions; existing ones finish. Undrain reverses this.",
+                                    confirmLabel: "Drain",
+                                });
+                                if (ok)
+                                    report(
+                                        `drain ${inst.instance}`,
+                                        drainInstance(inst.instance),
+                                    );
+                            }}
                         >
                             Drain
                         </Button>
                         <Button
                             variant="ghost"
+                            disabled={busy}
                             onClick={() =>
                                 report(
                                     `undrain ${inst.instance}`,
@@ -282,20 +306,36 @@ function InstanceBlock({
                                             <td className="py-1.5">
                                                 <select
                                                     value={b.state}
-                                                    onChange={(e) =>
+                                                    disabled={busy}
+                                                    onChange={async (e) => {
+                                                        const next = e.target
+                                                            .value as
+                                                            | "enabled"
+                                                            | "draining"
+                                                            | "disabled";
+                                                        // Taking a backend out of rotation is the risky direction;
+                                                        // returning it to `enabled` is restorative.
+                                                        if (
+                                                            next !== "enabled" &&
+                                                            !(await confirm({
+                                                                title: `Set ${b.addr} to ${next}?`,
+                                                                description: `Applies to every instance that has pool ${pool.name} and this address, not just ${inst.instance}.`,
+                                                                confirmLabel:
+                                                                    next === "disabled"
+                                                                        ? "Disable"
+                                                                        : "Set draining",
+                                                            }))
+                                                        )
+                                                            return;
                                                         report(
                                                             `patch ${pool.name}/${b.addr}`,
                                                             patchBackend(
                                                                 pool.name,
                                                                 b.addr,
-                                                                e.target
-                                                                    .value as
-                                                                    | "enabled"
-                                                                    | "draining"
-                                                                    | "disabled",
+                                                                next,
                                                             ),
-                                                        )
-                                                    }
+                                                        );
+                                                    }}
                                                     className="rounded border border-line bg-surface px-1.5 py-0.5 text-ink"
                                                 >
                                                     <option value="enabled">
@@ -314,16 +354,23 @@ function InstanceBlock({
                                             </td>
                                             <td className="py-1.5">
                                                 <button
-                                                    onClick={() =>
-                                                        report(
-                                                            `remove ${pool.name}/${b.addr}`,
-                                                            deleteBackend(
-                                                                pool.name,
-                                                                b.addr,
-                                                            ),
-                                                        )
-                                                    }
-                                                    className="text-bad hover:underline"
+                                                    disabled={busy}
+                                                    onClick={async () => {
+                                                        const ok = await confirm({
+                                                            title: `Remove ${b.addr} from ${pool.name}?`,
+                                                            description: `Removes it from every instance that has this pool and address, not just ${inst.instance}. Live sessions to it end.`,
+                                                            confirmLabel: "Remove",
+                                                        });
+                                                        if (ok)
+                                                            report(
+                                                                `remove ${pool.name}/${b.addr}`,
+                                                                deleteBackend(
+                                                                    pool.name,
+                                                                    b.addr,
+                                                                ),
+                                                            );
+                                                    }}
+                                                    className="text-bad hover:underline disabled:opacity-50"
                                                 >
                                                     remove
                                                 </button>
@@ -340,11 +387,8 @@ function InstanceBlock({
     );
 }
 
-function BroadcastForms({
-    report,
-}: {
-    report: (label: string, p: Promise<unknown>) => void;
-}) {
+function BroadcastForms({ actions }: { actions: Actions }) {
+    const { report, busy } = actions;
     const [addPool, setAddPool] = useState("");
     const [addAddr, setAddAddr] = useState("");
     const [hintIp, setHintIp] = useState("");
@@ -377,7 +421,9 @@ function BroadcastForms({
                         value={addAddr}
                         onChange={(e) => setAddAddr(e.target.value)}
                     />
-                    <Button type="submit">Add</Button>
+                    <Button type="submit" disabled={busy}>
+                        Add
+                    </Button>
                 </form>
             </section>
 
@@ -412,7 +458,9 @@ function BroadcastForms({
                         onChange={(e) => setHintTtl(Number(e.target.value))}
                         className="w-24"
                     />
-                    <Button type="submit">Set hint</Button>
+                    <Button type="submit" disabled={busy}>
+                        Set hint
+                    </Button>
                 </form>
             </section>
         </div>

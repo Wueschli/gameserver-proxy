@@ -5,6 +5,7 @@ import type { SnifferInfo } from "../types";
 import { Badge } from "../components/ui/Badge";
 import { Button, Input } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 
 export function PluginsPage() {
   const { instances } = useFleetSocket();
@@ -13,6 +14,8 @@ export function PluginsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   const instanceName = selected ?? instances[0]?.instance ?? null;
 
@@ -34,11 +37,21 @@ export function PluginsPage() {
   }, [instanceName, notice]);
 
   async function handleDelete(name: string) {
+    const ok = await confirm({
+      title: `Remove ${name}?`,
+      description:
+        "Deletes the module from every instance's sniffers directory; routes that use it stop matching after the next rescan.",
+      confirmLabel: "Remove",
+    });
+    if (!ok) return;
+    setBusy(true);
     try {
       await deleteSniffer(name);
       setNotice(`removed ${name}`);
     } catch (err) {
       setNotice(`remove ${name} failed: ${err instanceof ApiError ? err.message : err}`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -97,7 +110,11 @@ export function PluginsPage() {
                     {m.loaded ? <Badge tone="good">loaded</Badge> : <Badge tone="warn">not loaded</Badge>}
                   </td>
                   <td className="px-4 py-2 text-right">
-                    <button onClick={() => handleDelete(m.name)} className="text-bad hover:underline">
+                    <button
+                      onClick={() => handleDelete(m.name)}
+                      disabled={busy}
+                      className="text-bad hover:underline disabled:opacity-50"
+                    >
                       remove
                     </button>
                   </td>
@@ -108,6 +125,7 @@ export function PluginsPage() {
         )}
       </div>
 
+      {dialog}
       <UploadDialog
         open={uploadOpen}
         onOpenChange={setUploadOpen}

@@ -12,8 +12,7 @@ Last updated: 2026-10-01.
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work is the "Known follow-ups" table below, the remaining `gsp-ui`
-gaps (confirmation dialogs, frontend tests), and phase-14 CI coverage.
+Remaining work is the "Known follow-ups" table below, and phase-14 CI coverage.
 
 Most recent landings (newest first; full history in `git log`):
 
@@ -72,8 +71,12 @@ Most recent landings (newest first; full history in `git log`):
   (`make ui`, `--static-dir`) — redesigned in `d86c786` (Tailwind + Radix,
   react-router, grouped fleet tree via `settings.group`, schema-driven settings
   form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
-  /admin/sniffers`). Still missing: confirmation dialogs on destructive actions
-  and any frontend test suite.
+  /admin/sniffers`). Destructive actions (drain, remove backend, set a backend
+  `draining`/`disabled`, rollback, plugin remove) confirm first via
+  `useConfirm()`; action buttons disable while a request is in flight; a
+  vitest suite (`make ui-test`, CI `ui` job) pins that, and
+  `gsp-ui`'s `header_contract` test pins that every proxied route forwards
+  status + response headers (**add new proxied routes to its `ROUTES` table**).
 - **Tier-2 regional health gossip** — embedded `foca` SWIM mesh over one HMAC-auth
   UDP socket, per-backend last-writer-wins health broadcast piggybacked on foca's
   own anti-entropy, quorum-based `Backend::domain_down` override (additive to the
@@ -120,10 +123,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **CGNAT / both-sides-behind-restrictive-NAT** (phase 14) — documented v1
   limitation. A relay-of-last-resort (closer to Steam Datagram Relay's shape) is a
   possible v2, not designed.
-- **`gsp-ui` remaining gaps** — the visual redesign landed (see above); still
-  open are confirmation dialogs before drain / remove-backend / rollback, a
-  frontend test setup (no `test` script in `web/package.json`), and a
-  wire-shape contract test (see the Rust↔TS mismatch gotcha below).
+- **`gsp-ui` leftovers** — config *submit* (Settings page) still applies without a
+  confirmation step, and there is no end-to-end browser test (Playwright) — only
+  component tests against a mocked `api.ts`.
 - **Tunnel address authority** (phase 14, `docs/11` "Open questions") — origin
   and proxy tunnel addresses are self-reported; nothing guarantees fleet-wide
   uniqueness. Making `gsp-controller` allocate them is a registration-protocol

@@ -129,8 +129,9 @@ reference, `docs/10` for the design, and `crates/gsp-fleet-tests` for the
 multi-process integration tests. The `gsp-ui` frontend was redesigned after the
 PoC (Tailwind + Radix, client-side routing, a grouped fleet tree, a
 schema-driven settings form with a raw-YAML escape hatch, plugin management);
-confirmation dialogs for destructive actions and frontend tests are still
-open — see `docs/08-roadmap.md` "Later / optional".
+destructive actions ask for confirmation first, and the frontend has its own
+vitest suite (`make ui-test`) — see `docs/08-roadmap.md` "Later / optional" for
+what's left.
 
 **Phase 14 complete** (backend transport, `docs/11`): proxies can reach game
 servers that are *not* on a shared trusted network. An origin-side

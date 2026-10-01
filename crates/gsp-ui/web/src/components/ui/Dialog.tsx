@@ -4,11 +4,13 @@ export function Dialog({
   open,
   onOpenChange,
   title,
+  description,
   children,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
+  description?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -20,6 +22,11 @@ export function Dialog({
             border border-line bg-surface p-5 shadow-xl focus:outline-none"
         >
           <RadixDialog.Title className="mb-3 text-sm font-semibold text-ink">{title}</RadixDialog.Title>
+          {description ? (
+            <RadixDialog.Description className="mb-4 text-sm text-ink-muted">{description}</RadixDialog.Description>
+          ) : (
+            <RadixDialog.Description className="sr-only">{title}</RadixDialog.Description>
+          )}
           {children}
         </RadixDialog.Content>
       </RadixDialog.Portal>

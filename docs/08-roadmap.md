@@ -1085,13 +1085,12 @@ slice 1.
   the phase 10–13 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
-- **`gsp-ui` remaining gaps** — phase 10+11 slice 11f shipped a functional PoC;
-  the visual redesign has since landed (commit `d86c786`, see `docs/10` "The
-  admin GUI" → Redesign: Tailwind + Radix, client-side routing, grouped fleet
-  tree, schema-driven settings form, Plugins page). Still open: confirmation
-  dialogs before drain / remove-backend / rollback, better error surfacing,
-  and frontend tests (a contract test that response headers and body shapes
-  survive the Rust↔TS hop).
+- **`gsp-ui` leftovers** — phase 10+11 slice 11f shipped a functional PoC; the
+  visual redesign (commit `d86c786`, `docs/10` "The admin GUI" → Redesign) and
+  then confirmation dialogs for destructive actions, in-flight button states, a
+  vitest frontend suite and a table-driven header-forwarding contract test
+  (`crates/gsp-ui/src/proxy_util.rs`) landed. Still open: a confirmation step
+  on config *submit*, and browser-level end-to-end tests.
 - **Phase 14 follow-ups** — a CI-friendly tunnel end-to-end test (the Docker
   harness used for slice 6 lives only in a session scratchpad), and a
   controller-allocated tunnel address scheme (`docs/11` "Open questions").

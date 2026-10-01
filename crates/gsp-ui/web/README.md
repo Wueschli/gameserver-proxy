@@ -30,6 +30,24 @@ route its own API doesn't claim. A missing or unbuilt `dist/` doesn't fail
 `gsp-ui` for its API alone (as every test in `crates/gsp-ui` does) already
 has.
 
+## Tests
+
+```sh
+make ui-test     # from the repo root
+# or: cd crates/gsp-ui/web && npm test   (vitest run, jsdom + Testing Library)
+```
+
+CI runs them in the `ui` job, alongside `npm run build` (which type-checks).
+They mock `src/api.ts` / `useFleetSocket` at the module boundary, so they need no
+running `gsp-ui`. What they pin: every destructive action (drain, remove
+backend, set a backend `draining`/`disabled`, config rollback, plugin remove)
+asks for confirmation first and never calls the API on cancel; restorative
+actions (undrain, re-enable) don't ask; action buttons disable while a request
+is in flight; `api.ts` error/response handling (plain-text `ok` login body, JSON
+`error` field, `X-Config-Revision` header). The Rust half of the wire-shape
+contract — every proxied route forwards status + response headers — is
+`header_contract` in `crates/gsp-ui/src/proxy_util.rs` (part of `make check`).
+
 ## Local frontend development
 
 ```sh
