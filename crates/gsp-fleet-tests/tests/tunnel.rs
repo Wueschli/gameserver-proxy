@@ -145,6 +145,10 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
     t.start_origin(false).await?; // agent up, nothing listening on :7000 yet
     let edge = t.start_edge("edge-1", 1, None).await?;
 
+    // Tunnel up first (via a probe port outside the pool), so the unhealthy
+    // state below can only be because nothing listens on :7000 — not because a
+    // handshake is still pending (userspace's takes ~25 s).
+    t.wait_tunnel_up(edge).await?;
     t.wait_backends(edge, false).await?; // nothing answers on :7000 -> unhealthy
     t.start_echo()?;
     t.wait_backends(edge, true).await?; // recovers with no restart

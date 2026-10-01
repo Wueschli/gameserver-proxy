@@ -16,6 +16,8 @@ use crate::{spawn_controller_on, wait_http_up, wait_until, Proc};
 
 pub const ECHO_PORT: u16 = 7000;
 pub const PUBLIC_PORT: u16 = 8000;
+/// Not in any pool: a second echo port used only to prove the tunnel is up.
+const PROBE_PORT: u16 = 7001;
 const ADMIN_PORT: u16 = 9900;
 const WG_PORT: u16 = 51820;
 const ORIGIN_NAME: &str = "origin-a";
@@ -90,6 +92,8 @@ struct Origin {
     agent: Proc,
     #[allow(dead_code)] // held for its Drop: stops the echo server
     echo: Option<EchoServer>,
+    #[allow(dead_code)] // held for its Drop: stops the probe echo server
+    probe: Option<EchoServer>,
     ns: Ns,
     pubkey: String,
 }
@@ -206,6 +210,7 @@ impl TunnelLab {
         self.origin = Some(Origin {
             agent,
             echo,
+            probe: None,
             ns,
             pubkey,
         });
@@ -216,6 +221,41 @@ impl TunnelLab {
         let origin = self.origin.as_mut().context("start_origin first")?;
         origin.echo = Some(EchoServer::start(&origin.ns, ECHO_PORT)?);
         Ok(())
+    }
+
+    /// Prove the WireGuard tunnel itself is up, independent of any pool or of
+    /// whether the pooled backend (`:7000`) is listening: start a probe echo on
+    /// a second port in the origin namespace and connect to it *from the edge
+    /// namespace* over the tunnel address. Lets a scenario then attribute an
+    /// unhealthy `:7000` to `:7000` alone, not to a handshake still pending
+    /// (userspace's first handshake takes ~25 s).
+    pub async fn wait_tunnel_up(&mut self, edge: usize) -> Result<()> {
+        let origin = self.origin.as_mut().context("start_origin first")?;
+        if origin.probe.is_none() {
+            origin.probe = Some(EchoServer::start(&origin.ns, PROBE_PORT)?);
+        }
+        let ns = &self.edges[edge].ns;
+        wait_until(
+            || async move {
+                ns.in_ns(|| {
+                    use std::io::{Read, Write};
+                    let addr = SocketAddr::new(ORIGIN_TUNNEL_IP.parse().unwrap(), PROBE_PORT);
+                    let Ok(mut s) =
+                        std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+                    else {
+                        return false;
+                    };
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut buf = [0u8; 4];
+                    s.write_all(b"ping").is_ok()
+                        && s.read_exact(&mut buf).is_ok()
+                        && &buf == b"ping"
+                })
+            },
+            self.backend.deadline(),
+            "the WireGuard tunnel to carry traffic from the edge to the origin",
+        )
+        .await
     }
 
     pub fn origin_pubkey(&self) -> &str {
