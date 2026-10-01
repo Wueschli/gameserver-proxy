@@ -11,7 +11,7 @@ env:
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
@@ -28,7 +28,7 @@ jobs:
         run: cargo test --all
 
   plugins:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
@@ -59,7 +59,7 @@ jobs:
   ui:
     # gsp-ui frontend (crates/gsp-ui/web) — a standalone npm project, so it
     # gets its own job rather than riding on `make check`.
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: crates/gsp-ui/web
@@ -80,7 +80,7 @@ jobs:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces
     # (docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md). Non-blocking
     # until it has proven stable on GitHub runners.
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -102,7 +102,7 @@ jobs:
         run: make tunnel-e2e
 
   fuzz:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
