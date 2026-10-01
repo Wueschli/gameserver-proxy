@@ -25,6 +25,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"   # incremental state just bloats the cache
   RUSTFLAGS: "-D warnings"
 
 jobs:
@@ -75,7 +76,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with: { name: test }
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -94,11 +96,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          workspaces: |
-            crates/plugins
-            .
+          name: plugins
+          target-dirs: |
+            target
+            crates/plugins/target
       - name: Native unit tests
         working-directory: crates/plugins
         run: cargo test --workspace
@@ -155,7 +158,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with: { name: tunnel }
       - name: Allow unprivileged user namespaces (Ubuntu AppArmor)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Load the wireguard kernel module

@@ -1,0 +1,36 @@
+name: cargo-cache
+description: >
+  Rolling cargo cache. Swatinem/rust-cache only saves when the exact key misses,
+  and its key is the Cargo.lock hash, so its snapshot froze at the last lockfile
+  change and every later run recompiled everything newer (and a release-profile
+  change made the whole release tree cold forever). This saves a fresh snapshot
+  on every main push and restores the newest one by prefix.
+inputs:
+  name:
+    description: cache namespace (one per job kind)
+    required: true
+  target-dirs:
+    description: newline-separated cargo target dirs to cache
+    default: target
+runs:
+  using: composite
+  steps:
+    - id: k
+      shell: bash
+      run: |
+        echo "rustc=$(rustc -V | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
+        echo "lock=$(cat Cargo.lock crates/plugins/Cargo.lock 2>/dev/null | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          ${{ inputs.target-dirs }}
+        # main: unique key per commit => always saves a new snapshot.
+        # PRs: fixed key => read the main snapshot, don't churn the cache.
+        key: cargo-${{ inputs.name }}-${{ runner.os }}-${{ steps.k.outputs.rustc }}-${{ steps.k.outputs.lock }}-${{ github.ref == 'refs/heads/main' && github.sha || 'pr' }}
+        # No broader fallback on purpose: a lockfile or toolchain change starts
+        # cold, which bounds how much stale artifact data a snapshot accumulates.
+        restore-keys: |
+          cargo-${{ inputs.name }}-${{ runner.os }}-${{ steps.k.outputs.rustc }}-${{ steps.k.outputs.lock }}-

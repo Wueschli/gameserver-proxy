@@ -447,6 +447,13 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
   also act as nightly canaries for code-driven breakage. Adding a job or moving files between
   areas means updating `changes.sh` *and* its test. A full run is ~32 runner-minutes.
+  Cargo caching is `.github/actions/cargo-cache` (rolling: a new snapshot per `main` push,
+  restored by prefix `os-rustc-Cargo.lock`; PRs read it but don't write). It replaced
+  `Swatinem/rust-cache`, which only saves on an exact-key miss — its key is the lockfile
+  hash, so its snapshot froze at the last `Cargo.lock` change and a release-profile edit
+  (`strip = true`) left `plugins` recompiling all 342 crates every run. `fuzz` still uses
+  `rust-cache` (nightly only, tiny). A lockfile or toolchain bump starts cold by design.
+  Unverified until it has run twice on `main` (first run saves, second should be warm).
 - git remote `github.com/Wueschli/gameserver-proxy`, branch `main`; `git push`
   works, `origin/main` is current. The HTTPS credential helper logs a harmless
   "nonexistent Windows path" warning before falling back to a working credential.
