@@ -2532,7 +2532,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
         match m.host.as_ref().filter(|h| !h.is_empty()) {
             Some(raw) => raw
                 .iter()
-                .map(|h| parse_host_pattern(h).map_err(&at))
+                .map(|h| parse_host_pattern(h).map_err(at))
                 .collect(),
             None if min_one => Err(at(format!(
                 "match type `{}` needs a non-empty `host` list",
@@ -2553,7 +2553,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
             })?;
             let mut cidrs = Vec::with_capacity(raw.len());
             for c in raw {
-                cidrs.push(Cidr::parse(c).map_err(&at)?);
+                cidrs.push(Cidr::parse(c).map_err(at)?);
             }
             Ok(if m.kind == "dst" {
                 Matcher::DstCidr(cidrs)
@@ -2575,7 +2575,7 @@ fn parse_matcher(lname: &str, i: usize, m: &RawMatch) -> Result<Matcher, ConfigE
         }
         "first_bytes" => {
             let prefix = match &m.prefix {
-                Some(s) => parse_byte_spec(s).map_err(&at)?,
+                Some(s) => parse_byte_spec(s).map_err(at)?,
                 None => Vec::new(),
             };
             if prefix.len() > FIRST_BYTES_PREFIX_MAX {
