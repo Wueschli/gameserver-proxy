@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gsp-controller, namespace: gsp }
+spec:
+  replicas: 1                    # single standalone node; HA (Raft) is documented in docs/10
+  strategy: { type: Recreate }   # the sled store is single-writer
+  selector: { matchLabels: { app: gsp-controller } }
+  template:
+    metadata: { labels: { app: gsp-controller } }
+    spec:
+      securityContext: { fsGroup: 65532, runAsNonRoot: true }
+      containers:
+        - name: controller
+          image: gsp-deploy/gsp-controller:local
+          args: ["--listen=0.0.0.0:9901", "--data-dir=/data", "--auth-token=$(TOKEN)"]
+          env:
+            - name: TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: controller-token } }
+          ports: [{ containerPort: 9901 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 9901 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 9901 }, initialDelaySeconds: 10 }
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: gsp-controller-data }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: gsp-controller-data, namespace: gsp }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gsp-controller, namespace: gsp }
+spec:
+  selector: { app: gsp-controller }
+  ports: [{ port: 9901, targetPort: 9901 }]

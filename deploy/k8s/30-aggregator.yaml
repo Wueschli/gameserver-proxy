@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gsp-aggregator, namespace: gsp }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gsp-aggregator } }
+  template:
+    metadata: { labels: { app: gsp-aggregator } }
+    spec:
+      securityContext: { runAsNonRoot: true }
+      containers:
+        - name: aggregator
+          image: gsp-deploy/gsp-aggregator:local
+          args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)"]
+          env:
+            - name: TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+          ports: [{ containerPort: 9902 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 9902 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 9902 }, initialDelaySeconds: 10 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gsp-aggregator, namespace: gsp }
+spec:
+  selector: { app: gsp-aggregator }
+  ports: [{ port: 9902, targetPort: 9902 }]

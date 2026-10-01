@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: gsp, namespace: gsp }
+spec:
+  selector: { matchLabels: { app: gsp } }
+  template:
+    metadata: { labels: { app: gsp } }
+    spec:
+      hostNetwork: true                      # docs/12 default for an edge proxy
+      dnsPolicy: ClusterFirstWithHostNet     # else gsp-aggregator below won't resolve
+      containers:
+        - name: gsp
+          image: gsp-deploy/gsp:local
+          args:
+            - --config=/etc/gsp/gsp.yaml
+            - --aggregator=http://gsp-aggregator.gsp.svc:9902
+            - --aggregator-token=$(AGGREGATOR_TOKEN)
+          env:
+            - name: AGGREGATOR_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+          readinessProbe: { httpGet: { path: /healthz, port: 9900 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 9900 }, initialDelaySeconds: 10 }
+          volumeMounts: [{ name: config, mountPath: /etc/gsp, readOnly: true }]
+          # Phase-14 tunnel (docs/12): uncomment, add the --tunnel-* args, and
+          # mount /dev/net/tun (hostPath volume).
+          # securityContext:
+          #   capabilities: { add: ["NET_ADMIN"] }
+          #
+          # Reserved-range alternative to hostNetwork (docs/12): drop
+          # hostNetwork/dnsPolicy, bind "0.0.0.0:30000-30999" in the config and
+          # publish that range with hostPort entries.
+      volumes:
+        - name: config
+          secret: { secretName: gsp-config }

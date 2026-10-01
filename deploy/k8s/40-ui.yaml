@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gsp-ui, namespace: gsp }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gsp-ui } }
+  template:
+    metadata: { labels: { app: gsp-ui } }
+    spec:
+      securityContext: { runAsNonRoot: true }
+      containers:
+        - name: ui
+          image: gsp-deploy/gsp-ui:local
+          args:
+            - --listen=0.0.0.0:9903
+            - --ui-password=$(UI_PASSWORD)
+            - --controller-url=http://gsp-controller:9901
+            - --controller-token=$(CONTROLLER_TOKEN)
+            - --aggregator-url=http://gsp-aggregator:9902
+            - --aggregator-token=$(AGGREGATOR_TOKEN)
+          env:
+            - name: UI_PASSWORD
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: ui-password } }
+            - name: CONTROLLER_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: controller-token } }
+            - name: AGGREGATOR_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+          ports: [{ containerPort: 9903 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 9903 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 9903 }, initialDelaySeconds: 10 }
+---
+# ClusterIP only: front it with an Ingress / LoadBalancer (and TLS) yourself.
+apiVersion: v1
+kind: Service
+metadata: { name: gsp-ui, namespace: gsp }
+spec:
+  selector: { app: gsp-ui }
+  ports: [{ port: 9903, targetPort: 9903 }]
