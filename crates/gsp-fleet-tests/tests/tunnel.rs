@@ -7,9 +7,11 @@
 //! in plain `cargo test`.
 
 use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
@@ -68,6 +70,30 @@ fn dropping_a_namespace_reaps_its_holder() -> Result<()> {
     assert!(
         !std::path::Path::new(&proc_dir).exists(),
         "holder process {proc_dir} survived the drop"
+    );
+    Ok(())
+}
+
+/// The echo server lives *inside* the origin namespace; the client in the lab
+/// reaches it across the veth. Large TCP + a MTU-sized UDP datagram.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn echo_server_round_trips_tcp_and_udp_and_stops_on_drop() -> Result<()> {
+    let mut lab = Lab::new()?;
+    let origin = lab.add_ns()?;
+    let addr = SocketAddr::new(origin.underlay().into(), 7000);
+
+    let echo = EchoServer::start(&origin, 7000)?;
+    let big: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    assert_eq!(tcp_roundtrip(addr, &big).await?, big);
+    let dgram = vec![0x5a; 1200];
+    assert_eq!(udp_roundtrip(addr, &dgram).await?, dgram);
+
+    drop(echo);
+    let err = tcp_roundtrip(addr, b"x").await.unwrap_err();
+    assert!(
+        format!("{err:#}").to_lowercase().contains("refused"),
+        "after drop the port should refuse connections, got: {err:#}"
     );
     Ok(())
 }

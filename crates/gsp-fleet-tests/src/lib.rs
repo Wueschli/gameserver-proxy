@@ -25,6 +25,7 @@ use anyhow::{bail, ensure, Context, Result};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
+pub mod echo;
 pub mod netns;
 
 /// An OS-assigned loopback port, freed immediately before the caller binds
