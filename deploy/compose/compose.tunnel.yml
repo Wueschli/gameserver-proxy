@@ -1,0 +1,43 @@
+# Adds the phase-14 WireGuard transport (docs/11, docs/12). Needs NET_ADMIN and
+# /dev/net/tun. Usage (from deploy/compose):
+#   docker compose -f docker-compose.yml -f compose.tunnel.yml up -d
+# Not smoke-tested in CI (no privileged runner); `make tunnel-e2e` covers the logic.
+services:
+  gsp:
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes: ["gsp-tunnel-data:/data"]
+    command:
+      - --controller=http://127.0.0.1:9901
+      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --aggregator=http://127.0.0.1:9902
+      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
+      - --tunnel-iface=gsp-tun0
+      - --tunnel-address=10.60.0.1/24
+      - --tunnel-key-file=/data/gsp-tunnel.key
+      - --tunnel-controller-url=http://127.0.0.1:9901
+      - --tunnel-controller-token=${GSP_CONTROLLER_TOKEN}
+      - --tunnel-name=demo-proxy
+      - --tunnel-endpoint=${GSP_TUNNEL_ENDPOINT:?public ip:port origins dial}
+  # An origin's agent normally runs next to the game server, on another host;
+  # it is here only to show the flags.
+  agent:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: gsp-agent
+    image: gsp-deploy/gsp-agent:local
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes: ["agent-data:/data"]
+    command:
+      - --data-dir=/data
+      - --controller-url=http://127.0.0.1:9901
+      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --name=demo-origin
+      - --address=10.60.0.2/24
+      - --backends=10.60.0.2:25565
+volumes:
+  gsp-tunnel-data:
+  agent-data:
