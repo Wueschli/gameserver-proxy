@@ -145,8 +145,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
     time only), and `ensure_built()` runs `cargo build` again inside the namespace, which
     works offline only because everything is already built (and it recompiles `ring` there
     on every run — cause not investigated);
-  - not yet confirmed that `unshare -Urnm` + tmpfs-on-`/run` works on GitHub's Ubuntu 24.04
-    runners (the job exists but has not run on GitHub yet).
+
 - **HA + `--role slave` together** — rejected at startup today. Needs the upward
   relay to run leader-only with its cursor promoted to replicated state (designed in
   `docs/10`, not built).
@@ -195,7 +194,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
   (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
   The CI job is **non-blocking** (`continue-on-error: true`) until it has proven stable
-  on GitHub runners; make it required once it has. Needs `unshare`, `ip`,
+  on GitHub runners; make it required once it has. (First GitHub run, 2026-10-01,
+  commit `125ffde`: both matrix legs green — `unshare -Urnm` + tmpfs on `/run` and the
+  `wireguard` module work on the Ubuntu runners; kernel 62 s, userspace 132 s.) Needs `unshare`, `ip`,
   `nsenter`; the userspace backend also needs `/run/wireguard`
   (the make target mounts a tmpfs on `/run` for it). Traps it taught:
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
