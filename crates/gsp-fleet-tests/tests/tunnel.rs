@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
+use gsp_fleet_tests::{spawn_controller_on, wait_http_up};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
 #[test]
@@ -95,5 +96,32 @@ async fn echo_server_round_trips_tcp_and_udp_and_stops_on_drop() -> Result<()> {
         format!("{err:#}").to_lowercase().contains("refused"),
         "after drop the port should refuse connections, got: {err:#}"
     );
+    Ok(())
+}
+
+/// Logs are captured (existing helpers discard them) so a failing scenario can
+/// show what each process said. Runs in plain `cargo test`: no namespaces.
+#[tokio::test]
+async fn proc_captures_output_for_failure_reports() -> Result<()> {
+    gsp_fleet_tests::build_fleet_bins()?;
+    let dir = tempfile::tempdir()?;
+    let port = gsp_fleet_tests::free_port()?;
+    let ctl = spawn_controller_on(dir.path(), &format!("127.0.0.1:{port}"))?;
+    wait_http_up(
+        &format!("http://127.0.0.1:{port}/healthz"),
+        Duration::from_secs(10),
+    )
+    .await?;
+    assert_eq!(ctl.name(), "gsp-controller");
+    // The controller logs at startup; the log file must have something in it.
+    gsp_fleet_tests::wait_until(
+        || {
+            let log = ctl.log();
+            async move { Ok(!log.is_empty()) }
+        },
+        Duration::from_secs(5),
+        "controller output to be captured",
+    )
+    .await?;
     Ok(())
 }

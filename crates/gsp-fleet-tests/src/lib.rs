@@ -44,7 +44,7 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root must exist")
 }
 
-/// Debug-builds the four fleet binaries once (idempotent — `cargo build`
+/// Debug-builds the five fleet binaries once (idempotent — `cargo build`
 /// itself no-ops on an unchanged tree; callers don't need to coordinate
 /// across tests, cargo's own target-dir lock serializes concurrent callers).
 /// Debug, not release: this is a correctness test, not `gsp-bench`'s
@@ -61,10 +61,12 @@ pub fn build_fleet_bins() -> Result<()> {
             "gsp-aggregator",
             "-p",
             "gsp-ui",
+            "-p",
+            "gsp-agent",
         ])
         .current_dir(workspace_root())
         .status()
-        .context("running `cargo build -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui`")?;
+        .context("running `cargo build -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent`")?;
     ensure!(status.success(), "building the fleet binaries failed");
     Ok(())
 }
@@ -79,6 +81,8 @@ fn bin_path(name: &str) -> PathBuf {
 pub struct Proc {
     name: &'static str,
     child: Child,
+    /// Where this process's stdout+stderr go, if captured ([`Proc::spawn_in`]).
+    log: Option<tempfile::TempPath>,
 }
 
 impl Drop for Proc {
@@ -98,7 +102,58 @@ impl Proc {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawning {name}"))?;
-        Ok(Self { name, child })
+        Ok(Self {
+            name,
+            child,
+            log: None,
+        })
+    }
+
+    /// Like [`Proc::spawn`], but optionally inside a network namespace and with
+    /// stdout+stderr captured to a temp file ([`Proc::log`]) so a failing
+    /// scenario can print what every process said.
+    pub fn spawn_in(
+        ns: Option<&crate::netns::Ns>,
+        name: &'static str,
+        args: &[String],
+    ) -> Result<Self> {
+        let (file, path) = tempfile::NamedTempFile::new()?.into_parts();
+        let file2 = file.try_clone()?;
+        let mut cmd = match ns {
+            // nsenter exec()s the target, so `child.id()` is the binary's pid.
+            Some(ns) => {
+                let mut c = Command::new("nsenter");
+                c.arg(format!("--net={}", ns.ns_path()))
+                    .arg("--")
+                    .arg(bin_path(name));
+                c
+            }
+            None => Command::new(bin_path(name)),
+        };
+        let child = cmd
+            .args(args)
+            .stdout(Stdio::from(file))
+            .stderr(Stdio::from(file2))
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("spawning {name}"))?;
+        Ok(Self {
+            name,
+            child,
+            log: Some(path),
+        })
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Everything the process has written so far (empty if not captured).
+    pub fn log(&self) -> String {
+        self.log
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default()
     }
 
     /// Kill and reap the process now, instead of waiting for `Drop` — used
@@ -329,6 +384,21 @@ pub fn spawn_controller(data_dir: &Path, listen_port: u16) -> Result<Proc> {
             data_dir.display().to_string(),
             "--listen".to_string(),
             format!("127.0.0.1:{listen_port}"),
+        ],
+    )
+}
+
+/// Controller on an arbitrary `host:port` (the tunnel e2e test binds
+/// `0.0.0.0` so every namespace can reach it), output captured.
+pub fn spawn_controller_on(data_dir: &Path, listen: &str) -> Result<Proc> {
+    Proc::spawn_in(
+        None,
+        "gsp-controller",
+        &[
+            "--data-dir".to_string(),
+            data_dir.display().to_string(),
+            "--listen".to_string(),
+            listen.to_string(),
         ],
     )
 }
