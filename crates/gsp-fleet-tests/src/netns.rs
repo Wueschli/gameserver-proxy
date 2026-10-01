@@ -20,9 +20,12 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use nix::sched::{setns, CloneFlags};
 
-/// Namespace indices are handed out process-wide and never reused: a dead
-/// namespace's veth is torn down asynchronously by the kernel, so a later
-/// `Lab` reusing `gv1l`/`10.99.1.0/30` would race that cleanup (`File exists`).
+/// Namespace indices are handed out process-wide and never reused within one
+/// process: a dead namespace's veth is torn down asynchronously by the kernel, so
+/// a later `Lab` reusing `gv1l`/`10.99.1.0/30` would race that cleanup. Other
+/// processes sharing the lab (every `cargo nextest` test is its own process, all
+/// restarting at 1) are handled by [`Lab::add_ns`] skipping indices whose veth
+/// already exists.
 static NEXT_IDX: AtomicU8 = AtomicU8::new(1);
 
 const HINT: &str = "this test needs CAP_NET_ADMIN in a network namespace — run it via \
@@ -165,13 +168,28 @@ impl Lab {
 
     /// Create the next namespace and join it to the lab with a veth pair.
     pub fn add_ns(&mut self) -> Result<Ns> {
-        let i = NEXT_IDX.fetch_add(1, Ordering::SeqCst);
-        ensure!(i < 250, "too many namespaces created in one test run");
-        let ns = Ns::create(i)?;
-        let (lab_if, ns_if) = (format!("gv{i}l"), format!("gv{i}n"));
-        run(&[
-            "ip", "link", "add", &lab_if, "type", "veth", "peer", "name", &ns_if,
-        ])?;
+        // Claim the first free index. `ip link add` is atomic in the kernel, so
+        // "File exists" means another process (or a namespace whose veth is still
+        // being torn down) owns this index: try the next one.
+        let (i, lab_if, ns_if) = loop {
+            let i = NEXT_IDX.fetch_add(1, Ordering::SeqCst);
+            ensure!(i < 250, "too many namespaces created in one test run");
+            let (lab_if, ns_if) = (format!("gv{i}l"), format!("gv{i}n"));
+            match run(&[
+                "ip", "link", "add", &lab_if, "type", "veth", "peer", "name", &ns_if,
+            ]) {
+                Ok(_) => break (i, lab_if, ns_if),
+                Err(e) if e.to_string().contains("File exists") => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        let ns = match Ns::create(i) {
+            Ok(ns) => ns,
+            Err(e) => {
+                let _ = run(&["ip", "link", "del", &lab_if]);
+                return Err(e);
+            }
+        };
         run(&["ip", "link", "set", &ns_if, "netns", &ns.pid().to_string()])?;
         run(&[
             "ip",

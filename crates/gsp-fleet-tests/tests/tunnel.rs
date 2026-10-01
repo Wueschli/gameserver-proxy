@@ -27,6 +27,39 @@ fn outside_a_lab_the_error_names_the_make_target() {
     );
 }
 
+/// A veth left behind by an earlier process (each `cargo nextest` test is its
+/// own process, so the in-process index restarts at 1 in the same lab, and a dead
+/// namespace's veth is torn down asynchronously) must not make `add_ns` fail.
+#[test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+fn add_ns_skips_veths_left_by_an_earlier_process() -> Result<()> {
+    let mut lab = Lab::new()?;
+    // Make indices 1..=24 (more than any run allocates) taken. Earlier tests in
+    // this lab may already have left some behind, which is just as stale, so a
+    // failed `ip link add` is fine as long as the veth exists afterwards. (The
+    // tunnel suite runs one test at a time, so deleting these below is safe.)
+    let stale: Vec<String> = (1..=24).map(|i| format!("gv{i}l")).collect();
+    for (i, lab_if) in stale.iter().enumerate() {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "add", lab_if, "type", "veth", "peer", "name"])
+            .arg(format!("gv{}n", i + 1))
+            .output()?;
+        let exists = std::process::Command::new("ip")
+            .args(["link", "show", lab_if])
+            .output()?
+            .status
+            .success();
+        anyhow::ensure!(exists, "stale veth {lab_if} could not be set up");
+    }
+    let result = lab.add_ns();
+    for lab_if in &stale {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "del", lab_if])
+            .status();
+    }
+    result.map(|_| ())
+}
+
 /// Two namespaces reach each other only through the lab's forwarding.
 #[test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
