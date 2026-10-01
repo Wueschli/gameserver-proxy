@@ -130,6 +130,23 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   and proxy tunnel addresses are self-reported; nothing guarantees fleet-wide
   uniqueness. Making `gsp-controller` allocate them is a registration-protocol
   change, not designed.
+- **Tunnel e2e leftovers** (deferred minors from the 2026-10-01 branch review; none
+  affect correctness of what is asserted today):
+  - the 1200-byte UDP check in scenario 1 is one datagram with no retry — a single
+    dropped datagram on a fresh path would flake it (a 3-try loop fixes it);
+  - scenario 4's negative check looks for `/pools` lines starting with two spaces; it
+    would pass vacuously if that format changed — also assert the pool name is present;
+  - `echo.rs`: if `setns` fails inside the thread, the error surfaces as "did not
+    report ready within 5s" instead of the real cause;
+  - a blocked user namespace (e.g. Ubuntu AppArmor without the CI `sysctl`) makes
+    `unshare -Urnm` fail in the Makefile *before* the in-test hint can name
+    `make tunnel-e2e`;
+  - `make tunnel-e2e` also builds `gsp-aggregator`/`gsp-ui` (unused by these tests, build
+    time only), and `ensure_built()` runs `cargo build` again inside the namespace, which
+    works offline only because everything is already built (and it recompiles `ring` there
+    on every run — cause not investigated);
+  - not yet confirmed that `unshare -Urnm` + tmpfs-on-`/run` works on GitHub's Ubuntu 24.04
+    runners (the job exists but has not run on GitHub yet).
 - **HA + `--role slave` together** — rejected at startup today. Needs the upward
   relay to run leader-only with its cursor promoted to replicated state (designed in
   `docs/10`, not built).
@@ -177,7 +194,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   CI job `tunnel`, kernel + userspace matrix) runs the real `gsp-controller` /
   `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
   (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
-  Needs `unshare`, `ip`, `nsenter`; the userspace backend also needs `/run/wireguard`
+  The CI job is **non-blocking** (`continue-on-error: true`) until it has proven stable
+  on GitHub runners; make it required once it has. Needs `unshare`, `ip`,
+  `nsenter`; the userspace backend also needs `/run/wireguard`
   (the make target mounts a tmpfs on `/run` for it). Traps it taught:
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
   up — wait for a real round trip); **userspace (`boringtun`) first handshake takes
@@ -195,7 +214,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   it with `--ignored known_bug`). Fix = proxy registrations carry/receive a tunnel
   address and the agent uses `/32`s — a protocol change that belongs with the tunnel
   address authority work (`docs/11` "Open questions"). Until then a single origin
-  supports one active edge proxy.
+  supports one active edge proxy. **When you fix it, un-ignore that test and drop
+  `--skip known_bug_` from the `tunnel-e2e` target** — nothing in the gating run
+  asserts that the first proxy keeps working until you do.
 
 ## Known follow-ups (none blocking)
 
