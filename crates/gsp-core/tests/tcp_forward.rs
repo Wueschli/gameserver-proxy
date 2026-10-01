@@ -923,6 +923,22 @@ async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
         .await;
 }
 
+/// Connect, retrying while the listener is still coming up. A fixed
+/// `sleep` before `connect` flakes under parallel test load; this waits
+/// exactly as long as startup takes and no longer.
+async fn connect_when_listening(addr: std::net::SocketAddr) -> TcpStream {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return s,
+            Err(e) if std::time::Instant::now() >= deadline => {
+                panic!("listener at {addr} never came up: {e}")
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+}
+
 #[tokio::test]
 async fn acl_deny_drops_the_connection_before_routing() {
     // Echo backend that should never be reached.
@@ -951,14 +967,13 @@ async fn acl_deny_drops_the_connection_before_routing() {
     );
     let cfg = parse_str(&yaml).unwrap();
     let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The proxy accepts the TCP connection then drops it without connecting a
     // backend: the client sees EOF and never gets its bytes echoed.
-    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut client = connect_when_listening(proxy_addr).await;
     let _ = client.write_all(b"hello").await;
     let mut buf = [0u8; 5];
-    let read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut buf)).await;
+    let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf)).await;
     match read {
         Ok(Ok(0)) => {}  // clean EOF
         Ok(Err(_)) => {} // or connection reset

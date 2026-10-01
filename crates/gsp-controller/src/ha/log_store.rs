@@ -227,6 +227,21 @@ mod tests {
         }
     }
 
+    /// sled releases its file lock on a background thread after the last
+    /// handle drops, so an immediate reopen can lose the race under load.
+    fn reopen(path: &std::path::Path) -> sled::Db {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match sled::open(path) {
+                Ok(db) => return db,
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    panic!("sled never released its lock: {e}")
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn seeded_entries_are_readable_and_persist_across_a_reopen() {
         let (store, dir) = open();
@@ -238,7 +253,7 @@ mod tests {
 
         drop(store);
         drop(reader); // both clones must go — sled holds one file lock per open Db
-        let db = sled::open(dir.path()).unwrap();
+        let db = reopen(dir.path());
         let mut reopened = LogStore::open(&db).unwrap();
         let state = reopened.get_log_state().await.unwrap();
         assert_eq!(state.last_log_id.unwrap().index, 2);

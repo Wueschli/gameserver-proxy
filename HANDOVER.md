@@ -137,17 +137,21 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 ## Known flakes & environment gotchas
 
-- **`cargo-audit` is not installed by default** (`cargo install cargo-audit
-  --locked`); `cargo audit` currently reports 0 vulnerabilities (two
-  informational "unmaintained crate" notes for `fxhash`/`instant` remain, no
-  action needed). No `make audit` target yet — reasonable follow-up if Dependabot
-  alerts recur.
-- **Timing-sensitive-under-load test flakes** (never a regression, pass solo and on
-  rerun): `gsp-controller`'s `ha::log_store` seeded-entries test on a `sled`
-  file-lock race under parallel `cargo test`; `gsp-core`'s
-  `resolver_target_gets_a_proxy_protocol_header` and
-  `acl_deny_drops_the_connection_before_routing` under full-workspace parallel load
-  (worse since `gsp-fleet-tests` added subprocess-spawning tests).
+- **`make audit`** wraps `cargo audit` (needs `cargo install cargo-audit --locked`).
+  New advisories land on a schedule you don't control — on 2026-10-01 it caught
+  `rustls` (RUSTSEC-2026-0285) and two `wasmtime` fuel-accounting advisories
+  (RUSTSEC-2026-0315/0316), fixed by lockfile-only patch bumps (`rustls` 0.23.45,
+  `wasmtime` 48.0.3). Three "unmaintained crate" warnings (`atomic-polyfill`,
+  `fxhash`, `instant`) are informational and don't fail the target. Not in CI
+  yet — run it before a release.
+- **Fixed-sleep test flakes (fixed 2026-10-01)**: `resolver_target_gets_a_proxy_protocol_header`
+  and `acl_deny_drops_the_connection_before_routing` slept 150 ms then `connect().unwrap()`,
+  which loses to listener startup under parallel load; they now retry the connect
+  until the listener is up. `gsp-controller`'s `seeded_entries_are_readable_and_persist_across_a_reopen`
+  reopened `sled` immediately after dropping it (the file lock is released on a
+  background thread); it now retries the open. **The other ~30 `sleep(150ms)` +
+  connect tests in `crates/gsp-core/tests/tcp_forward.rs` have the same shape** —
+  if one flakes, reuse `connect_when_listening` there rather than lengthening the sleep.
 - **A config file directly under `/tmp`** triggers continuous ~200 ms
   `configuration reloaded source=file` log spam (a `notify` / tmpfs
   mtime-granularity interaction). Harmless — `reload.rs` only swaps the `Snapshot` —
@@ -162,11 +166,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   smoke scripts. Bare `kill`/`pkill` on background test processes has also produced
   a stray "Exit code 144" from the Bash tool in this environment — wrapping each
   process in `timeout -s KILL` instead avoids it.
-- **`config.example.yaml`'s `realtime` pool self-references its own listener ports**
-  (targets `127.0.0.1:27015`/`27016` == its own listener binds). Fine for
-  `--check`/parsing (all CI does); running it live makes `udp_probe` loop back
-  through the proxy as a fake client and snowball session counts (28k+ in seconds).
-  See the table below.
 - **`--tunnel-*` / `gsp-agent` need `CAP_NET_ADMIN` + `/dev/net/tun`** (even
   `boringtun` userspace does, for the TUN device). This dev sandbox has neither —
   phase 14 was verified in Docker with those granted. `TunnelSource` origin-name
@@ -181,7 +180,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 | Item | Notes |
 |------|-------|
-| `config.example.yaml`'s `realtime` pool self-references its own listener ports | targets `127.0.0.1:27015`/`27016` == the listener binds of the same name; actually *running* this file live (not just `--check`/parsing it, which is all CI does) makes the `udp_probe` health check loop back through the proxy's own listener as if it were a client, growing `active`/session counts unbounded within seconds (observed: 28k+ after ~4s). Found via slice 8's live `/fleet/sessions` smoke test, confirmed unrelated to phase 10+11 by re-running against a minimal non-self-referential config (`active: 0`, as expected). Not a regression from this session — a pre-existing property of the example/documentation config when actually executed rather than just parsed. Not fixing now: out of scope for the aggregator work, and `config.example.yaml`'s job is to document every feature's syntax, not to be a runnable fixture.
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |

@@ -834,13 +834,24 @@ listeners:
         );
         let runtime =
             crate::Runtime::start(crate::Snapshot::from_config(&cfg), Arc::new(resolvers), 1);
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        let mut c = TcpStream::connect(proxy).await.unwrap();
+        // Retry the connect until the listener is up: a fixed sleep flakes
+        // under parallel load. (Probing with a throwaway connection instead
+        // would reach the stub backend and eat its single accept.)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut c = loop {
+            match TcpStream::connect(proxy).await {
+                Ok(s) => break s,
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    panic!("listener never came up: {e}")
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        };
         let client_local = c.local_addr().unwrap();
         c.write_all(b"hello").await.unwrap();
 
-        let got = tokio::time::timeout(std::time::Duration::from_millis(500), rx)
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .expect("backend never received bytes")
             .unwrap();

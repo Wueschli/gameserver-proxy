@@ -135,6 +135,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
+| Audit | `make audit` (needs `cargo install cargo-audit --locked`) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |

@@ -132,9 +132,12 @@ pools:
       max_sessions: 500           # optional; omit for uncapped
 
   - name: realtime
+    # Backends deliberately NOT on this proxy's own listener ports (27015/27016
+    # below): a udp_probe against the proxy itself loops back through the
+    # listener as a fake client and snowballs session counts if run live.
     targets:
-      - "127.0.0.1:27015"
-      - "127.0.0.1:27016"
+      - "10.0.1.11:27015"
+      - "10.0.1.12:27015"
     # consistent_hash pins a client to one instance by a rendezvous hash of its
     # address — session affinity without a sticky table. hash_on: src_ip (default)
     # | src_ip_port. Only valid with balancer: consistent_hash.

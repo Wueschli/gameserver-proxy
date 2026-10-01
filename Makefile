@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test build run fuzz bench plugins ui help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -20,6 +20,10 @@ lint:
 ## test: run the whole test suite
 test:
 	cargo test --all
+
+## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
+audit:
+	cargo audit
 
 ## build: debug build of the workspace
 build:
