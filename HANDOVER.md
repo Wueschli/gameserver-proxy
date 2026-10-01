@@ -173,10 +173,29 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   phase 14 was verified in Docker with those granted. `TunnelSource` origin-name
   matching: `backend_sources[].name` must equal the origin's `gsp-agent --name`
   (intentionally the same string).
-- **Phase 14 Docker verification harness** (Dockerfile, compose, keygen/startup
-  scripts) lives only in a session scratchpad, not the repo — a one-off, not a
-  `gsp-fleet-tests`-style CI test. Building a CI-friendly version (minus the
-  Docker/`CAP_NET_ADMIN` dependency) is an open follow-up.
+- **Phase 14 tunnel e2e** — `make tunnel-e2e` (`crates/gsp-fleet-tests/tests/tunnel.rs`,
+  CI job `tunnel`, kernel + userspace matrix) runs the real `gsp-controller` /
+  `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
+  (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
+  Needs `unshare`, `ip`, `nsenter`; the userspace backend also needs `/run/wireguard`
+  (the make target mounts a tmpfs on `/run` for it). Traps it taught:
+  **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
+  up — wait for a real round trip); **userspace (`boringtun`) first handshake takes
+  ~25 s** (the proxy has no endpoint for the origin, so it waits for the agent's
+  25 s persistent keepalive; kernel is ~2 s) — observed 2026-10-01, not fixed;
+  dead namespaces' veths disappear asynchronously, so test namespaces never reuse
+  names within a run. Slice 7 (proxy-peers registry) is live-verified for *one
+  proxy added after the origin*.
+- **KNOWN BUG — a second proxy steals the first one's route** (found by the tunnel
+  e2e, 2026-10-01): `gsp-agent/src/proxy_subscribe.rs` gives every proxy peer
+  `AllowedIPs = 0.0.0.0/0` and `ProxyRegistration` has no tunnel address to narrow
+  it to, so with 2+ proxies on one origin only the last-registered works (the earlier
+  one's backend connects time out). Reproducer:
+  `known_bug_two_proxies_cannot_share_one_origin` (skipped by `make tunnel-e2e`; run
+  it with `--ignored known_bug`). Fix = proxy registrations carry/receive a tunnel
+  address and the agent uses `/32`s — a protocol change that belongs with the tunnel
+  address authority work (`docs/11` "Open questions"). Until then a single origin
+  supports one active edge proxy.
 
 ## Known follow-ups (none blocking)
 
@@ -352,7 +371,7 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
 | `crates/plugins/` | Standalone workspace (own `[workspace]`): `gsp-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `gsp` / `gsp-core`. |
 | `crates/gsp-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `gsp` process, connection-count ramp, `/proc` RSS/fd sampling). |
-| `crates/gsp-fleet-tests/` | Phase 10+11 slice 12: `cargo test -p gsp-fleet-tests` (part of `make check`) spawns real `gsp`/`gsp-controller`/`gsp-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
+| `crates/gsp-fleet-tests/` | Phase 10+11 slice 12 (+ phase 14 `tests/tunnel.rs`, `#[ignore]`d, `make tunnel-e2e`, with `src/{netns,echo,tunnel}.rs` helpers): `cargo test -p gsp-fleet-tests` (part of `make check`) spawns real `gsp`/`gsp-controller`/`gsp-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
 | `crates/gsp-config/fuzz/` | Standalone workspace: `extract_sni` / `route_match` / `parse_config` `cargo-fuzz` targets. `make fuzz` (nightly). |
 
 ---

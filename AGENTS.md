@@ -109,7 +109,8 @@ crates/
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
                               child processes and drives them over real HTTP
-                              (`cargo test -p gsp-fleet-tests`, included in `make check`)
+                              (`cargo test -p gsp-fleet-tests`, included in `make check`); phase 14's
+                              `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
   plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
 
@@ -135,6 +136,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
+| Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |

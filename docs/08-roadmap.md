@@ -1071,9 +1071,14 @@ next needed it; all now built):
    fix slice 6 needed) that reconciles every registered proxy onto the
    origin's interface. `--peer-pubkey`/`--peer-endpoint` still work
    alongside it as a manual pin — the two converge to the same state, no
-   conflict. Not re-verified live in containers (the mechanism and its
-   failure modes are identical to slice 6's, already proven there); covered
-   by unit + in-crate HTTP tests only.
+   conflict. Live-verified (2026-10-01) by `make tunnel-e2e` scenario 3: a
+   proxy started after the origin is learned by the already-running agent
+   with no restart, and carries traffic. **That run also found a real bug**:
+   every proxy peer gets `AllowedIPs 0.0.0.0/0`, so a *second* proxy steals the
+   first one's route — see HANDOVER.md "KNOWN BUG" (reproducer
+   `known_bug_two_proxies_cannot_share_one_origin`). "Scales to N proxies" holds
+   for one active proxy per origin until proxy registrations carry a tunnel
+   address.
 
 Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
 NAT fallback (documented v1 limitation, no code) — does not block starting
@@ -1091,9 +1096,10 @@ slice 1.
   vitest frontend suite and a table-driven header-forwarding contract test
   (`crates/gsp-ui/src/proxy_util.rs`) landed. Still open: a confirmation step
   on config *submit*, and browser-level end-to-end tests.
-- **Phase 14 follow-ups** — a CI-friendly tunnel end-to-end test (the Docker
-  harness used for slice 6 lives only in a session scratchpad), and a
-  controller-allocated tunnel address scheme (`docs/11` "Open questions").
+- **Phase 14 follow-ups** — fix the multi-proxy `AllowedIPs` conflict (above), which
+  needs proxy registrations to carry a tunnel address and so belongs with a
+  controller-allocated tunnel address scheme (`docs/11` "Open questions"); the
+  CI-friendly tunnel e2e now exists (`make tunnel-e2e`, CI job `tunnel`).
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).

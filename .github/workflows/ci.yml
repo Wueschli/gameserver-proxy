@@ -76,6 +76,31 @@ jobs:
       - name: Typecheck + build
         run: npm run build
 
+  tunnel:
+    # Phase-14 WireGuard tunnel e2e in rootless network namespaces
+    # (docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md). Non-blocking
+    # until it has proven stable on GitHub runners.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [kernel, userspace]
+    env:
+      TUNNEL_BACKEND: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Allow unprivileged user namespaces (Ubuntu AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Load the wireguard kernel module
+        run: sudo modprobe wireguard || true
+      - name: Tunnel e2e
+        run: make tunnel-e2e
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
