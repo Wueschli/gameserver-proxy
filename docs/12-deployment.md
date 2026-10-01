@@ -6,22 +6,23 @@ ports actually works once it's namespaced by a container runtime.
 
 ## Container images
 
-Build with a standard multi-stage Dockerfile: a `rust:<version>` stage runs
-`cargo build --release`, then the final stage copies just the binary onto a
-minimal base. None of these five binaries shell out to an external
-command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
+The reference build is [`deploy/Dockerfile`](../deploy/Dockerfile): one file, a
+shared `rust:1-trixie` builder and five runtime targets on
+`gcr.io/distroless/cc-debian13:nonroot` (see [`deploy/README.md`](../deploy/README.md);
+`make deploy-images` builds all five). None of these five binaries shell out to an
+external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its
-dynamic library dependencies (glibc, plus `ca-certificates` for any
-TLS-verifying HTTP client: `--controller`, `--aggregator`,
-`--tunnel-controller-url`, the HTTP/gRPC resolvers).
+dynamic library dependencies (glibc; distroless already ships `ca-certificates`
+for any TLS-verifying HTTP client: `--controller`, `--aggregator`,
+`--tunnel-controller-url`, the HTTP/gRPC resolvers). The builder and runtime base
+must be on the same Debian release, or a binary can fail to start on an older glibc.
 
-Add `strip = true` to the root `Cargo.toml`'s `[profile.release]` before
-packaging — it isn't set today, and stripping trims roughly 15-20% off
-every binary for free (no behavior change).
+`[profile.release]` sets `strip = true`, which trims roughly 15-20% off every binary.
 
-Measured image sizes (stripped release binaries, current `main`,
-2026-09-07):
+Measured image sizes (stripped release binaries, 2026-09-07, **on
+`cc-debian12` — not yet re-measured on the `cc-debian13` base `deploy/` now uses;
+the CI `deploy` job prints the new sizes**):
 
 | Binary | on `debian:trixie-slim` + `ca-certificates` | on `gcr.io/distroless/cc-debian12` |
 |---|---|---|
@@ -46,6 +47,14 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 `defguard_wireguard_rs`/`boringtun` (phase 14 backend transport);
 `gsp-controller` links `openraft` + `sled` for the HA/Raft log store
 (phase 12). `gsp-agent`/`gsp-aggregator`/`gsp-ui` don't carry those.
+
+## Examples
+
+[`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
+aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
+override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
+`hostNetwork` DaemonSet). Both are reference only and smoke-tested / schema-validated
+in CI.
 
 ## Networking: a proxy that binds many, changing ports
 

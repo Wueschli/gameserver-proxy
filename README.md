@@ -31,7 +31,8 @@ and access control.
 **All roadmap phases 0–14 are built** (resolver `sticky_key` deferred): the data
 plane (phases 0–9), the distributed control plane (phases 10–13) and the
 WireGuard backend transport (phase 14) — see the sections below and
-[docs/08-roadmap.md](docs/08-roadmap.md). TCP and UDP listener → backend pool forwarding with:
+[docs/08-roadmap.md](docs/08-roadmap.md). Reference container images, a compose demo and
+Kubernetes manifests live in [`deploy/`](deploy/). TCP and UDP listener → backend pool forwarding with:
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
   `hash_on: src_ip | src_ip_port`) balancing

@@ -1096,6 +1096,9 @@ slice 1.
   vitest frontend suite and a table-driven header-forwarding contract test
   (`crates/gsp-ui/src/proxy_util.rs`) landed. Still open: a confirmation step
   on config *submit*, and browser-level end-to-end tests.
+- **`deploy/`** — reference Dockerfile (five targets on distroless), compose
+  control-plane demo and plain k8s manifests, smoke-tested by the CI `deploy` job
+  (`docs/12`; non-blocking until proven stable).
 - **Phase 14 follow-ups** — fix the multi-proxy `AllowedIPs` conflict (above), which
   needs proxy registrations to carry a tunnel address and so belongs with a
   controller-allocated tunnel address scheme (`docs/11` "Open questions"); the

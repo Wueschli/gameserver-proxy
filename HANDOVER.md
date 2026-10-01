@@ -12,10 +12,20 @@ Last updated: 2026-10-01.
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work is the "Known follow-ups" table below, and phase-14 CI coverage.
+Remaining work: the TLS section in docs/12, tunnel address authority (+ the multi-proxy
+AllowedIPs fix), the "Known follow-ups" table below, and making the `tunnel` and
+`deploy` CI jobs blocking once stable.
 
 Most recent landings (newest first; full history in `git log`):
 
+- `deploy/` — reference `Dockerfile` (five distroless targets), compose
+  control-plane demo + tunnel override, plain k8s manifests, `deploy/smoke.sh`, CI job
+  `deploy` (non-blocking until stable). **Verified locally only as far as Docker-less
+  checks go** (smoke.sh against the real binaries started natively, `docker compose
+  config`, `kubeconform`, `gsp --check` on the embedded configs); the image builds and
+  `compose up` have **not run anywhere yet** — the Docker daemon was unavailable in the
+  dev sandbox, so the first real result is the CI `deploy` run after a push. Expect a
+  fix-up commit if it fails. docs/12's size table is still the `cc-debian12` one.
 - `docs/12-deployment.md` — container image sizing + the Docker/Kubernetes
   port-exposure model (host networking vs. a pre-reserved `bind: "host:lo-hi"`
   range; `CAP_NET_ADMIN` / `/dev/net/tun` for `--tunnel-*` / `gsp-agent`).

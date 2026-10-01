@@ -1,6 +1,6 @@
 # `deploy/` — container images, compose and Kubernetes examples
 
-Date: 2026-10-01 · Status: draft for review · Roadmap item 1 of 3 (then docs/12 TLS
+Date: 2026-10-01 · Status: implemented (docker steps verified in CI only — see HANDOVER) · Roadmap item 1 of 3 (then docs/12 TLS
 section, then tunnel address authority).
 
 ## Intent
@@ -67,7 +67,9 @@ Runnable control-plane demo. Services: `controller`, `aggregator`, `ui`, a one-s
 `--controller` and `--aggregator`.
 
 - `gsp` uses host networking (docs/12's default for an edge process); the rest sit on
-  a bridge network and only the UI port is published.
+  a bridge network. The UI, controller and aggregator are published on the host's
+  loopback only (`127.0.0.1:9903/9901/9902`) — the controller and aggregator because a
+  host-networked `gsp` cannot resolve bridge service names.
 - Tokens and the UI password come from `.env` (`.env.example` committed, `.env` git-
   ignored); nothing is hard-coded in the YAML. `docker compose --env-file` is how CI
   supplies test values.
@@ -75,17 +77,18 @@ Runnable control-plane demo. Services: `controller`, `aggregator`, `ui`, a one-s
 - `compose.tunnel.yml` adds `gsp-agent` and the `--tunnel-*` flags with
   `cap_add: [NET_ADMIN]` and `devices: [/dev/net/tun]`.
 
-**To verify in the plan (unknown today):** whether `gsp --controller` tolerates an
-empty controller at start (decides whether `seed` must gate `gsp` via `depends_on:
-service_completed_successfully`, which is the intended wiring regardless).
+`gsp --controller` exits at startup against an empty controller (verified in
+`controller_client::fetch_current`), so `gsp` must wait for `seed` via `depends_on:
+service_completed_successfully`.
 
 ## Kubernetes manifests
 
 Plain YAML, no Helm/kustomize: Deployment + Service for controller, aggregator and UI
 (controller gets a PVC); a `gsp` DaemonSet with `hostNetwork: true` and its config in
-a ConfigMap, with a commented reserved-range alternative; a `Secret` file of
-clearly-marked placeholders; `httpGet` probes on `/healthz` (controller, aggregator,
-gsp admin) and `/ui/session` (UI has no `/healthz`). The tunnel `securityContext` /
+a `Secret` (not a ConfigMap: a `hostNetwork` pod is probed on the node IP, so the
+admin listener binds `0.0.0.0` and carries an `auth_token`), with a commented
+reserved-range alternative; a `Secret` file of clearly-marked placeholders;
+`httpGet` probes on `/healthz` (controller, aggregator, ui, gsp admin). The tunnel `securityContext` /
 tun-device block from docs/12 appears as a commented snippet.
 
 ## CI and verification
@@ -94,9 +97,10 @@ New `deploy` job in `.github/workflows/ci.yml`:
 
 1. `docker build --target <t>` for all five targets (catches glibc mismatch, missing
    `dist/`; prints image sizes).
-2. `docker compose up -d --wait` with a test env file.
+2. `docker compose up -d` with a test env file (not `--wait`: the one-shot `seed`
+   service exits by design; `smoke.sh` polls instead).
 3. `deploy/smoke.sh`: controller and aggregator `GET /healthz` → ok; UI
-   `GET /ui/session` reachable and login works; the aggregator reports the `gsp`
+   `GET /healthz` and login work; the aggregator reports the `gsp`
    instance (proves config pull + state push worked end to end).
 4. `docker compose down -v`; on failure, dump `docker compose logs`.
 5. `kubeconform` (pinned release) validates `deploy/k8s/` — schema only, no cluster.
