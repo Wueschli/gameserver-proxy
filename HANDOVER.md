@@ -465,6 +465,10 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   not listed in the JUnit XML. **Nextest runs every test in its own process** — anything that
   assumed one shared process breaks (found: the tunnel lab's in-process namespace counter,
   fixed by probing for a free index in `Lab::add_ns`).
+  `build-release` also runs `cargo test -p gsp --release --no-run`: cargo unifies features per
+  invocation, so the plugins job's `-p gsp` test build needs different dependency artifacts
+  than the five-binary build, and it recompiled 293 crates even on an exact cache hit until
+  the snapshot held both.
   **Shared release stage:** a `build-release` job compiles the five release binaries once
   (cache namespace `release`); `plugins` restores that snapshot (same key => exact hit) and
   `deploy` downloads the binaries as an artifact and builds the images with

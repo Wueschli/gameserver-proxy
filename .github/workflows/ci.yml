@@ -123,6 +123,12 @@ jobs:
         with: { name: release }
       - name: Build the release binaries
         run: cargo build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+      # Cargo unifies features per invocation, so the plugins job's `-p gsp` test
+      # build (dev-dependencies included) needs different dependency artifacts than
+      # the five-binary build above; without this it recompiled ~290 crates even on
+      # an exact cache hit. Compile them here so the shared snapshot holds both.
+      - name: Warm the dependency set the plugins tests need
+        run: cargo test -p gsp --release --locked --no-run
       - uses: actions/upload-artifact@v4
         with:
           name: release-binaries
