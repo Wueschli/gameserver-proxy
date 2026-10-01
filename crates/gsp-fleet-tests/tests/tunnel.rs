@@ -162,3 +162,30 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
     assert_eq!(public.port(), PUBLIC_PORT);
     Ok(())
 }
+
+/// Scenario 2 — the slice-6 regression. Both sides re-register every 1 s
+/// (set by `TunnelLab`). Before the fix, every unchanged re-registration tore
+/// down and rebuilt the WireGuard session, so the handshake never stabilised.
+/// After the first success, every probe for the next ~12 s must succeed.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tunnel_stays_up_across_many_re_registrations() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", 1, None).await?;
+    t.wait_roundtrip(edge).await?;
+
+    let public = t.public_addr(edge);
+    let started = Instant::now();
+    let mut probes = 0u32;
+    while started.elapsed() < Duration::from_secs(12) {
+        let got = tcp_roundtrip(public, b"stable?").await?;
+        assert_eq!(got, b"stable?", "probe {probes} came back wrong");
+        probes += 1;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(probes >= 30, "only {probes} probes ran in 12s");
+    assert!(t.agent_alive(), "agent exited during the run");
+    Ok(())
+}
