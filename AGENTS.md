@@ -184,11 +184,13 @@ client from `crates/gsp/proto/resolver.proto`.
    `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `gsp-core`, the HTTP/gRPC clients in `gsp`.
-8. **Commit only when the user asks.** If not on a feature branch, branch off `main`
-   first. End commit messages with a `Co-Authored-By:` trailer identifying the agent
-   that made the change, plus a session/trace trailer (e.g. `Agent-Session:`) when the
-   tool provides one. **Do not `git push`** — credentials are not available in this
-   environment unless the user has set them up.
+8. **Commit directly on `main` whenever it is useful** — a finished slice, a spec or
+   plan, a green docs sweep; no need to ask first and no feature branch (owner's
+   standing decision, 2026-10-01). Run `make check` first (rule 1). End commit
+   messages with a `Co-Authored-By:` trailer identifying the agent that made the
+   change, plus a session/trace trailer (e.g. `Agent-Session:`) when the tool
+   provides one. **Do not `git push` unless the user asks** — pushing is outward-facing
+   and is still the user's call.
 
 ### Soft rules — the intended way to work
 
