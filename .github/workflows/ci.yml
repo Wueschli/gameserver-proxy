@@ -3,7 +3,23 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs-only pushes cost ~30 runner-minutes for nothing: no code, image or
+    # manifest is affected. (pull_request has the same filter.)
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE-*"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE-*"
+  workflow_dispatch:   # run everything by hand from the Actions tab
+
+# A newer push to the same ref supersedes an older, still-running one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
