@@ -4,6 +4,7 @@
 # Not smoke-tested in CI (no privileged runner); `make tunnel-e2e` covers the logic.
 services:
   gsp:
+    user: "0"          # NET_ADMIN is only in the bounding set for non-root: run as root
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     volumes: ["gsp-tunnel-data:/data"]
@@ -19,9 +20,13 @@ services:
       - --tunnel-controller-token=${GSP_CONTROLLER_TOKEN}
       - --tunnel-name=demo-proxy
       - --tunnel-endpoint=${GSP_TUNNEL_ENDPOINT:?public ip:port origins dial}
+      - --aggregator-instance=demo-gsp
   # An origin's agent normally runs next to the game server, on another host;
-  # it is here only to show the flags.
+  # it is here only to show the flags, so it is opt-in:
+  #   docker compose -f docker-compose.yml -f compose.tunnel.yml --profile origin-demo up -d
   agent:
+    profiles: [origin-demo]
+    user: "0"
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
@@ -37,6 +42,7 @@ services:
       - --controller-token=${GSP_CONTROLLER_TOKEN}
       - --name=demo-origin
       - --address=10.60.0.2/24
+      - --listen-port=51821   # gsp already owns UDP 51820 on this shared host network
       - --backends=10.60.0.2:25565
 volumes:
   gsp-tunnel-data:

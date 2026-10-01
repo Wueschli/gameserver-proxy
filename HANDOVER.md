@@ -25,7 +25,7 @@ Most recent landings (newest first; full history in `git log`):
   config`, `kubeconform`, `gsp --check` on the embedded configs); the image builds and
   `compose up` have **not run anywhere yet** — the Docker daemon was unavailable in the
   dev sandbox, so the first real result is the CI `deploy` run after a push. Expect a
-  fix-up commit if it fails. docs/12's size table is still the `cc-debian12` one.
+  fix-up commit if it fails (a fresh-context review already caught one that would have: curl 8.11.1 rejects `--opt=value`, so the `seed` args are separate; `make deploy-lint` pins that and other render-time facts). docs/12's size table is still the `cc-debian12` one.
 - `docs/12-deployment.md` — container image sizing + the Docker/Kubernetes
   port-exposure model (host networking vs. a pre-reserved `bind: "host:lo-hi"`
   range; `CAP_NET_ADMIN` / `/dev/net/tun` for `--tunnel-*` / `gsp-agent`).
@@ -233,6 +233,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 | Item | Notes |
 |------|-------|
+| `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |

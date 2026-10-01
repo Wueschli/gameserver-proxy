@@ -35,6 +35,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # distroless/cc-debian13 (glibc 2.41 == the builder's) has CA certs, no shell.
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp
 COPY --from=builder /out/gsp /usr/local/bin/gsp
+# Writable by the nonroot uid: the tunnel key file lives on a volume here.
+COPY --from=builder --chown=65532:65532 /out/data /data
 ENTRYPOINT ["/usr/local/bin/gsp"]
 CMD ["--config", "/etc/gsp/gsp.yaml"]
 

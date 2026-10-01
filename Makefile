@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e deploy-images deploy-smoke help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e deploy-images deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -82,14 +82,21 @@ tunnel-e2e:
 deploy-images:
 	sh deploy/build-images.sh
 
+## deploy-lint: static checks on deploy/ (needs the docker CLI + ruby, no daemon)
+deploy-lint:
+	sh deploy/lint.sh
+
+# Own project name so `down -v` can never touch a hand-run demo (gsp-demo).
+DEPLOY_COMPOSE := docker compose -p gsp-smoke --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml
+
 ## deploy-smoke: build + start deploy/compose, run deploy/smoke.sh, tear down (needs Docker)
 deploy-smoke:
 	test -f deploy/compose/.env || cp deploy/compose/.env.example deploy/compose/.env
-	docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml up -d --build
-	sh deploy/smoke.sh; rc=$$?; \
-	  [ $$rc -eq 0 ] || docker compose -f deploy/compose/docker-compose.yml logs; \
-	  docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml down -v; \
-	  exit $$rc
+	rc=0; \
+	$(DEPLOY_COMPOSE) up -d --build && sh deploy/smoke.sh || rc=$$?; \
+	[ $$rc -eq 0 ] || $(DEPLOY_COMPOSE) logs; \
+	$(DEPLOY_COMPOSE) down -v; \
+	exit $$rc
 
 ## help: list targets
 help:

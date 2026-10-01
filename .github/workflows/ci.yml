@@ -109,6 +109,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
+      - name: Static checks (compose render, k8s wiring)
+        run: make deploy-lint
       - name: Build all five images and run --version on each
         run: make deploy-images
       - name: Compose smoke test

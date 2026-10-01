@@ -53,8 +53,11 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
-`hostNetwork` DaemonSet). Both are reference only and smoke-tested / schema-validated
-in CI.
+`hostNetwork` DaemonSet). Both are reference only. CI is set up to smoke-test the compose demo and
+schema-validate the manifests (the `deploy` job, non-blocking); as of writing that job
+has not run yet. Known limitation: aggregator intent fan-out (drain etc.) cannot reach
+a `gsp` from these examples, because the `admin_url` it reports is derived from
+`settings.admin.listen` and no flag overrides it.
 
 ## Networking: a proxy that binds many, changing ports
 
@@ -118,11 +121,17 @@ userspace with `--tunnel-userspace`/`--userspace`. **Both backends need
 `/dev/net/tun` present in the container. Grant them explicitly:
 
 ```
-docker run --cap-add=NET_ADMIN --device=/dev/net/tun ...
+docker run --user 0 --cap-add=NET_ADMIN --device=/dev/net/tun ...
 ```
+
+`--user 0` matters for the nonroot images in `deploy/`: Docker and Kubernetes put an
+added capability only in a *non-root* process's bounding set, so uid 65532 would still
+get `EPERM` creating the interface.
 
 ```yaml
 securityContext:
+  runAsUser: 0
+  runAsNonRoot: false
   capabilities:
     add: ["NET_ADMIN"]
 volumes:

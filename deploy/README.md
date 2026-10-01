@@ -45,8 +45,10 @@ controller and aggregator are also published on the host's loopback.
 ## Tunnel (phase 14)
 
 `docker compose -f docker-compose.yml -f compose.tunnel.yml up -d` adds the
-WireGuard transport. It needs `NET_ADMIN` and `/dev/net/tun` and a
-`GSP_TUNNEL_ENDPOINT` (the public `ip:port` origins dial). Not smoke-tested
+WireGuard transport. It needs `NET_ADMIN`, `/dev/net/tun`, **root in the container**
+(the override sets `user: "0"` — a capability is useless to uid 65532) and a
+`GSP_TUNNEL_ENDPOINT` (the public `ip:port` origins dial). The demo `agent` is opt-in
+(`--profile origin-demo`; it listens on 51821 so it does not clash with `gsp`'s 51820). Not smoke-tested
 in CI; `make tunnel-e2e` covers the logic. See docs/12.
 
 ## Kubernetes
@@ -72,6 +74,11 @@ Ingress/LoadBalancer (with TLS) in front of it.
   cross the network in the clear. Terminate TLS in front of it (a docs/12
   section on this is planned).
 - One standalone controller; no HA (see docs/10).
+- Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
+  `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
+  overrides it. Fleet *reads* (pools, sessions) work.
+- `make deploy-lint` runs daemon-free static checks; `make deploy-smoke` uses its own
+  compose project (`gsp-smoke`) so it never tears down a demo you started by hand.
 
 ## Troubleshooting
 
