@@ -101,6 +101,23 @@ jobs:
       - name: Tunnel e2e
         run: make tunnel-e2e
 
+  deploy:
+    # deploy/ reference images + compose demo + k8s manifests
+    # (docs/superpowers/specs/2026-10-01-deploy-design.md). Non-blocking until
+    # it has proven stable on GitHub runners.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build all five images and run --version on each
+        run: make deploy-images
+      - name: Compose smoke test
+        run: make deploy-smoke
+      - name: Validate Kubernetes manifests (schema only)
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
+          ./kubeconform -strict -summary deploy/k8s
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
