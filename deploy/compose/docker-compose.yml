@@ -9,6 +9,8 @@ name: gsp-demo
 x-build: &build
   context: ../..
   dockerfile: deploy/Dockerfile
+  args:
+    BIN_SOURCE: ${BIN_SOURCE:-builder}   # `prebuilt` = binaries from deploy/prebuilt (CI)
 
 services:
   controller:

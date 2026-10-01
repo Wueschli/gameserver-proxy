@@ -39,6 +39,7 @@ jobs:
       tunnel: ${{ steps.f.outputs.tunnel }}
       deploy: ${{ steps.f.outputs.deploy }}
       fuzz: ${{ steps.f.outputs.fuzz }}
+      release: ${{ steps.f.outputs.release }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -85,10 +86,44 @@ jobs:
       - name: Test
         run: cargo test --all
 
-  plugins:
+  # One release compile shared by the jobs that need release binaries: the
+  # plugins tests restore this job's cache snapshot (same `release` namespace and
+  # key, so they reuse the compiled dependencies) and deploy takes the binaries
+  # as an artifact. Nightly, deploy ignores the artifact and compiles inside
+  # Docker instead, so the self-contained Dockerfile path can't rot.
+  # Pinned to ubuntu-24.04 (glibc 2.39), like plugins and deploy: binaries built on
+  # a newer runner image (ubuntu-latest becomes 26 on 2026-10-19) could need a newer
+  # glibc than the Debian 13 distroless runtime (2.41) has, and fail to start; the
+  # cache is also only reused between jobs on the same image.
+  build-release:
     needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/cargo-cache
+        with: { name: release }
+      - name: Build the release binaries
+        run: cargo build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            target/release/gsp
+            target/release/gsp-controller
+            target/release/gsp-aggregator
+            target/release/gsp-ui
+            target/release/gsp-agent
+          if-no-files-found: error
+          retention-days: 1
+
+  plugins:
+    needs: [changes, build-release]
     if: needs.changes.outputs.plugins == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
@@ -96,12 +131,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # Same namespace + key as build-release => an exact hit on its snapshot:
+      # the release dependencies are already compiled (nothing new to save).
+      - uses: ./.github/actions/cargo-cache
+        with: { name: release }
+      # The wasm plugin workspace is only built here, so it gets its own snapshot.
       - uses: ./.github/actions/cargo-cache
         with:
-          name: plugins
-          target-dirs: |
-            target
-            crates/plugins/target
+          name: plugins-wasm
+          target-dirs: crates/plugins/target
       - name: Native unit tests
         working-directory: crates/plugins
         run: cargo test --workspace
@@ -171,12 +209,22 @@ jobs:
     # deploy/ reference images + compose demo + k8s manifests
     # (docs/superpowers/specs/2026-10-01-deploy-design.md). Non-blocking until
     # it has proven stable on GitHub runners.
-    needs: changes
+    needs: [changes, build-release]
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     continue-on-error: true
+    env:
+      # Push/PR: images copy the shared release build (fast). Nightly: compile
+      # inside Docker, exercising the self-contained builder stage.
+      BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
       - uses: actions/checkout@v5
+      - name: Fetch the shared release binaries
+        if: env.BIN_SOURCE == 'prebuilt'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: deploy/prebuilt
       - name: Static checks (compose render, k8s wiring)
         run: make deploy-lint
       - name: Build all five images and run --version on each

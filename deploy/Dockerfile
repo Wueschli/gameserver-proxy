@@ -1,4 +1,9 @@
 # syntax=docker/dockerfile:1
+# Where the runtime targets take their binaries from:
+#   builder   (default) compile inside this Dockerfile — self-contained.
+#   prebuilt  copy binaries compiled outside Docker from deploy/prebuilt/
+#             (CI's shared release build; `BIN_SOURCE=prebuilt make deploy-images`).
+ARG BIN_SOURCE=builder
 # Reference images (docs/12). Build one with:
 #   docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .
 
@@ -31,36 +36,44 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
        target/release/gsp-agent /out/ \
  && chown 65532:65532 /out/data
 
+# --- prebuilt binaries (BIN_SOURCE=prebuilt) -----------------------------
+# Binaries built on the CI runner (glibc <= the runtime's, so they run on it).
+FROM debian:trixie-slim AS prebuilt
+COPY --chmod=0755 deploy/prebuilt/ /out/
+RUN mkdir -p /out/data && chown 65532:65532 /out/data
+
+FROM ${BIN_SOURCE} AS bins
+
 # --- runtime targets ------------------------------------------------------
 # distroless/cc-debian13 (glibc 2.41 == the builder's) has CA certs, no shell.
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp
-COPY --from=builder /out/gsp /usr/local/bin/gsp
+COPY --from=bins /out/gsp /usr/local/bin/gsp
 # Writable by the nonroot uid: the tunnel key file lives on a volume here.
-COPY --from=builder --chown=65532:65532 /out/data /data
+COPY --from=bins --chown=65532:65532 /out/data /data
 ENTRYPOINT ["/usr/local/bin/gsp"]
 CMD ["--config", "/etc/gsp/gsp.yaml"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-controller
-COPY --from=builder /out/gsp-controller /usr/local/bin/gsp-controller
+COPY --from=bins /out/gsp-controller /usr/local/bin/gsp-controller
 # /data must be owned by the nonroot uid *in the image* so a fresh named
 # volume / PVC inherits a writable directory.
-COPY --from=builder --chown=65532:65532 /out/data /data
+COPY --from=bins --chown=65532:65532 /out/data /data
 ENTRYPOINT ["/usr/local/bin/gsp-controller"]
 CMD ["--listen", "0.0.0.0:9901", "--data-dir", "/data"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-aggregator
-COPY --from=builder /out/gsp-aggregator /usr/local/bin/gsp-aggregator
+COPY --from=bins /out/gsp-aggregator /usr/local/bin/gsp-aggregator
 ENTRYPOINT ["/usr/local/bin/gsp-aggregator"]
 CMD ["--listen", "0.0.0.0:9902"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-ui
-COPY --from=builder /out/gsp-ui /usr/local/bin/gsp-ui
+COPY --from=bins /out/gsp-ui /usr/local/bin/gsp-ui
 COPY --from=web /web/dist /web
 ENTRYPOINT ["/usr/local/bin/gsp-ui", "--static-dir", "/web"]
 CMD ["--listen", "0.0.0.0:9903"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-agent
-COPY --from=builder /out/gsp-agent /usr/local/bin/gsp-agent
-COPY --from=builder --chown=65532:65532 /out/data /data
+COPY --from=bins /out/gsp-agent /usr/local/bin/gsp-agent
+COPY --from=bins --chown=65532:65532 /out/data /data
 ENTRYPOINT ["/usr/local/bin/gsp-agent"]
 CMD ["--data-dir", "/data"]

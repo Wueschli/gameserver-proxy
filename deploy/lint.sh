@@ -47,5 +47,15 @@ df = File.read("deploy/Dockerfile")
 gsp_stage = df[/AS gsp\n.*?(?=\nFROM |\z)/m]
 errs << "gsp image lacks a 65532-owned /data" unless gsp_stage.include?("--chown=65532:65532 /out/data /data")
 
+# Prebuilt mode (CI feeds binaries from the shared release build): the stage
+# selector, the prebuilt stage, runtime stages reading from `bins`, and the
+# compose/build-images plumbing must all agree.
+errs << "Dockerfile lacks `ARG BIN_SOURCE=builder` before the first FROM" unless df =~ /\A(?:#[^\n]*\n|\n)*ARG BIN_SOURCE=builder\n/
+errs << "Dockerfile lacks `FROM ${BIN_SOURCE} AS bins`" unless df.include?("FROM ${BIN_SOURCE} AS bins")
+errs << "Dockerfile lacks a `prebuilt` stage" unless df =~ /^FROM \S+ AS prebuilt$/
+errs << "a runtime stage still copies from builder directly" if df.split("# --- runtime targets").last.include?("--from=builder")
+errs << "compose build must pass BIN_SOURCE" unless base["gsp"]["build"]["args"].is_a?(Hash) && base["gsp"]["build"]["args"]["BIN_SOURCE"] == "builder"
+errs << "build-images.sh must pass --build-arg BIN_SOURCE" unless File.read("deploy/build-images.sh").include?("--build-arg BIN_SOURCE=")
+
 if errs.empty? then puts "deploy lint: ok" else warn errs.map { |e| "LINT FAIL: #{e}" }; exit 1 end
 '

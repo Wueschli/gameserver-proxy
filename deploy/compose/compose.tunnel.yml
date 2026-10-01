@@ -30,6 +30,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
+      args:
+        BIN_SOURCE: ${BIN_SOURCE:-builder}
       target: gsp-agent
     image: gsp-deploy/gsp-agent:local
     network_mode: host

@@ -26,6 +26,12 @@ docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .   
 Builder is `rust:1-trixie`, runtime is `gcr.io/distroless/cc-debian13:nonroot`
 (no shell, runs as uid 65532).
 
+`BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
+binaries you built yourself from `deploy/prebuilt/` (`gsp`, `gsp-controller`,
+`gsp-aggregator`, `gsp-ui`, `gsp-agent`). CI uses it to share one release build
+with the plugins tests; they must be built against a glibc no newer than the
+runtime's (2.41). The nightly CI run uses the default, self-contained path.
+
 ## Run the demo
 
 ```sh

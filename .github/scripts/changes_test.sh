@@ -6,6 +6,8 @@ fails=0
 # check <name> <files (newline separated)> <expected "ui plugins tunnel deploy fuzz" as 0/1 string> [--all]
 check() {
   name=$1; files=$2; want=$3; flag=${4:-}
+  # release (the shared release build) is needed iff plugins or deploy is.
+  case "$want" in *plugins=true*|*deploy=true*) want="$want release=true" ;; *) want="$want release=false" ;; esac
   got=$(printf '%s\n' "$files" | sh ./changes.sh $flag | sort | tr '\n' ' ')
   exp=$(printf '%s' "$want" | tr ' ' '\n' | sort | tr '\n' ' ')
   if [ "$got" = "$exp" ]; then echo "ok:   $name"; else echo "FAIL: $name"; echo "  got  $got"; echo "  want $exp"; fails=$((fails+1)); fi

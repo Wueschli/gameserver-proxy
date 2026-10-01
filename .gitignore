@@ -12,3 +12,6 @@
 crates/gsp-ui/web/node_modules
 crates/gsp-ui/web/dist
 crates/gsp-ui/web/*.tsbuildinfo
+
+# binaries staged for `BIN_SOURCE=prebuilt` image builds (CI)
+deploy/prebuilt/

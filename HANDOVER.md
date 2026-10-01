@@ -454,6 +454,17 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   (`strip = true`) left `plugins` recompiling all 342 crates every run. `fuzz` still uses
   `rust-cache` (nightly only, tiny). A lockfile or toolchain bump starts cold by design.
   Unverified until it has run twice on `main` (first run saves, second should be warm).
+  **Shared release stage:** a `build-release` job compiles the five release binaries once
+  (cache namespace `release`); `plugins` restores that snapshot (same key => exact hit) and
+  `deploy` downloads the binaries as an artifact and builds the images with
+  `BIN_SOURCE=prebuilt` (`deploy/Dockerfile`). Nightly `deploy` uses the self-contained
+  in-Docker build instead, so that path can't rot. These three jobs are pinned to
+  `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
+  built there might need a newer glibc than the distroless runtime's 2.41. `changes.sh`
+  emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
+  do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
+  cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
+  cache each only recompiles ~35 crates (~1 min).
 - git remote `github.com/Wueschli/gameserver-proxy`, branch `main`; `git push`
   works, `origin/main` is current. The HTTPS credential helper logs a harmless
   "nonexistent Windows path" warning before falling back to a working credential.
