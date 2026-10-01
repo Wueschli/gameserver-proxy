@@ -1,0 +1,83 @@
+# Control-plane demo: controller + aggregator + ui on a bridge network, one
+# gsp (host networking, docs/12's default for an edge process) that pulls its
+# config from the controller and pushes state to the aggregator.
+# Tokens come from .env; `${VAR:?}` refuses to start if one is unset.
+# NB: tokens appear in `docker inspect` — fine for a demo; use Docker/K8s
+# secrets in production.
+name: gsp-demo
+
+x-build: &build
+  context: ../..
+  dockerfile: deploy/Dockerfile
+
+services:
+  controller:
+    build: { <<: *build, target: gsp-controller }
+    image: gsp-deploy/gsp-controller:local
+    command:
+      - --listen=0.0.0.0:9901
+      - --data-dir=/data
+      - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
+    ports: ["127.0.0.1:9901:9901"]   # gsp (host network) dials it here
+    volumes: ["controller-data:/data"]
+    restart: unless-stopped
+
+  aggregator:
+    build: { <<: *build, target: gsp-aggregator }
+    image: gsp-deploy/gsp-aggregator:local
+    command:
+      - --listen=0.0.0.0:9902
+      - --auth-token=${GSP_AGGREGATOR_TOKEN:?set GSP_AGGREGATOR_TOKEN in .env}
+    ports: ["127.0.0.1:9902:9902"]
+    restart: unless-stopped
+
+  ui:
+    build: { <<: *build, target: gsp-ui }
+    image: gsp-deploy/gsp-ui:local
+    command:
+      - --listen=0.0.0.0:9903
+      - --ui-password=${GSP_UI_PASSWORD:?set GSP_UI_PASSWORD in .env}
+      - --controller-url=http://controller:9901
+      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --aggregator-url=http://aggregator:9902
+      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
+    ports: ["127.0.0.1:9903:9903"]
+    depends_on: [controller, aggregator]
+    restart: unless-stopped
+
+  # One-shot: write revision 1 so `gsp --controller` has something to fetch
+  # (it exits at startup against an empty controller).
+  seed:
+    image: curlimages/curl:8.11.1
+    command:
+      - -fsS
+      - --retry=30
+      - --retry-delay=1
+      - --retry-all-errors
+      - -X
+      - POST
+      - -H
+      - "Authorization: Bearer ${GSP_CONTROLLER_TOKEN}"
+      - --data-binary
+      - "@/gsp.yaml"
+      - http://controller:9901/config
+    volumes: ["./gsp.yaml:/gsp.yaml:ro"]
+    depends_on: [controller]
+    restart: "no"
+
+  gsp:
+    build: { <<: *build, target: gsp }
+    image: gsp-deploy/gsp:local
+    network_mode: host
+    command:
+      - --controller=http://127.0.0.1:9901
+      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --aggregator=http://127.0.0.1:9902
+      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      aggregator: { condition: service_started }
+    restart: unless-stopped
+
+volumes:
+  controller-data:

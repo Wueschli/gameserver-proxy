@@ -1,0 +1,20 @@
+settings:
+  workers: 1
+  shutdown_grace_sec: 5
+  admin:
+    listen: "127.0.0.1:9900"   # host networking: reachable on the host's loopback only
+pools:
+  - name: demo
+    targets: ["127.0.0.1:25566"]
+    balancer: round_robin
+    health_check:
+      type: tcp_connect
+      interval_sec: 5
+      timeout_ms: 200
+      rise: 1
+      fall: 1
+listeners:
+  - name: demo-tcp
+    bind: "0.0.0.0:25565"
+    protocol: tcp
+    pool: demo

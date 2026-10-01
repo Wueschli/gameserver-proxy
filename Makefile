@@ -82,6 +82,15 @@ tunnel-e2e:
 deploy-images:
 	sh deploy/build-images.sh
 
+## deploy-smoke: build + start deploy/compose, run deploy/smoke.sh, tear down (needs Docker)
+deploy-smoke:
+	test -f deploy/compose/.env || cp deploy/compose/.env.example deploy/compose/.env
+	docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml up -d --build
+	sh deploy/smoke.sh; rc=$$?; \
+	  [ $$rc -eq 0 ] || docker compose -f deploy/compose/docker-compose.yml logs; \
+	  docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml down -v; \
+	  exit $$rc
+
 ## help: list targets
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## /  /'
