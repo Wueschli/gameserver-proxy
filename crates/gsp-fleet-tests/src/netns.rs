@@ -13,11 +13,17 @@
 use std::fs::File;
 use std::net::Ipv4Addr;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use nix::sched::{setns, CloneFlags};
+
+/// Namespace indices are handed out process-wide and never reused: a dead
+/// namespace's veth is torn down asynchronously by the kernel, so a later
+/// `Lab` reusing `gv1l`/`10.99.1.0/30` would race that cleanup (`File exists`).
+static NEXT_IDX: AtomicU8 = AtomicU8::new(1);
 
 const HINT: &str = "this test needs CAP_NET_ADMIN in a network namespace — run it via \
                     `make tunnel-e2e` (which wraps it in `unshare -Urnm`), not plain `cargo test`";
@@ -141,10 +147,10 @@ impl Drop for Ns {
     }
 }
 
-/// The outer namespace the test process runs in, plus a counter for wiring
-/// nested namespaces to it.
+/// The outer namespace the test process runs in; nested namespaces are wired
+/// to it with [`Lab::add_ns`].
 pub struct Lab {
-    next_idx: u8,
+    _private: (),
 }
 
 impl Lab {
@@ -154,13 +160,13 @@ impl Lab {
         run(&["ip", "link", "set", "lo", "up"])?;
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .context("enabling ip_forward in the lab namespace")?;
-        Ok(Self { next_idx: 1 })
+        Ok(Self { _private: () })
     }
 
     /// Create the next namespace and join it to the lab with a veth pair.
     pub fn add_ns(&mut self) -> Result<Ns> {
-        let i = self.next_idx;
-        self.next_idx += 1;
+        let i = NEXT_IDX.fetch_add(1, Ordering::SeqCst);
+        ensure!(i < 250, "too many namespaces created in one test run");
         let ns = Ns::create(i)?;
         let (lab_if, ns_if) = (format!("gv{i}l"), format!("gv{i}n"));
         run(&[

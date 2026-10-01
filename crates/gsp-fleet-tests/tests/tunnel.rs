@@ -160,6 +160,7 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
         "1200 B over UDP"
     );
     assert_eq!(public.port(), PUBLIC_PORT);
+    t.pass();
     Ok(())
 }
 
@@ -187,5 +188,75 @@ async fn tunnel_stays_up_across_many_re_registrations() -> Result<()> {
     }
     assert!(probes >= 30, "only {probes} probes ran in 12s");
     assert!(t.agent_alive(), "agent exited during the run");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 3 — slice 7, never before verified live. An origin is already up
+/// with one proxy; a *second* proxy joins later. The agent is never restarted
+/// or reconfigured: it must learn the new proxy from the proxy-peers registry,
+/// and traffic must flow through the new proxy.
+///
+/// (That the *first* proxy keeps working alongside it is NOT asserted here —
+/// it doesn't today; see `known_bug_two_proxies_cannot_share_one_origin`.)
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn a_proxy_added_later_is_learned_without_restarting_the_agent() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let first = t.start_edge("edge-1", 1, None).await?;
+    t.wait_roundtrip(first).await?;
+
+    // New proxy: own namespace, own tunnel address (.3) and key. Nothing about
+    // the origin is touched.
+    let second = t.start_edge("edge-2", 3, None).await?;
+    t.wait_roundtrip(second).await?;
+
+    let big = vec![0x42u8; 64 * 1024];
+    assert_eq!(tcp_roundtrip(t.public_addr(second), &big).await?, big);
+    assert!(
+        t.agent_alive(),
+        "the agent must not have been restarted or crashed"
+    );
+    t.pass();
+    Ok(())
+}
+
+/// KNOWN BUG, found by scenario 3 on 2026-10-01 — excluded from `make
+/// tunnel-e2e` (`--skip known_bug_`); run it on purpose with
+/// `unshare -Urnm … cargo test -p gsp-fleet-tests --test tunnel known_bug -- --ignored`.
+///
+/// `gsp-agent` gives every proxy peer `AllowedIPs = 0.0.0.0/0`
+/// (`crates/gsp-agent/src/proxy_subscribe.rs`), and `ProxyRegistration` carries
+/// no tunnel address to narrow it to. WireGuard assigns an allowed-IP range to
+/// one peer per interface, so the proxy that registers last takes the route and
+/// the earlier proxy's replies are encrypted to the wrong key: its connections
+/// to the backend time out. Phase 14 slice 7's "scales to N proxies" therefore
+/// holds for one proxy at a time only. The fix needs the proxy's tunnel address
+/// in its registration (a protocol change) — see HANDOVER.md; it belongs with
+/// the tunnel-address-authority work.
+#[tokio::test]
+#[ignore = "KNOWN BUG (see doc comment): fails until proxy registrations carry a tunnel address"]
+async fn known_bug_two_proxies_cannot_share_one_origin() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let first = t.start_edge("edge-1", 1, None).await?;
+    t.wait_roundtrip(first).await?;
+    let second = t.start_edge("edge-2", 3, None).await?;
+    t.wait_roundtrip(second).await?;
+
+    // Both proxies must carry traffic at the same time.
+    assert_eq!(
+        tcp_roundtrip(t.public_addr(second), b"second").await?,
+        b"second"
+    );
+    assert_eq!(
+        tcp_roundtrip(t.public_addr(first), b"first").await?,
+        b"first",
+        "the first proxy lost its route when the second registered"
+    );
+    t.pass();
     Ok(())
 }

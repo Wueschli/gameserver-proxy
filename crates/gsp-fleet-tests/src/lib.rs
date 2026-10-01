@@ -90,7 +90,22 @@ impl Drop for Proc {
     fn drop(&mut self) {
         if self.child.start_kill().is_err() {
             eprintln!("gsp-fleet-tests: {} was already gone on drop", self.name);
+            return;
         }
+        // Reap before returning: the process may hold a network namespace (or a
+        // port) the caller is about to reuse, and `start_kill` alone only sends
+        // the signal.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                _ => return,
+            }
+        }
+        eprintln!(
+            "gsp-fleet-tests: {} did not exit within 5s of SIGKILL",
+            self.name
+        );
     }
 }
 

@@ -76,7 +76,7 @@ endif
 tunnel-e2e:
 	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
 	cargo test -p gsp-fleet-tests --test tunnel --no-run
-	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --skip known_bug_ --test-threads=1 --nocapture'
 
 ## help: list targets
 help:

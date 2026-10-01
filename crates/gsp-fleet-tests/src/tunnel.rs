@@ -17,7 +17,6 @@ use crate::{spawn_controller_on, wait_http_up, wait_until, Proc};
 pub const ECHO_PORT: u16 = 7000;
 pub const PUBLIC_PORT: u16 = 8000;
 const ADMIN_PORT: u16 = 9900;
-const CONTROLLER_PORT: u16 = 9901;
 const WG_PORT: u16 = 51820;
 const ORIGIN_NAME: &str = "origin-a";
 const ORIGIN_TUNNEL_IP: &str = "10.60.0.2";
@@ -85,54 +84,71 @@ listeners:
     )
 }
 
+// Field order is drop order: processes and the echo thread (which hold the
+// namespace) go before the `Ns` itself.
 struct Origin {
-    ns: Ns,
     agent: Proc,
     #[allow(dead_code)] // held for its Drop: stops the echo server
     echo: Option<EchoServer>,
+    ns: Ns,
     pubkey: String,
 }
 
 struct Edge {
-    ns: Ns,
     gsp: Proc,
+    ns: Ns,
 }
 
 pub struct TunnelLab {
     pub backend: Backend,
-    lab: Lab,
+    /// Set by [`TunnelLab::pass`]; if the lab is dropped without it (a panic, or
+    /// an `Err` returned with `?`) every process log is printed.
+    passed: bool,
+    controller_port: u16,
+    // Drop order: scenario processes first, then the controller, then the rest.
+    edges: Vec<Edge>,
+    origin: Option<Origin>,
     controller: Proc,
     dir: tempfile::TempDir,
-    origin: Option<Origin>,
-    edges: Vec<Edge>,
+    lab: Lab,
 }
 
 impl TunnelLab {
     pub async fn new() -> Result<Self> {
         let lab = Lab::new()?;
+        // A fresh port per lab: a previous test's controller may still be
+        // closing its listener.
+        let controller_port = crate::free_port()?;
         let dir = tempfile::tempdir()?;
         std::fs::create_dir_all(dir.path().join("controller"))?;
         let controller = spawn_controller_on(
             &dir.path().join("controller"),
-            &format!("0.0.0.0:{CONTROLLER_PORT}"),
+            &format!("0.0.0.0:{controller_port}"),
         )?;
         wait_http_up(
-            &format!("http://127.0.0.1:{CONTROLLER_PORT}/healthz"),
+            &format!("http://127.0.0.1:{controller_port}/healthz"),
             Duration::from_secs(10),
         )
         .await?;
         Ok(Self {
             backend: Backend::from_env(),
-            lab,
+            passed: false,
+            controller_port,
+            edges: Vec::new(),
+            origin: None,
             controller,
             dir,
-            origin: None,
-            edges: Vec::new(),
+            lab,
         })
     }
 
-    fn controller_url(ns: &Ns) -> String {
-        format!("http://{}:{CONTROLLER_PORT}", ns.lab_addr())
+    fn controller_url(&self, ns: &Ns) -> String {
+        format!("http://{}:{}", ns.lab_addr(), self.controller_port)
+    }
+
+    /// Mark the scenario as successful so `Drop` stays quiet.
+    pub fn pass(&mut self) {
+        self.passed = true;
     }
 
     /// Start `gsp-agent` in a new namespace, wait until it has registered, and
@@ -143,7 +159,7 @@ impl TunnelLab {
             "--data-dir",
             self.dir.path().join("agent").to_str().unwrap(),
             "--controller-url",
-            &Self::controller_url(&ns),
+            &self.controller_url(&ns),
             "--name",
             ORIGIN_NAME,
             "--iface",
@@ -163,7 +179,10 @@ impl TunnelLab {
         args.extend(self.backend.agent_flag().map(str::to_string));
         let agent = Proc::spawn_in(Some(&ns), "gsp-agent", &args)?;
 
-        let url = format!("http://127.0.0.1:{CONTROLLER_PORT}/peers/{ORIGIN_NAME}");
+        let url = format!(
+            "http://127.0.0.1:{}/peers/{ORIGIN_NAME}",
+            self.controller_port
+        );
         wait_until(
             || {
                 let url = url.clone();
@@ -185,9 +204,9 @@ impl TunnelLab {
             None
         };
         self.origin = Some(Origin {
-            ns,
             agent,
             echo,
+            ns,
             pubkey,
         });
         Ok(())
@@ -241,7 +260,7 @@ impl TunnelLab {
                 .to_str()
                 .unwrap(),
             "--tunnel-controller-url",
-            &Self::controller_url(&ns),
+            &self.controller_url(&ns),
             "--tunnel-name",
             name,
             "--tunnel-endpoint",
@@ -259,7 +278,7 @@ impl TunnelLab {
             Duration::from_secs(20),
         )
         .await?;
-        self.edges.push(Edge { ns, gsp });
+        self.edges.push(Edge { gsp, ns });
         Ok(self.edges.len() - 1)
     }
 
@@ -314,7 +333,7 @@ impl TunnelLab {
 
 impl Drop for TunnelLab {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
+        if self.passed {
             return;
         }
         eprintln!("\n=== tunnel e2e failed — process logs ===");
