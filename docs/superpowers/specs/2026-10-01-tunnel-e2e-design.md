@@ -77,8 +77,16 @@ interfaces. The client runs in the lab ns and dials `gsp`'s listener at
   explicitly requested.
 - `Makefile`: `tunnel-e2e` = `unshare -Urnm --kill-child cargo test -p
   gsp-fleet-tests --test tunnel -- --ignored --test-threads=1` (runs directly if
-  already root). `TUNNEL_BACKEND=userspace|kernel` selects the WG backend
-  (default `userspace`, i.e. `boringtun`, the portable one).
+  already root). The namespace also gets a tmpfs on `/run` with `/run/wireguard`
+  (boringtun's control socket lives there). `TUNNEL_BACKEND=kernel|userspace`
+  selects the WG backend; default `kernel`.
+  **Spike findings (2026-10-01, real binaries in `unshare -Urnm`):** both backends
+  work. Kernel: first round trip in ~2 s. Userspace (`boringtun`): the first
+  round trip took ~25 s — the proxy has no endpoint for the origin, so the
+  handshake waits for the agent's 25 s persistent keepalive. Per-wait deadlines
+  are therefore backend-scaled (30 s kernel / 90 s userspace), and CI runs both
+  as a matrix. The slow userspace first handshake is a product observation, not
+  fixed here (recorded in `HANDOVER.md`).
 - CI: a `tunnel` job. If the runner restricts unprivileged userns (Ubuntu 24.04
   AppArmor), set `kernel.apparmor_restrict_unprivileged_userns=0` via `sudo
   sysctl`, or run the make target under `sudo`. Starts non-blocking
@@ -93,13 +101,16 @@ must exist before `gsp` starts:
 persisted in its data dir). 3. Poll the controller's `GET /peers/<name>` until the
 origin appears; read its pubkey. 4. Write `gsp`'s config (tunnel source +
 pool + TCP/UDP listener) with that pubkey and start `gsp --tunnel-*` (edge).
-5. Wait for the pool to report the backend healthy via `gsp`'s admin `/pools`.
+5. Wait for a **real round trip**, not for `/pools` to say healthy: a new backend
+   starts optimistically healthy, so `/pools` is true before the tunnel is up.
 
 ## Scenarios
 
-1. **Round trip.** TCP echo and UDP echo through the public listener; assert the
-   payload comes back byte-for-byte. Proves handshake, routing, `AllowedIPs`,
-   discovery and health end to end.
+1. **Round trip.** The origin's echo server starts *after* `gsp`, so the backend is
+   first seen unhealthy and must turn healthy on its own. Then a 256 KiB TCP
+   payload and a 1200-byte UDP datagram come back byte-for-byte (large enough to
+   cross the WireGuard MTU). Proves handshake, routing, `AllowedIPs`, discovery
+   and health end to end.
 2. **Re-registration stability** (slice-6 regression). Agent and proxy register
    every 1 s. Probe every 200 ms for ~10 s after the first success; require 100 %
    success. A teardown/rebuild per registration (the original bug) breaks the
@@ -126,10 +137,10 @@ existing helpers which discard it).
 
 - Hosts where unprivileged userns is disabled/restricted → documented in the
   `make` target's error message and the CI `sysctl`/`sudo` fallback.
-- Kernel-backend variant depends on the host's `wireguard` module; it is a
-  secondary, optional run, not a gate.
-- Debug builds plus WG userspace are slower; deadlines are generous (30 s per
-  wait) and the job is non-blocking initially.
+- The kernel backend needs the host's `wireguard` module (CI runs
+  `modprobe wireguard`); the userspace run is the portable fallback.
+- Debug builds plus WG userspace are slower; deadlines are backend-scaled (see
+  above) and the job is non-blocking initially.
 
 ## Docs to update when built
 
