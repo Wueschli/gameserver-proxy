@@ -15,6 +15,8 @@ on:
       - "docs/**"
       - "LICENSE-*"
   workflow_dispatch:   # run everything by hand from the Actions tab
+  schedule:
+    - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
 
 # A newer push to the same ref supersedes an older, still-running one.
 concurrency:
@@ -26,6 +28,44 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
+  # Schedule / manual runs, a workflow edit, or a failed diff run everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ui: ${{ steps.f.outputs.ui }}
+      plugins: ${{ steps.f.outputs.plugins }}
+      tunnel: ${{ steps.f.outputs.tunnel }}
+      deploy: ${{ steps.f.outputs.deploy }}
+      fuzz: ${{ steps.f.outputs.fuzz }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Self-test the change detection
+        run: sh .github/scripts/changes_test.sh
+      - name: Detect changed areas
+        id: f
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          flag=""
+          files=""
+          case "$EVENT" in
+            pull_request)
+              files=$(git diff --name-only "origin/$BASE_REF...HEAD") || flag=--all ;;
+            push)
+              if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA") || flag=--all
+              else
+                flag=--all   # new branch / force-push: no usable base
+              fi ;;
+            *) flag=--all ;;
+          esac
+          printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -44,6 +84,8 @@ jobs:
         run: cargo test --all
 
   plugins:
+    needs: changes
+    if: needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -75,6 +117,8 @@ jobs:
   ui:
     # gsp-ui frontend (crates/gsp-ui/web) — a standalone npm project, so it
     # gets its own job rather than riding on `make check`.
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -96,6 +140,8 @@ jobs:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces
     # (docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md). Non-blocking
     # until it has proven stable on GitHub runners.
+    needs: changes
+    if: needs.changes.outputs.tunnel == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -121,6 +167,8 @@ jobs:
     # deploy/ reference images + compose demo + k8s manifests
     # (docs/superpowers/specs/2026-10-01-deploy-design.md). Non-blocking until
     # it has proven stable on GitHub runners.
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -137,6 +185,8 @@ jobs:
           ./kubeconform -strict -summary deploy/k8s
 
   fuzz:
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

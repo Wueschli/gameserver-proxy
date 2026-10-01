@@ -440,9 +440,13 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   `export PATH="$HOME/.cargo/bin:$PATH"`.
 - **`protoc` is a build requirement** (gRPC resolver codegen in
   `crates/gsp/build.rs`). CI installs `protobuf-compiler`.
-- CI: `.github/workflows/ci.yml` — installs `protoc`, then `cargo fmt --check`,
-  `clippy --all-targets --all-features`, `cargo test --all`. Plus nightly `fuzz`
-  and `plugins` jobs.
+- CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
+  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.sh`, tested by
+  `changes_test.sh`, self-run in CI) decides which path-scoped jobs run: `ui`, `plugins`, `tunnel`,
+  `deploy`, `fuzz` (`test` always runs for non-docs pushes). A workflow edit, a failed diff, the
+  **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
+  also act as nightly canaries for code-driven breakage. Adding a job or moving files between
+  areas means updating `changes.sh` *and* its test. A full run is ~32 runner-minutes.
 - git remote `github.com/Wueschli/gameserver-proxy`, branch `main`; `git push`
   works, `origin/main` is current. The HTTPS credential helper logs a harmless
   "nonexistent Windows path" warning before falling back to a working credential.
