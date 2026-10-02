@@ -108,9 +108,24 @@ async fn three_replicas_replicate_through_tls_terminators() -> Result<()> {
     let mut last = (0, String::new());
     for base in &c.plain {
         let body = config()?;
-        let rev = submit(base, body.clone()).await;
-        ensure!(rev.is_some(), "write via {base} was not accepted");
-        last = (rev.unwrap(), body);
+        // A follower may not know the leader yet (openraft backs off a peer
+        // after an Unreachable): retry briefly rather than assume it does.
+        let rev = std::sync::Arc::new(std::sync::Mutex::new(None));
+        wait_until(
+            || {
+                let (base, body, rev) = (base.clone(), body.clone(), rev.clone());
+                async move {
+                    let got = submit(&base, body).await;
+                    *rev.lock().unwrap() = got;
+                    Ok(got.is_some())
+                }
+            },
+            Duration::from_secs(15),
+            &format!("a write via {base} to be accepted"),
+        )
+        .await?;
+        let got = rev.lock().unwrap().expect("set when wait_until succeeds");
+        last = (got, body);
     }
 
     let (want_rev, want_body) = last;

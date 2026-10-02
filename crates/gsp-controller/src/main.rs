@@ -244,10 +244,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let node_id = args.ha_node_id.expect("checked above");
         let peers = ha::peers::parse_peers(&args.ha_peers)?;
-        let self_addr = peers
-            .get(&node_id)
-            .map(|n| n.addr.clone())
-            .unwrap_or_else(|| args.listen.to_string());
         let ha_token: Option<Arc<str>> = args.ha_token.clone().map(Arc::from);
 
         let ha_dir = args.data_dir.join("ha");
@@ -310,7 +306,6 @@ async fn main() -> anyhow::Result<()> {
         let handle = Arc::new(HaHandle {
             raft,
             node_id,
-            self_addr,
             ha_token,
         });
         config_state = config_state.with_ha(Some(handle.clone()));

@@ -611,9 +611,12 @@ what order," which a stateless replica set cannot give.
   bootstrap, not the joint-consensus dynamic membership change API). Adding
   or removing a peer from a running group needs `openraft`'s membership-
   change support and is **explicitly out of scope for the first HA slice** —
-  documented as a known limitation, not silently unsupported: growing a
-  tier's replica count means a coordinated restart of the whole group with a
-  new `--ha-peers` list until that slice lands.
+  documented as a known limitation, not silently unsupported. `--ha-peers` is
+  only read when a cluster is first bootstrapped (`raft.initialize` is refused
+  once the log is non-empty), so restarting with a new list changes nothing for
+  existing members: growing a tier, or moving it to new addresses / `https://`
+  peers, means bootstrapping a new cluster until that slice lands (docs/12 "HA
+  replicas over TLS"; HANDOVER row "Change a live HA member's address").
 - **`replicas: 1` (today's shape) needs no code path change.** A one-node
   Raft group trivially elects itself leader and commits every entry
   immediately (no network round trip) — `openraft` handles the degenerate
