@@ -446,6 +446,32 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
+/// Validates the controller's `--tunnel-*` flags together: parses the network
+/// and the stale threshold, and refuses a network combined with HA (the
+/// allocator is correct only with a single writer — see the module doc).
+pub fn resolve_flags(
+    network: Option<&str>,
+    stale_after: &str,
+    ha_enabled: bool,
+) -> Result<(Option<Network>, Duration), String> {
+    let stale = parse_duration(stale_after).map_err(|e| format!("--tunnel-stale-after: {e}"))?;
+    let net = match network {
+        Some(n) => {
+            if ha_enabled {
+                return Err(
+                    "--tunnel-network cannot be combined with --ha-peers: the address allocator \
+                     needs a single writer and the registries are not replicated \
+                     (see docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md)"
+                        .into(),
+                );
+            }
+            Some(Network::parse(n).map_err(|e| format!("--tunnel-network: {e}"))?)
+        }
+        None => None,
+    };
+    Ok((net, stale))
+}
+
 pub mod api;
 
 #[cfg(test)]
@@ -734,5 +760,29 @@ mod tests {
         assert!(parse_duration("14").is_err());
         assert!(parse_duration("d").is_err());
         assert!(parse_duration("14w").is_err());
+    }
+
+    #[test]
+    fn resolve_flags_defaults_to_pin_only_and_fourteen_days() {
+        let (net, stale) = resolve_flags(None, "14d", false).unwrap();
+        assert!(net.is_none());
+        assert_eq!(stale, Duration::from_secs(14 * 86400));
+    }
+
+    #[test]
+    fn resolve_flags_parses_the_network_and_the_duration() {
+        let (net, stale) = resolve_flags(Some("10.60.0.0/16"), "0", false).unwrap();
+        assert_eq!(net.unwrap().to_string(), "10.60.0.0/16");
+        assert!(stale.is_zero());
+    }
+
+    #[test]
+    fn resolve_flags_rejects_a_bad_network_a_bad_duration_and_ha() {
+        assert!(resolve_flags(Some("nonsense"), "14d", false).is_err());
+        assert!(resolve_flags(None, "soon", false).is_err());
+        let err = resolve_flags(Some("10.60.0.0/16"), "14d", true).unwrap_err();
+        assert!(err.contains("--ha-peers"), "{err}");
+        // Pin-only mode (no network) with HA is allowed: nothing is allocated.
+        assert!(resolve_flags(None, "14d", true).is_ok());
     }
 }

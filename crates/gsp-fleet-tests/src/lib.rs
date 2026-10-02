@@ -407,16 +407,19 @@ pub fn spawn_controller(data_dir: &Path, listen_port: u16) -> Result<Proc> {
 /// Controller on an arbitrary `host:port` (the tunnel e2e test binds
 /// `0.0.0.0` so every namespace can reach it), output captured.
 pub fn spawn_controller_on(data_dir: &Path, listen: &str) -> Result<Proc> {
-    Proc::spawn_in(
-        None,
-        "gsp-controller",
-        &[
-            "--data-dir".to_string(),
-            data_dir.display().to_string(),
-            "--listen".to_string(),
-            listen.to_string(),
-        ],
-    )
+    spawn_controller_with(data_dir, listen, &[])
+}
+
+/// Like [`spawn_controller_on`] with extra command-line arguments.
+pub fn spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) -> Result<Proc> {
+    let mut args = vec![
+        "--data-dir".to_string(),
+        data_dir.display().to_string(),
+        "--listen".to_string(),
+        listen.to_string(),
+    ];
+    args.extend(extra.iter().cloned());
+    Proc::spawn_in(None, "gsp-controller", &args)
 }
 
 pub fn spawn_aggregator(listen_port: u16) -> Result<Proc> {

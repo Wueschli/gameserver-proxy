@@ -15,7 +15,6 @@ use axum::Router;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use gsp_controller::addresses::AddressBook;
 use gsp_controller::adopt::AdoptState;
 use gsp_controller::api::{self, AppState};
 use gsp_controller::ha::{self, HaHandle, NodeId as HaNodeId};
@@ -84,6 +83,18 @@ struct Args {
     /// credential in this fleet.
     #[arg(long)]
     ha_token: Option<String>,
+
+    /// IPv4 network tunnel addresses are allocated from, e.g. `10.60.0.0/16`.
+    /// Omit for pin-only mode: requested addresses are checked for uniqueness
+    /// but nothing is allocated. Cannot be combined with `--ha-peers`.
+    #[arg(long)]
+    tunnel_network: Option<String>,
+
+    /// An allocated tunnel address not re-registered for this long is flagged
+    /// `stale` in `GET /tunnel/addresses` and in a daily log warning. Units:
+    /// s, m, h, d. `0` disables it.
+    #[arg(long, default_value = "14d")]
+    tunnel_stale_after: String,
 }
 
 fn parse_ha_peers(raw: &[String]) -> anyhow::Result<BTreeMap<HaNodeId, openraft::BasicNode>> {
@@ -118,6 +129,12 @@ async fn main() -> anyhow::Result<()> {
              built in this slice"
         );
     }
+    let (tunnel_network, stale_after) = gsp_controller::addresses::resolve_flags(
+        args.tunnel_network.as_deref(),
+        &args.tunnel_stale_after,
+        !args.ha_peers.is_empty(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -165,13 +182,17 @@ async fn main() -> anyhow::Result<()> {
         peers_dir = %peers_dir.display(),
         "backend-peers store opened"
     );
-    // Interim wiring (pin-only mode, no network): Task 3 replaces this with
-    // the real flags-driven address book.
-    let book_dir = args.data_dir.join("tunnel-addresses");
+    // The address book (spec: Controller/State) — its own sled database like
+    // every other registry, shared by both peer registries below.
+    let addresses_dir = args.data_dir.join("tunnel-addresses");
     let book = Arc::new(
-        AddressBook::open(&book_dir, None)
-            .map_err(|e| anyhow::anyhow!("opening address book at {book_dir:?}: {e}"))?,
+        gsp_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
+            .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?,
     );
+    match tunnel_network {
+        Some(n) => tracing::info!(network = %n, "tunnel address allocation enabled"),
+        None => tracing::info!("no --tunnel-network: pin-only tunnel addresses (no allocation)"),
+    }
     let peers_state = PeersState::new(peers_store, args.auth_token.clone(), book.clone());
 
     // A fourth separate sled database (phase 14 slice 7) — the proxy-peers
@@ -189,6 +210,15 @@ async fn main() -> anyhow::Result<()> {
     );
     let proxy_peers_state =
         ProxyPeersState::new(proxy_peers_store, args.auth_token.clone(), book.clone());
+    let addresses_state = gsp_controller::addresses::api::AddressesState::new(
+        book.clone(),
+        args.auth_token.clone(),
+        stale_after,
+    );
+    tokio::spawn(gsp_controller::addresses::api::stale_warning_loop(
+        book.clone(),
+        stale_after,
+    ));
 
     // Shared, mutable across `AppState` and `IntentState` — `adopt` flips
     // this one cell and both write gates see it instantly (see
@@ -349,6 +379,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(gsp_controller::intent::api::router((*intent_state).clone()))
         .merge(gsp_controller::peers::api::router(peers_state))
         .merge(gsp_controller::proxy_peers::api::router(proxy_peers_state))
+        .merge(gsp_controller::addresses::api::router(addresses_state))
         .merge(gsp_controller::adopt::router(adopt_state));
     if let Some(handle) = ha_handle {
         app = app.merge(ha::routes::router(handle));
