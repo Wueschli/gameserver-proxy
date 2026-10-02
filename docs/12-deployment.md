@@ -13,9 +13,10 @@ shared `rust:1-trixie` builder and five runtime targets on
 external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its
-dynamic library dependencies (glibc; distroless already ships `ca-certificates`
-for any TLS-verifying HTTP client: `--controller`, `--aggregator`,
-`--tunnel-controller-url`, the HTTP/gRPC resolvers). The builder and runtime base
+dynamic library dependencies (glibc). It does not need a system CA bundle either: the
+HTTP clients (`--controller`, `--aggregator`, `--tunnel-controller-url`, the HTTP
+resolvers) verify against a root bundle compiled into the binary — see
+[`gsp-controller` behind TLS](#gsp-controller-behind-tls) for what that implies. The builder and runtime base
 must be on the same Debian release, or a binary can fail to start on an older glibc.
 
 `[profile.release]` sets `strip = true`, which trims roughly 15-20% off every binary.
@@ -153,6 +154,99 @@ The CI-runnable `make tunnel-e2e` (rootless network namespaces,
 *logic* with the same binaries and flags, but it does not exercise container
 capabilities — `NET_ADMIN` and `/dev/net/tun` as documented above stay the
 deployment requirement.
+
+## `gsp-controller` behind TLS
+
+`gsp-controller` (and the aggregator, the UI and `gsp`'s admin API) serve **plain
+HTTP**. Run as-is across a network, that exposes:
+
+- the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
+- the full config text, on `GET /config` and the SSE `GET /config/subscribe`;
+- every origin's registration (WireGuard public key, public endpoint, fronted
+  backend addresses) on the `/peers*` and `/proxy-peers*` routes.
+
+The supported pattern is a **reverse proxy you run that terminates TLS**, with the
+controller listening only on loopback or a private network
+(`--listen 127.0.0.1:9901`, or a private bridge/pod network). There is no native TLS
+in the controller.
+
+### Proxy configuration
+
+Four routes are long-lived server-sent-event streams — `/config/subscribe`,
+`/peers/subscribe`, `/proxy-peers/subscribe` and `/intent/subscribe`. The controller
+sends keep-alives, but a proxy that buffers responses or enforces a short read
+timeout will stall or drop them, so those must be off/long.
+
+Caddy (certificates from Let's Encrypt automatically):
+
+```
+controller.example.com {
+    reverse_proxy 127.0.0.1:9901 {
+        flush_interval -1        # stream SSE immediately
+    }
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name controller.example.com;
+    ssl_certificate     /etc/letsencrypt/live/controller.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/controller.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9901;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;      # SSE
+        proxy_read_timeout 1h;    # idle SSE streams
+    }
+}
+```
+
+> These two snippets are **not tested in this repository** (CI has neither proxy, and
+> an end-to-end https test would need a certificate the clients trust — see the limits
+> below). Check them against your proxy's version.
+
+In Kubernetes the equivalent is an Ingress (or Gateway) with TLS in front of the
+`gsp-controller` Service; make sure its response buffering and timeouts allow SSE.
+
+### Pointing the clients at it
+
+Every HTTP client in the fleet uses `reqwest` with rustls and builds its requests from
+the base URL as given — no code forces a scheme — so these take an `https://` base URL
+(not exercised end-to-end in CI): `gsp --controller`, `gsp --tunnel-controller-url`,
+`gsp-agent --controller-url`, `gsp-ui --controller-url` / `--aggregator-url`, and
+`gsp-controller --parent-url`. To check it works:
+
+```sh
+curl -fsS https://controller.example.com/healthz
+gsp --check --controller https://controller.example.com --controller-token "$TOKEN"
+```
+
+### Limits (read these before relying on it)
+
+- **Publicly trusted certificates only.** The clients trust the Mozilla root bundle
+  compiled into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`), **not** the
+  system certificate store, and there is no flag or environment variable to add a CA.
+  A certificate from a private or internal CA — or a self-signed one — will not
+  verify. Use a public CA (Let's Encrypt works), or keep controller traffic on a
+  private network such as the WireGuard tunnel itself.
+- **HA and adoption traffic stays plain HTTP.** Replica-to-replica calls
+  (`/raft/append`, `/raft/vote`, `/raft/snapshot`, forwarded writes) and
+  `/admin/adopt` build `http://host:port` URLs in code, so they cannot go through a
+  TLS proxy. Keep the replicas on a private network; what protects those routes is
+  `--ha-token`, which is a shared secret and not encryption.
+- **The other services are plain HTTP too.** The aggregator, `gsp`'s admin API and
+  the UI have the same exposure; the same reverse-proxy pattern applies. For the UI
+  this matters most: it carries a password login, and its session cookie is
+  `HttpOnly; SameSite=Lax` but **not** `Secure`, so redirect HTTP to HTTPS (and
+  consider HSTS) at the proxy.
+- **A TLS proxy is a trust boundary.** It sees every token and registration in the
+  clear. Run it on a host you control.
 
 ## Open question
 

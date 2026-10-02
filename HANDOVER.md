@@ -12,7 +12,7 @@ Last updated: 2026-10-01.
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work: the TLS section in docs/12, tunnel address authority (+ the multi-proxy
+Remaining work: tunnel address authority (+ the multi-proxy
 AllowedIPs fix), the "Known follow-ups" table below, and making the `tunnel` and
 `deploy` CI jobs blocking once stable.
 
@@ -233,6 +233,8 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 | Item | Notes |
 |------|-------|
+| Custom CA support for the HTTP clients | `reqwest` uses `rustls-tls` (bundled `webpki-roots`, not the system store) and no flag adds a CA, so only publicly trusted certs verify behind a TLS proxy (docs/12 "gsp-controller behind TLS"). Small fix: switch to `rustls-tls-native-roots` or add a `--ca-file` |
+| TLS for HA / adopt traffic | `/raft/*`, forwarded writes and `/admin/adopt` hard-code `http://` (`ha/network.rs:45`, `ha/client.rs:83`, `adopt.rs:220`); today they must stay on a private network, protected only by `--ha-token` |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |

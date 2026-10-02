@@ -77,8 +77,9 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Tokens are visible in `docker inspect` / the Pod spec env — fine for a demo;
   use real secret management in production.
 - `gsp-controller` serves **plain HTTP**: bearer tokens and registrations
-  cross the network in the clear. Terminate TLS in front of it (a docs/12
-  section on this is planned).
+  cross the network in the clear. Terminate TLS in front of it — see
+  [`gsp-controller` behind TLS](../docs/12-deployment.md#gsp-controller-behind-tls),
+  including its limits (public CAs only; HA traffic stays plain HTTP).
 - One standalone controller; no HA (see docs/10).
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
