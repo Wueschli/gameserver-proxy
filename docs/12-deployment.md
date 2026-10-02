@@ -158,8 +158,8 @@ deployment requirement.
 
 ## `gsp-controller` behind TLS
 
-Without the flags below, `gsp-controller` (and always the aggregator, the UI and
-`gsp`'s admin API) serves **plain HTTP**. Run as-is across a network, that exposes:
+Without the flags below, `gsp-controller` and `gsp-aggregator` (and always the UI and
+`gsp`'s admin API) serve **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
 - the full config text, on `GET /config` and the SSE `GET /config/subscribe`;
@@ -169,8 +169,8 @@ Without the flags below, `gsp-controller` (and always the aggregator, the UI and
 Two ways to encrypt it: **native TLS** in the controller (below), or a **reverse proxy
 you run that terminates TLS**, with the controller listening only on loopback or a
 private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
-aggregator, the UI and `gsp`'s admin API have no native TLS yet, so for them the proxy
-is the only option.
+aggregator serves native TLS the same way. The UI and `gsp`'s admin API have no native
+TLS yet, so for them the proxy is the only option.
 
 ### Native TLS
 
@@ -192,10 +192,14 @@ gsp-controller --listen 0.0.0.0:8443 \
   (plus `--ca-file`), with no terminator at all.
 - TLS handshakes run in their own tasks with a 10 s timeout, so a client that connects
   and stalls cannot hold up others. No client certificates (mTLS).
+- **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
+  push to `--aggregator https://…` (plus `--ca-file` for a private CA), and so does a
+  child tier's `--parent-url`.
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
-TLS; `--tls-cert` alone is refused) and `ha_tls.rs`
+TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `gsp` pushes to an
+`https://` aggregator, read back over HTTPS) and `ha_tls.rs`
 `three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
 listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
 
@@ -314,13 +318,13 @@ needs a membership change, which is not built yet.
 - **HA over TLS needs a fresh cluster** (native TLS on each replica, or a terminator
   per replica; see "HA replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
-- **The other services are plain HTTP.** The aggregator, `gsp`'s admin API and the UI
-  have no native TLS yet; the reverse-proxy pattern applies. For the UI
+- **The other services are plain HTTP.** `gsp`'s admin API and the UI have no native
+  TLS yet; the reverse-proxy pattern applies. For the UI
   this matters most: it carries a password login, and its session cookie is
   `HttpOnly; SameSite=Lax` but **not** `Secure`, so redirect HTTP to HTTPS (and
   consider HSTS) at the proxy.
 - **A TLS proxy is a trust boundary.** It sees every token and registration in the
-  clear. Run it on a host you control — or use native TLS for the controller.
+  clear. Run it on a host you control — or use native TLS where it exists.
 
 ## Tunnel addressing
 

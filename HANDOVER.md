@@ -18,9 +18,10 @@ Remaining work: the "Known follow-ups" table below. Every CI job is blocking (20
 
 State at 2026-10-02 (latest): `--ca-file` (PR #1), TLS-capable HA peers + readable HTTP
 errors (PR #2) and the cleanup PR (#3: one HTTP client for Raft RPCs, blocking
-`tunnel`/`deploy`) are merged; native TLS for `gsp-controller` is on branch
-`claude/dazzling-carson-j2yxj0` (PR to `main`). It changes `Cargo.lock` (new deps of
-`gsp-http`), so its CI run starts cold.
+`tunnel`/`deploy`) and native TLS for `gsp-controller` (#4) are merged. The owner asked
+for native TLS on the other servers, one PR each, merged on green CI: the aggregator
+(with the shared `gsp_http::tls::{TlsArgs, serve}`) is on branch
+`claude/dazzling-carson-j2yxj0`; the UI and the admin API follow (follow-up row).
 
 **CI timings, measured.** Cold (lockfile changed; PR #1's run 37003396498): `test` 8m15,
 `build-release` 16.5 min, each `tunnel` leg ~10 min, ~22 min wall clock. Warm (PR #2's run
@@ -31,11 +32,10 @@ later code push is back near the cold numbers without a lockfile change, the cac
 
 Open decisions for the owner:
 
-1. **Native TLS for the other HTTP servers?** `gsp-controller` serves TLS natively since
-   2026-10-02 (`--tls-cert`/`--tls-key`, with `--ca-file` and `https://` HA peers). The
-   aggregator, the UI and `gsp`'s admin API still need the reverse-proxy pattern;
-   `gsp_http::tls` makes each a flag plus wiring (follow-up row). New client code must
-   not hard-code `http://` and must build clients via `gsp_http::{client, builder}`.
+1. **Native TLS for the other HTTP servers:** decided (2026-10-02) — all of them, in
+   progress (follow-up row). `gsp-controller` and `gsp-aggregator` serve TLS natively
+   (`--tls-cert`/`--tls-key`). New client code must not hard-code `http://` and must
+   build clients via `gsp_http::{client, builder}`.
 2. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
    Publishing (GHCR on release tags, multi-arch if arm64 is needed) is a small follow-up:
    `deploy/Dockerfile` already has the `BIN_SOURCE` switch; it needs a release workflow,
@@ -68,6 +68,11 @@ branch-protection required checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
+- Native TLS for `gsp-aggregator` (2026-10-02, spec
+  `docs/superpowers/specs/2026-10-02-native-tls-other-servers-design.md`): the same
+  `--tls-cert`/`--tls-key`; the flags and the HTTPS-or-HTTP choice are now shared as
+  `gsp_http::tls::{TlsArgs, serve}`, which the controller uses too. E2E:
+  `aggregator_native_tls.rs`.
 - Native TLS for `gsp-controller` (2026-10-02, spec
   `docs/superpowers/specs/2026-10-02-controller-native-tls-design.md`, ADR 27, docs/12
   "Native TLS"): `--tls-cert`/`--tls-key` serve HTTPS through `gsp_http::tls::TlsListener`
@@ -315,7 +320,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
 | Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
 | Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
-| TLS for aggregator / UI / `gsp` admin API | `gsp-controller` serves native TLS (`gsp_http::tls`, ADR 27); the other three servers still need a reverse proxy (docs/12). Each is `--tls-cert`/`--tls-key` + `TlsListener::bind` + `spawn_reloader` instead of `TcpListener::bind`, plus a test like `controller_native_tls.rs`. The UI matters most (password login; session cookie should then get `Secure`). |
+| TLS for UI / `gsp` admin API | `gsp-controller` and `gsp-aggregator` serve native TLS (`gsp_http::tls`, ADR 27; both via `TlsArgs` + `tls::serve`). Plan: `docs/superpowers/specs/2026-10-02-native-tls-other-servers-design.md` — the UI (flags, `Secure` cookie, `/ws/fleet` must accept HTTP/2 extended CONNECT), then the admin API (`settings.admin.tls` in the YAML, `https://` admin URL). |
 | Native TLS — deferred review minors (2026-10-02) | `ReloadingCert` detects changes by `(mtime, mtime)` only — add size + inode so a same-mtime content change (`cp -p`, coarse filesystems) is caught; no cap on in-flight handshakes (bounded by fds + the 10 s timeout, like plain `axum::serve`; a `Semaphore` would be cheap); `TlsListener::accept` goes `pending()` silently if the accept task ever died — log first; `serves_a_chain_file` passes even leaf-only (needs an intermediate-signed fixture) and the plain-HTTP test doesn't assert the connection closed; `the_reloader_picks_up_new_files` should reuse `Live::write`'s wait-for-mtime; stale "test-only"/"reqwest-only" comments in the root and `gsp-http` `Cargo.toml` and the `gsp-http` lib doc; `gsp-agent` now builds axum/tokio-rustls via `gsp-http` (a `server` cargo feature would avoid it); only SEC1 of the documented key encodings is tested |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |

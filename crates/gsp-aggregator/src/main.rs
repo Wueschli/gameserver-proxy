@@ -66,6 +66,9 @@ struct Args {
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
 }
 
 #[tokio::main]
@@ -85,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
+    // Load (and validate) the serving certificate before anything else starts.
+    let tls_cert = args.tls.load()?;
 
     // No data-dir, no persistence — the store is deliberately in-memory
     // only (see the "stateless and ephemeral by design" note in lib.rs).
@@ -113,9 +118,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router(state));
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(listen = %args.listen, "gsp-aggregator listening");
-    axum::serve(listener, app).await?;
+    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-aggregator").await?;
 
     Ok(())
 }
