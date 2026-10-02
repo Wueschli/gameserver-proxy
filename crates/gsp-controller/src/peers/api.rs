@@ -72,6 +72,17 @@ impl PeersState {
         Ok(revision)
     }
 
+    /// Logs a tombstone for `name` and drops it from `current`. The tombstone
+    /// goes first: a crash between the two leaves a stale `current` entry that
+    /// a retried `DELETE` removes — never a silently lost removal.
+    fn remove(&self, name: &str) -> Result<u64, StoreError> {
+        let revision = self.store.put(super::tombstone_bytes(name))?;
+        self.current.remove(name.as_bytes())?;
+        self.current.flush()?;
+        let _ = self.updates.send(revision);
+        Ok(revision)
+    }
+
     /// The current registration for `name`, if it has ever registered.
     fn current_for(&self, name: &str) -> Result<Option<PeerRegistration>, StoreError> {
         let Some(rev_bytes) = self.current.get(name.as_bytes())? else {
@@ -110,7 +121,7 @@ pub fn router(state: PeersState) -> Router {
     Router::new()
         .route("/peers", axum::routing::post(register).get(list))
         .route("/peers/subscribe", get(subscribe))
-        .route("/peers/{name}", get(get_one))
+        .route("/peers/{name}", get(get_one).delete(delete_one))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -239,6 +250,53 @@ async fn get_one(State(state): State<PeersState>, Path(name): Path<String>) -> R
     }
 }
 
+#[derive(Serialize)]
+struct DeleteResponse {
+    revision: u64,
+    released: Option<String>,
+}
+
+/// `DELETE /peers/{name}` — releases the origin's tunnel address and tells
+/// subscribers (a tombstone) to drop its WireGuard peer. `404` only when the
+/// name is unknown everywhere (no current registration *and* no address), so a
+/// retry after a crash still completes.
+async fn delete_one(State(state): State<PeersState>, Path(name): Path<String>) -> Response {
+    let has_current = match state.current.contains_key(name.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return store_error_response(StoreError::from(e)),
+    };
+    let has_address = match state.book.get(Role::Origin, &name) {
+        Ok(a) => a.is_some(),
+        Err(e) => return claim_error_response(&e),
+    };
+    if !has_current && !has_address {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no peer registered as {name:?}"),
+            }),
+        )
+            .into_response();
+    }
+    let revision = match state.remove(&name) {
+        Ok(r) => r,
+        Err(e) => return store_error_response(e),
+    };
+    let released = match state.book.release(Role::Origin, &name) {
+        Ok(a) => a,
+        Err(e) => return claim_error_response(&e),
+    };
+    tracing::info!(revision, name = %name, address = ?released, "released a backend peer");
+    (
+        StatusCode::OK,
+        Json(DeleteResponse {
+            revision,
+            released: released.map(|a| a.to_string()),
+        }),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct SubscribeParams {
     since: Option<u64>,
@@ -263,9 +321,7 @@ async fn subscribe(
     ));
 
     let events = ReceiverStream::new(rx).map(|(revision, bytes)| {
-        let reg = String::from_utf8_lossy(&bytes).into_owned();
-        let payload = serde_json::json!({ "revision": revision, "registration": serde_json::from_str::<serde_json::Value>(&reg).unwrap_or(serde_json::Value::Null) });
-        Ok(Event::default().data(payload.to_string()))
+        Ok(Event::default().data(super::event_payload(revision, &bytes).to_string()))
     });
     Sse::new(events).keep_alive(KeepAlive::default())
 }
@@ -674,5 +730,127 @@ mod tests {
         let (ok, body) = post(&app, body_with("home", &[":1"], None)).await;
         assert_eq!(ok, StatusCode::OK);
         assert_eq!(body["tunnel_address"], held.to_string());
+    }
+
+    async fn delete(app: &Router, name: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/peers/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn delete_frees_the_address_and_removes_the_current_registration() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (_, a) = post(&app, body_with("a", &[], None)).await;
+        assert_eq!(a["tunnel_address"], "10.60.0.1");
+
+        let (status, body) = delete(&app, "a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["released"], "10.60.0.1");
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/peers/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The freed address is the lowest free one again.
+        let (_, b) = post(&app, body_with("b", &[], None)).await;
+        assert_eq!(b["tunnel_address"], "10.60.0.1");
+    }
+
+    #[tokio::test]
+    async fn delete_of_an_unknown_name_is_404() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, _) = delete(&app, "nobody").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_retried_delete_after_a_half_finished_one_still_completes() {
+        // The address is held but there is no current registration (a crash
+        // between the tombstone and the release): the retry must succeed.
+        let (state, book, _dir) = test_state();
+        book.claim(Role::Origin, "ghost", None, 1).unwrap();
+        let app = router(state);
+        let (status, body) = delete(&app, "ghost").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["released"], "10.60.0.1");
+        assert!(book.get(Role::Origin, "ghost").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn re_registering_after_a_delete_is_allocated_afresh_not_sticky() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        post(&app, body_with("a", &[], None)).await; // .1
+        post(&app, body_with("b", &[], None)).await; // .2
+        delete(&app, "a").await;
+        let (_, c) = post(&app, body_with("c", &[], None)).await;
+        assert_eq!(
+            c["tunnel_address"], "10.60.0.1",
+            "c takes the freed address"
+        );
+        let (_, a) = post(&app, body_with("a", &[], None)).await;
+        assert_eq!(a["tunnel_address"], "10.60.0.3", "a no longer owns .1");
+    }
+
+    #[tokio::test]
+    async fn delete_logs_a_tombstone_a_catch_up_subscriber_receives() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state.clone());
+        post(&app, body_with("home", &[":1"], None)).await;
+        delete(&app, "home").await;
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let updates = state.updates.subscribe();
+        tokio::spawn(subscribe_worker(state.store.clone(), updates, 0, tx));
+        let (r1, b1) = rx.recv().await.unwrap();
+        let (r2, b2) = rx.recv().await.unwrap();
+        assert!(r2 > r1);
+        assert_eq!(
+            crate::peers::event_payload(r1, &b1)["registration"]["name"],
+            "home"
+        );
+        assert_eq!(
+            crate::peers::event_payload(r2, &b2)["removed"]["name"],
+            "home"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_requires_the_bearer_token_when_one_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("peers")).unwrap());
+        let book = Arc::new(
+            AddressBook::open(
+                &dir.path().join("addresses"),
+                Some(Network::parse("10.60.0.0/16").unwrap()),
+            )
+            .unwrap(),
+        );
+        let app = router(PeersState::new(store, Some("secret".into()), book));
+        let resp = app
+            .oneshot(Request::delete("/peers/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

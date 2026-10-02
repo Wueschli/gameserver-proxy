@@ -21,6 +21,7 @@ use tokio_stream::{Stream, StreamExt};
 use super::ProxyRegistration;
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{now_secs, AddressBook, Role};
+use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
@@ -63,6 +64,14 @@ impl ProxyPeersState {
         Ok(revision)
     }
 
+    fn remove(&self, name: &str) -> Result<u64, StoreError> {
+        let revision = self.store.put(tombstone_bytes(name))?;
+        self.current.remove(name.as_bytes())?;
+        self.current.flush()?;
+        let _ = self.updates.send(revision);
+        Ok(revision)
+    }
+
     fn current_for(&self, name: &str) -> Result<Option<ProxyRegistration>, StoreError> {
         let Some(rev_bytes) = self.current.get(name.as_bytes())? else {
             return Ok(None);
@@ -100,7 +109,7 @@ pub fn router(state: ProxyPeersState) -> Router {
     Router::new()
         .route("/proxy-peers", axum::routing::post(register).get(list))
         .route("/proxy-peers/subscribe", get(subscribe))
-        .route("/proxy-peers/{name}", get(get_one))
+        .route("/proxy-peers/{name}", get(get_one).delete(delete_one))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -216,6 +225,50 @@ async fn get_one(State(state): State<ProxyPeersState>, Path(name): Path<String>)
     }
 }
 
+#[derive(Serialize)]
+struct DeleteResponse {
+    revision: u64,
+    released: Option<String>,
+}
+
+/// `DELETE /proxy-peers/{name}` — see `crate::peers::api::delete_one`.
+async fn delete_one(State(state): State<ProxyPeersState>, Path(name): Path<String>) -> Response {
+    let has_current = match state.current.contains_key(name.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return store_error_response(StoreError::from(e)),
+    };
+    let has_address = match state.book.get(Role::Proxy, &name) {
+        Ok(a) => a.is_some(),
+        Err(e) => return claim_error_response(&e),
+    };
+    if !has_current && !has_address {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no proxy registered as {name:?}"),
+            }),
+        )
+            .into_response();
+    }
+    let revision = match state.remove(&name) {
+        Ok(r) => r,
+        Err(e) => return store_error_response(e),
+    };
+    let released = match state.book.release(Role::Proxy, &name) {
+        Ok(a) => a,
+        Err(e) => return claim_error_response(&e),
+    };
+    tracing::info!(revision, name = %name, address = ?released, "released a proxy peer");
+    (
+        StatusCode::OK,
+        Json(DeleteResponse {
+            revision,
+            released: released.map(|a| a.to_string()),
+        }),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct SubscribeParams {
     since: Option<u64>,
@@ -235,9 +288,7 @@ async fn subscribe(
     ));
 
     let events = ReceiverStream::new(rx).map(|(revision, bytes)| {
-        let reg = String::from_utf8_lossy(&bytes).into_owned();
-        let payload = serde_json::json!({ "revision": revision, "registration": serde_json::from_str::<serde_json::Value>(&reg).unwrap_or(serde_json::Value::Null) });
-        Ok(Event::default().data(payload.to_string()))
+        Ok(Event::default().data(event_payload(revision, &bytes).to_string()))
     });
     Sse::new(events).keep_alive(KeepAlive::default())
 }
@@ -638,5 +689,78 @@ mod tests {
             .unwrap();
         let reg: ProxyRegistration = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(reg.tunnel_address.as_deref(), Some("10.60.0.1"));
+    }
+
+    async fn delete(app: &Router, name: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/proxy-peers/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn delete_frees_the_address_and_removes_the_current_registration() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (_, a) = post(&app, body_with("a", None)).await;
+        assert_eq!(a["tunnel_address"], "10.60.0.1");
+
+        let (status, body) = delete(&app, "a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["released"], "10.60.0.1");
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/proxy-peers/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let (_, b) = post(&app, body_with("b", None)).await;
+        assert_eq!(b["tunnel_address"], "10.60.0.1");
+    }
+
+    #[tokio::test]
+    async fn delete_of_an_unknown_name_is_404() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, _) = delete(&app, "nobody").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_logs_a_tombstone_a_catch_up_subscriber_receives() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state.clone());
+        post(&app, body_with("edge-1", None)).await;
+        delete(&app, "edge-1").await;
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let updates = state.updates.subscribe();
+        tokio::spawn(subscribe_worker(state.store.clone(), updates, 0, tx));
+        let (r1, b1) = rx.recv().await.unwrap();
+        let (r2, b2) = rx.recv().await.unwrap();
+        assert!(r2 > r1);
+        assert_eq!(
+            crate::peers::event_payload(r1, &b1)["registration"]["name"],
+            "edge-1"
+        );
+        assert_eq!(
+            crate::peers::event_payload(r2, &b2)["removed"]["name"],
+            "edge-1"
+        );
     }
 }
