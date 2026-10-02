@@ -22,6 +22,20 @@ pub struct Network {
     /// the same `--ha-token` this node also checks on inbound calls
     /// (`crate::ha::routes`).
     pub ha_token: Option<std::sync::Arc<str>>,
+    /// One client for every peer, so its pool keeps each peer's connection
+    /// open between RPCs; a client per RPC would redo the TCP (and, for
+    /// `https://` peers, TLS) handshake on every 250 ms heartbeat.
+    client: reqwest::Client,
+}
+
+impl Network {
+    /// Build after `--ca-file` is loaded: the client captures the roots.
+    pub fn new(ha_token: Option<std::sync::Arc<str>>) -> Self {
+        Self {
+            ha_token,
+            client: gsp_http::client(),
+        }
+    }
 }
 
 impl Network {
@@ -43,8 +57,7 @@ impl Network {
         Resp: DeserializeOwned,
     {
         let url = super::peers::peer_url(&target_node.addr, path);
-        let client = gsp_http::client();
-        let mut builder = client.post(&url).json(&req);
+        let mut builder = self.client.post(&url).json(&req);
         if let Some(token) = &self.ha_token {
             builder = builder.bearer_auth(token);
         }

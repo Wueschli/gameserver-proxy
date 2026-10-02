@@ -260,9 +260,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?,
         );
 
-        let network = ha::network::Network {
-            ha_token: ha_token.clone(),
-        };
+        let network = ha::network::Network::new(ha_token.clone());
         // Relaxed from the library defaults (150/300/50ms) — this is a
         // control-plane group on plain HTTP over `reqwest`, not a
         // low-latency data-path link; a wider election window trades a

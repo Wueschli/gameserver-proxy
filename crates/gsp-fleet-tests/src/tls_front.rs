@@ -4,6 +4,7 @@
 //! upstream TCP address — the docs/12 "gsp-controller behind TLS" shape.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -27,6 +28,16 @@ const LEAF_KEY: &[u8] = include_bytes!("../../gsp-http/tests/fixtures/leaf.key")
 /// Listen on an ephemeral loopback port; returns it and the accept task
 /// (dropping the handle does not stop it; the test process exit does).
 pub async fn tls_front(upstream: SocketAddr) -> Result<(SocketAddr, JoinHandle<()>)> {
+    let (addr, task, _) = tls_front_counted(upstream).await?;
+    Ok((addr, task))
+}
+
+/// [`tls_front`], plus a count of TCP connections accepted so far — how a
+/// test tells a client that reuses its connections from one that dials anew
+/// for every request.
+pub async fn tls_front_counted(
+    upstream: SocketAddr,
+) -> Result<(SocketAddr, JoinHandle<()>, Arc<AtomicUsize>)> {
     let certs = CertificateDer::pem_slice_iter(LEAF)
         .collect::<Result<Vec<_>, _>>()
         .context("parsing the fixture certificate")?;
@@ -38,8 +49,11 @@ pub async fn tls_front(upstream: SocketAddr) -> Result<(SocketAddr, JoinHandle<(
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
     let task = tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::Relaxed);
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
@@ -52,5 +66,5 @@ pub async fn tls_front(upstream: SocketAddr) -> Result<(SocketAddr, JoinHandle<(
             });
         }
     });
-    Ok((addr, task))
+    Ok((addr, task, accepted))
 }
