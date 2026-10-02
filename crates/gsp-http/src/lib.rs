@@ -10,6 +10,8 @@
 //! [`builder`] / [`client`] still build a fresh client per call, so call sites
 //! keep their existing connection and timeout semantics.
 
+pub mod tls;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

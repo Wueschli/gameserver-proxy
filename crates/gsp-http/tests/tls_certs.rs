@@ -1,0 +1,156 @@
+//! Native TLS: loading the certificate/key pair and swapping it at runtime.
+
+use std::error::Error as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use gsp_http::tls::{load_certified_key, ReloadingCert, TlsError, TlsFiles};
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn files(cert: &str, key: &str) -> TlsFiles {
+    TlsFiles {
+        cert: fixture(cert),
+        key: fixture(key),
+    }
+}
+
+/// The source's text appears only via `source()`, never in the message.
+fn assert_cause_once(e: &TlsError) {
+    if let Some(src) = e.source() {
+        assert!(!e.to_string().contains(&src.to_string()), "{e}");
+    }
+}
+
+#[test]
+fn loads_the_fixture_pair() {
+    let key = load_certified_key(&files("leaf.pem", "leaf.key")).unwrap();
+    assert_eq!(key.cert.len(), 1);
+}
+
+#[test]
+fn loads_a_sec1_key() {
+    load_certified_key(&files("leaf.pem", "leaf.sec1.key")).unwrap();
+}
+
+#[test]
+fn startup_errors_name_the_file() {
+    let missing = load_certified_key(&TlsFiles {
+        cert: PathBuf::from("/nonexistent/cert.pem"),
+        key: fixture("leaf.key"),
+    })
+    .unwrap_err();
+    assert!(matches!(missing, TlsError::Read { .. }), "{missing:?}");
+    assert!(
+        missing
+            .to_string()
+            .starts_with("--tls-cert /nonexistent/cert.pem: "),
+        "{missing}"
+    );
+    assert_cause_once(&missing);
+
+    let no_cert = load_certified_key(&files("leaf.key", "leaf.key")).unwrap_err();
+    assert!(
+        matches!(no_cert, TlsError::NoCertificate { .. }),
+        "{no_cert:?}"
+    );
+    assert!(no_cert.to_string().starts_with("--tls-cert "), "{no_cert}");
+
+    let no_key = load_certified_key(&files("leaf.pem", "leaf.pem")).unwrap_err();
+    assert!(matches!(no_key, TlsError::NoKey { .. }), "{no_key:?}");
+    let want = format!("--tls-key {}: ", fixture("leaf.pem").display());
+    assert!(no_key.to_string().starts_with(&want), "{no_key}");
+
+    let mismatch = load_certified_key(&files("leaf.pem", "leaf2.key")).unwrap_err();
+    assert!(
+        matches!(mismatch, TlsError::KeyMismatch { .. }),
+        "{mismatch:?}"
+    );
+    assert_cause_once(&mismatch);
+}
+
+/// A temp dir holding `cert.pem`/`key.pem` copies, so tests can rewrite them.
+struct Live {
+    dir: tempfile::TempDir,
+}
+
+impl Live {
+    fn new(cert: &str, key: &str) -> Self {
+        let live = Self {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        live.write_cert(&std::fs::read(fixture(cert)).unwrap());
+        live.write_key(&std::fs::read(fixture(key)).unwrap());
+        live
+    }
+    fn files(&self) -> TlsFiles {
+        TlsFiles {
+            cert: self.dir.path().join("cert.pem"),
+            key: self.dir.path().join("key.pem"),
+        }
+    }
+    /// Writes, then waits until the mtime has visibly moved on.
+    fn write(&self, name: &str, bytes: &[u8]) {
+        let path = self.dir.path().join(name);
+        let before = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        loop {
+            std::fs::write(&path, bytes).unwrap();
+            let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+            if Some(after) != before {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn write_cert(&self, bytes: &[u8]) {
+        self.write("cert.pem", bytes);
+    }
+    fn write_key(&self, bytes: &[u8]) {
+        self.write("key.pem", bytes);
+    }
+}
+
+fn leaf_der(name: &str) -> Vec<u8> {
+    load_certified_key(&files(name, &name.replace(".pem", ".key")))
+        .unwrap()
+        .cert[0]
+        .to_vec()
+}
+
+#[test]
+fn rotation_swaps_the_served_cert() {
+    let live = Live::new("leaf.pem", "leaf.key");
+    let cert = ReloadingCert::new(live.files()).unwrap();
+    assert!(!cert.reload_if_changed().unwrap());
+    live.write_cert(&std::fs::read(fixture("leaf2.pem")).unwrap());
+    live.write_key(&std::fs::read(fixture("leaf2.key")).unwrap());
+    assert!(cert.reload_if_changed().unwrap());
+    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
+}
+
+#[test]
+fn half_rotated_pair_keeps_the_old_cert() {
+    let live = Live::new("leaf.pem", "leaf.key");
+    let cert = ReloadingCert::new(live.files()).unwrap();
+    live.write_cert(&std::fs::read(fixture("leaf2.pem")).unwrap());
+    let e = cert.reload_if_changed().unwrap_err();
+    assert!(matches!(e, TlsError::KeyMismatch { .. }), "{e:?}");
+    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf.pem"));
+    live.write_key(&std::fs::read(fixture("leaf2.key")).unwrap());
+    assert!(cert.reload_if_changed().unwrap());
+    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
+}
+
+#[test]
+fn garbage_on_reload_keeps_the_old_cert() {
+    let live = Live::new("leaf.pem", "leaf.key");
+    let cert = ReloadingCert::new(live.files()).unwrap();
+    live.write_cert(b"junk");
+    let e = cert.reload_if_changed().unwrap_err();
+    assert!(matches!(e, TlsError::NoCertificate { .. }), "{e:?}");
+    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf.pem"));
+}

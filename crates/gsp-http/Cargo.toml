@@ -6,13 +6,20 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The one place the fleet binaries build outbound HTTP clients (`--ca-file`).
+# The one place the fleet binaries build outbound HTTP clients (`--ca-file`) and,
+# for native TLS, the HTTPS listener (`tls`).
 # Deliberately reqwest-only: gsp-aggregator and gsp-ui depend on it and must
 # stay free of gsp-core / gsp-config.
 
 [dependencies]
 reqwest.workspace = true
 thiserror.workspace = true
+# Server side (`tls`): serving HTTPS for axum.
+axum.workspace = true
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+arc-swap.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
