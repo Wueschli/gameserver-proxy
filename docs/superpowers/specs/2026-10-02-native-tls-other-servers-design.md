@@ -64,8 +64,8 @@ settings:
 ```
 
 `tls` is all-or-nothing by type (both fields required). Like `listen`, it is read once at
-startup; a config reload that changes it is ignored with a warning (the admin listener is
-not rebound today either). The files themselves renew every 30 s as elsewhere.
+startup; a config reload that changes it is silently not applied, exactly as for `listen`
+(the admin listener is never rebound). The files themselves renew every 30 s as elsewhere.
 With TLS on, the admin URL `gsp` reports to the aggregator becomes `https://`, so the
 aggregator's fan-out (built on `gsp_http::client`, which honours `--ca-file`) reaches it.
 Validation (`gsp --check`) loads the pair, so a bad path fails the check, not the start.

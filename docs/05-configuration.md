@@ -216,6 +216,15 @@
 > boundary, which today means `gsp-aggregator`'s intent-verb fan-out
 > (`docs/10` "The aggregator"), given the same token to present.
 >
+> **Admin API TLS** (2026-10-02): `settings.admin.tls: { cert, key }` (PEM chain,
+> leaf first; PEM private key — both required) serves the admin API over HTTPS.
+> Startup-only like `listen`; the files are re-read every 30 s, so a renewed
+> certificate needs no restart. `gsp --check` loads the pair; errors name
+> `settings.admin.tls.cert`/`.key`. The admin URL reported to `--aggregator` becomes
+> `https://<listen>`, so the certificate must be valid for the `listen` address
+> (an IP SAN), and the aggregator needs `--ca-file` for a private CA. See docs/12
+> "TLS for the fleet services".
+>
 > The full schema below is the target.
 
 ```yaml

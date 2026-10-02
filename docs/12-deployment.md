@@ -158,8 +158,8 @@ deployment requirement.
 
 ## TLS for the fleet services
 
-Without the flags below, `gsp-controller`, `gsp-aggregator` and `gsp-ui` (and always
-`gsp`'s admin API) serve **plain HTTP**. Run as-is across a network, that exposes:
+Without the settings below, `gsp-controller`, `gsp-aggregator`, `gsp-ui` and `gsp`'s
+admin API serve **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
 - the full config text, on `GET /config` and the SSE `GET /config/subscribe`;
@@ -169,8 +169,7 @@ Without the flags below, `gsp-controller`, `gsp-aggregator` and `gsp-ui` (and al
 Two ways to encrypt it: **native TLS** (below), or a **reverse proxy
 you run that terminates TLS**, with the controller listening only on loopback or a
 private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
-aggregator and the UI serve native TLS the same way. `gsp`'s admin API has no native
-TLS yet, so for it the proxy is the only option.
+aggregator, the UI and `gsp`'s admin API serve native TLS the same way.
 
 ### Native TLS
 
@@ -201,12 +200,22 @@ gsp-controller --listen 0.0.0.0:8443 \
   a browser on h2 opens it as an extended `CONNECT`, which the UI accepts (and the
   session cookie counts in whichever `cookie` header h2 splits it into). Plain
   HTTP is not redirected; serve only HTTPS on the port browsers use.
+- **`gsp`'s admin API** is configured in the YAML, next to `listen`:
+  `settings.admin.tls: { cert: <chain.pem>, key: <key.pem> }` (both required;
+  startup-only like `listen`; the files renew like the flags above; `gsp --check`
+  loads them). The admin URL `gsp` reports to the aggregator then becomes
+  `https://<settings.admin.listen>`, so the certificate needs that address as a SAN
+  (an IP SAN for an IP `listen`), and the aggregator takes `--ca-file` for a private
+  CA. As before, the reported URL is the literal `listen` address — a wildcard bind
+  (`0.0.0.0`) is not reachable as an admin URL, TLS or not.
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
 TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `gsp` pushes to an
 `https://` aggregator, read back over HTTPS), `ui_native_tls.rs` (login over HTTPS
-sets a `Secure` cookie that unlocks `/ui/session`) and `ha_tls.rs`
+sets a `Secure` cookie that unlocks `/ui/session`), `admin_native_tls.rs` (an
+aggregator fans an intent verb out to an `https://` admin API; `gsp --check` names a
+bad `settings.admin.tls.cert`) and `ha_tls.rs`
 `three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
 listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
 
@@ -325,8 +334,6 @@ needs a membership change, which is not built yet.
 - **HA over TLS needs a fresh cluster** (native TLS on each replica, or a terminator
   per replica; see "HA replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
-- **`gsp`'s admin API is plain HTTP.** It has no native TLS yet; the reverse-proxy
-  pattern applies.
 - **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
   SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
   HSTS) at the proxy — or use the UI's native TLS, which sets `Secure` itself.

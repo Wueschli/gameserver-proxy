@@ -13,10 +13,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn files(cert: &str, key: &str) -> TlsFiles {
-    TlsFiles {
-        cert: fixture(cert),
-        key: fixture(key),
-    }
+    TlsFiles::new(fixture(cert), fixture(key))
 }
 
 /// The source's text appears only via `source()`, never in the message.
@@ -39,10 +36,10 @@ fn loads_a_sec1_key() {
 
 #[test]
 fn startup_errors_name_the_file() {
-    let missing = load_certified_key(&TlsFiles {
-        cert: PathBuf::from("/nonexistent/cert.pem"),
-        key: fixture("leaf.key"),
-    })
+    let missing = load_certified_key(&TlsFiles::new(
+        PathBuf::from("/nonexistent/cert.pem"),
+        fixture("leaf.key"),
+    ))
     .unwrap_err();
     assert!(matches!(missing, TlsError::Read { .. }), "{missing:?}");
     assert!(
@@ -88,10 +85,10 @@ impl Live {
         live
     }
     fn files(&self) -> TlsFiles {
-        TlsFiles {
-            cert: self.dir.path().join("cert.pem"),
-            key: self.dir.path().join("key.pem"),
-        }
+        TlsFiles::new(
+            self.dir.path().join("cert.pem"),
+            self.dir.path().join("key.pem"),
+        )
     }
     /// Writes, then waits until the mtime has visibly moved on.
     fn write(&self, name: &str, bytes: &[u8]) {
@@ -165,11 +162,7 @@ fn a_truncated_chain_is_rejected() {
     let ca = std::fs::read(fixture("ca.pem")).unwrap();
     pem.extend_from_slice(&ca[..ca.len() / 2]);
     std::fs::write(&cert, pem).unwrap();
-    let e = load_certified_key(&TlsFiles {
-        cert,
-        key: fixture("leaf.key"),
-    })
-    .unwrap_err();
+    let e = load_certified_key(&TlsFiles::new(cert, fixture("leaf.key"))).unwrap_err();
     assert!(matches!(e, TlsError::BadCertificate { .. }), "{e:?}");
     assert!(e.to_string().starts_with("--tls-cert "), "{e}");
     assert_cause_once(&e);
@@ -196,4 +189,36 @@ fn half_a_tls_args_pair_is_an_error() {
         tls_key: Some(fixture("leaf.key")),
     };
     assert!(both.load().unwrap().is_some());
+}
+
+/// A pair configured somewhere other than `--tls-cert`/`--tls-key` (e.g. `gsp`'s
+/// `settings.admin.tls`) names that setting in every error, not the flags.
+#[test]
+fn renamed_files_name_their_setting() {
+    let named = |cert: PathBuf, key: PathBuf| {
+        TlsFiles::new(cert, key).named("settings.admin.tls.cert", "settings.admin.tls.key")
+    };
+    let cases = [
+        named(PathBuf::from("/nonexistent/cert.pem"), fixture("leaf.key")),
+        named(fixture("leaf.pem"), PathBuf::from("/nonexistent/key.pem")),
+        named(fixture("leaf.key"), fixture("leaf.key")),
+        named(fixture("leaf.pem"), fixture("leaf.pem")),
+        named(fixture("leaf.pem"), fixture("leaf2.key")),
+    ];
+    for files in cases {
+        let text = load_certified_key(&files).unwrap_err().to_string();
+        assert!(text.contains("settings.admin.tls."), "{text}");
+        assert!(!text.contains("--tls"), "{text}");
+    }
+    // The default names stay the flags.
+    let text = load_certified_key(&TlsFiles::new(
+        PathBuf::from("/nonexistent/cert.pem"),
+        fixture("leaf.key"),
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        text.starts_with("--tls-cert /nonexistent/cert.pem"),
+        "{text}"
+    );
 }
