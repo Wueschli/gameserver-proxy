@@ -605,7 +605,8 @@ what order," which a stateless replica set cannot give.
   process-local variable. This is the one genuinely new piece of state HA
   introduces beyond "replicate what already exists."
 - **Cluster membership: static at bootstrap, dynamic membership deferred.**
-  `--ha-peers node1=http://host1:9901,node2=http://host2:9901,...` on every
+  `--ha-peers 1=host1:9901,2=host2:9901,...` (or `1=https://host1:8443,...`,
+  built 2026-10-02 — docs/12 "HA replicas over TLS") on every
   replica forms the initial voter set (`openraft`'s single-step static
   bootstrap, not the joint-consensus dynamic membership change API). Adding
   or removing a peer from a running group needs `openraft`'s membership-

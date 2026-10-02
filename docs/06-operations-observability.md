@@ -333,7 +333,8 @@ relays config — a `slave` controller now holds a full copy of both of its
 parent's logs while still never originating either one itself.
 
 **Intra-tier HA (phase 12 slice 6)**: `--ha-node-id <id>` + `--ha-peers
-id=host:port,...` (identical on every replica) turn a `standalone` tier into
+id=host:port,...` (identical on every replica; an entry may instead be
+`id=https://host[:port]`, see docs/12 "HA replicas over TLS") turn a `standalone` tier into
 an `N`-node Raft group (embedded `openraft`) replicating both the config and
 intent logs together. `POST /config` and `POST /intent` propose a Raft entry
 and only return once it's committed; a replica that isn't the current leader

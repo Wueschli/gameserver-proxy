@@ -218,9 +218,10 @@ In Kubernetes the equivalent is an Ingress (or Gateway) with TLS in front of the
 ### Pointing the clients at it
 
 Every HTTP client in the fleet uses `reqwest` with rustls and builds its requests from
-the base URL as given — no code forces a scheme — so these take an `https://` base URL
-: `gsp --controller`, `gsp --tunnel-controller-url`, `gsp-agent --controller-url`,
-`gsp-ui --controller-url` / `--aggregator-url`, and `gsp-controller --parent-url`.
+the base URL as given — no code forces a scheme — so these take an `https://` base URL:
+`gsp --controller`, `gsp --tunnel-controller-url`, `gsp-agent --controller-url`,
+`gsp-ui --controller-url` / `--aggregator-url`, `gsp-controller --parent-url`, and the
+`parent_url` in a `POST /admin/adopt` body.
 To check it works:
 
 ```sh
@@ -247,17 +248,44 @@ terminator whose certificate a private CA signed, failing without `--ca-file` an
 passing with it — is the `gsp-fleet-tests` test `ca_file.rs`, run by `make check`.
 The two proxy snippets above are still untested.
 
+A TLS or connection failure is logged with its cause (e.g. `invalid peer certificate:
+UnknownIssuer`), not just "error sending request" — that is usually the first sign a
+`--ca-file` is missing or wrong.
+
+### HA replicas over TLS
+
+Put a TLS terminator in front of **each** replica's listener and give `--ha-peers`
+base URLs instead of `host:port` (same list on every replica), plus `--ca-file` if the
+terminators' certificates come from a private CA:
+
+```sh
+gsp-controller --listen 127.0.0.1:9901 --ha-node-id 1 --ca-file /etc/gsp/ca.pem \
+  --ha-peers 1=https://ctl-1.internal:8443,2=https://ctl-2.internal:8443,3=https://ctl-3.internal:8443
+```
+
+Raft RPCs (`/raft/append`, `/raft/vote`, `/raft/snapshot`) and writes a follower
+forwards to the leader then go over HTTPS. `id=host:port` still means plain HTTP, and
+the two forms can be mixed. An entry that is not `http(s)://host[:port]` (another
+scheme, a path, a query, user info) stops the replica at startup naming the entry.
+Verified by `gsp-fleet-tests` `ha_tls.rs`: three replicas that reach each other only
+through private-CA terminators elect a leader, forward writes and all serve the last
+one with `--ca-file`, and never elect a leader without it.
+
+**Only at bootstrap.** `--ha-peers` is read when the cluster is first initialised;
+after that each member's address lives in the replicated Raft membership. Changing
+`--ha-peers` on an existing cluster does **not** change the addresses replicas use, so
+an existing plain-HTTP cluster cannot be moved to `https://` by editing the flag — that
+needs a membership change, which is not built yet.
+
 ### Limits (read these before relying on it)
 
 - **No system certificate store.** The clients trust the Mozilla root bundle compiled
   into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`) plus `--ca-file`, **not**
   the OS store or `SSL_CERT_FILE`. For a private or internal CA — or a self-signed
   certificate — pass it with `--ca-file`. No client certificates (mTLS).
-- **HA and adoption traffic stays plain HTTP.** Replica-to-replica calls
-  (`/raft/append`, `/raft/vote`, `/raft/snapshot`, forwarded writes) and
-  `/admin/adopt` build `http://host:port` URLs in code, so they cannot go through a
-  TLS proxy. Keep the replicas on a private network; what protects those routes is
-  `--ha-token`, which is a shared secret and not encryption.
+- **HA over TLS needs a terminator per replica and a fresh cluster** (see "HA
+  replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
+  the replicas on a private network — `--ha-token` is a shared secret, not encryption.
 - **The other services are plain HTTP too.** The aggregator, `gsp`'s admin API and
   the UI have the same exposure; the same reverse-proxy pattern applies. For the UI
   this matters most: it carries a password login, and its session cookie is
