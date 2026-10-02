@@ -23,6 +23,7 @@ spec:
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
             - name: AGGREGATOR_TOKEN
               valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+          # With settings.admin.tls set, add `scheme: HTTPS` to both probes.
           readinessProbe: { httpGet: { path: /healthz, port: 9900 } }
           livenessProbe: { httpGet: { path: /healthz, port: 9900 }, initialDelaySeconds: 10 }
           volumeMounts: [{ name: config, mountPath: /etc/gsp, readOnly: true }]
