@@ -105,8 +105,8 @@ pub async fn serve(
         sniffers,
     });
 
-    // HTTPS with `settings.admin.tls`, plain HTTP otherwise; a bind failure
-    // lands here too, as before.
+    // HTTPS with `settings.admin.tls`, plain HTTP otherwise. A bind failure
+    // lands here too and, as before, ends only this task (non-fatal).
     if let Err(e) = gsp_http::tls::serve(addr, app, tls, "admin API").await {
         tracing::error!(%addr, error = %e, "admin API server error");
     }
