@@ -63,7 +63,11 @@ async fn gsp_pushes_to_a_natively_tls_aggregator() -> Result<()> {
         || {
             let (client, url) = (client.clone(), format!("{agg_url}/fleet/pools"));
             async move {
-                let body: Value = client.get(url).send().await?.json().await?;
+                // A transient error is "not yet", like the healthz wait above.
+                let Ok(resp) = client.get(url).send().await else {
+                    return Ok(false);
+                };
+                let body: Value = resp.json().await.unwrap_or_default();
                 Ok(body
                     .as_array()
                     .is_some_and(|all| all.iter().any(|i| i["instance"] == "tls-instance")))

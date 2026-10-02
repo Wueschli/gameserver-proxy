@@ -17,7 +17,7 @@ dynamic library dependencies (glibc). It does not need a system CA bundle either
 HTTP clients (`--controller`, `--aggregator`, `--tunnel-controller-url`, the HTTP
 resolvers) verify against a root bundle compiled into the binary, plus whatever
 `--ca-file` adds — see
-[`gsp-controller` behind TLS](#gsp-controller-behind-tls) for what that implies. The builder and runtime base
+[TLS for the fleet services](#tls-for-the-fleet-services) for what that implies. The builder and runtime base
 must be on the same Debian release, or a binary can fail to start on an older glibc.
 
 `[profile.release]` sets `strip = true`, which trims roughly 15-20% off every binary.
@@ -156,7 +156,7 @@ The CI-runnable `make tunnel-e2e` (rootless network namespaces,
 capabilities — `NET_ADMIN` and `/dev/net/tun` as documented above stay the
 deployment requirement.
 
-## `gsp-controller` behind TLS
+## TLS for the fleet services
 
 Without the flags below, `gsp-controller` and `gsp-aggregator` (and always the UI and
 `gsp`'s admin API) serve **plain HTTP**. Run as-is across a network, that exposes:
@@ -193,8 +193,8 @@ gsp-controller --listen 0.0.0.0:8443 \
 - TLS handshakes run in their own tasks with a 10 s timeout, so a client that connects
   and stalls cannot hold up others. No client certificates (mTLS).
 - **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
-  push to `--aggregator https://…` (plus `--ca-file` for a private CA), and so does a
-  child tier's `--parent-url`.
+  push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
+  goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
