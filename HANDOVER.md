@@ -54,10 +54,11 @@ Never verified outside CI or the original dev sandbox:
 
 Watch-list:
 
-- **2026-10-19:** `ubuntu-latest` becomes Ubuntu 26. `build-release`, `plugins` and
-  `deploy` are pinned to `ubuntu-24.04`; `test`, `tunnel`, `fuzz`, `ui` and `changes` are
-  not. The `tunnel` job depends on the AppArmor userns sysctl and the `wireguard` module —
-  re-check it after the migration.
+- **Runner image:** every CI job is pinned to `ubuntu-24.04` (2026-10-02), so the
+  2026-10-19 `ubuntu-latest` → Ubuntu 26 switch changes nothing. Moving to 26 later is a
+  deliberate edit of all jobs together: re-check `tunnel` (AppArmor userns sysctl,
+  `wireguard` module) and the release jobs' glibc vs. the distroless runtime (2.41).
+  GitHub supports a runner image for a while after it stops being `latest`, not forever.
 - `actions/cache@v4` prints a Node 20 deprecation warning (it still works); bump when a
   Node 24 major exists.
 - A self-hosted-runner experiment on 2026-10-01 (reverted in `79d1bd7`) had a failing
@@ -560,7 +561,8 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   `BIN_SOURCE=prebuilt` (`deploy/Dockerfile`). Nightly `deploy` uses the self-contained
   in-Docker build instead, so that path can't rot. These three jobs are pinned to
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
-  built there might need a newer glibc than the distroless runtime's 2.41. `changes.sh`
+  built there might need a newer glibc than the distroless runtime's 2.41. (Since
+  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.sh`
   emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling

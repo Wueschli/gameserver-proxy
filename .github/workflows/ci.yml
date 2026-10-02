@@ -28,11 +28,16 @@ env:
   CARGO_INCREMENTAL: "0"   # incremental state just bloats the cache
   RUSTFLAGS: "-D warnings"
 
+# Every job is pinned to ubuntu-24.04 rather than ubuntu-latest (which becomes
+# Ubuntu 26 on 2026-10-19): the release-binary jobs for glibc (see build-release),
+# the rest so a runner-image migration is a deliberate edit, not a surprise red run
+# (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
+# caches stay on one image. Move them together when upgrading.
 jobs:
   # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
   # Schedule / manual runs, a workflow edit, or a failed diff run everything.
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     outputs:
       ui: ${{ steps.f.outputs.ui }}
       plugins: ${{ steps.f.outputs.plugins }}
@@ -71,7 +76,7 @@ jobs:
           printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
@@ -197,7 +202,7 @@ jobs:
     # gets its own job rather than riding on `make check`.
     needs: changes
     if: needs.changes.outputs.ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     defaults:
       run:
         working-directory: crates/gsp-ui/web
@@ -231,7 +236,7 @@ jobs:
     # until it has proven stable on GitHub runners.
     needs: changes
     if: needs.changes.outputs.tunnel == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -300,7 +305,7 @@ jobs:
   fuzz:
     needs: changes
     if: needs.changes.outputs.fuzz == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
