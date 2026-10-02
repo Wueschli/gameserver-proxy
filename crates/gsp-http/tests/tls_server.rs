@@ -90,30 +90,6 @@ async fn a_stalled_handshake_does_not_block_others() {
         .expect("a second client was blocked behind the stalled handshake");
 }
 
-/// Handshakes in flight are capped; a client stalled before its hello holds a
-/// slot until it goes away (or the handshake timeout ends it).
-#[tokio::test]
-async fn the_handshake_cap_holds_new_clients_until_a_slot_frees() {
-    let cert = ReloadingCert::new(fixture_files()).unwrap();
-    let listener = TlsListener::bind_with_handshake_limit("127.0.0.1:0".parse().unwrap(), cert, 1)
-        .await
-        .unwrap();
-    let addr = axum::serve::Listener::local_addr(&listener).unwrap();
-    let app = Router::new().route("/", get(|| async { "ok" }));
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-    let stalled = TcpStream::connect(addr).await.unwrap(); // takes the only slot
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let waiting = tokio::spawn(get_ok("ca.pem", addr));
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!waiting.is_finished(), "a handshake ran past the cap");
-    drop(stalled);
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .expect("the waiting client never got the freed slot")
-        .unwrap();
-}
-
 #[tokio::test]
 async fn plain_http_on_the_tls_port_does_not_break_the_server() {
     let (addr, _) = serve(fixture_files()).await;
@@ -139,7 +115,8 @@ async fn the_reloader_picks_up_new_files() {
     std::fs::copy(fixture("leaf.key"), &files.key).unwrap();
     let (addr, cert) = serve(files.clone()).await;
     let _reloader = spawn_reloader(cert, Duration::from_millis(100));
-    // No wait for the mtime to move on: a rewrite changes the ctime regardless.
+    // No wait for the mtime to move on: the stamp also compares size (leaf2.pem is
+    // longer than leaf.pem) and ctime.
     std::fs::copy(fixture("leaf2.pem"), &files.cert).unwrap();
     std::fs::copy(fixture("leaf2.key"), &files.key).unwrap();
 

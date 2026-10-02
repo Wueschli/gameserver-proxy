@@ -35,3 +35,12 @@ clap = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tempfile = { workspace = true }
+
+# The TLS tests need the (default) `server` feature; skip them without it.
+[[test]]
+name = "tls_certs"
+required-features = ["server"]
+
+[[test]]
+name = "tls_server"
+required-features = ["server"]

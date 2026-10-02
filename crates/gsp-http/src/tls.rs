@@ -144,7 +144,9 @@ pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
 
 /// What "this file changed" is judged by: mtime, size and — on Unix — inode and
 /// ctime. ctime cannot be set from user space, so a rewrite that restores the
-/// mtime (`cp -p`, `touch -r`) or lands within a coarse mtime tick still shows.
+/// mtime (`cp -p`, `touch -r`) still shows. On a coarse-timestamp filesystem
+/// ctime is as coarse as mtime; there a same-length, same-inode rewrite within
+/// one tick of the last load would be missed until the next change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
     mtime: Option<SystemTime>,
@@ -240,12 +242,6 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Finished handshakes waiting for `axum::serve` to pick them up.
 const READY_BACKLOG: usize = 64;
 
-/// TLS handshakes in flight at once. At the cap the accept loop stops taking
-/// connections (they wait in the kernel's listen backlog) until one finishes,
-/// fails or hits [`HANDSHAKE_TIMEOUT`] — so a flood of stalled clients costs a
-/// bounded number of tasks and file descriptors.
-pub const MAX_HANDSHAKES: usize = 1024;
-
 /// An `axum::serve::Listener` serving TLS with a [`ReloadingCert`]. A background
 /// task accepts TCP connections and runs each handshake in its own task, so a
 /// client that connects and stalls costs one task, never the accept loop.
@@ -264,16 +260,10 @@ impl Drop for AbortOnDrop {
 }
 
 impl TlsListener {
+    /// No cap on handshakes in flight, on purpose: a global cap lets ~cap idle
+    /// connects lock every client out. A stalled client costs one task and one
+    /// fd until [`HANDSHAKE_TIMEOUT`], the same bound as plain `axum::serve`.
     pub async fn bind(addr: SocketAddr, cert: Arc<ReloadingCert>) -> io::Result<Self> {
-        Self::bind_with_handshake_limit(addr, cert, MAX_HANDSHAKES).await
-    }
-
-    /// [`TlsListener::bind`] with a cap other than [`MAX_HANDSHAKES`].
-    pub async fn bind_with_handshake_limit(
-        addr: SocketAddr,
-        cert: Arc<ReloadingCert>,
-        max_handshakes: usize,
-    ) -> io::Result<Self> {
         let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -287,14 +277,8 @@ impl TlsListener {
         let tcp = TcpListener::bind(addr).await?;
         let local = tcp.local_addr()?;
         let (tx, ready) = mpsc::channel(READY_BACKLOG);
-        let slots = Arc::new(tokio::sync::Semaphore::new(max_handshakes));
         let accept = tokio::spawn(async move {
             loop {
-                let slot = slots
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("the handshake semaphore is never closed");
                 let (stream, peer) = match tcp.accept().await {
                     Ok(conn) => conn,
                     Err(e) => {
@@ -306,10 +290,7 @@ impl TlsListener {
                 };
                 let (acceptor, tx) = (acceptor.clone(), tx.clone());
                 tokio::spawn(async move {
-                    let handshake =
-                        tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
-                    drop(slot); // the handshake is over; queueing below doesn't hold a slot
-                    match handshake {
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                         Ok(Ok(tls)) => {
                             let _ = tx.send((tls, peer)).await;
                         }
