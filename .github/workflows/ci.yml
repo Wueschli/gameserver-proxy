@@ -54,6 +54,7 @@ jobs:
           sh .github/scripts/changes_test.sh
           python3 .github/scripts/test_summary_test.py
           python3 .github/scripts/trivy_summary_test.py
+          python3 .github/scripts/audit_summary_test.py
       - name: Detect changed areas
         id: f
         env:
@@ -312,6 +313,36 @@ jobs:
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
+
+  # RustSec advisories for every Cargo.lock in the repo (cargo audit): the check
+  # Trivy can't do for crates (it sees GHSA only). No build, just the lockfiles
+  # and the advisory DB, so it runs on every push / PR and nightly, path-scoped
+  # or not. Informational (owner's call): it never fails the run; findings show
+  # as a table on the run's summary page and as warning annotations, and the
+  # JSON is in the cargo-audit artifact. Accepted advisories:
+  # .cargo/audit.toml ([advisories] ignore = [...], each with a reason).
+  audit:
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-audit@0.22.2
+      - name: cargo audit (informational)
+        continue-on-error: true
+        run: sh .github/scripts/cargo_audit.sh target/cargo-audit
+      - name: cargo audit report
+        if: always()
+        run: |
+          python3 .github/scripts/audit_summary.py target/cargo-audit >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/audit_summary.py --annotations target/cargo-audit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cargo-audit
+          path: target/cargo-audit/
+          retention-days: 14
+          if-no-files-found: ignore
 
   # Trivy over the deploy job's images and the lockfiles they're built from.
   # Informational (owner's call): the job reports, it never fails — findings show
