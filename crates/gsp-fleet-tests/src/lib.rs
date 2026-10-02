@@ -72,7 +72,7 @@ pub fn build_fleet_bins() -> Result<()> {
     Ok(())
 }
 
-fn bin_path(name: &str) -> PathBuf {
+pub fn bin_path(name: &str) -> PathBuf {
     workspace_root().join("target/debug").join(name)
 }
 

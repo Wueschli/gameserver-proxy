@@ -5,6 +5,7 @@
 //! `api::router`.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,11 @@ struct Args {
     /// How often this tier pushes its merged view to `--parent-url`.
     #[arg(long, default_value_t = 10)]
     parent_push_interval_sec: u64,
+
+    /// PEM file of extra CA certificates to trust for outbound HTTPS, in
+    /// addition to the built-in Mozilla roots.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -75,6 +81,10 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &args.ca_file {
+        let certs = gsp_http::init_ca_file(path)?;
+        tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
+    }
 
     // No data-dir, no persistence — the store is deliberately in-memory
     // only (see the "stateless and ephemeral by design" note in lib.rs).

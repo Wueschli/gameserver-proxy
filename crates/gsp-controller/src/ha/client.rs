@@ -81,7 +81,7 @@ async fn forward_to_leader(
     actor: Option<&str>,
 ) -> Response {
     let url = format!("http://{leader_addr}{path}");
-    let mut req = reqwest::Client::new().post(&url).body(body);
+    let mut req = gsp_http::client().post(&url).body(body);
     if let Some(actor) = actor {
         req = req.header("X-Actor", actor);
     }

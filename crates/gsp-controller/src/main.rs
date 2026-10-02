@@ -95,6 +95,11 @@ struct Args {
     /// s, m, h, d. `0` disables it.
     #[arg(long, default_value = "14d")]
     tunnel_stale_after: String,
+
+    /// PEM file of extra CA certificates to trust for outbound HTTPS, in
+    /// addition to the built-in Mozilla roots.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
 }
 
 fn parse_ha_peers(raw: &[String]) -> anyhow::Result<BTreeMap<HaNodeId, openraft::BasicNode>> {
@@ -141,6 +146,10 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &args.ca_file {
+        let certs = gsp_http::init_ca_file(path)?;
+        tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
+    }
     if !args.ha_peers.is_empty() {
         // resolve_flags refuses --tunnel-network under HA, so this is pin-only mode.
         tracing::warn!(

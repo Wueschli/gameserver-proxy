@@ -238,7 +238,7 @@ async fn subscribe_once(
     last_applied: &mut HashMap<String, PeerRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/peers/subscribe");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = gsp_http::client().get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }

@@ -47,7 +47,7 @@ pub async fn run(cfg: PushConfig, store: Arc<IngestStore>) {
         interval,
         token,
     } = cfg;
-    let client = reqwest::Client::new();
+    let client = gsp_http::client();
     let url = format!("{base_url}/ingest");
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await; // fire on the first *real* interval, not immediately

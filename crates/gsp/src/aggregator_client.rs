@@ -89,7 +89,7 @@ pub async fn run(cfg: PushConfig, handle: RuntimeHandle) {
         interval,
         token,
     } = cfg;
-    let client = reqwest::Client::new();
+    let client = gsp_http::client();
     let url = format!("{base_url}/ingest");
     let mut ticker = tokio::time::interval(interval);
     // The first tick fires immediately; skip straight to a real interval so

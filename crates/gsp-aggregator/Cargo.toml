@@ -15,6 +15,7 @@ name = "gsp-aggregator"
 path = "src/main.rs"
 
 [dependencies]
+gsp-http.workspace = true
 tokio.workspace = true
 axum.workspace = true
 clap.workspace = true

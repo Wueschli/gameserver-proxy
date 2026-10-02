@@ -82,6 +82,11 @@ struct Args {
     /// crate does).
     #[arg(long, default_value = "crates/gsp-ui/web/dist")]
     static_dir: PathBuf,
+
+    /// PEM file of extra CA certificates to trust for outbound HTTPS, in
+    /// addition to the built-in Mozilla roots.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -105,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &args.ca_file {
+        let certs = gsp_http::init_ca_file(path)?;
+        tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
+    }
 
     let login_required = args.ui_password.is_some() || args.users_file.is_some();
     let mut state = AppState::new(args.ui_password);

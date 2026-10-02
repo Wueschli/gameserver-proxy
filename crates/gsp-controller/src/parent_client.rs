@@ -38,7 +38,7 @@ pub async fn fetch_initial(
     base_url: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Option<(u64, String)>> {
-    let mut req = reqwest::Client::new().get(format!("{base_url}/config"));
+    let mut req = gsp_http::client().get(format!("{base_url}/config"));
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -107,7 +107,7 @@ async fn subscribe_once(
 ) -> anyhow::Result<()> {
     let since = *cursor;
     let url = format!("{base_url}/config/subscribe?since={since}");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = gsp_http::client().get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }

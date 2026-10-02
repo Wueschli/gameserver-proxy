@@ -284,7 +284,7 @@ impl ConsulSource {
             base: base.trim_end_matches('/').to_string(),
             tag,
             interval,
-            client: reqwest::Client::builder()
+            client: gsp_http::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .context("build Consul HTTP client")?,
@@ -411,7 +411,7 @@ impl KubernetesSource {
         interval: Duration,
         auth: KubeAuth,
     ) -> anyhow::Result<Self> {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+        let mut builder = gsp_http::builder().timeout(Duration::from_secs(5));
         if let Some(ca) = &auth.ca_pem {
             let cert = reqwest::Certificate::from_pem(ca).context("parse Kubernetes CA cert")?;
             builder = builder.add_root_certificate(cert);
@@ -540,7 +540,7 @@ impl TunnelSource {
             controller_url,
             token,
             interval,
-            client: reqwest::Client::builder()
+            client: gsp_http::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .context("build tunnel backend-peers HTTP client")?,

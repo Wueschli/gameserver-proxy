@@ -119,6 +119,11 @@ struct Args {
     /// The pinned proxy's tunnel address (bare IPv4), routed as a `/32`.
     #[arg(long, requires = "peer_pubkey")]
     peer_address: Option<String>,
+
+    /// PEM file of extra CA certificates to trust for outbound HTTPS, in
+    /// addition to the built-in Mozilla roots.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -130,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &args.ca_file {
+        let certs = gsp_http::init_ca_file(path)?;
+        tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
+    }
 
     for b in &args.backends {
         let ok = match b.strip_prefix(':') {

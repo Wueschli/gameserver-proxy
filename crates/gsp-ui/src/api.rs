@@ -85,7 +85,7 @@ impl AppState {
             ui_password: ui_password.map(Arc::from),
             users: None,
             sessions: Arc::new(SessionStore::new()),
-            http: reqwest::Client::new(),
+            http: gsp_http::client(),
             aggregator: None,
             controller: None,
             fleet_feed: None,

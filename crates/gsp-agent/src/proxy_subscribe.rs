@@ -188,7 +188,7 @@ async fn subscribe_once(
     last_applied: &mut HashMap<String, ProxyRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/proxy-peers/subscribe");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = gsp_http::client().get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
