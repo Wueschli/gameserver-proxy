@@ -42,7 +42,7 @@ impl Network {
         Err: std::error::Error + DeserializeOwned,
         Resp: DeserializeOwned,
     {
-        let url = format!("http://{}{path}", target_node.addr);
+        let url = super::peers::peer_url(&target_node.addr, path);
         let client = gsp_http::client();
         let mut builder = client.post(&url).json(&req);
         if let Some(token) = &self.ha_token {

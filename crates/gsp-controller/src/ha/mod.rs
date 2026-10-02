@@ -43,6 +43,7 @@
 pub mod client;
 pub mod log_store;
 pub mod network;
+pub mod peers;
 pub mod routes;
 pub mod state_machine;
 
