@@ -67,7 +67,8 @@ pub struct PushConfig {
     pub instance: String,
     /// This instance's own admin API base URL, self-reported so the
     /// aggregator's slice-9 intent-verb fan-out has somewhere to send calls
-    /// for this instance. Always `http://{settings.admin.listen}` — a
+    /// for this instance. `http://{settings.admin.listen}`, or `https://` with
+    /// `settings.admin.tls` — a
     /// `0.0.0.0`/wildcard bind isn't reachable from the aggregator's side,
     /// same pre-existing caveat any admin-API client already has, not
     /// something this introduces.
