@@ -278,7 +278,7 @@ async fn proxy_raw(
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse {
-                error: format!("aggregator ({url}): {e}"),
+                error: format!("aggregator ({url}): {}", gsp_http::error_chain(&e)),
             }),
         )
             .into_response(),

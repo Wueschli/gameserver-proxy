@@ -88,3 +88,22 @@ pub fn client() -> Client {
         .build()
         .expect("the extra roots were validated by init_ca_file, so the client builds")
 }
+
+/// `e` followed by each of its `source()`s, joined with `": "`. A
+/// `reqwest::Error`'s own `Display` stops at "error sending request for url
+/// (…)", hiding the cause (a refused connection, an untrusted certificate);
+/// use this wherever an HTTP error becomes text. A source whose text the
+/// message already contains is skipped, since hyper/reqwest often repeat it.
+pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut next = e.source();
+    while let Some(src) = next {
+        let text = src.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        next = src.source();
+    }
+    out
+}
