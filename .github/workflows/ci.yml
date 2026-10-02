@@ -293,6 +293,26 @@ jobs:
         run: make deploy-lint
       - name: Build all five images and run --version on each
         run: make deploy-images
+      # Not aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
+      # force-pushed to a credential stealer, and a backdoored Trivy 0.69.4 was
+      # published. A fixed release checked against a hash pinned here can't be
+      # swapped underneath us; bump TRIVY_VERSION and TRIVY_SHA256 together
+      # (from the release's trivy_<v>_checksums.txt).
+      - name: Install Trivy (pinned release, checksum-verified)
+        env:
+          TRIVY_VERSION: "0.75.0"
+          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/trivy.tgz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/trivy.tgz" -C /usr/local/bin trivy
+          trivy --version
+      # Fails on a HIGH/CRITICAL vulnerability with a fix available, in an image's
+      # OS packages or secrets, in Cargo.lock (the binaries' crates) or in the UI's
+      # package-lock.json. The nightly run catches newly published CVEs.
+      - name: Trivy scan (images + the lockfiles they're built from)
+        run: make deploy-scan
       - name: Compose smoke test
         run: make deploy-smoke
       - name: Validate Kubernetes manifests (schema only)

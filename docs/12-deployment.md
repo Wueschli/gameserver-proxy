@@ -9,7 +9,8 @@ ports actually works once it's namespaced by a container runtime.
 The reference build is [`deploy/Dockerfile`](../deploy/Dockerfile): one file, a
 shared `rust:1-trixie` builder and five runtime targets on
 `gcr.io/distroless/cc-debian13:nonroot` (see [`deploy/README.md`](../deploy/README.md);
-`make deploy-images` builds all five). None of these five binaries shell out to an
+`make deploy-images` builds all five, `make deploy-scan` runs Trivy over them and the
+lockfiles they're built from — the `deploy` CI job does both, and nightly). None of these five binaries shell out to an
 external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its

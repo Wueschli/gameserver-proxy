@@ -20,6 +20,7 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 
 ```sh
 make deploy-images                      # all five, with a --version check each
+make deploy-scan                        # then Trivy over them (needs `trivy` on PATH)
 docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .   # one
 ```
 
@@ -84,6 +85,12 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
   overrides it. Fleet *reads* (pools, sessions) work.
+- `make deploy-scan` (also in the `deploy` CI job, and nightly) runs Trivy: it fails on a
+  HIGH/CRITICAL vulnerability with a fix available in an image's OS packages, a secret
+  in an image, or a vulnerable crate/npm package in `Cargo.lock` / the UI's
+  `package-lock.json`. The lockfiles are scanned because a plain release binary
+  carries no dependency list, so an image scan alone can't see the Rust crates in it.
+  Accepted findings go in `.trivyignore` (repo root), each with a reason.
 - `make deploy-lint` runs daemon-free static checks; `make deploy-smoke` uses its own
   compose project (`gsp-smoke`) so it never tears down a demo you started by hand.
 

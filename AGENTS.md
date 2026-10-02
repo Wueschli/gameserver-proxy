@@ -144,6 +144,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Test | `cargo test --all` |
 | Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Deploy images | `make deploy-images` (needs Docker; builds the five `deploy/Dockerfile` targets and runs `--version` on each; `BIN_SOURCE=prebuilt` uses binaries from `deploy/prebuilt/`) |
+| Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the five images (OS packages, secrets) and `Cargo.lock` / the UI's `package-lock.json`; fails on HIGH/CRITICAL with a fix. Accepted findings: `.trivyignore`. Also in the `deploy` CI job (Trivy pinned by version + SHA-256, not `trivy-action`) |
 | Deploy smoke | `make deploy-smoke` (needs Docker; compose demo + `deploy/smoke.sh`; also the `deploy` CI job) |
 | Tunnel e2e (nextest) | `make tunnel-e2e-ci` (needs `cargo install cargo-nextest --locked`; writes `target/nextest/ci/junit.xml`; what the CI `tunnel` job runs) |
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`) |
