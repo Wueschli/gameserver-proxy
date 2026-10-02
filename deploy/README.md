@@ -85,12 +85,15 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
   overrides it. Fleet *reads* (pools, sessions) work.
-- `make deploy-scan` (also in the `deploy` CI job, and nightly) runs Trivy: it fails on a
-  HIGH/CRITICAL vulnerability with a fix available in an image's OS packages, a secret
-  in an image, or a vulnerable crate/npm package in `Cargo.lock` / the UI's
-  `package-lock.json`. The lockfiles are scanned because a plain release binary
-  carries no dependency list, so an image scan alone can't see the Rust crates in it.
-  Accepted findings go in `.trivyignore` (repo root), each with a reason.
+- `make deploy-scan` runs Trivy over the five images (OS packages, secrets) and over
+  `Cargo.lock` and the UI's `package-lock.json` — a plain release binary carries no
+  dependency list, so an image scan alone can't see its Rust crates. It reports
+  HIGH/CRITICAL findings that have a fix available, writes JSON + SARIF to
+  `target/trivy/`, and exits 1 if it found anything. **Informational:** the `deploy` CI
+  job (and the nightly run) shows the results on the run's summary page and as
+  warnings, and never fails on them. For crates it sees GHSA advisories only —
+  RustSec-only ones need `make audit` (`cargo audit`). Accepted findings go in
+  `.trivyignore` (repo root), each with a reason.
 - `make deploy-lint` runs daemon-free static checks; `make deploy-smoke` uses its own
   compose project (`gsp-smoke`) so it never tears down a demo you started by hand.
 

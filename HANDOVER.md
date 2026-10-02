@@ -69,14 +69,18 @@ branch-protection required checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
-- Trivy image scanning (2026-10-02, owner's request): `make deploy-scan`
-  (`deploy/scan-images.sh`), run by the `deploy` CI job after `deploy-images` and
-  therefore nightly too. Fails on HIGH/CRITICAL with a fixed version: each image's OS
-  packages + secrets, plus `Cargo.lock` and `crates/gsp-ui/web/package-lock.json` (a
-  release binary has no embedded dependency list, so the image scan alone can't see
-  the crates). Trivy 0.75.0 from the release tarball, SHA-256 pinned in `ci.yml` — not
-  `trivy-action`/`setup-trivy`, whose tags were hijacked in March 2026. `.trivyignore`
-  holds accepted findings (empty). A UI lockfile change now also runs `deploy`.
+- Trivy image scanning (2026-10-02, owner's request; **informational** by the owner's
+  call): `make deploy-scan` (`deploy/scan-images.sh`) in the `deploy` CI job, last, as
+  `continue-on-error` steps — the job never fails on it. Results: a table on the run's
+  summary page (`.github/scripts/trivy_summary.py`, tested by `trivy_summary_test.py`
+  in the `changes` job), a warning annotation per affected or unscanned target, and
+  JSON + SARIF in the `trivy-reports` artifact. Scope: each image's OS packages +
+  secrets (`--image-src docker`: never a same-named registry image), plus `Cargo.lock`
+  and `crates/gsp-ui/web/package-lock.json` (a release binary has no embedded crate
+  list); HIGH/CRITICAL with a fix. Trivy 0.75.0 from the release tarball, SHA-256
+  pinned in `ci.yml` — not `trivy-action`/`setup-trivy`, whose tags were hijacked in
+  March 2026. `.trivyignore` holds accepted findings (empty). A UI lockfile or
+  `.trivyignore` change now also runs `deploy`.
 - Native TLS review minors (2026-10-02): `ReloadingCert` judges a change by mtime, size,
   inode and ctime (a `cp -p`/`touch -r` rewrite is caught); a dead accept task is
   logged; `gsp-http`'s `tls` is behind a default-on `server` feature that the workspace
@@ -353,7 +357,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
 | Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
 | Native TLS — handshake flood / coarse timestamps | No cap on in-flight TLS handshakes (a global cap was tried and dropped: it turns ~1024 idle connects into a lockout). Per-source limiting of pending handshakes, or a ClientHello timeout well under the 10 s `HANDSHAKE_TIMEOUT`, would bound a flood without that. `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. CI never builds `gsp-http` with `--no-default-features` (a `cargo check -p gsp-agent` step would). |
-| Trivy scan — follow-ups | The vulnerability DB (~120 MB from `mirror.gcr.io`) is downloaded on every `deploy` run; an `actions/cache` keyed by day would save it. Building with `cargo auditable` would embed each binary's crate list so the image scan sees the Rust crates itself (today `Cargo.lock` stands in for them). The DB has no cache fallback: a registry outage fails the job. |
+| Trivy scan — follow-ups | (1) GitHub's Security tab ("code scanning") would show the SARIF natively, but this repo is private, so uploads need GitHub Code Security (paid); with it, add `github/codeql-action/upload-sarif` (permission `security-events: write`) over `target/trivy/*.sarif`. (2) For Rust crates Trivy sees GHSA advisories only (RustSec-only ones such as the 2026-10-01 rustls/wasmtime fixes are missed, and many crate advisories are MEDIUM) — `cargo audit` in CI is the real check and still isn't wired up. (3) `cargo auditable` builds would let the image scan see the crates itself. (4) The vulnerability DB (~120 MB, `mirror.gcr.io` with a `ghcr.io` fallback) is fetched each run — cache it by day. (5) The pinned hash stops a later swap but can't prove 0.75.0 was clean when pinned; verifying the release's cosign/sigstore bundle would. (6) `package-lock.json` scanning includes build-only `dependencies` (tailwind, vite via `@tailwindcss/vite`), so a dev-server CVE there would be a false positive. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
@@ -555,7 +559,7 @@ time). Needs `protoc` on `PATH`. Not part of `make check`:
   needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` / `make deploy-scan` (need a
   Docker daemon; the scan also needs `trivy`);
 - the CI helper scripts: `sh .github/scripts/changes_test.sh` and
-  `python3 .github/scripts/test_summary_test.py` (CI runs both in the `changes` job).
+  `python3 .github/scripts/test_summary_test.py` and `python3 .github/scripts/trivy_summary_test.py` (CI runs all three in the `changes` job).
 
 CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 "Infra / environment".
