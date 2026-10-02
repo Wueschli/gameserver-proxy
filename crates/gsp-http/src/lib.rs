@@ -1,0 +1,90 @@
+//! The one place the fleet binaries build outbound HTTP clients.
+//!
+//! `reqwest`'s `rustls-tls` trusts only the Mozilla roots compiled into the
+//! binary. `--ca-file` adds an operator's own CAs (a private or internal CA, a
+//! self-signed controller) **on top of** those roots — never instead of them.
+//!
+//! Deliberate simplification: the extra roots are a process-global, set once
+//! from `main` via [`init_ca_file`] before any client is built, rather than
+//! threaded through every call site. Not set means exactly the old behaviour.
+//! [`builder`] / [`client`] still build a fresh client per call, so call sites
+//! keep their existing connection and timeout semantics.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use reqwest::{Certificate, Client, ClientBuilder};
+
+static EXTRA_ROOTS: OnceLock<Vec<Certificate>> = OnceLock::new();
+
+#[derive(Debug, thiserror::Error)]
+pub enum CaError {
+    #[error("--ca-file {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("--ca-file {}: invalid certificate: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: reqwest::Error,
+    },
+    #[error("--ca-file {}: no PEM certificates found", path.display())]
+    NoCertificates { path: PathBuf },
+    #[error("--ca-file was already loaded")]
+    AlreadyInitialised,
+}
+
+/// Read `path` as a PEM bundle. Non-certificate sections (e.g. a private key)
+/// are ignored; an empty result or a certificate rustls rejects is an error,
+/// so a bad file fails at startup rather than on the first request.
+pub fn load_ca_file(path: &Path) -> Result<Vec<Certificate>, CaError> {
+    let pem = std::fs::read(path).map_err(|source| CaError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let parse = |source| CaError::Parse {
+        path: path.to_owned(),
+        source,
+    };
+    let certs = Certificate::from_pem_bundle(&pem).map_err(parse)?;
+    if certs.is_empty() {
+        return Err(CaError::NoCertificates {
+            path: path.to_owned(),
+        });
+    }
+    // reqwest only adds roots to the rustls store at build time.
+    builder_with(&certs).build().map_err(parse)?;
+    Ok(certs)
+}
+
+/// A builder trusting the built-in roots plus `extra`.
+pub fn builder_with(extra: &[Certificate]) -> ClientBuilder {
+    extra
+        .iter()
+        .cloned()
+        .fold(Client::builder(), ClientBuilder::add_root_certificate)
+}
+
+/// Load `path` (see [`load_ca_file`]) and trust it in every client built
+/// through [`builder`] / [`client`] from now on. Returns the certificate count.
+pub fn init_ca_file(path: &Path) -> Result<usize, CaError> {
+    let certs = load_ca_file(path)?;
+    let n = certs.len();
+    EXTRA_ROOTS
+        .set(certs)
+        .map_err(|_| CaError::AlreadyInitialised)?;
+    Ok(n)
+}
+
+/// The drop-in for `reqwest::Client::builder()`.
+pub fn builder() -> ClientBuilder {
+    builder_with(EXTRA_ROOTS.get().map_or(&[], Vec::as_slice))
+}
+
+/// The drop-in for `reqwest::Client::new()`.
+pub fn client() -> Client {
+    builder()
+        .build()
+        .expect("the extra roots were validated by init_ca_file, so the client builds")
+}
