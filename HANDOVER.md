@@ -17,10 +17,11 @@ Remaining work: the "Known follow-ups" table below, and making the `tunnel` and
 
 ### Resume here (written for picking this up on another machine)
 
-State at 2026-10-02 (later): the `--ca-file` work is on branch
-`claude/dazzling-carson-j2yxj0` (PR to `main`). It changes `Cargo.lock` (new `gsp-http`
-crate), so its CI run starts cold again and does **not** confirm warm-cache timings — the
-first code push after it does. Earlier: CI run
+State at 2026-10-02 (latest): `--ca-file` (PR #1) is merged; TLS-capable HA peers +
+readable HTTP errors are on branch `claude/dazzling-carson-j2yxj0` (PR to `main`). That
+branch does not change `Cargo.lock`, so its CI run is the first one that can confirm the
+warm-cache timings below — compare it with PR #1's cold run 37003396498 (`test` 8m15,
+`build-release` 16.5 min, `tunnel` ~10 min). Earlier: CI run
 36989065039 was green on every job it ran. That run was **cold** (the lockfile changed,
 and the rolling cache starts cold on a lockfile bump by design): `build-release` took
 17 min and `test` 9m41. Expect a normal code push to be much faster (~4 min each, see
@@ -35,8 +36,8 @@ Open decisions for the owner:
    mode first ran (fixed). Cost to know first: each `tunnel` leg now takes ~9.5 min in CI,
    mostly the kernel edge-restart scenario (see the follow-up on that outage).
 2. **Native TLS for `gsp-controller` is wanted eventually** (owner, 2026-10-02). It bundles
-   serving TLS itself plus TLS for HA/adopt traffic (follow-up below); custom CA
-   support (`--ca-file`) landed 2026-10-02. Until then docs/12 "gsp-controller behind
+   serving TLS itself; custom CA support (`--ca-file`) and TLS-capable HA peers
+   (`--ha-peers id=https://…`) landed 2026-10-02. Until then docs/12 "gsp-controller behind
    TLS" is the supported pattern. New controller or client code must not hard-code
    `http://`, and must build HTTP clients via `gsp_http::{client, builder}` so
    `--ca-file` applies.
@@ -71,6 +72,15 @@ native TLS and the deferred pieces of the address authority.
 
 Most recent landings (newest first; full history in `git log`):
 
+- TLS-capable HA peers + readable HTTP errors (2026-10-02, spec
+  `docs/superpowers/specs/2026-10-02-ha-tls-peers-design.md`, docs/12 "HA replicas over
+  TLS"): `--ha-peers` entries may be `id=https://host[:port]`; `ha::peers::peer_url` builds
+  every Raft RPC and forwarded-write URL. New `gsp-fleet-tests` `ha_tls.rs` is the first
+  automated multi-replica HA test: three replicas reachable only through private-CA TLS
+  terminators elect, forward and replicate with `--ca-file`, never elect without it.
+  `gsp_http::error_chain` now renders every HTTP error with its cause (e.g.
+  `invalid peer certificate: UnknownIssuer`). `/admin/adopt` never hard-coded `http://`
+  (it takes a full `parent_url`) — the old follow-up row was wrong.
 - Custom CA support (2026-10-02, spec `docs/superpowers/specs/2026-10-02-custom-ca-design.md`,
   ADR 26, docs/12 "gsp-controller behind TLS"): every binary takes `--ca-file <PEM>`,
   additive to the built-in Mozilla roots; a bad file is a startup error. New crate
@@ -300,11 +310,10 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
 | Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
 | Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
-| Native TLS in `gsp-controller` (owner wants it eventually, 2026-10-02) | Umbrella: terminate TLS in the controller itself (not designed), plus the TLS-for-HA/adopt row below. Clients trusting a custom CA is done (`--ca-file`, 2026-10-02). Today's supported pattern is a reverse proxy (docs/12 "gsp-controller behind TLS"). Keep base URLs/schemes configurable in any new code so this stays small. |
+| Native TLS in `gsp-controller` (owner wants it eventually, 2026-10-02) | Umbrella: terminate TLS in the controller itself (not designed), the only piece left. Clients trusting a custom CA (`--ca-file`) and HA peers over a TLS terminator (`--ha-peers id=https://…`) are done (2026-10-02). Today's supported pattern is a reverse proxy (docs/12 "gsp-controller behind TLS"). Keep base URLs/schemes configurable in any new code so this stays small. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
-| TLS for HA / adopt traffic | `/raft/*`, forwarded writes and `/admin/adopt` hard-code `http://` (`ha/network.rs:45`, `ha/client.rs:83`, `adopt.rs:220`); today they must stay on a private network, protected only by `--ha-token` |
-| Terse reqwest errors in fleet clients | Most clients format `reqwest` errors with `{e}`, whose `Display` drops the cause chain, so a TLS/CA failure reads only "error sending request". Fixed for `gsp`'s `controller_client` (initial fetch + subscribe connect) with the `--ca-file` work; the rest (`intent_client`, `tunnel_client`, `aggregator_client`, `gsp-agent`, `gsp-controller` parent/relay, `gsp-ui` proxies) still do it — use `anyhow` context / `{e:#}` |
-| `--ca-file` — deferred review minors (2026-10-02) | docs/12 "Pointing the clients at it" has a line starting with `: ` after the re-wrap (renders as "base URL : …"); `CaError::{Read,Parse}` print `{source}` and also expose it as the source, so anyhow shows the cause twice and `Parse`'s top line ends in reqwest's bare "builder error"; `controller_client`'s reconnect warning records `error = format!(..)` (a quoted `String`) where `%format_args!(..)` matches the file's style; no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled |
+| Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
+| `--ca-file` — deferred review minors (2026-10-02) | `CaError::{Read,Parse}` print `{source}` and also expose it as the source, so anyhow shows the cause twice and `Parse`'s top line ends in reqwest's bare "builder error"; `controller_client`'s reconnect warning records `error = format!(..)` (a quoted `String`) where `%format_args!(..)` matches the file's style; no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (The docs/12 stray `: ` line was fixed with the HA-over-TLS work.) |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
