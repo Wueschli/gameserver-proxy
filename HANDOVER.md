@@ -6,23 +6,27 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-02 (`--ca-file`, HA-over-TLS, cleanup and native-TLS session; see "Resume here").
+Last updated: 2026-10-02 (`--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work: the "Known follow-ups" table below. Every CI job is blocking (2026-10-02).
+Remaining work: the "Known follow-ups" table below. Every CI job blocks except the two
+informational security scans, `trivy` and `audit` (2026-10-02, owner's call).
 
 ### Resume here (written for picking this up on another machine)
 
 State at 2026-10-02 (latest): `--ca-file` (PR #1), TLS-capable HA peers + readable HTTP
 errors (PR #2) and the cleanup PR (#3: one HTTP client for Raft RPCs, blocking
-`tunnel`/`deploy`) and native TLS for `gsp-controller` (#4) are merged. The owner asked
-for native TLS on the other servers, one PR each, merged on green CI: the aggregator
-(with the shared `gsp_http::tls::{TlsArgs, serve}`, #5) and the UI (#6) are merged; the
-admin API (`settings.admin.tls`) is on branch `claude/dazzling-carson-j2yxj0`. Every
-fleet HTTP server can then serve TLS itself.
+`tunnel`/`deploy`) and native TLS for `gsp-controller` (#4) are merged. Then, one PR each,
+merged on green CI: native TLS for the aggregator (#5, with the shared
+`gsp_http::tls::{TlsArgs, serve}`), the UI (#6) and `gsp`'s admin API (#7,
+`settings.admin.tls`) — every fleet HTTP server can serve TLS itself; the deferred TLS
+review minors plus two **informational** security-scan jobs, `trivy` and `audit` (#8);
+and HANDOVER's CI/image follow-ups (#9). Nothing is in flight. The first real scans
+(#8) were clean: no Trivy findings in the five images or the lockfiles, no `cargo audit`
+vulnerabilities (three unmaintained crates, see "Known flakes").
 
 **CI timings, measured.** Cold (lockfile changed; PR #1's run 37003396498): `test` 8m15,
 `build-release` 16.5 min, each `tunnel` leg ~10 min, ~22 min wall clock. Warm (PR #2's run
@@ -40,7 +44,21 @@ Open decisions for the owner:
 2. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
    Publishing (GHCR on release tags, multi-arch if arm64 is needed) is a small follow-up:
    `deploy/Dockerfile` already has the `BIN_SOURCE` switch; it needs a release workflow,
-   tags and a registry login.
+   tags and a registry login. The owner also wants images built "for both Docker and
+   Kubernetes" (2026-10-02) — the same OCI images already serve both, so this means
+   publishing, multi-arch or k8s packaging; which one is still to be clarified.
+3. **Self-hosted CI runner?** The owner has a spare VPS (6 cores, 12 GB RAM) and burned
+   ~1,100 Actions minutes on 2026-10-02 (a heavy day: five full-pipeline PRs, several
+   workflow edits that run every job, cold caches). Proposed (not done): a *hybrid* —
+   one runner instance on the VPS (12 GB fits one Rust release build at a time) for
+   `test`, `build-release`, `plugins`, with its persistent `target/` replacing the
+   Actions cache; `tunnel` stays GitHub-hosted (it reconfigures netns/WireGuard on the
+   host, and the 2026-10-01 self-hosted experiment below had a failing `tunnel` leg);
+   `deploy`/`trivy` only if the VPS gets Docker for the runner user. Requirements:
+   Ubuntu 24.04 / Debian 13 (glibc ≤ 2.41 for the release binaries), 60–80 GB free
+   disk, a KVM VM, its own unprivileged user. Pending the VPS facts (virtualisation,
+   OS, disk, what else runs on it). A self-hosted job just queues while the VPS is down
+   — there is no fallback to hosted runners.
 
 Never verified outside CI or the original dev sandbox:
 
@@ -60,23 +78,28 @@ Watch-list:
   Node 24 major exists.
 - A self-hosted-runner experiment on 2026-10-01 (reverted in `79d1bd7`) had a failing
   `tunnel (userspace)` job whose log nobody read — cause unknown (host limits? sudo/apt on
-  the VPS?). Only relevant if self-hosting is tried again.
+  the VPS?). Only relevant if self-hosting is tried again — see open decision 3.
+- **Merge queue** (owner asked about bors, 2026-10-02): PRs here land one at a time,
+  each re-run on the latest `main`, so `main` only gets tested combinations. Once several
+  PRs are in flight at once, GitHub's merge queue (needs an `on: merge_group` trigger;
+  check availability for a personal private repo) would keep `main` green.
 
-Suggested order: pick from "Known follow-ups" — the owner's stated interest is native TLS
-(controller-served, needs a design first) and the deferred pieces of the address
-authority. Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
-branch-protection required checks, a repo setting outside this tree.
+Suggested order: pick from "Known follow-ups" — candidates the owner raised: precise CI
+change detection, the self-hosted runner (open decision 3), publishing the images (open
+decision 2), and the deferred pieces of the address authority. Whether a red
+`tunnel`/`deploy` also *blocks merging* depends on GitHub branch-protection required
+checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
-- `cargo audit` in CI (2026-10-02, owner's request; informational): the `audit` job
+- `cargo audit` in CI (2026-10-02, owner's request, ADR 28; informational): the `audit` job
   runs on every push/PR and nightly — RustSec advisories for the root, plugins and fuzz
   `Cargo.lock`s, no build needed. `cargo-audit` 0.22.2 comes prebuilt via the pinned
   `taiki-e/install-action`. Results like Trivy's: run-summary table
   (`.github/scripts/audit_summary.py`, tested in the `changes` job), a warning per
   vulnerable or unaudited lockfile, JSON in the `cargo-audit` artifact. It covers the
   RustSec-only advisories Trivy misses. Accepted advisories: `.cargo/audit.toml`.
-- Trivy image scanning (2026-10-02, owner's request; **informational** by the owner's
+- Trivy image scanning (2026-10-02, owner's request, ADR 28; **informational** by the owner's
   call): `make deploy-scan` (`deploy/scan-images.sh`), and in CI its own `trivy` job
   after `deploy`, which hands over its five images as `docker save` tarballs (artifact
   `deploy-images`, 1 day). The job runs the official `aquasec/trivy:0.75.0` image
@@ -300,6 +323,13 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 ## Known flakes & environment gotchas
 
+- **Disk fills up in long sessions.** `target/debug` grew to ~30 GB over many test
+  builds on 2026-10-02 (the linker then fails with exit 1, not a clear "no space");
+  `target/debug/incremental` alone was 12 GB. `rm -rf target/debug/incremental` is the
+  cheap fix, `rm -rf target/debug` the full one (one cold rebuild).
+- **`make deploy-lint` and the locale.** Its ruby checks read the Dockerfile as
+  US-ASCII under a `C`/POSIX locale and fail with `invalid byte sequence`; run it with
+  `LANG=C.UTF-8 LC_ALL=C.UTF-8` (CI's runners are UTF-8 already).
 - **`make audit`** runs `cargo audit` over all three lockfiles (root, `crates/plugins`,
   the fuzz harness; `.github/scripts/cargo_audit.sh`, JSON in `target/cargo-audit/`;
   needs `cargo install cargo-audit --locked`). In CI since 2026-10-02 as the
@@ -309,8 +339,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   `rustls` (RUSTSEC-2026-0285) and two `wasmtime` fuel-accounting advisories
   (RUSTSEC-2026-0315/0316), fixed by lockfile-only patch bumps (`rustls` 0.23.45,
   `wasmtime` 48.0.3). Three "unmaintained crate" warnings (`atomic-polyfill`,
-  `fxhash`, `instant`) are informational and don't fail the target. Not in CI
-  yet — run it before a release.
+  `fxhash`, `instant`) are informational and don't fail the target; they show in
+  the `audit` job's summary (still present on 2026-10-02 — replacing them means moving off
+  the crates that pull them in).
 - **Fixed-sleep test flakes (fixed 2026-10-01)**: `resolver_target_gets_a_proxy_protocol_header`
   and `acl_deny_drops_the_connection_before_routing` slept 150 ms then `connect().unwrap()`,
   which loses to listener startup under parallel load; they now retry the connect
@@ -603,10 +634,16 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 - CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
   and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.sh`, tested by
   `changes_test.sh`, self-run in CI) decides which path-scoped jobs run: `ui`, `plugins`, `tunnel`,
-  `deploy`, `fuzz` (`test` always runs for non-docs pushes). A workflow edit, a failed diff, the
+  `deploy`, `fuzz`; `test` and `audit` always run for non-docs pushes, and `trivy` follows
+  `deploy` (it scans `deploy`'s images, handed over as the 1-day `deploy-images` artifact
+  of `docker save` tarballs). `trivy` and `audit` are informational: `continue-on-error`,
+  results on the run's summary page, as warning annotations and as artifacts
+  (`trivy-reports`, `cargo-audit`). A workflow edit, a failed diff, the
   **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
   also act as nightly canaries for code-driven breakage. Adding a job or moving files between
-  areas means updating `changes.sh` *and* its test. A full run is ~32 runner-minutes.
+  areas means updating `changes.sh` *and* its test. A full run bills roughly 60–80
+  runner-minutes (each job rounds up to the minute; cold caches cost more); the scan
+  jobs add under a minute each.
   Cargo caching is `.github/actions/cargo-cache` (rolling: a new snapshot per `main` push,
   restored by prefix `os-rustc-Cargo.lock`; PRs read it but don't write). It replaced
   `Swatinem/rust-cache`, which only saves on an exact-key miss — its key is the lockfile

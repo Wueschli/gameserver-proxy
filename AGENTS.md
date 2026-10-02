@@ -227,7 +227,7 @@ client from `crates/gsp/proto/resolver.proto`.
   task + spec/quality review + a final whole-branch review). Specs and plans are committed;
   `.superpowers/` is git-ignored scratch (ledgers, briefs, review packages). Reviewer
   findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
-- **CI costs money** (private repo; a full run is ~35 runner-minutes, a cold one more).
+- **CI costs money** (private repo; a full run bills roughly 60–80 runner-minutes, a cold one more).
   Batch pushes, remember that docs-only pushes skip CI (`paths-ignore`), put `[skip ci]` in
   the tip commit message when a code push needs no run, and check `changes.sh` before adding
   a job. Never push without being asked (rule 8).
