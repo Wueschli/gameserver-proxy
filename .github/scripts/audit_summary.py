@@ -23,10 +23,15 @@ def esc(text):
     return html.escape(str(text or ""), quote=False).replace("|", "\\|").replace("\n", " ")
 
 
+def lockfile(name):
+    """Report name (cargo_audit.sh: the path with / as _) -> the lockfile's path."""
+    return "Cargo.lock" if name == "root" else name.replace("_", "/") + "/Cargo.lock"
+
+
 def load(directory):
     reports, notes, missing = {}, [], []
     for path in sorted(glob.glob(os.path.join(directory, "*.json"))):
-        name = os.path.splitext(os.path.basename(path))[0]
+        name = lockfile(os.path.splitext(os.path.basename(path))[0])
         try:
             with open(path) as f:
                 reports[name] = json.load(f)
