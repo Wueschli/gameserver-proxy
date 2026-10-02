@@ -1,6 +1,7 @@
-//! Intra-tier HA with every replica reachable by its peers only through a
-//! TLS terminator signed by a private CA (`--ha-peers id=https://…` +
-//! `--ca-file`): Raft RPCs and write forwarding both cross TLS.
+//! Intra-tier HA over TLS with a private CA (`--ha-peers id=https://…` +
+//! `--ca-file`), with every replica reachable by its peers either only
+//! through a TLS terminator or through its own native TLS listener
+//! (`--tls-cert/--tls-key`): Raft RPCs and write forwarding both cross TLS.
 
 use std::time::Duration;
 
@@ -8,14 +9,16 @@ use anyhow::{ensure, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use gsp_fleet_tests::tls_front::{tls_front_counted, TEST_CA};
+use gsp_fleet_tests::tls_front::{tls_front_counted, TEST_CA, TEST_LEAF, TEST_LEAF_KEY};
 use gsp_fleet_tests::{
     build_fleet_bins, free_port, minimal_gsp_config, spawn_controller_with, wait_until, Proc,
 };
 use tokio::task::JoinHandle;
 
 struct Cluster {
-    plain: Vec<String>,
+    /// Each replica's base URL as a client reaches it (`client` below).
+    bases: Vec<String>,
+    client: reqwest::Client,
     /// TLS connections each replica's terminator has accepted so far.
     accepted: Vec<Arc<AtomicUsize>>,
     procs: Vec<Proc>,
@@ -66,10 +69,11 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
         dirs.push(dir);
     }
     Ok(Cluster {
-        plain: plain_ports
+        bases: plain_ports
             .iter()
             .map(|p| format!("http://127.0.0.1:{p}"))
             .collect(),
+        client: reqwest::Client::new(),
         accepted,
         procs,
         _fronts: fronts,
@@ -77,9 +81,60 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
     })
 }
 
+/// Three replicas serving native TLS with the test leaf; peers and the test
+/// client reach them by `https://localhost:<port>` and trust the test CA.
+async fn native_cluster() -> Result<Cluster> {
+    build_fleet_bins()?;
+    let ports = (0..3).map(|_| free_port()).collect::<Result<Vec<_>>>()?;
+    let peers = ports
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!("{}=https://localhost:{p}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut procs = Vec::new();
+    let mut dirs = Vec::new();
+    for (i, p) in ports.iter().enumerate() {
+        let dir = tempfile::tempdir()?;
+        let extra = [
+            "--ha-node-id",
+            &(i + 1).to_string(),
+            "--ha-peers",
+            &peers,
+            "--ca-file",
+            TEST_CA,
+            "--tls-cert",
+            TEST_LEAF,
+            "--tls-key",
+            TEST_LEAF_KEY,
+        ]
+        .map(String::from);
+        procs.push(spawn_controller_with(
+            dir.path(),
+            &format!("127.0.0.1:{p}"),
+            &extra,
+        )?);
+        dirs.push(dir);
+    }
+    let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
+    Ok(Cluster {
+        bases: ports
+            .iter()
+            .map(|p| format!("https://localhost:{p}"))
+            .collect(),
+        client: reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .build()?,
+        accepted: Vec::new(),
+        procs,
+        _fronts: Vec::new(),
+        _dirs: dirs,
+    })
+}
+
 /// `POST /config`; `Some(revision)` on 2xx.
-async fn submit(base: &str, body: String) -> Option<u64> {
-    let resp = reqwest::Client::new()
+async fn submit(client: &reqwest::Client, base: &str, body: String) -> Option<u64> {
+    let resp = client
         .post(format!("{base}/config"))
         .body(body)
         .send()
@@ -98,13 +153,22 @@ fn config() -> Result<String> {
 
 #[tokio::test]
 async fn three_replicas_replicate_through_tls_terminators() -> Result<()> {
-    let c = cluster(true).await?;
+    assert_replicates(&cluster(true).await?).await
+}
 
+#[tokio::test]
+async fn three_replicas_replicate_over_native_tls() -> Result<()> {
+    assert_replicates(&native_cluster().await?).await
+}
+
+/// A leader is elected, a write sent to each replica is accepted (at least two
+/// are followers, so forwarding is exercised), and every replica serves the last.
+async fn assert_replicates(c: &Cluster) -> Result<()> {
     let first = config()?;
     wait_until(
         || {
-            let (base, body) = (c.plain[0].clone(), first.clone());
-            async move { Ok(submit(&base, body).await.is_some()) }
+            let (client, base, body) = (c.client.clone(), c.bases[0].clone(), first.clone());
+            async move { Ok(submit(&client, &base, body).await.is_some()) }
         },
         Duration::from_secs(60),
         "a raft leader to accept a write",
@@ -114,16 +178,17 @@ async fn three_replicas_replicate_through_tls_terminators() -> Result<()> {
     // One write per replica: at least two land on followers and are
     // forwarded to the leader's https URL.
     let mut last = (0, String::new());
-    for base in &c.plain {
+    for base in &c.bases {
         let body = config()?;
         // A follower may not know the leader yet (openraft backs off a peer
         // after an Unreachable): retry briefly rather than assume it does.
         let rev = std::sync::Arc::new(std::sync::Mutex::new(None));
         wait_until(
             || {
-                let (base, body, rev) = (base.clone(), body.clone(), rev.clone());
+                let (client, base, body, rev) =
+                    (c.client.clone(), base.clone(), body.clone(), rev.clone());
                 async move {
-                    let got = submit(&base, body).await;
+                    let got = submit(&client, &base, body).await;
                     *rev.lock().unwrap() = got;
                     Ok(got.is_some())
                 }
@@ -139,10 +204,10 @@ async fn three_replicas_replicate_through_tls_terminators() -> Result<()> {
     let (want_rev, want_body) = last;
     wait_until(
         || {
-            let (plain, want_body) = (c.plain.clone(), want_body.clone());
+            let (client, bases, want_body) = (c.client.clone(), c.bases.clone(), want_body.clone());
             async move {
-                for base in &plain {
-                    let resp = reqwest::get(format!("{base}/config")).await?;
+                for base in &bases {
+                    let resp = client.get(format!("{base}/config")).send().await?;
                     let rev = resp
                         .headers()
                         .get("x-config-revision")
@@ -170,7 +235,7 @@ async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while tokio::time::Instant::now() < deadline {
         ensure!(
-            submit(&c.plain[0], config()?).await.is_none(),
+            submit(&c.client, &c.bases[0], config()?).await.is_none(),
             "a write was accepted although no replica trusts its peers' certificates"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -202,8 +267,8 @@ async fn raft_traffic_reuses_its_tls_connections() -> Result<()> {
     let first = config()?;
     wait_until(
         || {
-            let (base, body) = (c.plain[0].clone(), first.clone());
-            async move { Ok(submit(&base, body).await.is_some()) }
+            let (client, base, body) = (c.client.clone(), c.bases[0].clone(), first.clone());
+            async move { Ok(submit(&client, &base, body).await.is_some()) }
         },
         Duration::from_secs(60),
         "a raft leader to accept a write",
