@@ -1,5 +1,5 @@
 //! The one place the fleet binaries build outbound HTTP clients — and, with the
-//! `server` feature, serve HTTPS themselves ([`tls`], native TLS).
+//! `server` feature, serve HTTPS themselves (the `tls` module, native TLS).
 //!
 //! `reqwest`'s `rustls-tls` trusts only the Mozilla roots compiled into the
 //! binary. `--ca-file` adds an operator's own CAs (a private or internal CA, a

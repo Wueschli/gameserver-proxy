@@ -129,31 +129,40 @@ fn rotation_swaps_the_served_cert() {
     assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
 }
 
-/// `cp -p`, `touch -r` or a coarse-mtime filesystem can replace a file without
-/// moving its mtime; the change must still be picked up.
+/// `cp -p` or `touch -r` can replace a file without moving its mtime; the change
+/// must still be picked up. The rewrite keeps the length and the inode too, so
+/// only the ctime can tell (the .key fixtures are all 241 bytes).
 #[test]
 fn a_rewrite_that_keeps_the_mtime_is_picked_up() {
     let live = Live::new("leaf.pem", "leaf.key");
     let cert = ReloadingCert::new(live.files()).unwrap();
-    let files = live.files();
-    let mtime = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
-    let (cert_mtime, key_mtime) = (mtime(&files.cert), mtime(&files.key));
-    for (path, fixture_name, old) in [
-        (&files.cert, "leaf2.pem", cert_mtime),
-        (&files.key, "leaf2.key", key_mtime),
-    ] {
-        std::fs::write(path, std::fs::read(fixture(fixture_name)).unwrap()).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
-        assert_eq!(mtime(path), old);
-    }
-    assert!(cert.reload_if_changed().unwrap());
-    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
-    assert!(!cert.reload_if_changed().unwrap(), "reloaded twice");
+    let key = live.files().key;
+    let before = std::fs::metadata(&key).unwrap();
+    // Past one tick of even a coarse (jiffy) timestamp clock.
+    std::thread::sleep(Duration::from_millis(50));
+    let replacement = std::fs::read(fixture("leaf2.key")).unwrap();
+    assert_eq!(
+        replacement.len() as u64,
+        before.len(),
+        "fixtures changed size"
+    );
+    std::fs::write(&key, replacement).unwrap(); // in place: same inode
+    std::fs::File::options()
+        .write(true)
+        .open(&key)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    let after = std::fs::metadata(&key).unwrap();
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!(after.len(), before.len());
+    // The new key doesn't match the old certificate: noticing the change means
+    // trying the pair and refusing it; Ok(false) would mean it went unseen.
+    let seen = cert.reload_if_changed();
+    assert!(
+        matches!(seen, Err(TlsError::KeyMismatch { .. })),
+        "{seen:?}"
+    );
 }
 
 #[test]

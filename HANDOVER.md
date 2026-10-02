@@ -70,14 +70,18 @@ branch-protection required checks, a repo setting outside this tree.
 Most recent landings (newest first; full history in `git log`):
 
 - Native TLS review minors (2026-10-02): `ReloadingCert` judges a change by mtime, size,
-  inode and ctime (a `cp -p`/`touch -r` rewrite is caught); `TlsListener` caps
-  in-flight handshakes at `MAX_HANDSHAKES` (1024; the accept loop waits for a slot);
-  a dead accept task is logged; `gsp-http`'s `tls` is behind a default-on `server`
-  feature that the workspace dependency turns off, so `gsp-agent` no longer builds
-  axum/rustls-server; tests now prove the chain is sent (`ca3`/`inter`/`leaf3`
-  fixtures, with a leaf-only control), a PKCS#1 RSA key, and that plain HTTP on the
-  TLS port is closed. Also: the two `first_party_*` sniffer tests get the latency
-  bench's 10 s `call_timeout` — the 50 ms epoch tick failed them now and then on CI.
+  inode and ctime (a `cp -p`/`touch -r` rewrite is caught); a dead accept task is
+  logged; `gsp-http`'s `tls` is behind a default-on `server` feature that the workspace
+  dependency turns off (a standalone `cargo build -p gsp-agent` skips axum/rustls-server;
+  the usual one-invocation build of every binary still unifies it on); tests now prove
+  the chain is sent (`ca3`/`inter`/`leaf3` fixtures, with a leaf-only control), that
+  ctime alone catches a same-length rewrite, a PKCS#1 RSA key, and that plain HTTP on
+  the TLS port is closed. The two `first_party_*` sniffer tests get the latency bench's
+  10 s `call_timeout` — the 50 ms epoch tick failed them now and then on CI.
+  **Decided against** a cap on in-flight TLS handshakes: a global cap lets ~cap idle
+  connects lock every client out (topped up every 10 s), worse than today's bound (one
+  task + fd per stalled client until the 10 s timeout, as plain `axum::serve`). A real
+  fix is per-source limiting or a shorter ClientHello timeout — see the follow-up row.
 - Native TLS for `gsp`'s admin API (2026-10-02): `settings.admin.tls: { cert, key }`
   (startup-only like `listen`; files renew every 30 s; `gsp --check` loads them; errors
   name `settings.admin.tls.cert`/`.key` via `TlsFiles::named`). The reported admin URL
@@ -340,6 +344,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
 | Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
 | Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
+| Native TLS — handshake flood / coarse timestamps | No cap on in-flight TLS handshakes (a global cap was tried and dropped: it turns ~1024 idle connects into a lockout). Per-source limiting of pending handshakes, or a ClientHello timeout well under the 10 s `HANDSHAKE_TIMEOUT`, would bound a flood without that. `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. CI never builds `gsp-http` with `--no-default-features` (a `cargo check -p gsp-agent` step would). |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
