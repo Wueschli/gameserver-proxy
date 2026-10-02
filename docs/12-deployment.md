@@ -166,7 +166,7 @@ Without the flags below, `gsp-controller`, `gsp-aggregator` and `gsp-ui` (and al
 - every origin's registration (WireGuard public key, public endpoint, fronted
   backend addresses) on the `/peers*` and `/proxy-peers*` routes.
 
-Two ways to encrypt it: **native TLS** in the controller (below), or a **reverse proxy
+Two ways to encrypt it: **native TLS** (below), or a **reverse proxy
 you run that terminates TLS**, with the controller listening only on loopback or a
 private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
 aggregator and the UI serve native TLS the same way. `gsp`'s admin API has no native
@@ -198,7 +198,8 @@ gsp-controller --listen 0.0.0.0:8443 \
 - **`gsp-ui`** takes the same two flags. Serving HTTPS itself, it marks the session
   cookie `Secure` (without the flags it doesn't — a browser drops a `Secure` cookie on
   `http://` and login would loop). The live view's WebSocket works over HTTP/2 too:
-  a browser on h2 opens it as an extended `CONNECT`, which the UI accepts. Plain
+  a browser on h2 opens it as an extended `CONNECT`, which the UI accepts (and the
+  session cookie counts in whichever `cookie` header h2 splits it into). Plain
   HTTP is not redirected; serve only HTTPS on the port browsers use.
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
