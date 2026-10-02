@@ -575,7 +575,7 @@ what order," which a stateless replica set cannot give.
   view is always a strict prefix of the leader's, never a divergent one.
 - **Non-leader write handling: transparent HTTP forward, not a redirect.** A
   replica that receives a write it isn't the leader for forwards the request
-  to the current leader over plain HTTP (`openraft` tracks the current
+  to the current leader over HTTP, or HTTPS for `https://` peers (`openraft` tracks the current
   leader; the follower proxies the request body byte-for-byte, same
   `forwardable_headers` pattern `gsp-ui`'s proxies already use) and relays
   the leader's response back verbatim. **Rejected**: an HTTP redirect

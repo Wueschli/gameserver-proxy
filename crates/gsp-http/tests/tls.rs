@@ -206,3 +206,17 @@ fn error_chain_skips_repeated_sources() {
     let distinct = Layer("a", Some(Box::new(Layer("b", None))));
     assert_eq!(error_chain(&distinct), "a: b");
 }
+
+/// The cause comes via `source()` only, so `main`'s `Error: … Caused by:`
+/// output (and `error_chain`) shows it once, not twice.
+#[test]
+fn ca_errors_name_their_cause_once() {
+    let missing = load_ca_file(Path::new("/nonexistent/gsp-ca.pem")).unwrap_err();
+    let malformed = bundle(&[b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"]);
+    let malformed = load_ca_file(malformed.path()).unwrap_err();
+    for e in [missing, malformed] {
+        let source = std::error::Error::source(&e).expect("a cause").to_string();
+        assert!(!e.to_string().contains(&source), "{e}");
+        assert_eq!(error_chain(&e).matches(&source).count(), 1, "{e:?}");
+    }
+}
