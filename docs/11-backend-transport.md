@@ -184,6 +184,35 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   "discovered set, not a static file list" property every other dynamic
   source already has.
 
+## Address authority (built 2026-10-02)
+
+`gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
+mis-chooses) one. Design and decisions:
+[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
+
+- **Allocation.** Start the controller with `--tunnel-network 10.60.0.0/16` (IPv4,
+  `/30` or shorter). A registration that omits its address is allocated the lowest
+  free host address; the allocation is sticky per `(role, name)`. A registration may
+  instead **pin** an address, which is granted only if free (`409` otherwise). One
+  global address space is shared by origins and proxies. Without `--tunnel-network`
+  the controller is pin-only: it enforces uniqueness but allocates nothing.
+- **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
+  interface up (the answer is its address), persist the answer next to their key, and
+  can start from it while the controller is down. For `gsp --tunnel-*` that fallback
+  is not instant: with the controller down it first spends its ~30 s registration
+  budget, then falls back to the saved address (`<tunnel-key-file>.address`). A later,
+  different answer is logged as an error and not applied until a restart.
+- **Routing.** Every peer is a `/32`: origins route each proxy's tunnel address
+  (this fixed the earlier `AllowedIPs 0.0.0.0/0` bug where a second proxy stole the
+  first one's route), proxies route each origin's. Backends must be on the
+  registrant's own address; `--backends :25565` means "my address, port 25565".
+- **Release.** `DELETE /peers/{name}` / `DELETE /proxy-peers/{name}` free the address
+  and emit a tombstone that subscribers turn into a WireGuard peer removal.
+  `GET /tunnel/addresses` lists the table with a `stale` flag
+  (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
+- **Limits.** Not combinable with `--ha-peers`; IPv6, lease expiry, a UI view and
+  live address changes are future work (HANDOVER "Known follow-ups").
+
 ## Open questions
 
 - **What happens when hole-punching genuinely fails** (both the origin's
@@ -192,20 +221,7 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   some consumer ISPs/CGNAT)? Out of scope for v1; the honest fallback is a
   documented limitation, with a relay-of-last-resort (closer to Steam
   Datagram Relay's actual shape) as a possible v2, not designed now.
-- **Tunnel-internal address collision/exhaustion at fleet scale** (raised
-  2026-09-06, not designed): every origin's `--address`/`--backends` and
-  every proxy's `--tunnel-address` are self-reported and operator-chosen —
-  nothing allocates or checks uniqueness fleet-wide. Two origins picking
-  overlapping addresses (easy to do by both starting from the same example
-  config) means a proxy's WireGuard interface gets asked to route the same
-  `/32` to two different peers, which is undefined/last-write-wins, not a
-  clean error. A large enough fleet can also just run out of addresses in
-  whatever private range was chosen. A real fix would make
-  `gsp-controller` the address authority — hand out a unique address per
-  origin at registration time instead of trusting a self-reported one — but
-  that's a registration protocol change (request an address, don't just
-  state one), not a small patch. Out of scope for now; noted so it isn't
-  lost, not because it's expected to bite soon.
+- **Tunnel-internal address collision/exhaustion** — resolved 2026-10-02: see "Address authority" below.
 - **Does this replace or sit alongside the existing "trusted internal
   network" assumption?** Alongside — a same-network deployment still needs
   none of this and keeps working exactly as today; backend transport is

@@ -60,5 +60,14 @@ errs << "a runtime stage still copies from builder directly" if df.split("# --- 
 errs << "compose build must pass BIN_SOURCE" unless base["gsp"]["build"]["args"].is_a?(Hash) && base["gsp"]["build"]["args"]["BIN_SOURCE"] == "builder"
 errs << "build-images.sh must pass --build-arg BIN_SOURCE" unless File.read("deploy/build-images.sh").include?("--build-arg BIN_SOURCE=")
 
+# The tunnel override must use the address authority, not hand-picked addresses.
+ctl_cmd = tunnel["controller"]["command"]
+errs << "tunnel override: controller needs --tunnel-network=10.60.0.0/16" unless ctl_cmd.include?("--tunnel-network=10.60.0.0/16")
+errs << "tunnel override: controller lost the base flags" unless %w[--listen=0.0.0.0:9901 --data-dir=/data].all? { |f| ctl_cmd.include?(f) } && ctl_cmd.any? { |a| a.start_with?("--auth-token=") }
+errs << "tunnel override: gsp must not hand-pick --tunnel-address" if tunnel["gsp"]["command"].any? { |a| a.start_with?("--tunnel-address") }
+agent_cmd = tunnel["agent"]["command"]
+errs << "tunnel override: agent must not hand-pick --address" if agent_cmd.any? { |a| a.start_with?("--address") }
+errs << "tunnel override: agent backends should use the :port shorthand" unless agent_cmd.include?("--backends=:25565")
+
 if errs.empty? then puts "deploy lint: ok" else warn errs.map { |e| "LINT FAIL: #{e}" }; exit 1 end
 '

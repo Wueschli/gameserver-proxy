@@ -138,7 +138,8 @@ what's left.
 servers that are *not* on a shared trusted network. An origin-side
 `gsp-agent` brings up a local WireGuard interface (kernel module, `boringtun`
 userspace fallback) and registers its public key and fronted backend
-addresses with `gsp-controller`'s backend-peers registry; `gsp --tunnel-*`
+addresses with `gsp-controller`'s backend-peers registry (tunnel addresses are
+allocated by the controller, `--tunnel-network`); `gsp --tunnel-*`
 subscribes to that registry and peers every origin onto its own interface,
 and a mirror proxy-peers registry lets agents learn every proxy without a
 restart. A `backend_sources[].type: tunnel` source turns a registered origin

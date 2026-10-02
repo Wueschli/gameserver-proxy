@@ -79,12 +79,15 @@ crates/
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
     controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
     tunnel_client.rs        `--tunnel-*` (phase 14 slice 4, `docs/11`): brings up this proxy's shared WireGuard interface and subscribes to `gsp-controller`'s backend-peers registry, reconciling every registered origin onto the interface's peer list
+    tunnel_address.rs       `--tunnel-*` address resolution: registers for an address before the interface comes up, falls back to the saved `<key-file>.address`
     proxy_register.rs       `--tunnel-*` (phase 14 slice 7, `docs/11`): registers this proxy's own pubkey + public endpoint with `gsp-controller`'s proxy-peers registry, so every origin's `gsp-agent` can peer with it without origin-side reconfiguration
   gsp-controller/            binary — Tier-1 config distribution (phases 10–14, docs/10 "The controller" + docs/11: `standalone`/`slave` roles, Raft HA, canary rollout, backend/proxy-peers registries)
     store.rs                `Store` — embedded sled KV (ADR 20): revisions + current-pointer trees, catch-up range scan
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
     auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
     peers.rs                 backend-peers registry (phase 14 slice 2, `docs/11`): POST/GET /peers(+/{name}), GET /peers/subscribe (SSE) — origins register here, proxies subscribe
+    addresses.rs            tunnel address book: allocation, pinning, release; shared by both peer registries
+    addresses/api.rs        `GET /tunnel/addresses` and the release plumbing over the address book
     proxy_peers.rs           proxy-peers registry (phase 14 slice 7, `docs/11`) — the mirror image of `peers.rs`: proxies register here, origins' `gsp-agent`s subscribe
   gsp-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no gsp-core/gsp-config dependency, stays decoupled from the data-plane crates
     ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts, self-reported `admin_url`)
@@ -104,6 +107,7 @@ crates/
   gsp-agent/                 binary — phase 14 (backend transport, `docs/11`) origin-side agent; brings up a local WireGuard interface (`defguard/wireguard-rs`: kernel primary, `boringtun` userspace fallback) and registers its pubkey + fronted backend addresses with `gsp-controller`'s backend-peers registry
     keypair.rs              persists this origin's WireGuard private key across restarts — a stable identity, never regenerated
     interface.rs            `bring_up_with` — creates/configures the interface, kernel backend first unless `--userspace` forces boringtun
+    address_store.rs        persists the controller-assigned tunnel address next to the key (start-from-saved while the controller is down)
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)

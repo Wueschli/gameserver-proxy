@@ -1074,11 +1074,10 @@ next needed it; all now built):
    conflict. Live-verified (2026-10-01) by `make tunnel-e2e` scenario 3: a
    proxy started after the origin is learned by the already-running agent
    with no restart, and carries traffic. **That run also found a real bug**:
-   every proxy peer gets `AllowedIPs 0.0.0.0/0`, so a *second* proxy steals the
-   first one's route — see HANDOVER.md "KNOWN BUG" (reproducer
-   `known_bug_two_proxies_cannot_share_one_origin`). "Scales to N proxies" holds
-   for one active proxy per origin until proxy registrations carry a tunnel
-   address.
+   every proxy peer got `AllowedIPs 0.0.0.0/0`, so a *second* proxy stole the
+   first one's route. Fixed 2026-10-02 with the tunnel address authority
+   (`docs/11` "Address authority"): peers are `/32`s, and
+   `two_proxies_share_one_origin` now passes in the lab.
 
 Still open (see docs/11 "Open questions"): the CGNAT/both-sides-restrictive-
 NAT fallback (documented v1 limitation, no code) — does not block starting
@@ -1099,10 +1098,10 @@ slice 1.
 - **`deploy/`** — reference Dockerfile (five targets on distroless), compose
   control-plane demo and plain k8s manifests, smoke-tested by the CI `deploy` job
   (`docs/12`; non-blocking until proven stable).
-- **Phase 14 follow-ups** — fix the multi-proxy `AllowedIPs` conflict (above), which
-  needs proxy registrations to carry a tunnel address and so belongs with a
-  controller-allocated tunnel address scheme (`docs/11` "Open questions"); the
-  CI-friendly tunnel e2e now exists (`make tunnel-e2e`, CI job `tunnel`).
+- **Phase 14 follow-ups** — the multi-proxy `AllowedIPs` fix and the controller-allocated
+  tunnel address authority landed 2026-10-02 (`docs/11` "Address authority"); the
+  CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Remaining pieces
+  (IPv6, lease expiry, HA-replicated allocation, a UI view) are in HANDOVER "Known follow-ups".
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).

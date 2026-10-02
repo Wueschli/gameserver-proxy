@@ -6,17 +6,27 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-01.
+Last updated: 2026-10-02.
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work: tunnel address authority (+ the multi-proxy
-AllowedIPs fix), the "Known follow-ups" table below, and making the `tunnel` and
+Remaining work: the "Known follow-ups" table below, and making the `tunnel` and
 `deploy` CI jobs blocking once stable.
 
 Most recent landings (newest first; full history in `git log`):
+
+- Tunnel address authority (2026-10-02, spec
+  `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`, `docs/11`
+  "Address authority"): `gsp-controller --tunnel-network` allocates/pins/releases
+  tunnel addresses for origins and proxies; `gsp-agent` and `gsp --tunnel-*` register
+  for an address before bringing the interface up (`--address` / `--tunnel-address`
+  now optional), peers are `/32`s. This fixed the old "second proxy steals the first
+  one's route" bug (`two_proxies_share_one_origin` passes in the lab). The tunnel e2e
+  lab has 12 scenarios, green on both backends. With the controller down,
+  `gsp --tunnel-*` spends its ~30 s registration budget before falling back to the
+  saved address.
 
 - `deploy/` — reference `Dockerfile` (five distroless targets), compose
   control-plane demo + tunnel override, plain k8s manifests, `deploy/smoke.sh`, CI job
@@ -136,10 +146,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **`gsp-ui` leftovers** — config *submit* (Settings page) still applies without a
   confirmation step, and there is no end-to-end browser test (Playwright) — only
   component tests against a mocked `api.ts`.
-- **Tunnel address authority** (phase 14, `docs/11` "Open questions") — origin
-  and proxy tunnel addresses are self-reported; nothing guarantees fleet-wide
-  uniqueness. Making `gsp-controller` allocate them is a registration-protocol
-  change, not designed.
 - **Tunnel e2e leftovers** (deferred minors from the 2026-10-01 branch review; none
   affect correctness of what is asserted today):
   - the 1200-byte UDP check in scenario 1 is one datagram with no retry — a single
@@ -216,24 +222,13 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified for *one
   proxy added after the origin*.
-- **KNOWN BUG — a second proxy steals the first one's route** (found by the tunnel
-  e2e, 2026-10-01): `gsp-agent/src/proxy_subscribe.rs` gives every proxy peer
-  `AllowedIPs = 0.0.0.0/0` and `ProxyRegistration` has no tunnel address to narrow
-  it to, so with 2+ proxies on one origin only the last-registered works (the earlier
-  one's backend connects time out). Reproducer:
-  `known_bug_two_proxies_cannot_share_one_origin` (skipped by `make tunnel-e2e`; run
-  it with `--ignored known_bug`). Fix = proxy registrations carry/receive a tunnel
-  address and the agent uses `/32`s — a protocol change that belongs with the tunnel
-  address authority work (`docs/11` "Open questions"). Until then a single origin
-  supports one active edge proxy. **When you fix it, un-ignore that test and drop
-  `--skip known_bug_` from the `tunnel-e2e` target** — nothing in the gating run
-  asserts that the first proxy keeps working until you do.
 
 ## Known follow-ups (none blocking)
 
 | Item | Notes |
 |------|-------|
-| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Designed alongside item 3 (`docs/superpowers/specs/…-tunnel-address-authority-design.md`, once written): **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
+| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
+| Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
 | Custom CA support for the HTTP clients | `reqwest` uses `rustls-tls` (bundled `webpki-roots`, not the system store) and no flag adds a CA, so only publicly trusted certs verify behind a TLS proxy (docs/12 "gsp-controller behind TLS"). Small fix: switch to `rustls-tls-native-roots` or add a `--ca-file` |
 | TLS for HA / adopt traffic | `/raft/*`, forwarded writes and `/admin/adopt` hard-code `http://` (`ha/network.rs:45`, `ha/client.rs:83`, `adopt.rs:220`); today they must stay on a private network, protected only by `--ha-token` |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |

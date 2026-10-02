@@ -1,6 +1,6 @@
 # Tunnel address authority — `gsp-controller` allocates tunnel addresses
 
-Date: 2026-10-02 · Status: draft for review · Roadmap item 3 of 3 (after `deploy/`
+Date: 2026-10-02 · Status: implemented (slices 1–6, 2026-10-02) · Roadmap item 3 of 3 (after `deploy/`
 and the docs/12 TLS section). Resolves the "Tunnel-internal address collision/exhaustion"
 open question in [`docs/11`](../../11-backend-transport.md) and the
 `known_bug_two_proxies_cannot_share_one_origin` defect.

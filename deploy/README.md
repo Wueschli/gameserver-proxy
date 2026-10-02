@@ -55,7 +55,7 @@ WireGuard transport. It needs `NET_ADMIN`, `/dev/net/tun`, **root in the contain
 (the override sets `user: "0"` — a capability is useless to uid 65532) and a
 `GSP_TUNNEL_ENDPOINT` (the public `ip:port` origins dial). The demo `agent` is opt-in
 (`--profile origin-demo`; it listens on 51821 so it does not clash with `gsp`'s 51820). Not smoke-tested
-in CI; `make tunnel-e2e` covers the logic. See docs/12.
+in CI; `make tunnel-e2e` covers the logic. The controller allocates tunnel addresses from `--tunnel-network` (`10.60.0.0/16` here), so no `--address` / `--tunnel-address` is given; pin one only to keep a specific address (see docs/11 "Address authority"). See docs/12.
 
 ## Kubernetes
 

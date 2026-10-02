@@ -1,8 +1,16 @@
 # Adds the phase-14 WireGuard transport (docs/11, docs/12). Needs NET_ADMIN and
-# /dev/net/tun. Usage (from deploy/compose):
+# /dev/net/tun, and root in the container (a capability is useless to uid
+# 65532). The controller allocates the tunnel addresses (--tunnel-network):
+# nothing here hand-picks one. Usage (from deploy/compose):
 #   docker compose -f docker-compose.yml -f compose.tunnel.yml up -d
 # Not smoke-tested in CI (no privileged runner); `make tunnel-e2e` covers the logic.
 services:
+  controller:
+    command:
+      - --listen=0.0.0.0:9901
+      - --data-dir=/data
+      - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
+      - --tunnel-network=10.60.0.0/16
   gsp:
     user: "0"          # NET_ADMIN is only in the bounding set for non-root: run as root
     cap_add: [NET_ADMIN]
@@ -14,7 +22,6 @@ services:
       - --aggregator=http://127.0.0.1:9902
       - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
       - --tunnel-iface=gsp-tun0
-      - --tunnel-address=10.60.0.1/24
       - --tunnel-key-file=/data/gsp-tunnel.key
       - --tunnel-controller-url=http://127.0.0.1:9901
       - --tunnel-controller-token=${GSP_CONTROLLER_TOKEN}
@@ -43,9 +50,8 @@ services:
       - --controller-url=http://127.0.0.1:9901
       - --controller-token=${GSP_CONTROLLER_TOKEN}
       - --name=demo-origin
-      - --address=10.60.0.2/24
       - --listen-port=51821   # gsp already owns UDP 51820 on this shared host network
-      - --backends=10.60.0.2:25565
+      - --backends=:25565
 volumes:
   gsp-tunnel-data:
   agent-data:
