@@ -70,16 +70,20 @@ branch-protection required checks, a repo setting outside this tree.
 Most recent landings (newest first; full history in `git log`):
 
 - Trivy image scanning (2026-10-02, owner's request; **informational** by the owner's
-  call): `make deploy-scan` (`deploy/scan-images.sh`) in the `deploy` CI job, last, as
-  `continue-on-error` steps — the job never fails on it. Results: a table on the run's
+  call): `make deploy-scan` (`deploy/scan-images.sh`), and in CI its own `trivy` job
+  after `deploy`, which hands over its five images as `docker save` tarballs (artifact
+  `deploy-images`, 1 day). The job runs the official `aquasec/trivy:0.75.0` image
+  pinned by digest as a `docker://` step (not a job `container:` — JavaScript actions
+  can't run in the Alpine image), with `continue-on-error`: it never fails. Results: a table on the run's
   summary page (`.github/scripts/trivy_summary.py`, tested by `trivy_summary_test.py`
   in the `changes` job), a warning annotation per affected or unscanned target, and
   JSON + SARIF in the `trivy-reports` artifact. Scope: each image's OS packages +
-  secrets (`--image-src docker`: never a same-named registry image), plus `Cargo.lock`
+  secrets (`--input <tarball>` in CI; locally `--image-src docker`, never a same-named
+  registry image), plus `Cargo.lock`
   and `crates/gsp-ui/web/package-lock.json` (a release binary has no embedded crate
-  list); HIGH/CRITICAL with a fix. Trivy 0.75.0 from the release tarball, SHA-256
-  pinned in `ci.yml` — not `trivy-action`/`setup-trivy`, whose tags were hijacked in
-  March 2026. `.trivyignore` holds accepted findings (empty). A UI lockfile or
+  list); HIGH/CRITICAL with a fix. The image's `trivy` binary was checked byte-identical to the
+  checksum-verified 0.75.0 release tarball — not `trivy-action`/`setup-trivy`, whose
+  tags were hijacked in March 2026; re-check when bumping the digest. `.trivyignore` holds accepted findings (empty). A UI lockfile or
   `.trivyignore` change now also runs `deploy`.
 - Native TLS review minors (2026-10-02): `ReloadingCert` judges a change by mtime, size,
   inode and ctime (a `cp -p`/`touch -r` rewrite is caught); a dead accept task is

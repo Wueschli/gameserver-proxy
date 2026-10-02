@@ -12,6 +12,8 @@
 #     built --locked from it; a plain release binary carries no dependency list,
 #     so the image scan can't see its crates) and the UI's package-lock.json.
 # JSON and SARIF reports land in $TRIVY_REPORT_DIR (default target/trivy).
+# With $TRIVY_IMAGE_DIR set, the images come from `docker save` tarballs there
+# (<target>.tar) instead of the Docker daemon — CI's trivy job runs that way.
 # Accepted findings go in .trivyignore at the repo root, each with a reason.
 set -eu
 cd "$(dirname "$0")/.."
@@ -34,8 +36,12 @@ scan() {
   fi
 }
 for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
-  # --image-src docker: only the image just built, never a same-named registry one.
-  scan "image-$t" image "$@" --image-src docker --scanners vuln,secret "gsp-deploy/$t:local"
+  if [ -n "${TRIVY_IMAGE_DIR:-}" ]; then
+    scan "image-$t" image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
+  else
+    # --image-src docker: only the image just built, never a same-named registry one.
+    scan "image-$t" image "$@" --image-src docker --scanners vuln,secret "gsp-deploy/$t:local"
+  fi
 done
 scan lock-cargo fs "$@" --scanners vuln Cargo.lock
 scan lock-ui-npm fs "$@" --scanners vuln crates/gsp-ui/web/package-lock.json

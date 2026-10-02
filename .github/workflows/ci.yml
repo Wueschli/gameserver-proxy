@@ -294,47 +294,67 @@ jobs:
         run: make deploy-lint
       - name: Build all five images and run --version on each
         run: make deploy-images
+      # For the trivy job, which has no access to this runner's Docker daemon.
+      - name: Save the images for the trivy job
+        run: |
+          mkdir -p "$RUNNER_TEMP/images"
+          for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+            docker save -o "$RUNNER_TEMP/images/$t.tar" "gsp-deploy/$t:local"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-images
+          path: ${{ runner.temp }}/images/
+          retention-days: 1
       - name: Compose smoke test
         run: make deploy-smoke
       - name: Validate Kubernetes manifests (schema only)
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
-      # Trivy is informational (owner's call): it never fails the job. Findings show
-      # as a table on the run's summary page, as warning annotations, and as JSON +
-      # SARIF in the trivy-reports artifact (GitHub's Security tab would take the
-      # SARIF, but on a private repo only with GitHub Code Security enabled).
-      #
-      # Not aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
-      # force-pushed to a credential stealer, and a backdoored Trivy 0.69.4 was
-      # published. A fixed release checked against a hash pinned here can't be
-      # swapped underneath us; bump TRIVY_VERSION and TRIVY_SHA256 together
-      # (from the release's trivy_<v>_checksums.txt).
-      - name: Install Trivy (pinned release, checksum-verified)
-        id: trivy-install
+
+  # Trivy over the deploy job's images and the lockfiles they're built from.
+  # Informational (owner's call): the job reports, it never fails — findings show
+  # as a table on the run's summary page, as warning annotations, and as JSON +
+  # SARIF in the trivy-reports artifact (GitHub's Security tab would take the
+  # SARIF, but on a private repo only with GitHub Code Security enabled).
+  #
+  # Trivy runs from its official image, pinned by digest, as a `docker://` step:
+  # a job-level `container:` would need JavaScript actions (checkout, artifacts)
+  # to run inside it, which GitHub doesn't support on the Alpine-based image. Not
+  # aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
+  # force-pushed to a credential stealer and a backdoored Trivy 0.69.4 was
+  # published. The pinned digest is aquasec/trivy:0.75.0, whose trivy binary is
+  # byte-identical to the checksum-verified 0.75.0 release tarball (sha256
+  # 93f9da8e…299b8e, checked 2026-10-02); re-check when bumping it.
+  trivy:
+    needs: [changes, deploy]
+    # Also when deploy failed later on (e.g. the smoke test): the images exist.
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # missing images show up as "not scanned"
+        with:
+          name: deploy-images
+          path: target/images
+      - name: Trivy scan (informational)
         continue-on-error: true
+        uses: docker://aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
         env:
-          TRIVY_VERSION: "0.75.0"
-          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
-        run: |
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/trivy.tgz" \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
-          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
-          sudo tar -xzf "$RUNNER_TEMP/trivy.tgz" -C /usr/local/bin trivy
-          trivy --version
-      - name: Trivy scan (images + the lockfiles they're built from; informational)
-        if: steps.trivy-install.outcome == 'success'
-        continue-on-error: true
-        env:
+          TRIVY_IMAGE_DIR: target/images
           TRIVY_REPORT_DIR: target/trivy
-        run: make deploy-scan
+        with:
+          entrypoint: sh
+          args: deploy/scan-images.sh
       - name: Trivy report
-        if: always() && steps.trivy-install.outcome == 'success'
+        if: always()
         run: |
           python3 .github/scripts/trivy_summary.py target/trivy >> "$GITHUB_STEP_SUMMARY"
           python3 .github/scripts/trivy_summary.py --annotations target/trivy
       - uses: actions/upload-artifact@v4
-        if: always() && steps.trivy-install.outcome == 'success'
+        if: always()
         with:
           name: trivy-reports
           path: target/trivy/
