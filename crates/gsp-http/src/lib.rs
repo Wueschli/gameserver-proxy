@@ -1,4 +1,5 @@
-//! The one place the fleet binaries build outbound HTTP clients.
+//! The one place the fleet binaries build outbound HTTP clients — and, with the
+//! `server` feature, serve HTTPS themselves ([`tls`], native TLS).
 //!
 //! `reqwest`'s `rustls-tls` trusts only the Mozilla roots compiled into the
 //! binary. `--ca-file` adds an operator's own CAs (a private or internal CA, a
@@ -10,6 +11,7 @@
 //! [`builder`] / [`client`] still build a fresh client per call, so call sites
 //! keep their existing connection and timeout semantics.
 
+#[cfg(feature = "server")]
 pub mod tls;
 
 use std::path::{Path, PathBuf};

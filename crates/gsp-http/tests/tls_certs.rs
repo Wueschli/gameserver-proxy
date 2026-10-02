@@ -129,6 +129,33 @@ fn rotation_swaps_the_served_cert() {
     assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
 }
 
+/// `cp -p`, `touch -r` or a coarse-mtime filesystem can replace a file without
+/// moving its mtime; the change must still be picked up.
+#[test]
+fn a_rewrite_that_keeps_the_mtime_is_picked_up() {
+    let live = Live::new("leaf.pem", "leaf.key");
+    let cert = ReloadingCert::new(live.files()).unwrap();
+    let files = live.files();
+    let mtime = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    let (cert_mtime, key_mtime) = (mtime(&files.cert), mtime(&files.key));
+    for (path, fixture_name, old) in [
+        (&files.cert, "leaf2.pem", cert_mtime),
+        (&files.key, "leaf2.key", key_mtime),
+    ] {
+        std::fs::write(path, std::fs::read(fixture(fixture_name)).unwrap()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(mtime(path), old);
+    }
+    assert!(cert.reload_if_changed().unwrap());
+    assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf2.pem"));
+    assert!(!cert.reload_if_changed().unwrap(), "reloaded twice");
+}
+
 #[test]
 fn half_rotated_pair_keeps_the_old_cert() {
     let live = Live::new("leaf.pem", "leaf.key");
@@ -221,4 +248,9 @@ fn renamed_files_name_their_setting() {
         text.starts_with("--tls-cert /nonexistent/cert.pem"),
         "{text}"
     );
+}
+
+#[test]
+fn loads_a_pkcs1_rsa_key() {
+    load_certified_key(&files("leaf-rsa.pem", "leaf-rsa.pkcs1.key")).unwrap();
 }

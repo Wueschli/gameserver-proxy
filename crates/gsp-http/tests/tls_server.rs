@@ -53,16 +53,32 @@ async fn serves_https_to_a_client_that_trusts_the_ca() {
     get_ok("ca.pem", addr).await;
 }
 
+/// `leaf3` is signed by an intermediate that only `ca3` signed: a client trusting
+/// `ca3` alone verifies it only if the server sends the intermediate as well.
 #[tokio::test]
 async fn serves_a_chain_file() {
     let dir = tempfile::tempdir().unwrap();
     let chain = dir.path().join("chain.pem");
-    let mut pem = std::fs::read(fixture("leaf.pem")).unwrap();
-    pem.extend(std::fs::read(fixture("ca.pem")).unwrap());
+    let mut pem = std::fs::read(fixture("leaf3.pem")).unwrap();
+    pem.extend(std::fs::read(fixture("inter.pem")).unwrap());
     std::fs::write(&chain, pem).unwrap();
-    let (addr, cert) = serve(TlsFiles::new(chain, fixture("leaf.key"))).await;
+    let (addr, cert) = serve(TlsFiles::new(chain, fixture("leaf3.key"))).await;
     assert_eq!(cert.current().cert.len(), 2);
-    get_ok("ca.pem", addr).await;
+    get_ok("ca3.pem", addr).await;
+
+    // The control: leaf only, and the same client cannot verify it.
+    let (addr, _) = serve(TlsFiles::new(fixture("leaf3.pem"), fixture("leaf3.key"))).await;
+    let client = builder_with(&load_ca_file(&fixture("ca3.pem")).unwrap())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let err = client
+        .get(format!("https://localhost:{}/", addr.port()))
+        .send()
+        .await
+        .expect_err("verified a leaf without its intermediate");
+    let chain = gsp_http::error_chain(&err);
+    assert!(chain.contains("UnknownIssuer"), "{chain}");
 }
 
 #[tokio::test]
@@ -74,6 +90,30 @@ async fn a_stalled_handshake_does_not_block_others() {
         .expect("a second client was blocked behind the stalled handshake");
 }
 
+/// Handshakes in flight are capped; a client stalled before its hello holds a
+/// slot until it goes away (or the handshake timeout ends it).
+#[tokio::test]
+async fn the_handshake_cap_holds_new_clients_until_a_slot_frees() {
+    let cert = ReloadingCert::new(fixture_files()).unwrap();
+    let listener = TlsListener::bind_with_handshake_limit("127.0.0.1:0".parse().unwrap(), cert, 1)
+        .await
+        .unwrap();
+    let addr = axum::serve::Listener::local_addr(&listener).unwrap();
+    let app = Router::new().route("/", get(|| async { "ok" }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let stalled = TcpStream::connect(addr).await.unwrap(); // takes the only slot
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let waiting = tokio::spawn(get_ok("ca.pem", addr));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!waiting.is_finished(), "a handshake ran past the cap");
+    drop(stalled);
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the waiting client never got the freed slot")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn plain_http_on_the_tls_port_does_not_break_the_server() {
     let (addr, _) = serve(fixture_files()).await;
@@ -82,8 +122,12 @@ async fn plain_http_on_the_tls_port_does_not_break_the_server() {
         .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
         .await
         .unwrap();
+    // The server drops that connection (EOF or reset, either is fine), rather than
+    // leaving it open.
     let mut buf = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(2), plain.read_to_end(&mut buf)).await;
+    let _eof_or_reset = tokio::time::timeout(Duration::from_secs(2), plain.read_to_end(&mut buf))
+        .await
+        .expect("the plain-HTTP connection was left open");
     get_ok("ca.pem", addr).await;
 }
 
@@ -95,8 +139,7 @@ async fn the_reloader_picks_up_new_files() {
     std::fs::copy(fixture("leaf.key"), &files.key).unwrap();
     let (addr, cert) = serve(files.clone()).await;
     let _reloader = spawn_reloader(cert, Duration::from_millis(100));
-    // mtime resolution: make sure the rewrite is visibly newer.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // No wait for the mtime to move on: a rewrite changes the ctime regardless.
     std::fs::copy(fixture("leaf2.pem"), &files.cert).unwrap();
     std::fs::copy(fixture("leaf2.key"), &files.key).unwrap();
 
