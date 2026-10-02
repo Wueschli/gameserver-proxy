@@ -15,7 +15,8 @@ goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its
 dynamic library dependencies (glibc). It does not need a system CA bundle either: the
 HTTP clients (`--controller`, `--aggregator`, `--tunnel-controller-url`, the HTTP
-resolvers) verify against a root bundle compiled into the binary — see
+resolvers) verify against a root bundle compiled into the binary, plus whatever
+`--ca-file` adds — see
 [`gsp-controller` behind TLS](#gsp-controller-behind-tls) for what that implies. The builder and runtime base
 must be on the same Debian release, or a binary can fail to start on an older glibc.
 
@@ -218,23 +219,38 @@ In Kubernetes the equivalent is an Ingress (or Gateway) with TLS in front of the
 
 Every HTTP client in the fleet uses `reqwest` with rustls and builds its requests from
 the base URL as given — no code forces a scheme — so these take an `https://` base URL
-(not exercised end-to-end in CI): `gsp --controller`, `gsp --tunnel-controller-url`,
-`gsp-agent --controller-url`, `gsp-ui --controller-url` / `--aggregator-url`, and
-`gsp-controller --parent-url`. To check it works:
+: `gsp --controller`, `gsp --tunnel-controller-url`, `gsp-agent --controller-url`,
+`gsp-ui --controller-url` / `--aggregator-url`, and `gsp-controller --parent-url`.
+To check it works:
 
 ```sh
 curl -fsS https://controller.example.com/healthz
 gsp --check --controller https://controller.example.com --controller-token "$TOKEN"
 ```
 
+**Private or self-signed CA.** Every binary (`gsp`, `gsp-agent`, `gsp-controller`,
+`gsp-aggregator`, `gsp-ui`) takes `--ca-file <PATH>`: a PEM file with one or more CA
+certificates to trust for **all** of that process's outbound HTTPS, in addition to the
+built-in Mozilla roots (it never replaces them, so public endpoints keep working).
+Non-certificate PEM sections (a private key pasted into the same file) are ignored. A
+missing or unreadable file, one with no certificates, or a malformed certificate stops
+the process at startup with an error naming the file.
+
+```sh
+gsp --check --controller https://controller.internal:8443 --ca-file /etc/gsp/ca.pem
+```
+
+This exact shape — `gsp --check` against a real `gsp-controller` behind a TLS
+terminator whose certificate a private CA signed, failing without `--ca-file` and
+passing with it — is the `gsp-fleet-tests` test `ca_file.rs`, run by `make check`.
+The two proxy snippets above are still untested.
+
 ### Limits (read these before relying on it)
 
-- **Publicly trusted certificates only.** The clients trust the Mozilla root bundle
-  compiled into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`), **not** the
-  system certificate store, and there is no flag or environment variable to add a CA.
-  A certificate from a private or internal CA — or a self-signed one — will not
-  verify. Use a public CA (Let's Encrypt works), or keep controller traffic on a
-  private network such as the WireGuard tunnel itself.
+- **No system certificate store.** The clients trust the Mozilla root bundle compiled
+  into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`) plus `--ca-file`, **not**
+  the OS store or `SSL_CERT_FILE`. For a private or internal CA — or a self-signed
+  certificate — pass it with `--ca-file`. No client certificates (mTLS).
 - **HA and adoption traffic stays plain HTTP.** Replica-to-replica calls
   (`/raft/append`, `/raft/vote`, `/raft/snapshot`, forwarded writes) and
   `/admin/adopt` build `http://host:port` URLs in code, so they cannot go through a
