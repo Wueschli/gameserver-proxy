@@ -43,7 +43,7 @@ impl Network {
         Resp: DeserializeOwned,
     {
         let url = format!("http://{}{path}", target_node.addr);
-        let client = reqwest::Client::new();
+        let client = gsp_http::client();
         let mut builder = client.post(&url).json(&req);
         if let Some(token) = &self.ha_token {
             builder = builder.bearer_auth(token);

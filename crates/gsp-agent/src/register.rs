@@ -77,11 +77,11 @@ impl std::error::Error for RegisterError {}
 /// retry budget real: without them a controller that accepts TCP but never
 /// answers would block startup (and the refresh loop) forever.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    gsp_http::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
-        .expect("a reqwest client with only timeouts always builds")
+        .expect("timeouts plus --ca-file roots (validated at startup) always build")
 }
 
 /// One registration attempt.

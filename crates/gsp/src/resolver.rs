@@ -77,7 +77,7 @@ pub struct HttpResolver {
 
 impl HttpResolver {
     fn new(cfg: &ResolverConfig) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = gsp_http::builder()
             .timeout(cfg.timeout)
             .build()
             .map_err(|e| anyhow::anyhow!("resolver {}: {e}", cfg.name))?;

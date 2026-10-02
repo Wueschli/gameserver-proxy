@@ -34,7 +34,7 @@ const REVISION_HEADER: &str = "x-config-revision";
 /// before anything else exists to build a `Snapshot` from (mirrors
 /// `gsp_config::load` in file mode).
 pub async fn fetch_current(base_url: &str, token: Option<&str>) -> anyhow::Result<(u64, String)> {
-    let mut req = reqwest::Client::new().get(format!("{base_url}/config"));
+    let mut req = gsp_http::client().get(format!("{base_url}/config"));
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -130,7 +130,7 @@ async fn subscribe_once(
 ) -> anyhow::Result<()> {
     let since = *cursor;
     let url = format!("{base_url}/config/subscribe?since={since}");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = gsp_http::client().get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }

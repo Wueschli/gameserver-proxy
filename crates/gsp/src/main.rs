@@ -139,6 +139,11 @@ struct Args {
     /// proxy-peers registry.
     #[arg(long, default_value_t = 30)]
     tunnel_register_interval_sec: u64,
+
+    /// PEM file of extra CA certificates to trust for outbound HTTPS, in
+    /// addition to the built-in Mozilla roots.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
 }
 
 /// Resolved `--tunnel-*` settings, built once in `async_main` after
@@ -173,6 +178,10 @@ fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = &args.ca_file {
+        let certs = gsp_http::init_ca_file(path)?;
+        tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
+    }
 
     // Fetching from a controller needs an async runtime, so config loading
     // itself now happens inside `block_on` rather than before it (file mode

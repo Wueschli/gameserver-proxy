@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+gsp-http.workspace = true
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

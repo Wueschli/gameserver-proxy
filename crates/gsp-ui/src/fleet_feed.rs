@@ -84,7 +84,7 @@ async fn subscribe_once(
     feed: &FleetFeed,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/fleet/subscribe");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = gsp_http::client().get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }

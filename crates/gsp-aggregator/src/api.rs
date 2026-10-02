@@ -90,7 +90,7 @@ impl AppState {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
-            http: reqwest::Client::new(),
+            http: gsp_http::client(),
             auth_token: None,
             instance_token: None,
             updates,
