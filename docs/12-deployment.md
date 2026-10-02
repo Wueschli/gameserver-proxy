@@ -248,11 +248,10 @@ gsp --check --controller https://controller.example.com --controller-token "$TOK
 - **A TLS proxy is a trust boundary.** It sees every token and registration in the
   clear. Run it on a host you control.
 
-## Open question
+## Tunnel addressing
 
-`docs/11`'s "Open questions" section separately flags tunnel-internal
-address collision/exhaustion at fleet scale — a related but distinct
-concern from this document's container networking question (that one is
-about the WireGuard-internal `10.x.x.x`-style addressing between proxies
-and origins; this document is about the container/orchestrator-facing side
-of the same proxy's public listeners).
+Tunnel-internal addressing (the WireGuard-side `10.x.x.x` space between proxies and
+origins) is not an open question any more: `gsp-controller --tunnel-network` allocates
+the addresses, so nothing here hand-picks one. See `docs/11` "Address authority". This
+document covers only the container/orchestrator-facing side of the proxy's public
+listeners.
