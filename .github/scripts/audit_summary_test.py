@@ -56,10 +56,11 @@ class Summary(unittest.TestCase):
         rc, out = run({"root": report()})
         self.assertEqual(rc, 0)
         self.assertIn("No vulnerabilities", out)
-        self.assertIn("`root`", out)
+        self.assertIn("`Cargo.lock`", out)
 
     def test_vulnerabilities_are_tabled_and_escaped(self):
         rc, out = run({"root": report([VULN]), "crates_plugins": report()})
+        self.assertIn("`crates/plugins/Cargo.lock`", out)
         self.assertEqual(rc, 0)
         self.assertIn("1 vulnerabilit", out)
         self.assertIn("[RUSTSEC-2026-0285](https://github.com/rustls/rustls/security/advisories/x)", out)
@@ -88,7 +89,7 @@ class Summary(unittest.TestCase):
         self.assertEqual(rc, 0)
         lines = [l for l in out.splitlines() if l.startswith("::warning")]
         self.assertEqual(len(lines), 2, out)
-        self.assertTrue(any("root" in l and "1 vulnerab" in l for l in lines), out)
+        self.assertTrue(any("Cargo.lock" in l and "1 vulnerab" in l for l in lines), out)
 
     def test_no_annotations_when_clean(self):
         rc, out = run({"root": report(unmaintained=[UNMAINTAINED])}, "--annotations")
