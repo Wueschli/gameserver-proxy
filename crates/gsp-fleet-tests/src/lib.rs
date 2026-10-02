@@ -451,3 +451,10 @@ pub async fn port_is_down(port: u16, timeout: Duration) -> bool {
         }
     }
 }
+
+/// `gsp-ui` on `127.0.0.1:listen_port` with extra command-line arguments.
+pub fn spawn_ui_with(listen_port: u16, extra: &[String]) -> Result<Proc> {
+    let mut args = vec!["--listen".to_string(), format!("127.0.0.1:{listen_port}")];
+    args.extend(extra.iter().cloned());
+    Proc::spawn("gsp-ui", &args)
+}

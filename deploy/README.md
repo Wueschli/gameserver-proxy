@@ -77,8 +77,8 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Tokens are visible in `docker inspect` / the Pod spec env — fine for a demo;
   use real secret management in production.
 - These examples run every service on **plain HTTP**: bearer tokens and
-  registrations cross the network in the clear. `gsp-controller` and
-  `gsp-aggregator` can serve TLS themselves (`--tls-cert`/`--tls-key`); the rest
+  registrations cross the network in the clear. `gsp-controller`,
+  `gsp-aggregator` and `gsp-ui` can serve TLS themselves (`--tls-cert`/`--tls-key`); the rest
   need a TLS terminator in front — see
   [TLS for the fleet services](../docs/12-deployment.md#tls-for-the-fleet-services).
 - One standalone controller; no HA (see docs/10).

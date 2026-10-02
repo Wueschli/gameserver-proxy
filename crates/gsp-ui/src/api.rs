@@ -35,9 +35,9 @@ use crate::session::{Session, SessionStore};
 use crate::users::UserRecord;
 
 /// The cookie the browser holds. `HttpOnly` (never readable from JS) +
-/// `SameSite=Lax`. **Not marked `Secure`** — a PoC deployment commonly runs
-/// over plain HTTP (localhost, an internal network); a real TLS-fronted
-/// deployment should add it. Tracked as a known gap, not silently ignored.
+/// `SameSite=Lax`, plus `Secure` when this process serves HTTPS itself
+/// ([`AppState::secure_cookie`]). Behind a TLS-terminating proxy the UI sees
+/// plain HTTP and leaves it off — set it at the proxy there (docs/12).
 pub const SESSION_COOKIE: &str = "gsp_ui_session";
 
 /// Where `crate::aggregator_proxy` sends its calls, and the bearer token it
@@ -77,6 +77,9 @@ pub struct AppState {
     /// ([`crate::fleet_feed`], slice 11d) — `None` when no aggregator is
     /// configured at all, same as `aggregator` being `None`.
     pub fleet_feed: Option<std::sync::Arc<crate::fleet_feed::FleetFeed>>,
+    /// Mark the session cookie `Secure` — set exactly when this UI serves HTTPS
+    /// itself (`--tls-cert`); on plain HTTP a browser would drop such a cookie.
+    pub secure_cookie: bool,
 }
 
 impl AppState {
@@ -89,6 +92,7 @@ impl AppState {
             aggregator: None,
             controller: None,
             fleet_feed: None,
+            secure_cookie: false,
         }
     }
 
@@ -104,6 +108,11 @@ impl AppState {
 
     pub fn with_controller(mut self, base_url: String, token: Option<String>) -> Self {
         self.controller = Some(ControllerTarget { base_url, token });
+        self
+    }
+
+    pub fn with_secure_cookie(mut self, secure: bool) -> Self {
+        self.secure_cookie = secure;
         self
     }
 
@@ -228,8 +237,19 @@ fn bad_credentials() -> Response {
 
 fn issue_session(state: &AppState, session: Session) -> Response {
     let id = state.sessions.create(session);
-    let cookie = format!("{SESSION_COOKIE}={id}; HttpOnly; Path=/; SameSite=Lax");
+    let cookie = format!(
+        "{SESSION_COOKIE}={id}; HttpOnly; Path=/; SameSite=Lax{}",
+        secure_attr(state)
+    );
     (StatusCode::OK, [(header::SET_COOKIE, cookie)], "ok").into_response()
+}
+
+fn secure_attr(state: &AppState) -> &'static str {
+    if state.secure_cookie {
+        "; Secure"
+    } else {
+        ""
+    }
 }
 
 /// `POST /ui/logout` — revokes the session named by the request's cookie, if
@@ -239,7 +259,10 @@ async fn logout(State(state): State<AppState>, req: Request) -> Response {
     if let Some(id) = session_id_from(&req) {
         state.sessions.revoke(&id);
     }
-    let expire_cookie = format!("{SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
+    let expire_cookie = format!(
+        "{SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0{}",
+        secure_attr(&state)
+    );
     (StatusCode::OK, [(header::SET_COOKIE, expire_cookie)], "ok").into_response()
 }
 
@@ -393,6 +416,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn login_and_logout_cookies(state: AppState) -> (String, String) {
+        let app = router(state);
+        let login = app
+            .clone()
+            .oneshot(
+                HttpRequest::post("/ui/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password":"secret"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let logout = app
+            .oneshot(HttpRequest::post("/ui/logout").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        (set_cookie_value(&login), set_cookie_value(&logout))
+    }
+
+    fn has_attr(set_cookie: &str, attr: &str) -> bool {
+        set_cookie.split(';').any(|part| part.trim() == attr)
+    }
+
+    /// Served over HTTPS (`--tls-cert`): the browser must never send the session
+    /// cookie over plain HTTP, so both the cookie and its expiry carry `Secure`.
+    #[tokio::test]
+    async fn a_tls_ui_marks_the_session_cookie_secure() {
+        let state = AppState::new(Some("secret".into())).with_secure_cookie(true);
+        let (login, logout) = login_and_logout_cookies(state).await;
+        assert!(has_attr(&login, "Secure"), "{login}");
+        assert!(has_attr(&login, "HttpOnly"), "{login}");
+        assert!(has_attr(&logout, "Secure"), "{logout}");
+    }
+
+    /// Plain HTTP: a `Secure` cookie would be dropped by the browser and login
+    /// would loop, so it stays unmarked.
+    #[tokio::test]
+    async fn a_plain_http_ui_does_not_mark_the_cookie_secure() {
+        let (login, logout) = login_and_logout_cookies(AppState::new(Some("secret".into()))).await;
+        assert!(!has_attr(&login, "Secure"), "{login}");
+        assert!(!has_attr(&logout, "Secure"), "{logout}");
     }
 
     #[tokio::test]
