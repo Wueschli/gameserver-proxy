@@ -1097,7 +1097,7 @@ slice 1.
   on config *submit*, and browser-level end-to-end tests.
 - **`deploy/`** — reference Dockerfile (five targets on distroless), compose
   control-plane demo and plain k8s manifests, smoke-tested by the CI `deploy` job
-  (`docs/12`; non-blocking until proven stable).
+  (`docs/12`; blocking since 2026-10-02).
 - **Phase 14 follow-ups** — the multi-proxy `AllowedIPs` fix and the controller-allocated
   tunnel address authority landed 2026-10-02 (`docs/11` "Address authority"); the
   CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Remaining pieces

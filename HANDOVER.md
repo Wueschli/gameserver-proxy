@@ -6,42 +6,37 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-02 (custom-CA `--ca-file` session; see "Resume here").
+Last updated: 2026-10-02 (`--ca-file`, HA-over-TLS and cleanup session; see "Resume here").
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work: the "Known follow-ups" table below, and making the `tunnel` and
-`deploy` CI jobs blocking once stable.
+Remaining work: the "Known follow-ups" table below. Every CI job is blocking (2026-10-02).
 
 ### Resume here (written for picking this up on another machine)
 
-State at 2026-10-02 (latest): `--ca-file` (PR #1) is merged; TLS-capable HA peers +
-readable HTTP errors are on branch `claude/dazzling-carson-j2yxj0` (PR to `main`). That
-branch does not change `Cargo.lock`, so its CI run is the first one that can confirm the
-warm-cache timings below — compare it with PR #1's cold run 37003396498 (`test` 8m15,
-`build-release` 16.5 min, `tunnel` ~10 min). Earlier: CI run
-36989065039 was green on every job it ran. That run was **cold** (the lockfile changed,
-and the rolling cache starts cold on a lockfile bump by design): `build-release` took
-17 min and `test` 9m41. Expect a normal code push to be much faster (~4 min each, see
-"Infra / environment") — **verify that on the next code push**; if it is still slow, the
-cache key in `.github/actions/cargo-cache` is the first suspect.
+State at 2026-10-02 (latest): `--ca-file` (PR #1) and TLS-capable HA peers + readable HTTP
+errors (PR #2) are merged; a cleanup PR (one HTTP client for Raft RPCs, blocking
+`tunnel`/`deploy`, review minors, this refresh) is on branch
+`claude/dazzling-carson-j2yxj0`.
+
+**CI timings, measured.** Cold (lockfile changed; PR #1's run 37003396498): `test` 8m15,
+`build-release` 16.5 min, each `tunnel` leg ~10 min, ~22 min wall clock. Warm (PR #2's run
+37011410675, no lockfile change): `test` 4m41, `build-release` 6m10, `tunnel` 6m47 (kernel)
+/ 8m12 (userspace), `plugins` 3m12, ~9.5 min wall clock. The rolling cache works; if a
+later code push is back near the cold numbers without a lockfile change, the cache key in
+`.github/actions/cargo-cache` is the first suspect.
 
 Open decisions for the owner:
 
-1. **Make the `tunnel` and `deploy` CI jobs blocking** (drop `continue-on-error: true` in
-   `.github/workflows/ci.yml`). Both are green on the latest runs (`tunnel` on both
-   backends); `deploy` had exactly one real failure, a lint bug when its prebuilt-binaries
-   mode first ran (fixed). Cost to know first: each `tunnel` leg now takes ~9.5 min in CI,
-   mostly the kernel edge-restart scenario (see the follow-up on that outage).
-2. **Native TLS for `gsp-controller` is wanted eventually** (owner, 2026-10-02). It bundles
+1. **Native TLS for `gsp-controller` is wanted eventually** (owner, 2026-10-02). It bundles
    serving TLS itself; custom CA support (`--ca-file`) and TLS-capable HA peers
    (`--ha-peers id=https://…`) landed 2026-10-02. Until then docs/12 "gsp-controller behind
    TLS" is the supported pattern. New controller or client code must not hard-code
    `http://`, and must build HTTP clients via `gsp_http::{client, builder}` so
    `--ca-file` applies.
-3. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
+2. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
    Publishing (GHCR on release tags, multi-arch if arm64 is needed) is a small follow-up:
    `deploy/Dockerfile` already has the `BIN_SOURCE` switch; it needs a release workflow,
    tags and a registry login.
@@ -66,12 +61,17 @@ Watch-list:
   `tunnel (userspace)` job whose log nobody read — cause unknown (host limits? sudo/apt on
   the VPS?). Only relevant if self-hosting is tried again.
 
-Suggested order: (a) confirm the warm-cache CI timings on the next code push, (b) decide
-on blocking CI jobs, (c) pick from "Known follow-ups" — the owner's stated interest is
-native TLS and the deferred pieces of the address authority.
+Suggested order: pick from "Known follow-ups" — the owner's stated interest is native TLS
+(controller-served, needs a design first) and the deferred pieces of the address
+authority. Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
+branch-protection required checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
+- Cleanup (2026-10-02): `ha::network::Network` holds one HTTP client, so Raft RPCs reuse
+  their connection (`ha_tls.rs` counts terminator accepts: 26 new TLS connections per 5 s
+  before, under 6 after); `tunnel` and `deploy` CI jobs are blocking; `CaError` names its
+  cause once; measured CI timings recorded above.
 - TLS-capable HA peers + readable HTTP errors (2026-10-02, spec
   `docs/superpowers/specs/2026-10-02-ha-tls-peers-design.md`, docs/12 "HA replicas over
   TLS"): `--ha-peers` entries may be `id=https://host[:port]`; `ha::peers::peer_url` builds
@@ -101,7 +101,7 @@ Most recent landings (newest first; full history in `git log`):
 
 - `deploy/` — reference `Dockerfile` (five distroless targets), compose
   control-plane demo + tunnel override, plain k8s manifests, `deploy/smoke.sh`, CI job
-  `deploy` (non-blocking until stable). **First CI run (36922142697, 2026-10-01) was
+  `deploy` (blocking since 2026-10-02). **First CI run (36922142697, 2026-10-01) was
 fully green**: all five images built and ran `--version`, the compose smoke passed
 end to end, kubeconform passed. Not exercised anywhere: the tunnel override and the
 k8s manifests on a real cluster. A pre-push fresh-context review caught one bug that
@@ -283,8 +283,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   CI job `tunnel`, kernel + userspace matrix) runs the real `gsp-controller` /
   `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
   (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
-  The CI job is **non-blocking** (`continue-on-error: true`); making it required is an
-  open decision (see "Resume here"). It is green on both backends on GitHub (`unshare -Urnm`
+  The CI job is **blocking** since 2026-10-02. It is green on both backends on GitHub (`unshare -Urnm`
   + tmpfs on `/run` and the `wireguard` module work on the Ubuntu runners). The lab now has
   **12 scenarios** (namespace helpers, TCP/UDP round trip, stays-up-across-re-registrations,
   a proxy added later, **two proxies sharing one origin**, a pinned-key mismatch, a pinned
@@ -313,8 +312,8 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Native TLS in `gsp-controller` (owner wants it eventually, 2026-10-02) | Umbrella: terminate TLS in the controller itself (not designed), the only piece left. Clients trusting a custom CA (`--ca-file`) and HA peers over a TLS terminator (`--ha-peers id=https://…`) are done (2026-10-02). Today's supported pattern is a reverse proxy (docs/12 "gsp-controller behind TLS"). Keep base URLs/schemes configurable in any new code so this stays small. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
-| HA-over-TLS — deferred review minors (2026-10-02) | `ha/network.rs` builds a fresh `gsp_http::client()` per Raft RPC, so with `https://` peers every heartbeat (4/s per peer) pays a TCP+TLS handshake — keep one client in `Network`; docs/10 "Non-leader write handling" still says "over plain HTTP"; `ha_tls.rs`'s negative test would also pass if the replicas never started (its positive twin covers that) — could assert the procs are alive and the log names the certificate error; `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message) |
-| `--ca-file` — deferred review minors (2026-10-02) | `CaError::{Read,Parse}` print `{source}` and also expose it as the source, so anyhow shows the cause twice and `Parse`'s top line ends in reqwest's bare "builder error"; `controller_client`'s reconnect warning records `error = format!(..)` (a quoted `String`) where `%format_args!(..)` matches the file's style; no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (The docs/12 stray `: ` line was fixed with the HA-over-TLS work.) |
+| HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
+| `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
@@ -551,7 +550,9 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   `rust-cache` (nightly only, tiny). A lockfile or toolchain bump starts cold by design.
   Verified: a cold run took test 8m41 / build-release 10m53 / deploy 11m25; the next run
   restored the previous commit's snapshot (build-release recompiled 7 crates, 4m02, the rest
-  is the thin-LTO link) and test took 3m53, deploy 1m22.
+  is the thin-LTO link) and test took 3m53, deploy 1m22. Re-measured 2026-10-02 after the
+  lockfile bump for `gsp-http`: cold `test` 8m15 / `build-release` 16.5 min, then warm
+  `test` 4m41 / `build-release` 6m10 (see "Resume here").
   **Test reports:** CI runs Rust tests with `cargo nextest run --profile ci` (config:
   `.config/nextest.toml`; installed via a SHA-pinned `taiki-e/install-action`) and vitest with
   `--reporter=junit`; `.github/scripts/test_summary.py` (tested by `test_summary_test.py`,

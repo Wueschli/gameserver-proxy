@@ -232,12 +232,11 @@ jobs:
 
   tunnel:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces
-    # (docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md). Non-blocking
-    # until it has proven stable on GitHub runners.
+    # (docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md). Blocking since
+    # 2026-10-02, after green runs on both backends on the pinned runners.
     needs: changes
     if: needs.changes.outputs.tunnel == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -273,12 +272,11 @@ jobs:
 
   deploy:
     # deploy/ reference images + compose demo + k8s manifests
-    # (docs/superpowers/specs/2026-10-01-deploy-design.md). Non-blocking until
-    # it has proven stable on GitHub runners.
+    # (docs/superpowers/specs/2026-10-01-deploy-design.md). Blocking since
+    # 2026-10-02, after green runs on the pinned runners.
     needs: [changes, build-release]
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
-    continue-on-error: true
     env:
       # Push/PR: images copy the shared release build (fast). Nightly: compile
       # inside Docker, exercising the self-contained builder stage.

@@ -57,7 +57,7 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
 `hostNetwork` DaemonSet). Both are reference only. CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
-job, non-blocking until it has a few more green runs; first green run 2026-10-01). Known limitation: aggregator intent fan-out (drain etc.) cannot reach
+job, blocking since 2026-10-02; first green run 2026-10-01). Known limitation: aggregator intent fan-out (drain etc.) cannot reach
 a `gsp` from these examples, because the `admin_url` it reports is derived from
 `settings.admin.listen` and no flag overrides it.
 
