@@ -55,6 +55,8 @@ pub enum TlsError {
         path: PathBuf,
         source: rustls::Error,
     },
+    #[error("--tls-cert and --tls-key go together; only one was given")]
+    Incomplete,
     #[error("--tls-key {} does not match the certificate in --tls-cert {}", key.display(), cert.display())]
     KeyMismatch {
         cert: PathBuf,
@@ -282,8 +284,9 @@ pub fn spawn_reloader(cert: Arc<ReloadingCert>, every: Duration) -> JoinHandle<(
     })
 }
 
-/// `--tls-cert`/`--tls-key`, shared by every fleet binary that serves HTTP
-/// (`#[command(flatten)]` into its `Args`).
+// `--tls-cert`/`--tls-key`, shared by every fleet binary that serves HTTP
+// (`#[command(flatten)]` into its `Args`). A `//` comment on purpose: clap turns a
+// `///` doc on a flattened struct into the parent command's `about`.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct TlsArgs {
     /// PEM certificate chain (leaf first) to serve HTTPS with on `--listen`
@@ -299,6 +302,7 @@ pub struct TlsArgs {
 
 impl TlsArgs {
     /// Load and validate the pair, if given (a bad file is a startup error).
+    /// Only one of the two is an error, never a silent fall-back to plain HTTP.
     pub fn load(&self) -> Result<Option<Arc<ReloadingCert>>, TlsError> {
         match (&self.tls_cert, &self.tls_key) {
             (Some(cert), Some(key)) => ReloadingCert::new(TlsFiles {
@@ -306,7 +310,8 @@ impl TlsArgs {
                 key: key.clone(),
             })
             .map(Some),
-            _ => Ok(None),
+            (None, None) => Ok(None),
+            _ => Err(TlsError::Incomplete),
         }
     }
 }

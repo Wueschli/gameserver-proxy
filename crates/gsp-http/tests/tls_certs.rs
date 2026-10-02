@@ -174,3 +174,26 @@ fn a_truncated_chain_is_rejected() {
     assert!(e.to_string().starts_with("--tls-cert "), "{e}");
     assert_cause_once(&e);
 }
+
+/// `TlsArgs` built in code (not through clap's `requires`) with only one file must
+/// not silently serve plain HTTP.
+#[test]
+fn half_a_tls_args_pair_is_an_error() {
+    use gsp_http::tls::TlsArgs;
+    let only_cert = TlsArgs {
+        tls_cert: Some(fixture("leaf.pem")),
+        tls_key: None,
+    };
+    assert!(matches!(only_cert.load(), Err(TlsError::Incomplete)));
+    let only_key = TlsArgs {
+        tls_cert: None,
+        tls_key: Some(fixture("leaf.key")),
+    };
+    assert!(matches!(only_key.load(), Err(TlsError::Incomplete)));
+    assert!(TlsArgs::default().load().unwrap().is_none());
+    let both = TlsArgs {
+        tls_cert: Some(fixture("leaf.pem")),
+        tls_key: Some(fixture("leaf.key")),
+    };
+    assert!(both.load().unwrap().is_some());
+}
