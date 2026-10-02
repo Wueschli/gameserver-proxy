@@ -1,21 +1,17 @@
 //! Registers this proxy with `gsp-controller`'s proxy-peers registry
-//! (`POST /proxy-peers`, phase 14 slice 7) — the mirror image of
-//! `gsp-agent::register`, duplicated rather than shared for the same
-//! reason `gsp-agent`'s own copy is: no library crate sits between these
-//! two binaries, and this project's own precedent (`controller_client`'s
-//! hand-parsed SSE, `aggregator_client`'s duplicated `IngestPayload`)
-//! already accepts small wire-shape duplication across independent
-//! binaries over adding one.
+//! (`POST /proxy-peers`) — the mirror image of `gsp-agent::register`,
+//! duplicated rather than shared for the same reason: no library crate sits
+//! between these two binaries.
 //!
 //! Exists so every origin's `gsp-agent` can learn about every edge proxy by
-//! subscribing to this registry, the same way every proxy already learns
-//! about every origin by subscribing to the backend-peers one
-//! (`tunnel_client.rs`) — a growing proxy fleet, or one proxy added after
-//! an origin was already deployed, needs no origin-side reconfiguration.
+//! subscribing to that registry. The controller is also the tunnel address
+//! authority (spec
+//! `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`): the
+//! answer carries this proxy's `tunnel_address`, which startup needs *before*
+//! the WireGuard interface can be brought up.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -23,75 +19,169 @@ struct ProxyRegistration<'a> {
     name: &'a str,
     pubkey: &'a str,
     endpoint: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_address: Option<&'a str>,
 }
 
-#[derive(Deserialize)]
-struct RegisterResponse {
-    revision: u64,
+/// What the controller answers to a successful `POST /proxy-peers`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Registered {
+    pub revision: u64,
+    pub tunnel_address: String,
+    #[serde(default)]
+    pub tunnel_network: Option<String>,
 }
 
-/// One registration attempt. Returns the revision the controller assigned.
+/// This proxy's identity/facts as submitted on every registration.
+#[derive(Clone)]
+pub struct Registration {
+    pub name: String,
+    pub pubkey: String,
+    /// This proxy's public dial-out address (`ip:port`) — required for a proxy.
+    pub endpoint: String,
+    /// A pinned tunnel address (bare IP); `None` asks the controller to allocate.
+    pub address: Option<String>,
+}
+
+fn body(reg: &Registration) -> ProxyRegistration<'_> {
+    ProxyRegistration {
+        name: &reg.name,
+        pubkey: &reg.pubkey,
+        endpoint: &reg.endpoint,
+        tunnel_address: reg.address.as_deref(),
+    }
+}
+
+#[derive(Debug)]
+pub enum RegisterError {
+    /// The controller understood and refused (4xx): retrying cannot help.
+    Rejected(String),
+    /// Transport trouble or a 5xx: worth retrying.
+    Transient(anyhow::Error),
+}
+
+impl std::fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterError::Rejected(m) => f.write_str(m),
+            RegisterError::Transient(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for RegisterError {}
+
+/// The HTTP client for every controller call. The timeouts are what make the
+/// retry budget real: without them a controller that accepts TCP but never
+/// answers would block startup (and the refresh loop) forever.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("a reqwest client with only timeouts always builds")
+}
+
+/// One registration attempt.
 pub async fn register_once(
     client: &reqwest::Client,
     controller_url: &str,
     token: Option<&str>,
-    name: &str,
-    pubkey: &str,
-    endpoint: &str,
-) -> anyhow::Result<u64> {
-    let body = ProxyRegistration {
-        name,
-        pubkey,
-        endpoint,
-    };
+    reg: &Registration,
+) -> Result<Registered, RegisterError> {
     let url = format!("{}/proxy-peers", controller_url.trim_end_matches('/'));
-    let mut req = client.post(&url).json(&body);
+    let mut req = client.post(&url).json(&body(reg));
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("registering with the controller at {url}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("controller rejected proxy registration ({status}): {text}");
+    let resp = req.send().await.map_err(|e| {
+        RegisterError::Transient(
+            anyhow::Error::new(e).context(format!("registering with the controller at {url}")),
+        )
+    })?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp.json().await.map_err(|e| {
+            RegisterError::Transient(
+                anyhow::Error::new(e).context("parsing the controller's registration response"),
+            )
+        });
     }
-    let parsed: RegisterResponse = resp
-        .json()
-        .await
-        .context("parsing the controller's proxy registration response")?;
-    Ok(parsed.revision)
+    let text = resp.text().await.unwrap_or_default();
+    let msg = format!("controller rejected proxy registration ({status}): {text}");
+    if status.is_client_error() {
+        Err(RegisterError::Rejected(msg))
+    } else {
+        Err(RegisterError::Transient(anyhow::anyhow!(msg)))
+    }
 }
 
-/// Registers immediately, then keeps re-registering every `interval` for as
-/// long as the process runs — same fixed-interval-refresh posture
-/// `gsp-agent::register::run` uses, for the same reason (no "did anything
-/// change" signal to key off yet).
+/// Retries transient failures with backoff until `budget` runs out; a
+/// rejection (4xx) returns immediately.
+pub async fn register_with_retry(
+    client: &reqwest::Client,
+    controller_url: &str,
+    token: Option<&str>,
+    reg: &Registration,
+    budget: Duration,
+) -> Result<Registered, RegisterError> {
+    let deadline = Instant::now() + budget;
+    let mut delay = Duration::from_millis(500);
+    loop {
+        match register_once(client, controller_url, token, reg).await {
+            Ok(r) => return Ok(r),
+            Err(e @ RegisterError::Rejected(_)) => return Err(e),
+            Err(RegisterError::Transient(e)) => {
+                if Instant::now() + delay >= deadline {
+                    return Err(RegisterError::Transient(e));
+                }
+                tracing::warn!(error = %format!("{e:#}"), "controller not ready; retrying registration");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+/// `Some(message)` when the controller now reports a different address than
+/// the one this process is running with. Never fatal: a live interface must
+/// not be torn down over a registry change — a restart applies the new one.
+pub fn address_change(running: &str, reported: &str) -> Option<String> {
+    (running != reported).then(|| {
+        format!(
+            "the controller now assigns tunnel address {reported} but this process is running \
+             with {running}; keeping {running} — restart to apply the new address"
+        )
+    })
+}
+
+/// Re-registers every `interval` for as long as the process runs (a fixed
+/// refresh: there is no "did anything change" signal to key off yet).
+/// `running_address` is the bare IP the interface was brought up with.
 pub async fn run(
     client: reqwest::Client,
     controller_url: String,
     token: Option<String>,
-    name: String,
-    pubkey: String,
-    endpoint: String,
+    reg: Registration,
     interval: Duration,
+    running_address: String,
 ) {
+    let mut warned = false;
     loop {
-        match register_once(
-            &client,
-            &controller_url,
-            token.as_deref(),
-            &name,
-            &pubkey,
-            &endpoint,
-        )
-        .await
-        {
-            Ok(revision) => {
-                tracing::info!(revision, "registered as a proxy peer with the controller")
+        match register_once(&client, &controller_url, token.as_deref(), &reg).await {
+            Ok(r) => {
+                tracing::info!(
+                    revision = r.revision,
+                    "registered as a proxy peer with the controller"
+                );
+                match address_change(&running_address, &r.tunnel_address) {
+                    Some(msg) if !warned => {
+                        tracing::error!("{msg}");
+                        warned = true;
+                    }
+                    Some(_) => {}
+                    None => warned = false,
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to register as a proxy peer; will retry")
@@ -105,33 +195,164 @@ pub async fn run(
 mod tests {
     use super::*;
 
+    fn reg() -> Registration {
+        Registration {
+            name: "edge-1".into(),
+            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            endpoint: "203.0.113.9:51820".into(),
+            address: None,
+        }
+    }
+
     #[test]
-    fn a_registration_serializes_all_fields() {
-        let reg = ProxyRegistration {
-            name: "edge-1",
-            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            endpoint: "203.0.113.9:51820",
-        };
-        let json = serde_json::to_string(&reg).unwrap();
-        assert!(json.contains("\"name\":\"edge-1\""));
+    fn the_tunnel_address_is_omitted_from_the_body_when_not_pinned() {
+        let json = serde_json::to_string(&body(&reg())).unwrap();
+        assert!(!json.contains("tunnel_address"));
         assert!(json.contains("\"endpoint\":\"203.0.113.9:51820\""));
     }
 
+    #[test]
+    fn a_pinned_address_is_serialized() {
+        let mut r = reg();
+        r.address = Some("10.60.0.3".into());
+        let json = serde_json::to_string(&body(&r)).unwrap();
+        assert!(json.contains("\"tunnel_address\":\"10.60.0.3\""));
+    }
+
+    #[test]
+    fn address_change_reports_only_a_real_difference() {
+        assert_eq!(address_change("10.60.0.5", "10.60.0.5"), None);
+        let msg = address_change("10.60.0.5", "10.60.0.9").unwrap();
+        assert!(msg.contains("10.60.0.5") && msg.contains("10.60.0.9"));
+        assert!(msg.contains("restart"));
+    }
+
+    /// A one-shot HTTP server answering every request with a canned response.
+    async fn canned(status_line: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
-    async fn register_once_surfaces_a_rejection_as_an_error() {
-        // No real controller listening on this port — `send()` itself fails
-        // (connection refused), the common real-world case (controller not
-        // up yet), and should be a clear error, not a panic.
-        let client = reqwest::Client::new();
-        let result = register_once(
-            &client,
-            "http://127.0.0.1:1",
-            None,
-            "edge-1",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "203.0.113.9:51820",
+    async fn a_successful_registration_parses_the_assigned_address_and_network() {
+        let url = canned(
+            "200 OK",
+            r#"{"revision":4,"tunnel_address":"10.60.0.3","tunnel_network":"10.60.0.0/16"}"#,
         )
         .await;
-        assert!(result.is_err());
+        let got = register_once(&reqwest::Client::new(), &url, None, &reg())
+            .await
+            .unwrap();
+        assert_eq!(got.tunnel_address, "10.60.0.3");
+        assert_eq!(got.tunnel_network.as_deref(), Some("10.60.0.0/16"));
+    }
+
+    #[tokio::test]
+    async fn a_4xx_is_a_permanent_rejection_carrying_the_controllers_message() {
+        let url = canned(
+            "409 Conflict",
+            r#"{"error":"address 10.60.0.2 is already held by origin \"x\""}"#,
+        )
+        .await;
+        match register_once(&reqwest::Client::new(), &url, None, &reg()).await {
+            Err(RegisterError::Rejected(m)) => assert!(m.contains("already held"), "{m}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_5xx_or_a_refused_connection_is_transient() {
+        let url = canned("503 Service Unavailable", r#"{"error":"exhausted"}"#).await;
+        assert!(matches!(
+            register_once(&reqwest::Client::new(), &url, None, &reg()).await,
+            Err(RegisterError::Transient(_))
+        ));
+        assert!(matches!(
+            register_once(&reqwest::Client::new(), "http://127.0.0.1:1", None, &reg()).await,
+            Err(RegisterError::Transient(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn retrying_gives_up_on_a_permanent_rejection_immediately() {
+        let url = canned("409 Conflict", r#"{"error":"held"}"#).await;
+        let started = std::time::Instant::now();
+        let err = register_with_retry(
+            &reqwest::Client::new(),
+            &url,
+            None,
+            &reg(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RegisterError::Rejected(_)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must not retry a 409"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_controller_does_not_block_startup_past_the_budget() {
+        // Accepts the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                held.push(s);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(
+            Duration::from_secs(10),
+            register_with_retry(&client, &url, None, &reg(), Duration::from_secs(1)),
+        )
+        .await
+        .expect("registration hung past the retry budget");
+        assert!(matches!(got, Err(RegisterError::Transient(_))));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn the_production_client_has_a_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                held.push(s);
+            }
+        });
+        // Must give up on its own (10 s request timeout), never hang.
+        let got = tokio::time::timeout(
+            Duration::from_secs(20),
+            register_once(&http_client(), &url, None, &reg()),
+        )
+        .await
+        .expect("http_client() has no request timeout");
+        assert!(matches!(got, Err(RegisterError::Transient(_))));
     }
 }

@@ -16,12 +16,10 @@
 //! disconnected (`docs/10` principle 4, "freeze on last-known-good,
 //! applied here to WireGuard peers instead of routing config").
 //!
-//! **Scope of this slice**: this task only ever adds/updates a peer — it
-//! never removes one, even if an origin stops registering. A registration
-//! is asserted (`docs/10`'s framing: "last known good"), and there's no
-//! signal here yet for "this origin is gone for good" vs. "temporarily
-//! unreachable"; removal is left for a later pass once that distinction is
-//! designed. `endpoint` is only ever set when the origin's registration
+//! **Removal**: an origin's deletion arrives as a controller tombstone
+//! (`removed`) and removes the matching WireGuard peer; silence alone never
+//! does ("last known good"). Each origin is routed as one `/32` host route to
+//! its controller-assigned tunnel address. `endpoint` is only ever set when the origin's registration
 //! carries one (i.e. this proxy could dial out); the common case — an
 //! origin behind a home NAT — leaves the peer endpoint-less, and this
 //! proxy passively waits for the origin's own `gsp-agent` to initiate the
@@ -30,6 +28,7 @@
 //! a known public address in this design, so there's no discovery problem
 //! on that side).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -139,9 +138,9 @@ where
 
 /// One origin's registration, exactly as `gsp-controller::peers::
 /// PeerRegistration` serializes it (duplicated wire shape — same precedent
-/// `controller_client`'s hand-parsed SSE and `aggregator_client`'s
-/// duplicated `IngestPayload` already established).
-#[derive(Debug, Deserialize, PartialEq)]
+/// `controller_client`'s hand-parsed SSE and `aggregator_client`'s duplicated
+/// `IngestPayload` already established).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct PeerRegistration {
     name: String,
     pubkey: String,
@@ -149,30 +148,31 @@ struct PeerRegistration {
     endpoint: Option<String>,
     #[serde(default)]
     backends: Vec<String>,
+    #[serde(default)]
+    tunnel_address: Option<String>,
 }
 
-/// Builds the WireGuard peer this registration implies: `allowed_ips` is
-/// every backend address as a `/32` (or `/128`) host route — exactly the
-/// tunnel-internal addresses this origin fronts, nothing wider — and
-/// `endpoint` is only set when the registration carries one (see the
-/// module doc on why that's the common-case-absent field, not a bug).
+/// Builds the WireGuard peer this registration implies: a **host route to the
+/// origin's own tunnel address** (`/32`) — the controller guarantees it is
+/// unique and that every backend lives on it — and `endpoint` only when the
+/// registration carries one (the common-case-absent field, not a bug).
 fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
     let key = Key::try_from(reg.pubkey.as_str())
         .map_err(|e| anyhow::anyhow!("origin {:?} has an invalid pubkey: {e}", reg.name))?;
+    let addr = reg.tunnel_address.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "origin {:?} has no tunnel_address (is the controller up to date?)",
+            reg.name
+        )
+    })?;
+    let ip: std::net::Ipv4Addr = addr.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "origin {:?} tunnel_address {addr:?} is invalid: {e}",
+            reg.name
+        )
+    })?;
     let mut peer = Peer::new(key);
-
-    let mut allowed_ips = Vec::with_capacity(reg.backends.len());
-    for b in &reg.backends {
-        let addr: std::net::SocketAddr = b.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "origin {:?} backend {b:?} is not a valid ip:port: {e}",
-                reg.name
-            )
-        })?;
-        allowed_ips.push(IpAddrMask::host(addr.ip()));
-    }
-    peer.set_allowed_ips(allowed_ips);
-
+    peer.set_allowed_ips(vec![IpAddrMask::host(std::net::IpAddr::V4(ip))]);
     if let Some(endpoint) = &reg.endpoint {
         peer.set_endpoint(endpoint).map_err(|e| {
             anyhow::anyhow!(
@@ -201,8 +201,7 @@ pub async fn run(
     wg: std::sync::Arc<dyn WireguardInterfaceApi + Send + Sync>,
 ) {
     let mut backoff = RECONNECT_MIN;
-    let mut last_applied: std::collections::HashMap<String, PeerRegistration> =
-        std::collections::HashMap::new();
+    let mut last_applied: HashMap<String, PeerRegistration> = HashMap::new();
     loop {
         match subscribe_once(
             &controller_url,
@@ -236,7 +235,7 @@ async fn subscribe_once(
     base_url: &str,
     token: Option<&str>,
     wg: &(dyn WireguardInterfaceApi + Send + Sync),
-    last_applied: &mut std::collections::HashMap<String, PeerRegistration>,
+    last_applied: &mut HashMap<String, PeerRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/peers/subscribe");
     let mut req = reqwest::Client::new().get(&url);
@@ -266,30 +265,82 @@ async fn subscribe_once(
         while let Some(end) = buf.find("\n\n") {
             let event = buf[..end].to_string();
             buf.drain(..end + 2);
-            if let Some(reg) = parse_sse_event(&event) {
-                if last_applied.get(&reg.name) == Some(&reg) {
-                    continue; // unchanged since last apply — don't churn the session
+            if let Some(ev) = parse_sse_event(&event) {
+                match plan(last_applied, &ev) {
+                    Action::Skip => {}
+                    Action::Reconcile(reg) => {
+                        reconcile_peer(wg, reg);
+                        last_applied.insert(reg.name.clone(), reg.clone());
+                    }
+                    Action::Remove(pubkey) => {
+                        if let Event::Removed(name) = &ev {
+                            remove_peer(wg, name, &pubkey);
+                            last_applied.remove(name);
+                        }
+                    }
                 }
-                let name = reg.name.clone();
-                reconcile_peer(wg, &reg);
-                last_applied.insert(name, reg);
             }
         }
     }
 }
 
-/// Parses one SSE event block (`gsp-controller`'s `data:
-/// {"revision":N,"registration":{...}}` shape). `None` for anything that
-/// isn't a data event — a keep-alive comment block, or a malformed one —
-/// exactly like `controller_client::parse_sse_event`'s posture: the
-/// connection is still healthy, there's simply nothing to reconcile.
-fn parse_sse_event(event: &str) -> Option<PeerRegistration> {
+#[derive(Debug, PartialEq)]
+enum Event {
+    Registered(PeerRegistration),
+    Removed(String),
+}
+
+/// Parses one SSE event block — identical shape to
+/// `gsp-agent::proxy_subscribe::parse_sse_event`.
+fn parse_sse_event(event: &str) -> Option<Event> {
     let data_line = event
         .split('\n')
         .find_map(|line| line.strip_prefix("data:"))?
         .trim_start();
     let payload: serde_json::Value = serde_json::from_str(data_line).ok()?;
-    serde_json::from_value(payload.get("registration")?.clone()).ok()
+    if let Some(name) = payload
+        .get("removed")
+        .and_then(|r| r.get("name"))
+        .and_then(|n| n.as_str())
+    {
+        return Some(Event::Removed(name.to_string()));
+    }
+    serde_json::from_value(payload.get("registration")?.clone())
+        .ok()
+        .map(Event::Registered)
+}
+
+#[derive(Debug, PartialEq)]
+enum Action<'a> {
+    Skip,
+    Reconcile(&'a PeerRegistration),
+    /// Remove the WireGuard peer with this pubkey.
+    Remove(String),
+}
+
+/// What to do with `event` given what is already applied — pure, so the
+/// catch-up replay (add, then removal) is testable without a WireGuard device.
+fn plan<'a>(applied: &HashMap<String, PeerRegistration>, event: &'a Event) -> Action<'a> {
+    match event {
+        Event::Registered(reg) if applied.get(&reg.name) == Some(reg) => Action::Skip,
+        Event::Registered(reg) => Action::Reconcile(reg),
+        Event::Removed(name) => match applied.get(name) {
+            Some(old) => Action::Remove(old.pubkey.clone()),
+            None => Action::Skip,
+        },
+    }
+}
+
+fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubkey: &str) {
+    match Key::try_from(pubkey) {
+        Ok(key) => match wg.remove_peer(&key) {
+            Ok(()) => tracing::info!(origin = %name, "removed wireguard peer for a deleted origin"),
+            Err(e) => tracing::warn!(origin = %name, error = %e, "failed to remove wireguard peer"),
+        },
+        Err(e) => {
+            tracing::error!(origin = %name, error = %e, "cannot remove a peer with an invalid pubkey")
+        }
+    }
 }
 
 /// Removes any existing peer under this pubkey before adding it back with
@@ -314,6 +365,7 @@ fn reconcile_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), reg: &PeerRegi
             match wg.configure_peer(&peer) {
                 Ok(()) => tracing::info!(
                     origin = %reg.name,
+                    address = ?reg.tunnel_address,
                     backends = ?reg.backends,
                     has_endpoint = reg.endpoint.is_some(),
                     "reconciled wireguard peer for origin"
@@ -338,7 +390,9 @@ mod tests {
     #[test]
     fn parses_a_well_formed_data_event() {
         let event = r#"data: {"revision":1,"registration":{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.7:51820","backends":["10.60.0.2:1"]}}"#;
-        let reg = parse_sse_event(event).unwrap();
+        let Some(Event::Registered(reg)) = parse_sse_event(event) else {
+            panic!("expected a registration event");
+        };
         assert_eq!(reg.name, "home");
         assert_eq!(reg.endpoint.as_deref(), Some("203.0.113.7:51820"));
         assert_eq!(reg.backends, vec!["10.60.0.2:1"]);
@@ -366,33 +420,9 @@ mod tests {
             pubkey: "not-a-key".into(),
             endpoint: None,
             backends: vec![],
+            tunnel_address: None,
         };
         assert!(to_wg_peer(&reg).is_err());
-    }
-
-    #[test]
-    fn to_wg_peer_rejects_a_malformed_backend_address() {
-        let reg = PeerRegistration {
-            name: "home".into(),
-            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
-            endpoint: None,
-            backends: vec!["not-an-addr".into()],
-        };
-        assert!(to_wg_peer(&reg).is_err());
-    }
-
-    #[test]
-    fn to_wg_peer_builds_host_allowed_ips_from_backends() {
-        let reg = PeerRegistration {
-            name: "home".into(),
-            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
-            endpoint: Some("203.0.113.7:51820".into()),
-            backends: vec!["10.60.0.2:25565".into(), "10.60.0.3:25566".into()],
-        };
-        let peer = to_wg_peer(&reg).unwrap();
-        assert_eq!(peer.allowed_ips.len(), 2);
-        assert!(peer.allowed_ips.iter().all(|ip| ip.cidr == 32));
-        assert!(peer.endpoint.is_some());
     }
 
     #[test]
@@ -402,8 +432,81 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: None,
             backends: vec![],
+            tunnel_address: Some("10.60.0.5".into()),
         };
         let peer = to_wg_peer(&reg).unwrap();
         assert!(peer.endpoint.is_none());
+    }
+
+    fn reg(addr: Option<&str>) -> PeerRegistration {
+        PeerRegistration {
+            name: "home".into(),
+            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            endpoint: None,
+            backends: vec![],
+            tunnel_address: addr.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn to_wg_peer_routes_the_origins_tunnel_address_as_a_host_route() {
+        // Even with no backends yet the origin is reachable at its address.
+        let peer = to_wg_peer(&reg(Some("10.60.0.5"))).unwrap();
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.allowed_ips[0].cidr, 32);
+        assert_eq!(peer.allowed_ips[0].address.to_string(), "10.60.0.5");
+    }
+
+    #[test]
+    fn to_wg_peer_rejects_an_origin_without_a_tunnel_address() {
+        assert!(to_wg_peer(&reg(None)).is_err());
+    }
+
+    #[test]
+    fn parses_a_registration_and_a_tombstone_event() {
+        let event = r#"data: {"revision":1,"registration":{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.7:51820","backends":["10.60.0.2:1"],"tunnel_address":"10.60.0.2"}}"#;
+        assert!(matches!(parse_sse_event(event), Some(Event::Registered(_))));
+        let gone = r#"data: {"revision":2,"removed":{"name":"home"}}"#;
+        assert_eq!(parse_sse_event(gone), Some(Event::Removed("home".into())));
+    }
+
+    #[test]
+    fn plan_skips_unchanged_reconciles_changed_and_removes_known() {
+        let mut applied = HashMap::new();
+        let r = reg(Some("10.60.0.5"));
+        assert_eq!(
+            plan(&applied, &Event::Registered(r.clone())),
+            Action::Reconcile(&r)
+        );
+        applied.insert(r.name.clone(), r.clone());
+        assert_eq!(plan(&applied, &Event::Registered(r.clone())), Action::Skip);
+        assert_eq!(
+            plan(&applied, &Event::Removed("home".into())),
+            Action::Remove(r.pubkey.clone())
+        );
+        assert_eq!(
+            plan(&applied, &Event::Removed("other".into())),
+            Action::Skip
+        );
+    }
+
+    #[test]
+    fn registered_then_removed_leaves_nothing() {
+        // A catch-up from revision 0 replays the add and then the removal;
+        // applying both in order must end with no peer tracked.
+        let mut applied = HashMap::new();
+        let r = reg(Some("10.60.0.5"));
+        let add = Event::Registered(r.clone());
+        match plan(&applied, &add) {
+            Action::Reconcile(reg) => {
+                applied.insert(reg.name.clone(), reg.clone());
+            }
+            other => panic!("expected Reconcile, got {other:?}"),
+        }
+        assert_eq!(applied.len(), 1);
+        let del = Event::Removed("home".into());
+        assert_eq!(plan(&applied, &del), Action::Remove(r.pubkey.clone()));
+        applied.remove("home");
+        assert!(applied.is_empty());
     }
 }

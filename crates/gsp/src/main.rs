@@ -14,6 +14,7 @@ mod proxy_register;
 mod reload;
 mod resolver;
 mod sniffer_loader;
+mod tunnel_address;
 mod tunnel_client;
 
 use std::path::PathBuf;
@@ -84,7 +85,7 @@ struct Args {
     /// Enables phase 14's WireGuard backend transport (`docs/11`):
     /// brings up a local interface with this name and reconciles its peer
     /// list from `--tunnel-controller-url`'s backend-peers registry.
-    /// Requires `--tunnel-address` and `--tunnel-controller-url`. Omit to
+    /// Requires `--tunnel-controller-url`. Omit to
     /// leave this feature off entirely — today's exact behavior otherwise.
     #[arg(long)]
     tunnel_iface: Option<String>,
@@ -93,8 +94,10 @@ struct Args {
     #[arg(long, default_value_t = 51820)]
     tunnel_listen_port: u16,
 
-    /// This proxy's own tunnel-internal address, `ip/cidr` (e.g.
-    /// `10.60.0.1/24`). Required with `--tunnel-iface`.
+    /// Optional. This proxy's own tunnel-internal address as `ip/prefix`
+    /// (e.g. `10.60.0.1/24`): pins that address with the controller (the
+    /// prefix is used only when the controller reports no network). Omit to
+    /// let the controller allocate one.
     #[arg(long)]
     tunnel_address: Option<String>,
 
@@ -144,7 +147,7 @@ struct Args {
 struct TunnelConfig {
     iface: String,
     listen_port: u16,
-    address: String,
+    address: Option<String>,
     key_file: PathBuf,
     controller_url: String,
     controller_token: Option<String>,
@@ -183,10 +186,6 @@ fn main() -> anyhow::Result<()> {
 async fn async_main(args: Args) -> anyhow::Result<()> {
     let tunnel_config = match &args.tunnel_iface {
         Some(iface) => {
-            let address = args
-                .tunnel_address
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-address"))?;
             let controller_url = args.tunnel_controller_url.clone().ok_or_else(|| {
                 anyhow::anyhow!("--tunnel-iface requires --tunnel-controller-url")
             })?;
@@ -201,7 +200,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             Some(TunnelConfig {
                 iface: iface.clone(),
                 listen_port: args.tunnel_listen_port,
-                address,
+                address: args.tunnel_address.clone(),
                 key_file: args.tunnel_key_file.clone(),
                 controller_url,
                 controller_token: args.tunnel_controller_token.clone(),
@@ -387,10 +386,57 @@ async fn run(
         Some(tc) => {
             let private_key = tunnel_client::load_or_generate_key(&tc.key_file)
                 .with_context(|| format!("loading tunnel key from {:?}", tc.key_file))?;
-            let address: defguard_wireguard_rs::net::IpAddrMask =
-                tc.address.parse().map_err(|e| {
-                    anyhow::anyhow!("--tunnel-address {:?} is invalid: {e}", tc.address)
-                })?;
+            let pubkey = private_key.public_key().to_string();
+
+            // The controller is the address authority: register BEFORE the
+            // interface exists (the answer is its address) and before any
+            // listener binds — a failure here is a failing `--tunnel-*`.
+            let pinned_cidr = tc.address.clone();
+            if let Some(c) = pinned_cidr.as_deref() {
+                tunnel_address::ip_of(c)
+                    .parse::<std::net::Ipv4Addr>()
+                    .with_context(|| format!("--tunnel-address {c:?} must be an IPv4 ip/prefix"))?;
+            }
+            let reg = proxy_register::Registration {
+                name: tc.name.clone(),
+                pubkey,
+                endpoint: tc.endpoint.clone(),
+                address: pinned_cidr
+                    .as_deref()
+                    .map(|c| tunnel_address::ip_of(c).to_string()),
+            };
+            let client = proxy_register::http_client();
+            let addr_path = {
+                let mut p = tc.key_file.clone().into_os_string();
+                p.push(".address");
+                PathBuf::from(p)
+            };
+            let outcome = proxy_register::register_with_retry(
+                &client,
+                &tc.controller_url,
+                tc.controller_token.as_deref(),
+                &reg,
+                Duration::from_secs(30),
+            )
+            .await;
+            let start = tunnel_address::resolve_startup(
+                outcome,
+                pinned_cidr.as_deref(),
+                tunnel_address::load(&addr_path),
+            )?;
+            match start.source {
+                tunnel_address::Source::Controller => {
+                    tunnel_address::save(&addr_path, &start.cidr)?
+                }
+                tunnel_address::Source::Saved => tracing::warn!(
+                    address = %start.cidr,
+                    "controller unreachable; starting with the last saved tunnel address"
+                ),
+            }
+            let address: defguard_wireguard_rs::net::IpAddrMask = start
+                .cidr
+                .parse()
+                .map_err(|e| anyhow::anyhow!("tunnel address {:?} is invalid: {e}", start.cidr))?;
             let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> =
                 Arc::from(tunnel_client::bring_up(
                     &tc.iface,
@@ -402,6 +448,7 @@ async fn run(
             tracing::info!(
                 iface = %tc.iface,
                 port = tc.listen_port,
+                address = %start.cidr,
                 pubkey = %private_key.public_key(),
                 controller = %tc.controller_url,
                 "wireguard tunnel interface up; subscribing to backend-peers updates"
@@ -411,18 +458,15 @@ async fn run(
                 tc.controller_token.clone(),
                 wg.clone(),
             ));
-            // Phase 14 slice 7: register ourselves with the same
-            // controller's proxy-peers registry, so every origin's
-            // `gsp-agent` can peer with us without any origin-side
-            // reconfiguration — the mirror image of `task` above.
+            // Register ourselves (periodically) so every origin's `gsp-agent`
+            // can peer with us — the mirror image of `task` above.
             let register_task = tokio::spawn(proxy_register::run(
-                reqwest::Client::new(),
+                client,
                 tc.controller_url,
                 tc.controller_token,
-                tc.name,
-                private_key.public_key().to_string(),
-                tc.endpoint,
+                reg,
                 tc.register_interval,
+                tunnel_address::ip_of(&start.cidr).to_string(),
             ));
             Some((task, register_task, wg))
         }

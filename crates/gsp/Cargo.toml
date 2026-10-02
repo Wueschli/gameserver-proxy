@@ -42,3 +42,4 @@ tonic-build.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 hickory-server = { version = "0.26", features = ["testing"] }
 wat.workspace = true
+tempfile.workspace = true
