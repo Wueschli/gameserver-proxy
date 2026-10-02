@@ -22,6 +22,8 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 arc-swap.workspace = true
 tracing.workspace = true
+# `TlsArgs`: the shared `--tls-cert`/`--tls-key` flags.
+clap.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

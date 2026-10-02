@@ -103,19 +103,9 @@ struct Args {
     #[arg(long)]
     ca_file: Option<PathBuf>,
 
-    /// PEM certificate chain (leaf first) to serve HTTPS with on `--listen`
-    /// instead of plain HTTP. Requires `--tls-key`. Re-read when the file
-    /// changes (checked every 30 s), so a renewed certificate needs no restart.
-    #[arg(long, requires = "tls_key")]
-    tls_cert: Option<PathBuf>,
-
-    /// PEM private key for `--tls-cert`.
-    #[arg(long, requires = "tls_cert")]
-    tls_key: Option<PathBuf>,
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
 }
-
-/// How often `--tls-cert`/`--tls-key` are checked for a renewed certificate.
-const TLS_RELOAD_EVERY: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -152,15 +142,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
     // Load (and validate) the serving certificate before anything else starts.
-    let tls_cert = match (&args.tls_cert, &args.tls_key) {
-        (Some(cert), Some(key)) => Some(gsp_http::tls::ReloadingCert::new(
-            gsp_http::tls::TlsFiles {
-                cert: cert.clone(),
-                key: key.clone(),
-            },
-        )?),
-        _ => None,
-    };
+    let tls_cert = args.tls.load()?;
     if !args.ha_peers.is_empty() {
         // resolve_flags refuses --tunnel-network under HA, so this is pin-only mode.
         tracing::warn!(
@@ -406,19 +388,7 @@ async fn main() -> anyhow::Result<()> {
         app = app.merge(ha::routes::router(handle));
     }
 
-    match tls_cert {
-        Some(cert) => {
-            let listener = gsp_http::tls::TlsListener::bind(args.listen, cert.clone()).await?;
-            gsp_http::tls::spawn_reloader(cert, TLS_RELOAD_EVERY);
-            tracing::info!(listen = %args.listen, "gsp-controller serving HTTPS");
-            axum::serve(listener, app).await?;
-        }
-        None => {
-            let listener = tokio::net::TcpListener::bind(args.listen).await?;
-            tracing::info!(listen = %args.listen, "gsp-controller listening");
-            axum::serve(listener, app).await?;
-        }
-    }
+    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-controller").await?;
 
     Ok(())
 }

@@ -1,10 +1,11 @@
-//! Native TLS for the fleet's HTTP servers (`gsp-controller --tls-cert/--tls-key`).
+//! Native TLS for the fleet's HTTP servers (`--tls-cert/--tls-key`, [`TlsArgs`]).
 //!
 //! [`ReloadingCert`] holds the served certificate behind an `ArcSwap` and re-reads
 //! the PEM files when their mtime changes, so a renewed certificate (certbot,
 //! cert-manager) is picked up without a restart; a broken or half-written
 //! replacement keeps the current one. [`TlsListener`] is an `axum::serve::Listener`
 //! that runs each handshake in its own task, so a slow client never blocks accepts.
+//! [`serve`] picks HTTPS or plain HTTP for a binary's `--listen`.
 
 use std::fmt;
 use std::io;
@@ -279,4 +280,60 @@ pub fn spawn_reloader(cert: Arc<ReloadingCert>, every: Duration) -> JoinHandle<(
             }
         }
     })
+}
+
+/// `--tls-cert`/`--tls-key`, shared by every fleet binary that serves HTTP
+/// (`#[command(flatten)]` into its `Args`).
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct TlsArgs {
+    /// PEM certificate chain (leaf first) to serve HTTPS with on `--listen`
+    /// instead of plain HTTP. Requires `--tls-key`. Re-read when the file
+    /// changes (checked every 30 s), so a renewed certificate needs no restart.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key for `--tls-cert`.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+}
+
+impl TlsArgs {
+    /// Load and validate the pair, if given (a bad file is a startup error).
+    pub fn load(&self) -> Result<Option<Arc<ReloadingCert>>, TlsError> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => ReloadingCert::new(TlsFiles {
+                cert: cert.clone(),
+                key: key.clone(),
+            })
+            .map(Some),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// How often a served certificate's files are checked for a renewed pair.
+pub const RELOAD_EVERY: Duration = Duration::from_secs(30);
+
+/// Serve `app` on `addr` until the server fails: HTTPS through [`TlsListener`]
+/// (with the files re-read every [`RELOAD_EVERY`]) when `cert` is set, plain
+/// HTTP otherwise. `name` is the binary, for the startup log line.
+pub async fn serve(
+    addr: SocketAddr,
+    app: axum::Router,
+    cert: Option<Arc<ReloadingCert>>,
+    name: &str,
+) -> io::Result<()> {
+    match cert {
+        Some(cert) => {
+            let listener = TlsListener::bind(addr, cert.clone()).await?;
+            let _reloader = AbortOnDrop(spawn_reloader(cert, RELOAD_EVERY));
+            tracing::info!(listen = %addr, "{name} serving HTTPS");
+            axum::serve(listener, app).await
+        }
+        None => {
+            let listener = TcpListener::bind(addr).await?;
+            tracing::info!(listen = %addr, "{name} listening");
+            axum::serve(listener, app).await
+        }
+    }
 }

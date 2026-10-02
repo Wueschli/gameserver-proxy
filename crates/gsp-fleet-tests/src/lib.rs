@@ -351,6 +351,8 @@ pub struct GspArgs {
     pub aggregator_url: Option<String>,
     pub aggregator_instance: Option<String>,
     pub aggregator_interval_sec: u64,
+    /// Further command-line arguments, appended last (e.g. `--ca-file`).
+    pub extra: Vec<String>,
 }
 
 impl Default for GspArgs {
@@ -362,6 +364,7 @@ impl Default for GspArgs {
             aggregator_url: None,
             aggregator_instance: None,
             aggregator_interval_sec: 1,
+            extra: Vec::new(),
         }
     }
 }
@@ -390,6 +393,7 @@ pub fn spawn_gsp(args: GspArgs) -> Result<Proc> {
     }
     argv.push("--aggregator-interval-sec".to_string());
     argv.push(args.aggregator_interval_sec.to_string());
+    argv.extend(args.extra);
     Proc::spawn("gsp", &argv)
 }
 
@@ -424,10 +428,14 @@ pub fn spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) ->
 }
 
 pub fn spawn_aggregator(listen_port: u16) -> Result<Proc> {
-    Proc::spawn(
-        "gsp-aggregator",
-        &["--listen".to_string(), format!("127.0.0.1:{listen_port}")],
-    )
+    spawn_aggregator_with(listen_port, &[])
+}
+
+/// Like [`spawn_aggregator`] with extra command-line arguments.
+pub fn spawn_aggregator_with(listen_port: u16, extra: &[String]) -> Result<Proc> {
+    let mut args = vec!["--listen".to_string(), format!("127.0.0.1:{listen_port}")];
+    args.extend(extra.iter().cloned());
+    Proc::spawn("gsp-aggregator", &args)
 }
 
 /// True once the port refuses new connections (used after killing a
