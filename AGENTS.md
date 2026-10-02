@@ -217,6 +217,18 @@ client from `crates/gsp/proto/resolver.proto`.
 - **Pre-1.0: prefer clean breaks over compatibility shims.** When you change the
   config schema, update *all four*: `gsp-config` types + `validate()`,
   `config.example.yaml`, and `docs/05-configuration.md`.
+- **How sessions are run here (owner's expectations, 2026-10-02).** Larger work follows
+  the superpowers flow: brainstorm (one question at a time, designs approved section by
+  section) → a written spec in `docs/superpowers/specs/` → a written plan in
+  `docs/superpowers/plans/` → execution with strict TDD (show the RED run, then GREEN) and
+  verification before claiming done; big plans run subagent-driven (fresh implementer per
+  task + spec/quality review + a final whole-branch review). Specs and plans are committed;
+  `.superpowers/` is git-ignored scratch (ledgers, briefs, review packages). Reviewer
+  findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
+- **CI costs money** (private repo; a full run is ~35 runner-minutes, a cold one more).
+  Batch pushes, remember that docs-only pushes skip CI (`paths-ignore`), put `[skip ci]` in
+  the tip commit message when a code push needs no run, and check `changes.sh` before adding
+  a job. Never push without being asked (rule 8).
 - Keep comments at the density of the surrounding code. Module-level `//!` docs should
   say what the module is for and note deliberate simplifications.
 

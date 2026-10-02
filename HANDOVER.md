@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-02 (end of the address-authority session; see "Resume here").
 
 ## Current state
 
@@ -14,6 +14,54 @@ Last updated: 2026-10-02.
 `make check`.** No slice is in flight — the repo is at a natural stopping point.
 Remaining work: the "Known follow-ups" table below, and making the `tunnel` and
 `deploy` CI jobs blocking once stable.
+
+### Resume here (written for picking this up on another machine)
+
+State at 2026-10-02: `main` equals `origin/main` once this commit is pushed; CI run
+36989065039 was green on every job it ran. That run was **cold** (the lockfile changed,
+and the rolling cache starts cold on a lockfile bump by design): `build-release` took
+17 min and `test` 9m41. Expect a normal code push to be much faster (~4 min each, see
+"Infra / environment") — **verify that on the next code push**; if it is still slow, the
+cache key in `.github/actions/cargo-cache` is the first suspect.
+
+Open decisions for the owner:
+
+1. **Make the `tunnel` and `deploy` CI jobs blocking** (drop `continue-on-error: true` in
+   `.github/workflows/ci.yml`). Both are green on the latest runs (`tunnel` on both
+   backends); `deploy` had exactly one real failure, a lint bug when its prebuilt-binaries
+   mode first ran (fixed). Cost to know first: each `tunnel` leg now takes ~9.5 min in CI,
+   mostly the kernel edge-restart scenario (see the follow-up on that outage).
+2. **Native TLS for `gsp-controller` is wanted eventually** (owner, 2026-10-02). It bundles
+   serving TLS itself plus two follow-ups below: custom CA support and TLS for HA/adopt
+   traffic. Until then docs/12 "gsp-controller behind TLS" is the supported pattern. New
+   controller or client code must not hard-code `http://`.
+3. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
+   Publishing (GHCR on release tags, multi-arch if arm64 is needed) is a small follow-up:
+   `deploy/Dockerfile` already has the `BIN_SOURCE` switch; it needs a release workflow,
+   tags and a registry login.
+
+Never verified outside CI or the original dev sandbox:
+
+- `make deploy-images` / `make deploy-smoke` and the compose **tunnel** override have not
+  been run on a developer machine (the dev sandbox had no Docker daemon, so they were only
+  ever exercised by the CI `deploy` job). On a machine with Docker, run both once.
+- The k8s manifests were only schema-validated (kubeconform), never applied to a cluster.
+
+Watch-list:
+
+- **2026-10-19:** `ubuntu-latest` becomes Ubuntu 26. `build-release`, `plugins` and
+  `deploy` are pinned to `ubuntu-24.04`; `test`, `tunnel`, `fuzz`, `ui` and `changes` are
+  not. The `tunnel` job depends on the AppArmor userns sysctl and the `wireguard` module —
+  re-check it after the migration.
+- `actions/cache@v4` prints a Node 20 deprecation warning (it still works); bump when a
+  Node 24 major exists.
+- A self-hosted-runner experiment on 2026-10-01 (reverted in `79d1bd7`) had a failing
+  `tunnel (userspace)` job whose log nobody read — cause unknown (host limits? sudo/apt on
+  the VPS?). Only relevant if self-hosting is tried again.
+
+Suggested order: (a) confirm the warm-cache CI timings on the next code push, (b) decide
+on blocking CI jobs, (c) pick from "Known follow-ups" — the owner's stated interest is
+native TLS and the deferred pieces of the address authority.
 
 Most recent landings (newest first; full history in `git log`):
 
@@ -199,20 +247,29 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   `timeout -s KILL` and give helper processes a longer lifetime than the proxy in
   smoke scripts. Bare `kill`/`pkill` on background test processes has also produced
   a stray "Exit code 144" from the Bash tool in this environment — wrapping each
-  process in `timeout -s KILL` instead avoids it.
+  process in `timeout -s KILL` instead avoids it. **Never `pkill -f <pattern>` from an
+  agent shell:** the pattern also matches the shell's own command line and kills it; use
+  `pkill -KILL -x <exact-process-name>` (`gsp`, `gsp-controller`, `gsp-agent`, …).
 - **`--tunnel-*` / `gsp-agent` need `CAP_NET_ADMIN` + `/dev/net/tun`** (even
-  `boringtun` userspace does, for the TUN device). This dev sandbox has neither —
-  phase 14 was verified in Docker with those granted. `TunnelSource` origin-name
-  matching: `backend_sources[].name` must equal the origin's `gsp-agent --name`
-  (intentionally the same string).
+  `boringtun` userspace does, for the TUN device). In containers grant both
+  (`docs/12`). The rootless tunnel e2e lab gets `CAP_NET_ADMIN` from a user namespace
+  (`unshare -Urnm`), so it runs without root or Docker — including in the original dev
+  sandbox. `TunnelSource` origin-name matching: `backend_sources[].name` must equal the
+  origin's `gsp-agent --name` (intentionally the same string).
 - **Phase 14 tunnel e2e** — `make tunnel-e2e` (`crates/gsp-fleet-tests/tests/tunnel.rs`,
   CI job `tunnel`, kernel + userspace matrix) runs the real `gsp-controller` /
   `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
   (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
-  The CI job is **non-blocking** (`continue-on-error: true`) until it has proven stable
-  on GitHub runners; make it required once it has. (First GitHub run, 2026-10-01,
-  commit `125ffde`: both matrix legs green — `unshare -Urnm` + tmpfs on `/run` and the
-  `wireguard` module work on the Ubuntu runners; kernel 62 s, userspace 132 s.) Needs `unshare`, `ip`,
+  The CI job is **non-blocking** (`continue-on-error: true`); making it required is an
+  open decision (see "Resume here"). It is green on both backends on GitHub (`unshare -Urnm`
+  + tmpfs on `/run` and the `wireguard` module work on the Ubuntu runners). The lab now has
+  **12 scenarios** (namespace helpers, TCP/UDP round trip, stays-up-across-re-registrations,
+  a proxy added later, **two proxies sharing one origin**, a pinned-key mismatch, a pinned
+  address collision, an edge restart keeping its address, an edge restarting with the
+  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (the
+  kernel edge-restart scenario alone waits up to 200 s). Run it with
+  `TUNNEL_BACKEND=kernel|userspace make tunnel-e2e` (plain `cargo test`) or
+  `make tunnel-e2e-ci` (nextest + JUnit; needs `cargo install cargo-nextest --locked`). Needs `unshare`, `ip`,
   `nsenter`; the userspace backend also needs `/run/wireguard`
   (the make target mounts a tmpfs on `/run` for it). Traps it taught:
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
@@ -220,8 +277,8 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   ~25 s** (the proxy has no endpoint for the origin, so it waits for the agent's
   25 s persistent keepalive; kernel is ~2 s) — observed 2026-10-01, not fixed;
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
-  names within a run. Slice 7 (proxy-peers registry) is live-verified for *one
-  proxy added after the origin*.
+  names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
+  proxies carrying traffic at once.
 
 ## Known follow-ups (none blocking)
 
@@ -230,6 +287,8 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
 | Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
 | Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
+| Native TLS in `gsp-controller` (owner wants it eventually, 2026-10-02) | Umbrella: terminate TLS in the controller itself (not designed), plus the next two rows — let clients trust a custom CA, and move HA/adopt traffic off hard-coded `http://`. Today's supported pattern is a reverse proxy (docs/12 "gsp-controller behind TLS"). Keep base URLs/schemes configurable in any new code so this stays small. |
+| Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
 | Custom CA support for the HTTP clients | `reqwest` uses `rustls-tls` (bundled `webpki-roots`, not the system store) and no flag adds a CA, so only publicly trusted certs verify behind a TLS proxy (docs/12 "gsp-controller behind TLS"). Small fix: switch to `rustls-tls-native-roots` or add a `--ca-file` |
 | TLS for HA / adopt traffic | `/raft/*`, forwarded writes and `/admin/adopt` hard-code `http://` (`ha/network.rs:45`, `ha/client.rs:83`, `adopt.rs:220`); today they must stay on a private network, protected only by `--ha-token` |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
@@ -401,6 +460,10 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
 | `crates/gsp/src/procinfo.rs` | `gsp_build_info` / `gsp_fd_open` / `gsp_fd_limit` — build identity + a small detached `/proc/self/fd` sampling task. |
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
+| `crates/gsp-controller/src/addresses.rs` + `addresses/api.rs` | Tunnel address authority: `Network`, `AddressBook` (claim / release / entries over two sled trees, one mutex, flush after each transaction), `expand_backends`, `resolve_flags`; `GET /tunnel/addresses`, `claim_error_response` (409 / 422 / 503 mapping), the daily stale warning. Shared by both peer registries. |
+| `crates/gsp-controller/src/{peers,proxy_peers}.rs` + `{peers,proxy_peers}/api.rs` | The two mirrored registries (origins register in `peers`, proxies in `proxy_peers`): `POST` claims an address atomically with the registration (under a per-registry write lock), `DELETE` releases it and logs a tombstone, SSE `subscribe` replays registrations and tombstones. |
+| `crates/gsp-agent/src/{register,address_store,proxy_subscribe,interface,keypair,main}.rs` | Origin agent: register first (bounded `http_client()`), `resolve_startup` picks controller answer vs saved `<data_dir>/tunnel-address`, `/32` proxy peers, `plan()`/`Action` for events and tombstones. |
+| `crates/gsp/src/{proxy_register,tunnel_address,tunnel_client}.rs` (+ the `--tunnel-*` block in `main.rs`) | Proxy side of the same: register before bringing the interface up (before any listener binds), saved address at `<tunnel-key-file>.address`, `/32` origin peers, tombstones. |
 | `crates/plugins/` | Standalone workspace (own `[workspace]`): `gsp-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `gsp` / `gsp-core`. |
 | `crates/gsp-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `gsp` process, connection-count ramp, `/proc` RSS/fd sampling). |
 | `crates/gsp-fleet-tests/` | Phase 10+11 slice 12 (+ phase 14 `tests/tunnel.rs`, `#[ignore]`d, `make tunnel-e2e`, with `src/{netns,echo,tunnel}.rs` helpers): `cargo test -p gsp-fleet-tests` (part of `make check`) spawns real `gsp`/`gsp-controller`/`gsp-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
@@ -410,14 +473,24 @@ rebuild reads `Discovery::get`).
 
 ## Testing
 
-`make check` runs fmt + clippy `-D warnings` + ~150 tests (`gsp-config`,
-`gsp-core` unit + `crates/gsp-core/tests/{tcp_forward,udp_forward,amplification}.rs`,
-`gsp` unit incl. the `sniffer_loader` WAT-fixture end-to-end and the in-module
-admin HTTP tests), plus `gsp-controller`/`gsp-aggregator`/`gsp-ui`'s own
-in-module HTTP tests and `crates/gsp-fleet-tests`' 4 real-multi-process
-integration tests (slice 12) — the latter debug-builds and spawns the real
-`gsp`/`gsp-controller`/`gsp-aggregator` binaries, adding real wall-clock time
-(~15-20s) to `cargo test --all` vs. every other crate's in-process tests. Needs `protoc` on `PATH`.
+`make check` runs fmt + clippy `-D warnings` + `cargo test --all` (~520 tests across
+`gsp-config`, `gsp-core` (unit + `crates/gsp-core/tests/{tcp_forward,udp_forward,amplification}.rs`),
+`gsp` (incl. the `sniffer_loader` WAT-fixture end-to-end and the admin HTTP tests),
+`gsp-controller` / `gsp-aggregator` / `gsp-ui` / `gsp-agent` (in-module HTTP and unit
+tests) and `crates/gsp-fleet-tests`' real-multi-process tests (`fleet`, `gossip`,
+`tunnel_addresses`; they debug-build and spawn the real binaries, adding real wall-clock
+time). Needs `protoc` on `PATH`. Not part of `make check`:
+
+- the namespace lab `make tunnel-e2e` / `make tunnel-e2e-ci` (12 scenarios, see "Known
+  flakes & environment gotchas");
+- `make ui-test` (vitest), `make deploy-lint` (daemon-free render checks of `deploy/`;
+  needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` (need a Docker
+  daemon);
+- the CI helper scripts: `sh .github/scripts/changes_test.sh` and
+  `python3 .github/scripts/test_summary_test.py` (CI runs both in the `changes` job).
+
+CI runs Rust tests under `cargo nextest` (each test in its own process) — see
+"Infra / environment".
 
 - `TP­ROXY` / `IP_TRANSPARENT` e2e is not in CI (needs `CAP_NET_ADMIN`) — covered
   by config parse/reject + `connect_tcp_from` fallback tests. Setup recipe in
@@ -479,6 +552,13 @@ integration tests (slice 12) — the latter debug-builds and spawns the real
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
   cache each only recompiles ~35 crates (~1 min).
+- **Local verification tools** (none are in the repo): `cargo install cargo-nextest --locked`
+  (for `make tunnel-e2e-ci`); `actionlint` (workflow lint; release binary from
+  `github.com/rhysd/actionlint`, v1.7.7 used); `hadolint` (Dockerfile lint, v2.12.0 — its
+  `DL3008`/`DL3006` warnings are expected); `kubeconform` (v0.6.7, the version CI
+  downloads: `kubeconform -strict -summary deploy/k8s`). `docker compose ... config` renders
+  the compose files without a daemon. The docs-only push filter means a pure `*.md` /
+  `docs/**` change runs no CI; any other change runs at least `test`.
 - git remote `github.com/Wueschli/gameserver-proxy`, branch `main`; `git push`
   works, `origin/main` is current. The HTTPS credential helper logs a harmless
   "nonexistent Windows path" warning before falling back to a working credential.
