@@ -1,0 +1,128 @@
+//! Native TLS: `TlsListener` under a real `axum::serve`, loopback only.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::routing::get;
+use axum::Router;
+use gsp_http::tls::{spawn_reloader, ReloadingCert, TlsFiles, TlsListener};
+use gsp_http::{builder_with, load_ca_file};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+async fn serve(files: TlsFiles) -> (SocketAddr, Arc<ReloadingCert>) {
+    let cert = ReloadingCert::new(files).unwrap();
+    let listener = TlsListener::bind("127.0.0.1:0".parse().unwrap(), cert.clone())
+        .await
+        .unwrap();
+    let addr = axum::serve::Listener::local_addr(&listener).unwrap();
+    let app = Router::new().route("/", get(|| async { "ok" }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, cert)
+}
+
+fn fixture_files() -> TlsFiles {
+    TlsFiles {
+        cert: fixture("leaf.pem"),
+        key: fixture("leaf.key"),
+    }
+}
+
+async fn get_ok(ca: &str, addr: SocketAddr) {
+    let client = builder_with(&load_ca_file(&fixture(ca)).unwrap())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("https://localhost:{}/", addr.port()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn serves_https_to_a_client_that_trusts_the_ca() {
+    let (addr, _) = serve(fixture_files()).await;
+    get_ok("ca.pem", addr).await;
+}
+
+#[tokio::test]
+async fn serves_a_chain_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = dir.path().join("chain.pem");
+    let mut pem = std::fs::read(fixture("leaf.pem")).unwrap();
+    pem.extend(std::fs::read(fixture("ca.pem")).unwrap());
+    std::fs::write(&chain, pem).unwrap();
+    let (addr, cert) = serve(TlsFiles {
+        cert: chain,
+        key: fixture("leaf.key"),
+    })
+    .await;
+    assert_eq!(cert.current().cert.len(), 2);
+    get_ok("ca.pem", addr).await;
+}
+
+#[tokio::test]
+async fn a_stalled_handshake_does_not_block_others() {
+    let (addr, _) = serve(fixture_files()).await;
+    let _stalled = TcpStream::connect(addr).await.unwrap(); // never says hello
+    tokio::time::timeout(Duration::from_secs(2), get_ok("ca.pem", addr))
+        .await
+        .expect("a second client was blocked behind the stalled handshake");
+}
+
+#[tokio::test]
+async fn plain_http_on_the_tls_port_does_not_break_the_server() {
+    let (addr, _) = serve(fixture_files()).await;
+    let mut plain = TcpStream::connect(addr).await.unwrap();
+    plain
+        .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), plain.read_to_end(&mut buf)).await;
+    get_ok("ca.pem", addr).await;
+}
+
+#[tokio::test]
+async fn the_reloader_picks_up_new_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = TlsFiles {
+        cert: dir.path().join("cert.pem"),
+        key: dir.path().join("key.pem"),
+    };
+    std::fs::copy(fixture("leaf.pem"), &files.cert).unwrap();
+    std::fs::copy(fixture("leaf.key"), &files.key).unwrap();
+    let (addr, cert) = serve(files.clone()).await;
+    let _reloader = spawn_reloader(cert, Duration::from_millis(100));
+    // mtime resolution: make sure the rewrite is visibly newer.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    std::fs::copy(fixture("leaf2.pem"), &files.cert).unwrap();
+    std::fs::copy(fixture("leaf2.key"), &files.key).unwrap();
+
+    let client = builder_with(&load_ca_file(&fixture("ca2.pem")).unwrap())
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let url = format!("https://localhost:{}/", addr.port());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status() == 200 => return,
+            _ if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
+            other => panic!("the rotated certificate was never served: {other:?}"),
+        }
+    }
+}
