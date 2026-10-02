@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e tunnel-e2e-ci deploy-images deploy-lint deploy-smoke help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -88,6 +88,10 @@ tunnel-e2e-ci:
 ## deploy-images: build the five deploy/ images and run --version on each (needs Docker)
 deploy-images:
 	sh deploy/build-images.sh
+
+## deploy-scan: Trivy over the deploy/ images and the lockfiles they're built from (after deploy-images; needs Docker + trivy)
+deploy-scan:
+	sh deploy/scan-images.sh
 
 ## deploy-lint: static checks on deploy/ (needs the docker CLI + ruby, no daemon)
 deploy-lint:

@@ -20,7 +20,9 @@ out() { if touches "$2"; then echo "$1=true"; else echo "$1=false"; fi; }
 RUSTWIDE='^(Cargo\.(toml|lock)|rust-toolchain\.toml)$|^\.cargo/'
 
 PLUGINS="^crates/(plugins|gsp|gsp-core|gsp-config|gsp-http)/|$RUSTWIDE"
-DEPLOY='^deploy/|^\.dockerignore$|^Makefile$|^Cargo\.(toml|lock)$'
+# The UI's npm lockfile is in DEPLOY too: those packages end up in the gsp-ui image's
+# bundle, and the deploy job's Trivy scan checks them.
+DEPLOY='^deploy/|^\.dockerignore$|^Makefile$|^Cargo\.(toml|lock)$|^crates/gsp-ui/web/package-lock\.json$|^\.trivyignore$'
 
 out ui      '^crates/gsp-ui/web/'
 out plugins "$PLUGINS"
