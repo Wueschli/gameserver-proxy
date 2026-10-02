@@ -280,13 +280,16 @@ async fn session_status(
         .into_response()
 }
 
-/// Extracts the session id from the `Cookie` header, if present. Shared by
-/// [`logout`] and [`crate::auth::check_role`].
+/// Extracts the session id from the `Cookie` header(s), if present. Shared by
+/// [`logout`] and [`crate::auth::check_role`]. Every `cookie` header counts:
+/// over HTTP/2 a browser may send one per cookie (RFC 9113 §8.2.3).
 pub fn session_id_from(req: &Request) -> Option<String> {
-    let cookie_header = req.headers().get(header::COOKIE)?.to_str().ok()?;
     let prefix = format!("{SESSION_COOKIE}=");
-    cookie_header
-        .split(';')
+    req.headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
         .map(str::trim)
         .find_map(|part| part.strip_prefix(&prefix).map(str::to_string))
 }
@@ -460,6 +463,37 @@ mod tests {
         let (login, logout) = login_and_logout_cookies(AppState::new(Some("secret".into()))).await;
         assert!(!has_attr(&login, "Secure"), "{login}");
         assert!(!has_attr(&logout, "Secure"), "{logout}");
+    }
+
+    /// HTTP/2 lets a browser send each cookie in its own `cookie` header
+    /// (RFC 9113 §8.2.3; Firefox does), and hyper does not join them — the
+    /// session cookie behind another site's cookie on the same host must count.
+    #[tokio::test]
+    async fn the_session_cookie_is_found_in_any_cookie_header() {
+        let app = router(AppState::new(Some("secret".into())));
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::post("/ui/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password":"secret"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = cookie_header_from(&set_cookie_value(&resp));
+
+        let resp = app
+            .oneshot(
+                HttpRequest::get("/ui/session")
+                    .header(header::COOKIE, "other_app=1")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

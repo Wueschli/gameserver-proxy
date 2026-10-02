@@ -135,8 +135,10 @@ mod tests {
 
     /// `axum::serve` advertises HTTP/2 extended CONNECT (RFC 8441), so a browser
     /// that loaded the UI over h2 (`--tls-cert`) opens this socket as `CONNECT`
-    /// with `:protocol websocket` on the same connection, not as a `GET` upgrade.
-    /// h2c with prior knowledge here: the same HTTP/2 path, without TLS.
+    /// with `:protocol websocket` on the same connection, not as a `GET` upgrade —
+    /// through the same session gate, with its cookie possibly split across
+    /// several `cookie` headers. h2c with prior knowledge here: the same HTTP/2
+    /// path, without TLS.
     #[tokio::test]
     async fn an_http2_websocket_gets_the_current_view() {
         use hyper::ext::Protocol;
@@ -144,7 +146,11 @@ mod tests {
 
         let feed = crate::fleet_feed::FleetFeed::new();
         feed.set_latest(r#"[{"instance":"h2"}]"#.to_string());
-        let state = crate::api::AppState::new(None).with_fleet_feed(feed);
+        let state = crate::api::AppState::new(Some("secret".into())).with_fleet_feed(feed);
+        let session = state.sessions.create(crate::session::Session {
+            role: crate::role::Role::Viewer,
+            username: None,
+        });
         let app = crate::api::router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -158,15 +164,28 @@ mod tests {
             .await
             .unwrap();
         tokio::spawn(conn);
-        let mut req = hyper::Request::builder()
-            .method(hyper::Method::CONNECT)
-            .uri(format!("http://{addr}/ws/fleet"))
-            .header("sec-websocket-version", "13")
-            .body(http_body_util::Empty::new())
-            .unwrap();
-        req.extensions_mut()
-            .insert(Protocol::from_static("websocket"));
-        let resp = send.send_request(req).await.unwrap();
+        let connect = |cookies: &[String]| {
+            let mut req = hyper::Request::builder()
+                .method(hyper::Method::CONNECT)
+                .uri(format!("http://{addr}/ws/fleet"))
+                .header("sec-websocket-version", "13");
+            for cookie in cookies {
+                req = req.header("cookie", cookie);
+            }
+            let mut req = req.body(http_body_util::Empty::new()).unwrap();
+            req.extensions_mut()
+                .insert(Protocol::from_static("websocket"));
+            req
+        };
+
+        let resp = send.send_request(connect(&[])).await.unwrap();
+        assert_eq!(resp.status(), hyper::StatusCode::UNAUTHORIZED);
+
+        let cookies = [
+            "other_app=1".to_string(),
+            format!("{}={session}", crate::api::SESSION_COOKIE),
+        ];
+        let resp = send.send_request(connect(&cookies)).await.unwrap();
         assert_eq!(resp.status(), hyper::StatusCode::OK);
 
         let upgraded = hyper::upgrade::on(resp).await.unwrap();

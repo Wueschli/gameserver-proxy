@@ -39,6 +39,13 @@ async fn login_over_native_tls_sets_a_secure_cookie_that_works() -> Result<()> {
     )
     .await?;
 
+    let anonymous = client.get(format!("{base}/ui/session")).send().await?;
+    ensure!(
+        anonymous.status() == reqwest::StatusCode::UNAUTHORIZED,
+        "/ui/session without a cookie: {}",
+        anonymous.status()
+    );
+
     let login = client
         .post(format!("{base}/ui/login"))
         .json(&serde_json::json!({ "password": "secret" }))
