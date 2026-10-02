@@ -318,12 +318,14 @@ impl BackendSource for ConsulSource {
             .get(&url)
             .send()
             .await
-            .context("Consul request")?
+            .map_err(|e| anyhow::anyhow!("Consul request: {}", gsp_http::error_chain(&e)))?
             .error_for_status()
-            .context("Consul response status")?
+            .map_err(|e| anyhow::anyhow!("Consul response status: {}", gsp_http::error_chain(&e)))?
             .json()
             .await
-            .context("decode Consul response")?;
+            .map_err(|e| {
+                anyhow::anyhow!("decode Consul response: {}", gsp_http::error_chain(&e))
+            })?;
 
         let mut out = Vec::new();
         for e in entries {
@@ -453,12 +455,16 @@ impl BackendSource for KubernetesSource {
         let ep: Endpoints = req
             .send()
             .await
-            .context("Kubernetes request")?
+            .map_err(|e| anyhow::anyhow!("Kubernetes request: {}", gsp_http::error_chain(&e)))?
             .error_for_status()
-            .context("Kubernetes response status")?
+            .map_err(|e| {
+                anyhow::anyhow!("Kubernetes response status: {}", gsp_http::error_chain(&e))
+            })?
             .json()
             .await
-            .context("decode Kubernetes Endpoints")?;
+            .map_err(|e| {
+                anyhow::anyhow!("decode Kubernetes Endpoints: {}", gsp_http::error_chain(&e))
+            })?;
 
         let mut out = Vec::new();
         for subset in &ep.subsets {
@@ -584,7 +590,7 @@ impl BackendSource for TunnelSource {
         let resp = req
             .send()
             .await
-            .with_context(|| format!("fetching {url}"))?;
+            .map_err(|e| anyhow::anyhow!("fetching {url}: {}", gsp_http::error_chain(&e)))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             // The origin hasn't registered yet (or ever) — not an error,
@@ -597,10 +603,12 @@ impl BackendSource for TunnelSource {
             anyhow::bail!("controller {url} returned {}", resp.status());
         }
 
-        let reg: PeerRegistration = resp
-            .json()
-            .await
-            .with_context(|| format!("parsing peer registration from {url}"))?;
+        let reg: PeerRegistration = resp.json().await.map_err(|e| {
+            anyhow::anyhow!(
+                "parsing peer registration from {url}: {}",
+                gsp_http::error_chain(&e)
+            )
+        })?;
         if reg.pubkey != self.pubkey {
             anyhow::bail!(
                 "origin {:?} is currently registered with a different pubkey than \
@@ -627,6 +635,106 @@ impl BackendSource for TunnelSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed request's error text must carry its cause: `refresh_loop`
+    /// logs it with `%e`, which for anyhow is only the outermost message.
+    fn assert_names_the_cause(e: anyhow::Error) {
+        let text = e.to_string().to_lowercase();
+        assert!(text.contains("connection refused"), "{text}");
+    }
+
+    const REFUSED: &str = "http://127.0.0.1:1";
+
+    #[tokio::test]
+    async fn consul_request_errors_name_the_cause() {
+        let src = ConsulSource::new(
+            "p".into(),
+            "game".into(),
+            REFUSED.into(),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_names_the_cause(src.fetch().await.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn kubernetes_request_errors_name_the_cause() {
+        let src = KubernetesSource::new(
+            "p".into(),
+            "games".into(),
+            "match".into(),
+            None,
+            REFUSED.into(),
+            Duration::from_secs(10),
+            KubeAuth::default(),
+        )
+        .unwrap();
+        assert_names_the_cause(src.fetch().await.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn consul_and_kubernetes_status_and_decode_errors_name_the_cause() {
+        let bad_status = mock_http::serve_status("503 Service Unavailable", "").await;
+        let not_json = mock_http::serve_json("not json").await;
+        for (base, want) in [
+            (format!("http://{}", bad_status.addr), "503"),
+            (format!("http://{}", not_json.addr), "expected"),
+        ] {
+            let consul = ConsulSource::new(
+                "p".into(),
+                "game".into(),
+                base.clone(),
+                None,
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            let e = consul.fetch().await.unwrap_err().to_string();
+            assert!(e.contains(want), "consul: {e}");
+            let kube = KubernetesSource::new(
+                "p".into(),
+                "games".into(),
+                "match".into(),
+                None,
+                base,
+                Duration::from_secs(10),
+                KubeAuth::default(),
+            )
+            .unwrap();
+            let e = kube.fetch().await.unwrap_err().to_string();
+            assert!(e.contains(want), "kubernetes: {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_decode_errors_name_the_cause() {
+        let not_json = mock_http::serve_json("not json").await;
+        let src = TunnelSource::new(
+            "p".into(),
+            "home".into(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            format!("http://{}", not_json.addr),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let e = src.fetch().await.unwrap_err().to_string();
+        assert!(e.contains("expected"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn tunnel_request_errors_name_the_cause() {
+        let src = TunnelSource::new(
+            "p".into(),
+            "home".into(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            REFUSED.into(),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_names_the_cause(src.fetch().await.unwrap_err());
+    }
 
     #[tokio::test]
     async fn consul_source_lists_passing_instances() {

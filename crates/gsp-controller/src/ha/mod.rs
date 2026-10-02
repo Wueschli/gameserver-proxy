@@ -123,10 +123,6 @@ pub mod typ {
 pub struct HaHandle {
     pub raft: Raft,
     pub node_id: NodeId,
-    /// This node's own advertised address (`host:port`, no scheme) — needed
-    /// to tell whether a `ForwardToLeader` response actually names *this*
-    /// node (can happen transiently right after an election).
-    pub self_addr: String,
     /// Peer-only shared secret gating `/raft/*` — a separate secret from
     /// `--auth-token` (client-facing) and `--parent-token`
     /// (slave-to-parent), matching every other cross-service credential

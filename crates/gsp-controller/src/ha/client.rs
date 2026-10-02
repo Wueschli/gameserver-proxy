@@ -2,7 +2,7 @@
 //! `intent::api::submit_intent` call instead of `apply_revision` directly
 //! when HA is on. Proposes a Raft write on this replica; if this replica
 //! isn't the leader, **transparently forwards the original request to the
-//! current leader over plain HTTP** rather than returning a redirect — see
+//! current leader** (over HTTP or HTTPS, per its `--ha-peers` entry) rather than returning a redirect — see
 //! `docs/10` "Intra-tier HA (design)" for why: every existing client of
 //! this API (`gsp`, `gsp-ui`, `curl`) stays completely unaware HA exists.
 
@@ -56,22 +56,30 @@ async fn handle_write_error(
         return service_unavailable("raft internal error; retry shortly");
     };
 
-    let leader_node = match api_err {
-        openraft::error::ClientWriteError::ForwardToLeader(fwd) => fwd.leader_node,
-        openraft::error::ClientWriteError::ChangeMembershipError(_) => None,
+    let (leader_id, leader_node) = match api_err {
+        openraft::error::ClientWriteError::ForwardToLeader(fwd) => (fwd.leader_id, fwd.leader_node),
+        openraft::error::ClientWriteError::ChangeMembershipError(_) => (None, None),
     };
 
-    let Some(leader_node) = leader_node else {
-        return service_unavailable("no raft leader elected yet; retry shortly");
-    };
-
-    if leader_node.addr == ha.self_addr {
-        // A transient self-forward right after an election settles — the
-        // leadership info this replica has is a beat behind reality.
-        return service_unavailable("this replica just lost leadership; retry shortly");
+    match forward_target(leader_id, leader_node, ha.node_id) {
+        Ok(leader) => forward_to_leader(&leader.addr, path, body, actor).await,
+        Err(msg) => service_unavailable(msg),
     }
+}
 
-    forward_to_leader(&leader_node.addr, path, body, actor).await
+/// Where a write this replica can't commit should go, or why nowhere. Decided
+/// by node id, not address: a leader naming *this* node (transiently, right
+/// after an election) must never be forwarded to, even if this node's
+/// `--ha-peers` entry no longer matches its address in the Raft membership.
+fn forward_target(
+    leader_id: Option<super::NodeId>,
+    leader_node: Option<openraft::BasicNode>,
+    self_id: super::NodeId,
+) -> Result<openraft::BasicNode, &'static str> {
+    if leader_id == Some(self_id) {
+        return Err("this replica just lost leadership; retry shortly");
+    }
+    leader_node.ok_or("no raft leader elected yet; retry shortly")
 }
 
 async fn forward_to_leader(
@@ -109,4 +117,29 @@ fn service_unavailable(msg: &str) -> Response {
         axum::Json(ErrorBody { error: msg.into() }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::BasicNode;
+
+    #[test]
+    fn a_leader_naming_this_node_is_never_forwarded_to_even_under_another_address() {
+        // The membership address can differ from this node's current
+        // --ha-peers entry (edited after bootstrap); the id cannot.
+        let got = forward_target(Some(2), Some(BasicNode::new("127.0.0.1:9911")), 2);
+        assert!(got.is_err());
+    }
+
+    #[test]
+    fn another_leader_is_forwarded_to() {
+        let got = forward_target(Some(1), Some(BasicNode::new("https://ctl-1:8443")), 2);
+        assert_eq!(got.unwrap().addr, "https://ctl-1:8443");
+    }
+
+    #[test]
+    fn no_known_leader_is_unavailable() {
+        assert!(forward_target(None, None, 2).is_err());
+    }
 }
