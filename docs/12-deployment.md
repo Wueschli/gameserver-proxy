@@ -10,7 +10,7 @@ The reference build is [`deploy/Dockerfile`](../deploy/Dockerfile): one file, a
 shared `rust:1-trixie` builder and five runtime targets on
 `gcr.io/distroless/cc-debian13:nonroot` (see [`deploy/README.md`](../deploy/README.md);
 `make deploy-images` builds all five; `make deploy-scan` runs an informational Trivy
-scan of them and of the lockfiles they're built from — the `deploy` CI job does both).
+scan of them and of the lockfiles they're built from — CI's `deploy` and `trivy` jobs).
 None of these five binaries shell out to an
 external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the

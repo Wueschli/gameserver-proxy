@@ -89,8 +89,8 @@ Ingress/LoadBalancer (with TLS) in front of it.
   `Cargo.lock` and the UI's `package-lock.json` — a plain release binary carries no
   dependency list, so an image scan alone can't see its Rust crates. It reports
   HIGH/CRITICAL findings that have a fix available, writes JSON + SARIF to
-  `target/trivy/`, and exits 1 if it found anything. **Informational:** the `deploy` CI
-  job (and the nightly run) shows the results on the run's summary page and as
+  `target/trivy/`, and exits 1 if it found anything. **Informational:** CI's separate `trivy`
+  job (after `deploy`, and nightly) shows the results on the run's summary page and as
   warnings, and never fails on them. For crates it sees GHSA advisories only —
   RustSec-only ones need `make audit` (`cargo audit`). Accepted findings go in
   `.trivyignore` (repo root), each with a reason.
