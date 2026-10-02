@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use gsp_core::metrics_defs as m;
 use gsp_core::sniff::Sniffers;
 use gsp_core::{Resolvers, RuntimeHandle};
@@ -41,7 +42,7 @@ pub async fn fetch_current(base_url: &str, token: Option<&str>) -> anyhow::Resul
     let resp = req
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("fetching initial config from {base_url}: {e}"))?;
+        .with_context(|| format!("fetching initial config from {base_url}"))?;
     if !resp.status().is_success() {
         anyhow::bail!(
             "controller {base_url} returned {} for GET /config (has any config ever been submitted to it?)",
@@ -103,7 +104,7 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e, controller = %base_url, cursor,
+                    error = format!("{e:#}"), controller = %base_url, cursor,
                     "controller subscribe connection failed; keeping the last known \
                      configuration and retrying"
                 );
@@ -137,7 +138,7 @@ async fn subscribe_once(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("connecting to {url}: {e}"))?;
+        .with_context(|| format!("connecting to {url}"))?;
     if !resp.status().is_success() {
         anyhow::bail!("controller {url} returned {}", resp.status());
     }
