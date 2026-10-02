@@ -207,7 +207,10 @@ gsp-controller --listen 0.0.0.0:8443 \
   `https://<settings.admin.listen>`, so the certificate needs that address as a SAN
   (an IP SAN for an IP `listen`), and the aggregator takes `--ca-file` for a private
   CA. As before, the reported URL is the literal `listen` address — a wildcard bind
-  (`0.0.0.0`) is not reachable as an admin URL, TLS or not.
+  (`0.0.0.0`) is not reachable as an admin URL, TLS or not. With `--controller` one
+  YAML reaches every instance, so put each host's own certificate at the same path.
+  Health probes against the admin port must then use HTTPS (Kubernetes:
+  `httpGet.scheme: HTTPS`).
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
