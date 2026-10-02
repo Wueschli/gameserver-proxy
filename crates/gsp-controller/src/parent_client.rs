@@ -42,10 +42,12 @@ pub async fn fetch_initial(
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("fetching initial config from parent {base_url}: {e}"))?;
+    let resp = req.send().await.map_err(|e| {
+        anyhow::anyhow!(
+            "fetching initial config from parent {base_url}: {}",
+            gsp_http::error_chain(&e)
+        )
+    })?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -63,10 +65,12 @@ pub async fn fetch_initial(
         .ok_or_else(|| {
             anyhow::anyhow!("parent controller {base_url} response missing {REVISION_HEADER}")
         })?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading initial config body from {base_url}: {e}"))?;
+    let text = resp.text().await.map_err(|e| {
+        anyhow::anyhow!(
+            "reading initial config body from {base_url}: {}",
+            gsp_http::error_chain(&e)
+        )
+    })?;
     Ok(Some((revision, text)))
 }
 
@@ -114,7 +118,7 @@ async fn subscribe_once(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("connecting to {url}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("connecting to {url}: {}", gsp_http::error_chain(&e)))?;
     if !resp.status().is_success() {
         anyhow::bail!("parent controller {url} returned {}", resp.status());
     }
@@ -122,10 +126,12 @@ async fn subscribe_once(
 
     let mut buf = String::new();
     loop {
-        let chunk = resp
-            .chunk()
-            .await
-            .map_err(|e| anyhow::anyhow!("reading subscribe stream from {base_url}: {e}"))?;
+        let chunk = resp.chunk().await.map_err(|e| {
+            anyhow::anyhow!(
+                "reading subscribe stream from {base_url}: {}",
+                gsp_http::error_chain(&e)
+            )
+        })?;
         let Some(bytes) = chunk else {
             return Ok(()); // parent closed the stream
         };

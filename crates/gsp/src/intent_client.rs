@@ -103,7 +103,7 @@ async fn subscribe_once(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("connecting to {url}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("connecting to {url}: {}", gsp_http::error_chain(&e)))?;
     if !resp.status().is_success() {
         anyhow::bail!("controller {url} returned {}", resp.status());
     }
@@ -111,10 +111,12 @@ async fn subscribe_once(
 
     let mut buf = String::new();
     loop {
-        let chunk = resp
-            .chunk()
-            .await
-            .map_err(|e| anyhow::anyhow!("reading intent subscribe stream from {base_url}: {e}"))?;
+        let chunk = resp.chunk().await.map_err(|e| {
+            anyhow::anyhow!(
+                "reading intent subscribe stream from {base_url}: {}",
+                gsp_http::error_chain(&e)
+            )
+        })?;
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };

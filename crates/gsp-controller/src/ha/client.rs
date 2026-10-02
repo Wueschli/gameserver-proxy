@@ -97,7 +97,7 @@ async fn forward_to_leader(
                 .into_response()
         }
         Err(e) => {
-            tracing::warn!(error = %e, %leader_addr, "forwarding a write to the raft leader failed");
+            tracing::warn!(error = %gsp_http::error_chain(&e), %leader_addr, "forwarding a write to the raft leader failed");
             service_unavailable("could not reach the current raft leader; retry shortly")
         }
     }

@@ -172,7 +172,7 @@ async fn proxy(
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse {
-                error: format!("controller ({url}): {e}"),
+                error: format!("controller ({url}): {}", gsp_http::error_chain(&e)),
             }),
         )
             .into_response(),

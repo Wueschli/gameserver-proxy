@@ -308,7 +308,7 @@ async fn proxy_to_instance(
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse {
-                error: format!("{instance} ({url}): {e}"),
+                error: format!("{instance} ({url}): {}", gsp_http::error_chain(&e)),
             }),
         )
             .into_response(),
@@ -402,7 +402,7 @@ async fn broadcast_with_content_type(
                 Err(e) => InstanceResult {
                     instance,
                     status: None,
-                    error: Some(e.to_string()),
+                    error: Some(gsp_http::error_chain(&e)),
                 },
             }
         });

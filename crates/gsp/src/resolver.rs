@@ -129,16 +129,15 @@ impl Resolver for HttpResolver {
                 if e.is_timeout() {
                     ResolveError::Timeout
                 } else {
-                    ResolveError::Failed(e.to_string())
+                    ResolveError::Failed(gsp_http::error_chain(&e))
                 }
             })?;
         if !resp.status().is_success() {
             return Err(ResolveError::Failed(format!("HTTP {}", resp.status())));
         }
-        let w: WireResponse = resp
-            .json()
-            .await
-            .map_err(|e| ResolveError::Failed(format!("bad response body: {e}")))?;
+        let w: WireResponse = resp.json().await.map_err(|e| {
+            ResolveError::Failed(format!("bad response body: {}", gsp_http::error_chain(&e)))
+        })?;
         let target = match w.target.as_deref() {
             Some(s) => Some(
                 s.parse()

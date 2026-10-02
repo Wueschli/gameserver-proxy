@@ -57,10 +57,12 @@ pub async fn fetch_current(base_url: &str, token: Option<&str>) -> anyhow::Resul
         .ok_or_else(|| {
             anyhow::anyhow!("controller {base_url} response missing {REVISION_HEADER}")
         })?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading initial config body from {base_url}: {e}"))?;
+    let text = resp.text().await.map_err(|e| {
+        anyhow::anyhow!(
+            "reading initial config body from {base_url}: {}",
+            gsp_http::error_chain(&e)
+        )
+    })?;
     Ok((revision, text))
 }
 
@@ -147,10 +149,12 @@ async fn subscribe_once(
     let mut buf = String::new();
 
     loop {
-        let chunk = resp
-            .chunk()
-            .await
-            .map_err(|e| anyhow::anyhow!("reading subscribe stream from {base_url}: {e}"))?;
+        let chunk = resp.chunk().await.map_err(|e| {
+            anyhow::anyhow!(
+                "reading subscribe stream from {base_url}: {}",
+                gsp_http::error_chain(&e)
+            )
+        })?;
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };

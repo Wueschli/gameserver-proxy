@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gsp_http::{builder_with, client, init_ca_file, load_ca_file, CaError};
+use gsp_http::{builder_with, client, error_chain, init_ca_file, load_ca_file, CaError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
@@ -163,4 +163,46 @@ async fn init_twice_is_an_error() {
         Err(CaError::AlreadyInitialised)
     ));
     get_ok(&client(), addr).await;
+}
+
+#[tokio::test]
+async fn error_chain_names_the_tls_cause() {
+    let addr = tls_server().await;
+    let err = builder_with(&[])
+        .build()
+        .unwrap()
+        .get(url(addr))
+        .send()
+        .await
+        .expect_err("the fixture CA is not trusted");
+    let has_cause = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains("certificate") || s.contains("unknownissuer")
+    };
+    assert!(!has_cause(&err.to_string()), "Display alone: {err}");
+    let chain = error_chain(&err);
+    assert!(has_cause(&chain), "{chain}");
+}
+
+#[derive(Debug)]
+struct Layer(&'static str, Option<Box<Layer>>);
+
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Layer {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.1.as_deref().map(|l| l as _)
+    }
+}
+
+#[test]
+fn error_chain_skips_repeated_sources() {
+    let repeated = Layer("a: b", Some(Box::new(Layer("b", None))));
+    assert_eq!(error_chain(&repeated), "a: b");
+    let distinct = Layer("a", Some(Box::new(Layer("b", None))));
+    assert_eq!(error_chain(&distinct), "a: b");
 }
