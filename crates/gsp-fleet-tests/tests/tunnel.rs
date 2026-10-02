@@ -361,6 +361,12 @@ async fn an_edge_restart_keeps_its_address() -> Result<()> {
 /// Scenario 8 — Review Focus 5. An edge restarts while the controller is down:
 /// it must come up on its saved address (admin `/healthz` answers), and when
 /// the controller returns it re-registers with the same address.
+///
+/// The `last_seen` baseline is read only after the controller is back: the
+/// old `gsp` re-registers every second until the controller dies and sled
+/// persists that, so a baseline taken before the stop could already be beaten
+/// by a stale value. Once the controller returns the old `gsp` is dead, so
+/// only the restarted one can push `last_seen` past the baseline.
 #[tokio::test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
 async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
@@ -370,13 +376,13 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
     let edge = t.start_edge("edge-1", None).await?;
     t.wait_roundtrip(edge).await?;
     let before = t.proxy_address("edge-1").await?;
-    let seen_before = t.proxy_last_seen("edge-1").await?;
 
     t.stop_controller().await?;
     // `restart_edge` returns only once the admin API answers — i.e. startup
     // went ahead on the saved address instead of failing.
     t.restart_edge(edge).await?;
     t.start_controller().await?;
+    let seen_after_restart = t.proxy_last_seen("edge-1").await?;
 
     {
         let t = &t;
@@ -384,7 +390,7 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
             || async move {
                 Ok(t.proxy_last_seen("edge-1")
                     .await
-                    .is_ok_and(|s| s > seen_before))
+                    .is_ok_and(|s| s > seen_after_restart))
             },
             Duration::from_secs(30),
             "the restarted edge to re-register with the returned controller",
