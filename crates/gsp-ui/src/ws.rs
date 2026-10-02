@@ -2,21 +2,24 @@
 //! by [`crate::fleet_feed`]'s single shared subscription to the
 //! aggregator's SSE feed. Gated by [`crate::auth::require_session`] like
 //! everything else this process serves to a browser — a WS upgrade request
-//! is an ordinary `GET` until the `101` handshake, so the session cookie is
+//! is an ordinary `GET` until the `101` handshake (or, over HTTP/2, a `CONNECT`
+//! with `:protocol websocket`), so the session cookie is
 //! checked exactly the same way (applied by `crate::api::router`, not here —
 //! same "route definitions only" shape as `crate::aggregator_proxy`).
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::any;
 use axum::Router;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::api::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/ws/fleet", get(ws_handler))
+    // `any`, not `get`: over HTTP/2 (`--tls-cert`, ALPN h2) a browser opens the
+    // socket as an extended `CONNECT` (RFC 8441), which `axum::serve` advertises.
+    Router::new().route("/ws/fleet", any(ws_handler))
 }
 
 async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
@@ -128,6 +131,57 @@ mod tests {
             .unwrap();
         assert_eq!(msg.into_text().unwrap(), r#"[{"instance":"b"}]"#);
         let _ = ws.close(None).await;
+    }
+
+    /// `axum::serve` advertises HTTP/2 extended CONNECT (RFC 8441), so a browser
+    /// that loaded the UI over h2 (`--tls-cert`) opens this socket as `CONNECT`
+    /// with `:protocol websocket` on the same connection, not as a `GET` upgrade.
+    /// h2c with prior knowledge here: the same HTTP/2 path, without TLS.
+    #[tokio::test]
+    async fn an_http2_websocket_gets_the_current_view() {
+        use hyper::ext::Protocol;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let feed = crate::fleet_feed::FleetFeed::new();
+        feed.set_latest(r#"[{"instance":"h2"}]"#.to_string());
+        let state = crate::api::AppState::new(None).with_fleet_feed(feed);
+        let app = crate::api::router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut send, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        let mut req = hyper::Request::builder()
+            .method(hyper::Method::CONNECT)
+            .uri(format!("http://{addr}/ws/fleet"))
+            .header("sec-websocket-version", "13")
+            .body(http_body_util::Empty::new())
+            .unwrap();
+        req.extensions_mut()
+            .insert(Protocol::from_static("websocket"));
+        let resp = send.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+        let upgraded = hyper::upgrade::on(resp).await.unwrap();
+        let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            TokioIo::new(upgraded),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.into_text().unwrap(), r#"[{"instance":"h2"}]"#);
     }
 
     #[tokio::test]

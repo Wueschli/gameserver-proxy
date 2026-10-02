@@ -158,7 +158,7 @@ deployment requirement.
 
 ## TLS for the fleet services
 
-Without the flags below, `gsp-controller` and `gsp-aggregator` (and always the UI and
+Without the flags below, `gsp-controller`, `gsp-aggregator` and `gsp-ui` (and always
 `gsp`'s admin API) serve **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
@@ -169,8 +169,8 @@ Without the flags below, `gsp-controller` and `gsp-aggregator` (and always the U
 Two ways to encrypt it: **native TLS** in the controller (below), or a **reverse proxy
 you run that terminates TLS**, with the controller listening only on loopback or a
 private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
-aggregator serves native TLS the same way. The UI and `gsp`'s admin API have no native
-TLS yet, so for them the proxy is the only option.
+aggregator and the UI serve native TLS the same way. `gsp`'s admin API has no native
+TLS yet, so for it the proxy is the only option.
 
 ### Native TLS
 
@@ -195,11 +195,17 @@ gsp-controller --listen 0.0.0.0:8443 \
 - **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
   push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
   goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
+- **`gsp-ui`** takes the same two flags. Serving HTTPS itself, it marks the session
+  cookie `Secure` (without the flags it doesn't — a browser drops a `Secure` cookie on
+  `http://` and login would loop). The live view's WebSocket works over HTTP/2 too:
+  a browser on h2 opens it as an extended `CONNECT`, which the UI accepts. Plain
+  HTTP is not redirected; serve only HTTPS on the port browsers use.
 
 Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
 TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `gsp` pushes to an
-`https://` aggregator, read back over HTTPS) and `ha_tls.rs`
+`https://` aggregator, read back over HTTPS), `ui_native_tls.rs` (login over HTTPS
+sets a `Secure` cookie that unlocks `/ui/session`) and `ha_tls.rs`
 `three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
 listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
 
@@ -318,11 +324,11 @@ needs a membership change, which is not built yet.
 - **HA over TLS needs a fresh cluster** (native TLS on each replica, or a terminator
   per replica; see "HA replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
-- **The other services are plain HTTP.** `gsp`'s admin API and the UI have no native
-  TLS yet; the reverse-proxy pattern applies. For the UI
-  this matters most: it carries a password login, and its session cookie is
-  `HttpOnly; SameSite=Lax` but **not** `Secure`, so redirect HTTP to HTTPS (and
-  consider HSTS) at the proxy.
+- **`gsp`'s admin API is plain HTTP.** It has no native TLS yet; the reverse-proxy
+  pattern applies.
+- **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
+  SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
+  HSTS) at the proxy — or use the UI's native TLS, which sets `Secure` itself.
 - **A TLS proxy is a trust boundary.** It sees every token and registration in the
   clear. Run it on a host you control — or use native TLS where it exists.
 

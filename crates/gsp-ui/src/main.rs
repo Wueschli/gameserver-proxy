@@ -87,6 +87,9 @@ struct Args {
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
 }
 
 #[tokio::main]
@@ -114,9 +117,11 @@ async fn main() -> anyhow::Result<()> {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
+    // Load (and validate) the serving certificate before anything else starts.
+    let tls_cert = args.tls.load()?;
 
     let login_required = args.ui_password.is_some() || args.users_file.is_some();
-    let mut state = AppState::new(args.ui_password);
+    let mut state = AppState::new(args.ui_password).with_secure_cookie(tls_cert.is_some());
     if let Some(users_file) = &args.users_file {
         let users = gsp_ui::users::load(users_file)?;
         tracing::info!(
@@ -153,9 +158,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(api::router(state))
         .fallback_service(ServeDir::new(&args.static_dir));
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(listen = %args.listen, "gsp-ui listening");
-    axum::serve(listener, app).await?;
+    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-ui").await?;
 
     if let Some(task) = feed_task {
         task.abort();

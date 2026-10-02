@@ -35,3 +35,8 @@ tower = "0.5"
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false }
 tempfile.workspace = true
+# HTTP/2 WebSocket (extended CONNECT) test client; all already in the lockfile.
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
