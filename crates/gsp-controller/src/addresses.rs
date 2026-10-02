@@ -204,7 +204,7 @@ pub struct AddressBook {
     by_address: sled::Tree,
     write: Mutex<()>,
     // Held so the database stays open for the trees' lifetime.
-    _db: sled::Db,
+    db: sled::Db,
 }
 
 impl AddressBook {
@@ -219,7 +219,7 @@ impl AddressBook {
             by_owner,
             by_address,
             write: Mutex::new(()),
-            _db: db,
+            db,
         })
     }
 
@@ -276,6 +276,7 @@ impl AddressBook {
                 Ok::<(), sled::transaction::ConflictableTransactionError<()>>(())
             })
             .map_err(|e| ClaimError::Storage(format!("{e:?}")))?;
+        self.db.flush().map_err(storage)?;
         Ok(assignment)
     }
 
@@ -294,6 +295,7 @@ impl AddressBook {
                 Ok::<(), sled::transaction::ConflictableTransactionError<()>>(())
             })
             .map_err(|e| ClaimError::Storage(format!("{e:?}")))?;
+        self.db.flush().map_err(storage)?;
         Ok(Some(existing.address))
     }
 
@@ -673,8 +675,19 @@ mod tests {
         {
             let b = AddressBook::open(dir.path(), Network::parse("10.60.0.0/24").ok()).unwrap();
             b.claim(Role::Origin, "o1", None, 7).unwrap();
+            b.claim(Role::Origin, "o2", None, 7).unwrap();
+            assert_eq!(
+                b.release(Role::Origin, "o2").unwrap(),
+                Some(ip("10.60.0.2"))
+            );
         }
         let b = reopen(dir.path(), Some("10.60.0.0/24"));
+        // The release survived too: o2 is gone and its address is free again.
+        assert!(b.get(Role::Origin, "o2").unwrap().is_none());
+        assert_eq!(
+            b.claim(Role::Origin, "o3", None, 9).unwrap().address,
+            ip("10.60.0.2")
+        );
         let a = b.get(Role::Origin, "o1").unwrap().unwrap();
         assert_eq!(a.address, ip("10.60.0.1"));
         assert_eq!(a.first_seen, 7);

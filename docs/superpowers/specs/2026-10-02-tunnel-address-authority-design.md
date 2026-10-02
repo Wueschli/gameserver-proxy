@@ -44,7 +44,8 @@ each later:
 - **IPv6** tunnel networks (v1 is IPv4 only).
 - **HA-replicated allocation.** The registries are not Raft-integrated and a lock-based
   allocator is correct only with a single writer, so `--tunnel-network` together with
-  `--ha-peers` is refused at startup.
+  `--ha-peers` is refused at startup. Pin-only mode under `--ha-peers` is allowed but
+  enforces uniqueness per controller node only (startup warning), as the registries are not replicated.
 - **Automatic lease expiry / auto-release** (v1: explicit release + stale warning).
 - **A `gsp-ui` view** of `GET /tunnel/addresses`.
 - **Changing a live peer's address without a restart** (v1 logs the mismatch and keeps

@@ -141,6 +141,14 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if !args.ha_peers.is_empty() {
+        // resolve_flags refuses --tunnel-network under HA, so this is pin-only mode.
+        tracing::warn!(
+            "tunnel address uniqueness under --ha-peers is enforced per controller node only, \
+             because the peer registries are not replicated; point all origins and proxies at \
+             one node"
+        );
+    }
 
     let store = Arc::new(
         Store::open(&args.data_dir)

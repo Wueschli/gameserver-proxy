@@ -210,7 +210,10 @@ mis-chooses) one. Design and decisions:
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
   (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
-- **Limits.** Not combinable with `--ha-peers`; IPv6, lease expiry, a UI view and
+- **Limits.** `--tunnel-network` is not combinable with `--ha-peers`. Pin-only mode
+  (no network) is allowed under `--ha-peers`, but each controller node keeps its own
+  unreplicated address book, so pin uniqueness is enforced per node only (the controller
+  logs a startup warning); point all origins and proxies at one node. IPv6, lease expiry, a UI view and
   live address changes are future work (HANDOVER "Known follow-ups").
 
 ## Open questions
@@ -221,7 +224,7 @@ mis-chooses) one. Design and decisions:
   some consumer ISPs/CGNAT)? Out of scope for v1; the honest fallback is a
   documented limitation, with a relay-of-last-resort (closer to Steam
   Datagram Relay's actual shape) as a possible v2, not designed now.
-- **Tunnel-internal address collision/exhaustion** — resolved 2026-10-02: see "Address authority" below.
+- **Tunnel-internal address collision/exhaustion** — resolved 2026-10-02: see "Address authority" above.
 - **Does this replace or sit alongside the existing "trusted internal
   network" assumption?** Alongside — a same-network deployment still needs
   none of this and keeps working exactly as today; backend transport is

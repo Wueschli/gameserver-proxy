@@ -18,7 +18,7 @@ pub fn ip_of(cidr: &str) -> &str {
 
 /// The interface address: the assigned IP with the *network's* prefix, or — in
 /// pin-only mode, when the controller reports no network — with the prefix of
-/// the operator's pinned `--address`.
+/// the operator's pinned `--tunnel-address`.
 pub fn interface_cidr(
     assigned_ip: &str,
     network: Option<&str>,
@@ -28,7 +28,7 @@ pub fn interface_cidr(
         (Some(n), _) => n,
         (None, Some(p)) => p,
         (None, None) => anyhow::bail!(
-            "the controller reported no tunnel_network and no --address was given whose \
+            "the controller reported no tunnel_network and no --tunnel-address was given whose \
              prefix could be used for the interface"
         ),
     };
@@ -126,7 +126,13 @@ mod tests {
             interface_cidr("10.60.0.5", None, Some("10.60.0.5/24")).unwrap(),
             "10.60.0.5/24"
         );
-        assert!(interface_cidr("10.60.0.5", None, None).is_err());
+        let err = interface_cidr("10.60.0.5", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--tunnel-address"),
+            "wrong flag name in: {err}"
+        );
     }
 
     #[test]

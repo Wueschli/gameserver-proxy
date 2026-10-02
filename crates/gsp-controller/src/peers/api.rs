@@ -41,6 +41,11 @@ pub struct PeersState {
     auth_token: Option<Arc<str>>,
     /// The shared tunnel-address book every registration claims from.
     book: Arc<AddressBook>,
+    /// Serialises POST (claim -> register) against DELETE (check -> remove ->
+    /// release) so a re-register can never interleave with a delete and leave
+    /// a live registration whose address the book freed. Never held across an
+    /// `.await`.
+    write_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl PeersState {
@@ -56,6 +61,7 @@ impl PeersState {
             updates,
             auth_token: auth_token.map(Arc::from),
             book,
+            write_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -182,6 +188,7 @@ async fn register(State(state): State<PeersState>, body: String) -> Response {
             .into_response();
     }
 
+    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
     let assignment =
         match state
             .book
@@ -204,7 +211,9 @@ async fn register(State(state): State<PeersState>, body: String) -> Response {
     };
     reg.tunnel_address = Some(assignment.address.to_string());
 
-    match state.register(&reg) {
+    let registered = state.register(&reg);
+    drop(guard);
+    match registered {
         Ok(revision) => {
             tracing::info!(
                 revision,
@@ -261,6 +270,7 @@ struct DeleteResponse {
 /// name is unknown everywhere (no current registration *and* no address), so a
 /// retry after a crash still completes.
 async fn delete_one(State(state): State<PeersState>, Path(name): Path<String>) -> Response {
+    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
     let has_current = match state.current.contains_key(name.as_bytes()) {
         Ok(b) => b,
         Err(e) => return store_error_response(StoreError::from(e)),
@@ -286,6 +296,7 @@ async fn delete_one(State(state): State<PeersState>, Path(name): Path<String>) -
         Ok(a) => a,
         Err(e) => return claim_error_response(&e),
     };
+    drop(guard);
     tracing::info!(revision, name = %name, address = ?released, "released a backend peer");
     (
         StatusCode::OK,
@@ -812,6 +823,46 @@ mod tests {
         assert_eq!(a["tunnel_address"], "10.60.0.3", "a no longer owns .1");
     }
 
+    const ROUNDS: usize = 200;
+
+    /// A POST racing a DELETE for the same name must never leave a live
+    /// registration whose address the book has freed (or the reverse).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn post_racing_delete_never_splits_registry_and_book() {
+        let (state, book, _dir) = test_state();
+        let app = router(state.clone());
+        for round in 0..ROUNDS {
+            post(&app, body_with("race", &[":1"], None)).await;
+            let _ = tokio::join!(
+                tokio::spawn({
+                    let app = app.clone();
+                    async move { post(&app, body_with("race", &[":1"], None)).await }
+                }),
+                tokio::spawn({
+                    let app = app.clone();
+                    async move { delete(&app, "race").await }
+                }),
+            );
+            let current = state.current_for("race").unwrap();
+            let held = book.get(Role::Origin, "race").unwrap();
+            match (&current, &held) {
+                (None, None) => {}
+                (Some(c), Some(h)) => assert_eq!(
+                    c.tunnel_address.as_deref(),
+                    Some(h.address.to_string().as_str()),
+                    "round {round}: registration and book disagree on the address"
+                ),
+                _ => panic!(
+                    "round {round}: registration present={} but book present={}",
+                    current.is_some(),
+                    held.is_some()
+                ),
+            }
+            // Reset for the next round.
+            let _ = delete(&app, "race").await;
+        }
+    }
+
     #[tokio::test]
     async fn delete_logs_a_tombstone_a_catch_up_subscriber_receives() {
         let (state, _book, _dir) = test_state();
@@ -822,8 +873,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let updates = state.updates.subscribe();
         tokio::spawn(subscribe_worker(state.store.clone(), updates, 0, tx));
-        let (r1, b1) = rx.recv().await.unwrap();
-        let (r2, b2) = rx.recv().await.unwrap();
+        let (r1, b1) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for event 1")
+            .expect("channel closed before event 1");
+        let (r2, b2) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for event 2")
+            .expect("channel closed before event 2");
         assert!(r2 > r1);
         assert_eq!(
             crate::peers::event_payload(r1, &b1)["registration"]["name"],

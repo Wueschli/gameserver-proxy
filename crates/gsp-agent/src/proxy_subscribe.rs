@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn two_proxies_get_non_overlapping_routes() {
-        // The known bug: both used to be 0.0.0.0/0, so the last one won.
+        // Regression guard: these used to be 0.0.0.0/0, so the last-registered proxy stole every earlier proxy's route.
         let a = to_wg_peer(&reg(Some("10.60.0.3"))).unwrap();
         let b = to_wg_peer(&reg(Some("10.60.0.4"))).unwrap();
         assert_ne!(a.allowed_ips[0].address, b.allowed_ips[0].address);
