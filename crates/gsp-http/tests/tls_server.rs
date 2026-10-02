@@ -30,10 +30,7 @@ async fn serve(files: TlsFiles) -> (SocketAddr, Arc<ReloadingCert>) {
 }
 
 fn fixture_files() -> TlsFiles {
-    TlsFiles {
-        cert: fixture("leaf.pem"),
-        key: fixture("leaf.key"),
-    }
+    TlsFiles::new(fixture("leaf.pem"), fixture("leaf.key"))
 }
 
 async fn get_ok(ca: &str, addr: SocketAddr) {
@@ -63,11 +60,7 @@ async fn serves_a_chain_file() {
     let mut pem = std::fs::read(fixture("leaf.pem")).unwrap();
     pem.extend(std::fs::read(fixture("ca.pem")).unwrap());
     std::fs::write(&chain, pem).unwrap();
-    let (addr, cert) = serve(TlsFiles {
-        cert: chain,
-        key: fixture("leaf.key"),
-    })
-    .await;
+    let (addr, cert) = serve(TlsFiles::new(chain, fixture("leaf.key"))).await;
     assert_eq!(cert.current().cert.len(), 2);
     get_ok("ca.pem", addr).await;
 }
@@ -97,10 +90,7 @@ async fn plain_http_on_the_tls_port_does_not_break_the_server() {
 #[tokio::test]
 async fn the_reloader_picks_up_new_files() {
     let dir = tempfile::tempdir().unwrap();
-    let files = TlsFiles {
-        cert: dir.path().join("cert.pem"),
-        key: dir.path().join("key.pem"),
-    };
+    let files = TlsFiles::new(dir.path().join("cert.pem"), dir.path().join("key.pem"));
     std::fs::copy(fixture("leaf.pem"), &files.cert).unwrap();
     std::fs::copy(fixture("leaf.key"), &files.key).unwrap();
     let (addr, cert) = serve(files.clone()).await;

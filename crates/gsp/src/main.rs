@@ -271,11 +271,25 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         None => (None, Arc::new(gsp_core::sniff::Sniffers::default())),
     };
 
+    // A configured admin certificate must load too, for `--check` and at startup.
+    let admin_tls = match &cfg.admin_tls {
+        Some(t) => Some(gsp_http::tls::ReloadingCert::new(
+            gsp_http::tls::TlsFiles::new(t.cert.clone().into(), t.key.clone().into())
+                .named("settings.admin.tls.cert", "settings.admin.tls.key"),
+        )?),
+        None => None,
+    };
+
     if args.check {
         println!(
-            "config OK: {} listener(s), {} pool(s){}{}",
+            "config OK: {} listener(s), {} pool(s){}{}{}",
             cfg.listeners.len(),
             cfg.pools.len(),
+            if admin_tls.is_some() {
+                ", admin TLS loaded"
+            } else {
+                ""
+            },
             if geo_db.is_some() {
                 ", geo_db loaded"
             } else {
@@ -296,7 +310,11 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             instance: args
                 .aggregator_instance
                 .unwrap_or_else(|| cfg.admin_listen.to_string()),
-            admin_url: format!("http://{}", cfg.admin_listen),
+            admin_url: format!(
+                "{}://{}",
+                if admin_tls.is_some() { "https" } else { "http" },
+                cfg.admin_listen
+            ),
             interval: Duration::from_secs(args.aggregator_interval_sec),
             token: args.aggregator_token,
         });
@@ -310,6 +328,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         sniffers,
         aggregator_push,
         tunnel_config,
+        admin_tls,
     )
     .await
 }
@@ -324,6 +343,7 @@ async fn run(
     sniffers: Arc<gsp_core::sniff::Sniffers>,
     aggregator_push: Option<aggregator_client::PushConfig>,
     tunnel_config: Option<TunnelConfig>,
+    admin_tls: Option<Arc<gsp_http::tls::ReloadingCert>>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
@@ -513,6 +533,7 @@ async fn run(
 
     let admin = tokio::spawn(admin::serve(
         cfg.admin_listen,
+        admin_tls,
         handle.clone(),
         prometheus,
         cfg.admin_auth_token.clone(),

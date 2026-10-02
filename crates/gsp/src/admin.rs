@@ -90,6 +90,7 @@ async fn require_bearer(State(state): State<AdminState>, req: Request, next: Nex
 
 pub async fn serve(
     addr: SocketAddr,
+    tls: Option<std::sync::Arc<gsp_http::tls::ReloadingCert>>,
     runtime: RuntimeHandle,
     prometheus: PrometheusHandle,
     auth_token: Option<String>,
@@ -104,16 +105,10 @@ pub async fn serve(
         sniffers,
     });
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(%addr, error = %e, "failed to bind admin listener");
-            return;
-        }
-    };
-    tracing::info!(%addr, "admin API listening");
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!(error = %e, "admin API server error");
+    // HTTPS with `settings.admin.tls`, plain HTTP otherwise; a bind failure
+    // lands here too, as before.
+    if let Err(e) = gsp_http::tls::serve(addr, app, tls, "admin API").await {
+        tracing::error!(%addr, error = %e, "admin API server error");
     }
 }
 

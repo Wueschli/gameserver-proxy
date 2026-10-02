@@ -26,48 +26,76 @@ use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
-/// The `--tls-cert` (PEM chain, leaf first) and `--tls-key` (PEM private key) files.
+/// The certificate (PEM chain, leaf first) and private key (PEM) files, plus the
+/// names errors call them by: `--tls-cert`/`--tls-key` unless [`TlsFiles::named`].
 #[derive(Clone, Debug)]
 pub struct TlsFiles {
     pub cert: PathBuf,
     pub key: PathBuf,
+    pub cert_name: &'static str,
+    pub key_name: &'static str,
+}
+
+impl TlsFiles {
+    pub fn new(cert: PathBuf, key: PathBuf) -> Self {
+        Self {
+            cert,
+            key,
+            cert_name: "--tls-cert",
+            key_name: "--tls-key",
+        }
+    }
+
+    /// Name the pair after where it was configured (e.g. a YAML setting).
+    pub fn named(mut self, cert_name: &'static str, key_name: &'static str) -> Self {
+        self.cert_name = cert_name;
+        self.key_name = key_name;
+        self
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
-    #[error("{flag} {}: cannot read the file", path.display())]
+    #[error("{name} {}: cannot read the file", path.display())]
     Read {
-        flag: &'static str,
+        name: &'static str,
         path: PathBuf,
         source: io::Error,
     },
-    #[error("--tls-cert {}: no PEM certificate found", path.display())]
-    NoCertificate { path: PathBuf },
-    #[error("--tls-cert {}: malformed PEM certificate", path.display())]
+    #[error("{name} {}: no PEM certificate found", path.display())]
+    NoCertificate { name: &'static str, path: PathBuf },
+    #[error("{name} {}: malformed PEM certificate", path.display())]
     BadCertificate {
+        name: &'static str,
         path: PathBuf,
         source: tokio_rustls::rustls::pki_types::pem::Error,
     },
-    #[error("--tls-key {}: no PEM private key found", path.display())]
-    NoKey { path: PathBuf },
-    #[error("--tls-key {}: unsupported or invalid private key", path.display())]
+    #[error("{name} {}: no PEM private key found", path.display())]
+    NoKey { name: &'static str, path: PathBuf },
+    #[error("{name} {}: unsupported or invalid private key", path.display())]
     BadKey {
+        name: &'static str,
         path: PathBuf,
         source: rustls::Error,
     },
     #[error("--tls-cert and --tls-key go together; only one was given")]
     Incomplete,
-    #[error("--tls-key {} does not match the certificate in --tls-cert {}", key.display(), cert.display())]
+    #[error(
+        "{} {} does not match the certificate in {} {}",
+        files.key_name,
+        files.key.display(),
+        files.cert_name,
+        files.cert.display()
+    )]
     KeyMismatch {
-        cert: PathBuf,
-        key: PathBuf,
+        files: Box<TlsFiles>,
         source: rustls::Error,
     },
 }
 
-fn read(flag: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
+fn read(name: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
     std::fs::read(path).map_err(|source| TlsError::Read {
-        flag,
+        name,
         path: path.to_owned(),
         source,
     })
@@ -76,26 +104,30 @@ fn read(flag: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
 /// Read and validate the pair: at least one certificate, a key rustls (ring)
 /// supports in any PEM encoding, and a key that matches the leaf certificate.
 pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
-    let cert_pem = read("--tls-cert", &files.cert)?;
+    let cert_pem = read(files.cert_name, &files.cert)?;
     // Every PEM section must parse: a file cut off mid-chain is an error, not a
     // shorter chain.
     let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<_, _>>()
         .map_err(|source| TlsError::BadCertificate {
+            name: files.cert_name,
             path: files.cert.clone(),
             source,
         })?;
     if chain.is_empty() {
         return Err(TlsError::NoCertificate {
+            name: files.cert_name,
             path: files.cert.clone(),
         });
     }
-    let key_pem = read("--tls-key", &files.key)?;
+    let key_pem = read(files.key_name, &files.key)?;
     let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|_| TlsError::NoKey {
+        name: files.key_name,
         path: files.key.clone(),
     })?;
     let signer = rustls::crypto::ring::sign::any_supported_type(&key).map_err(|source| {
         TlsError::BadKey {
+            name: files.key_name,
             path: files.key.clone(),
             source,
         }
@@ -104,8 +136,7 @@ pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
     certified
         .keys_match()
         .map_err(|source| TlsError::KeyMismatch {
-            cert: files.cert.clone(),
-            key: files.key.clone(),
+            files: Box::new(files.clone()),
             source,
         })?;
     Ok(certified)
@@ -305,11 +336,9 @@ impl TlsArgs {
     /// Only one of the two is an error, never a silent fall-back to plain HTTP.
     pub fn load(&self) -> Result<Option<Arc<ReloadingCert>>, TlsError> {
         match (&self.tls_cert, &self.tls_key) {
-            (Some(cert), Some(key)) => ReloadingCert::new(TlsFiles {
-                cert: cert.clone(),
-                key: key.clone(),
-            })
-            .map(Some),
+            (Some(cert), Some(key)) => {
+                ReloadingCert::new(TlsFiles::new(cert.clone(), key.clone())).map(Some)
+            }
             (None, None) => Ok(None),
             _ => Err(TlsError::Incomplete),
         }

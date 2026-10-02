@@ -199,6 +199,9 @@ struct RawAdmin {
     /// (phase 10+11 slice 10, `docs/10` "The aggregator").
     #[serde(default)]
     auth_token: Option<String>,
+    /// Serve the admin API over HTTPS with this certificate pair.
+    #[serde(default)]
+    tls: Option<AdminTls>,
 }
 
 impl Default for RawAdmin {
@@ -206,8 +209,19 @@ impl Default for RawAdmin {
         Self {
             listen: default_admin_listen(),
             auth_token: None,
+            tls: None,
         }
     }
+}
+
+/// `settings.admin.tls`: the admin API serves HTTPS with this pair (PEM chain,
+/// leaf first; PEM private key). Both or neither, by type. Startup-only like
+/// `listen`; the files themselves are re-read when they change.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminTls {
+    pub cert: String,
+    pub key: String,
 }
 
 fn default_admin_listen() -> String {
@@ -1302,6 +1316,8 @@ pub struct Config {
     /// Bearer token every admin API request (except `GET /healthz`) must
     /// present; `None` leaves the API open.
     pub admin_auth_token: Option<String>,
+    /// `settings.admin.tls`: serve the admin API over HTTPS. Startup-only.
+    pub admin_tls: Option<AdminTls>,
     pub pools: Vec<PoolConfig>,
     pub resolvers: Vec<ResolverConfig>,
     pub listeners: Vec<ListenerConfig>,
@@ -1580,6 +1596,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         ))
     })?;
     let admin_auth_token = raw.settings.admin.auth_token.clone();
+    let admin_tls = raw.settings.admin.tls.clone();
 
     // Resolve `backend_sources`. A `static` source becomes a fixed address list;
     // the dynamic kinds become a `SourceConfig` for the runtime refresh task.
@@ -2389,6 +2406,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,
         admin_auth_token,
+        admin_tls,
         pools,
         resolvers,
         listeners,
@@ -2864,6 +2882,49 @@ listeners:
         )
         .expect("should parse");
         assert_eq!(cfg.admin_auth_token.as_deref(), Some("secret123"));
+    }
+
+    #[test]
+    fn parses_admin_tls() {
+        let cfg = parse_str(
+            r#"
+settings:
+  admin:
+    tls:
+      cert: /etc/gsp/tls/fullchain.pem
+      key: /etc/gsp/tls/privkey.pem
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#,
+        )
+        .expect("should parse");
+        assert_eq!(
+            cfg.admin_tls,
+            Some(AdminTls {
+                cert: "/etc/gsp/tls/fullchain.pem".into(),
+                key: "/etc/gsp/tls/privkey.pem".into(),
+            })
+        );
+        assert_eq!(parse_str(MINIMAL).unwrap().admin_tls, None);
+    }
+
+    #[test]
+    fn admin_tls_needs_both_files() {
+        for tls in [
+            "cert: /c.pem",
+            "key: /k.pem",
+            "cert: /c.pem\n      key: /k.pem\n      ca: /x",
+        ] {
+            let text = format!(
+                "settings:\n  admin:\n    tls:\n      {tls}\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+            );
+            assert!(parse_str(&text).is_err(), "accepted:\n{text}");
+        }
     }
 
     #[test]
