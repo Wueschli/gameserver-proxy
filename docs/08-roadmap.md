@@ -542,7 +542,8 @@ token, is ever exposed to a human directly.
      the same "ephemeral, nothing durable" posture the aggregator already
      has), returned as an `HttpOnly`, `SameSite=Lax` cookie (not yet marked
      `Secure` — noted as a gap for a TLS-fronted deployment, not silently
-     ignored); `POST /ui/logout` clears it; `GET /ui/session` (gated by the
+     ignored; since 2026-10-02 a UI serving native TLS, `--tls-cert`, sets
+     `Secure` itself, behind a proxy the proxy must); `POST /ui/logout` clears it; `GET /ui/session` (gated by the
      new `require_session` middleware) lets the frontend check login state
      on load. `None` (`--ui-password` omitted) leaves the UI open, consistent
      with every other optional-auth surface in this fleet. 9 new tests;
