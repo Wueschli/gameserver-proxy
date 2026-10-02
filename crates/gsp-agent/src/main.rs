@@ -20,6 +20,7 @@
 //! small to bother with the registry) — see [`proxy_subscribe`]'s module
 //! doc for why the two don't conflict.
 
+mod address_store;
 mod interface;
 mod keypair;
 mod proxy_subscribe;
@@ -73,13 +74,16 @@ struct Args {
     #[arg(long, default_value_t = 51820)]
     listen_port: u16,
 
-    /// This interface's own tunnel-internal address, `ip/cidr` (e.g.
-    /// `10.60.0.2/24`).
+    /// This interface's own tunnel-internal address as `ip/prefix`
+    /// (e.g. `10.60.0.2/24`) to **pin** it. Omit to have the controller allocate
+    /// one from its `--tunnel-network` (it is returned on registration and
+    /// saved to `<data-dir>/tunnel-address`).
     #[arg(long)]
-    address: String,
+    address: Option<String>,
 
-    /// Backend addresses (tunnel-internal `ip:port`, reachable once this
-    /// interface is up) this origin fronts.
+    /// Backend addresses this origin fronts: `host:port`, or the shorthand
+    /// `:port` ("my tunnel address plus this port"). Every host must be this
+    /// origin's own tunnel address.
     #[arg(long, value_delimiter = ',')]
     backends: Vec<String>,
 
@@ -102,20 +106,19 @@ struct Args {
     #[arg(long)]
     userspace: bool,
 
-    /// A manually-pinned edge proxy's WireGuard pubkey, in addition to
-    /// whatever `--controller-url`'s proxy-peers registry already supplies
-    /// (see `proxy_subscribe`'s module doc) — a bootstrap proxy that
-    /// predates the registry, or a deployment too small to bother with it.
-    /// Requires `--peer-endpoint`.
-    #[arg(long, requires = "peer_endpoint")]
+    /// A manually-pinned edge proxy's WireGuard pubkey, in addition to whatever
+    /// the proxy-peers registry supplies. Requires `--peer-endpoint` and
+    /// `--peer-address`.
+    #[arg(long, requires_all = ["peer_endpoint", "peer_address"])]
     peer_pubkey: Option<String>,
 
-    /// The edge proxy's public `ip:port` to dial. Required to actually
-    /// initiate the handshake — an origin behind NAT can't rely on the
-    /// proxy dialing in first, since the proxy only learns of an origin's
-    /// endpoint from this agent's own (often NAT-invisible) `--endpoint`.
+    /// The edge proxy's public `ip:port` to dial.
     #[arg(long, requires = "peer_pubkey")]
     peer_endpoint: Option<String>,
+
+    /// The pinned proxy's tunnel address (bare IPv4), routed as a `/32`.
+    #[arg(long, requires = "peer_pubkey")]
+    peer_address: Option<String>,
 }
 
 #[tokio::main]
@@ -129,8 +132,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     for b in &args.backends {
-        b.parse::<SocketAddr>()
-            .with_context(|| format!("--backends entry {b:?} is not a valid ip:port"))?;
+        let ok = match b.strip_prefix(':') {
+            Some(port) => port.parse::<u16>().is_ok(),
+            None => b.parse::<SocketAddr>().is_ok(),
+        };
+        anyhow::ensure!(ok, "--backends entry {b:?} is not host:port or :port");
     }
 
     std::fs::create_dir_all(&args.data_dir)
@@ -140,27 +146,66 @@ async fn main() -> anyhow::Result<()> {
     let pubkey = private_key.public_key().to_string();
     tracing::info!(pubkey = %pubkey, key_path = %key_path.display(), "wireguard identity ready");
 
-    let address: IpAddrMask = args
-        .address
-        .parse()
-        .map_err(|e| anyhow::anyhow!("--address {:?} is not a valid ip/cidr: {e}", args.address))?;
+    // The controller is the address authority: register BEFORE the interface
+    // exists, because the answer is the interface's address.
+    let pinned_cidr = args.address.as_deref();
+    if let Some(c) = pinned_cidr {
+        address_store::ip_of(c)
+            .parse::<std::net::Ipv4Addr>()
+            .with_context(|| format!("--address {c:?} must be an IPv4 ip/prefix"))?;
+    }
+    let reg = register::Registration {
+        name: args.name.clone(),
+        pubkey: pubkey.clone(),
+        endpoint: args.endpoint.clone(),
+        backends: args.backends.clone(),
+        address: pinned_cidr.map(|c| address_store::ip_of(c).to_string()),
+    };
+    let client = reqwest::Client::new();
+    let addr_path = args.data_dir.join("tunnel-address");
+    let outcome = register::register_with_retry(
+        &client,
+        &args.controller_url,
+        args.controller_token.as_deref(),
+        &reg,
+        Duration::from_secs(30),
+    )
+    .await;
+    let start =
+        address_store::resolve_startup(outcome, pinned_cidr, address_store::load(&addr_path))?;
+    match start.source {
+        address_store::Source::Controller => address_store::save(&addr_path, &start.cidr)?,
+        address_store::Source::Saved => tracing::warn!(
+            address = %start.cidr,
+            "controller unreachable; starting with the last saved tunnel address"
+        ),
+    }
+    tracing::info!(address = %start.cidr, "tunnel address ready");
+    let address: IpAddrMask = start.cidr.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "tunnel address {:?} is not a valid ip/cidr: {e}",
+            start.cidr
+        )
+    })?;
 
     let mut peers = Vec::new();
-    if let (Some(peer_pubkey), Some(peer_endpoint)) = (&args.peer_pubkey, &args.peer_endpoint) {
+    if let (Some(peer_pubkey), Some(peer_endpoint), Some(peer_address)) =
+        (&args.peer_pubkey, &args.peer_endpoint, &args.peer_address)
+    {
         let public_key: Key = peer_pubkey
             .parse()
             .map_err(|e| anyhow::anyhow!("--peer-pubkey {peer_pubkey:?} is not valid: {e}"))?;
         let endpoint: SocketAddr = peer_endpoint
             .parse()
             .with_context(|| format!("--peer-endpoint {peer_endpoint:?} is not a valid ip:port"))?;
+        let peer_ip: std::net::Ipv4Addr = peer_address
+            .parse()
+            .with_context(|| format!("--peer-address {peer_address:?} is not an IPv4 address"))?;
         let mut peer = Peer::new(public_key);
         peer.endpoint = Some(endpoint);
-        // Single static peer (the edge proxy) — route everything through
-        // it. A fleet of proxies per origin isn't a locked design yet
-        // (`docs/11`), so this stays a single pinned peer for now.
-        peer.allowed_ips = vec!["0.0.0.0/0".parse().unwrap()];
-        // The proxy may sit behind NAT too (or this origin does) —
-        // keepalive is what keeps the mapping alive between handshakes.
+        // A host route to the pinned proxy's own tunnel address — never
+        // 0.0.0.0/0, which would collide with every other proxy's route.
+        peer.allowed_ips = vec![format!("{peer_ip}/32").parse().unwrap()];
         peer.persistent_keepalive_interval = Some(25);
         tracing::info!(pubkey = %peer_pubkey, endpoint = %endpoint, "peering with the edge proxy");
         peers.push(peer);
@@ -179,18 +224,13 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
 
-    let client = reqwest::Client::new();
     tokio::spawn(register::run(
         client,
         args.controller_url.clone(),
         args.controller_token.clone(),
-        register::Registration {
-            name: args.name.clone(),
-            pubkey,
-            endpoint: args.endpoint.clone(),
-            backends: args.backends.clone(),
-        },
+        reg,
         Duration::from_secs(args.register_interval_sec),
+        address_store::ip_of(&start.cidr).to_string(),
     ));
     // Phase 14 slice 7: learn about every edge proxy, not just a manually
     // pinned one — see `proxy_subscribe`'s module doc.
