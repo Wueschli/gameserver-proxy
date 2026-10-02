@@ -23,7 +23,7 @@ test:
 
 ## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
 audit:
-	cargo audit
+	sh .github/scripts/cargo_audit.sh
 
 ## build: debug build of the workspace
 build:

@@ -92,7 +92,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
   `target/trivy/`, and exits 1 if it found anything. **Informational:** CI's separate `trivy`
   job (after `deploy`, and nightly) shows the results on the run's summary page and as
   warnings, and never fails on them. For crates it sees GHSA advisories only —
-  RustSec-only ones need `make audit` (`cargo audit`). Accepted findings go in
+  RustSec ones come from `make audit` (`cargo audit`), also an informational CI job. Accepted findings go in
   `.trivyignore` (repo root), each with a reason.
 - `make deploy-lint` runs daemon-free static checks; `make deploy-smoke` uses its own
   compose project (`gsp-smoke`) so it never tears down a demo you started by hand.
