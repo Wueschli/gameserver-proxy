@@ -15,6 +15,7 @@ use axum::Router;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use gsp_controller::addresses::AddressBook;
 use gsp_controller::adopt::AdoptState;
 use gsp_controller::api::{self, AppState};
 use gsp_controller::ha::{self, HaHandle, NodeId as HaNodeId};
@@ -164,7 +165,14 @@ async fn main() -> anyhow::Result<()> {
         peers_dir = %peers_dir.display(),
         "backend-peers store opened"
     );
-    let peers_state = PeersState::new(peers_store, args.auth_token.clone());
+    // Interim wiring (pin-only mode, no network): Task 3 replaces this with
+    // the real flags-driven address book.
+    let book_dir = args.data_dir.join("tunnel-addresses");
+    let book = Arc::new(
+        AddressBook::open(&book_dir, None)
+            .map_err(|e| anyhow::anyhow!("opening address book at {book_dir:?}: {e}"))?,
+    );
+    let peers_state = PeersState::new(peers_store, args.auth_token.clone(), book.clone());
 
     // A fourth separate sled database (phase 14 slice 7) — the proxy-peers
     // registry, the mirror image of the backend-peers one above (see
@@ -179,7 +187,8 @@ async fn main() -> anyhow::Result<()> {
         proxy_peers_dir = %proxy_peers_dir.display(),
         "proxy-peers store opened"
     );
-    let proxy_peers_state = ProxyPeersState::new(proxy_peers_store, args.auth_token.clone());
+    let proxy_peers_state =
+        ProxyPeersState::new(proxy_peers_store, args.auth_token.clone(), book.clone());
 
     // Shared, mutable across `AppState` and `IntentState` — `adopt` flips
     // this one cell and both write gates see it instantly (see

@@ -31,6 +31,8 @@
 
 pub mod api;
 
+use std::net::Ipv4Addr;
+
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
 
@@ -48,13 +50,24 @@ pub struct PeerRegistration {
     /// register (an origin behind a home NAT may not have a stable one).
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Backend addresses this origin currently fronts, reachable once its
-    /// WireGuard peer is up (tunnel-internal `ip:port`s, not public ones).
+    /// Backend addresses this origin fronts, reachable once its WireGuard peer
+    /// is up. Entries are `host:port`, or the shorthand `:port` ("my tunnel
+    /// address plus this port"), which the controller expands when it stores
+    /// the registration (spec: Backends).
     #[serde(default)]
     pub backends: Vec<String>,
+    /// This origin's tunnel-internal IPv4 address. Optional on request (omit to
+    /// be allocated one, or give one to claim it); always set once stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_address: Option<String>,
 }
 
 impl PeerRegistration {
+    /// The address this registration asks for, if it names one.
+    pub fn requested_address(&self) -> Option<Ipv4Addr> {
+        self.tunnel_address.as_deref().and_then(|a| a.parse().ok())
+    }
+
     /// The same "reject a malformed submission before it's ever broadcast"
     /// posture `crate::intent::IntentOp::validate` uses — there's no
     /// `gsp_config::validate()` equivalent for a bare registration either.
@@ -66,8 +79,17 @@ impl PeerRegistration {
             return Err("pubkey must be a base64-encoded 32-byte WireGuard key".into());
         }
         for b in &self.backends {
-            if b.parse::<std::net::SocketAddr>().is_err() {
-                return Err(format!("backends entry {b:?} is not a valid ip:port"));
+            let ok = match b.strip_prefix(':') {
+                Some(port) => port.parse::<u16>().is_ok(),
+                None => b.parse::<std::net::SocketAddr>().is_ok(),
+            };
+            if !ok {
+                return Err(format!("backends entry {b:?} is not host:port or :port"));
+            }
+        }
+        if let Some(a) = &self.tunnel_address {
+            if a.parse::<Ipv4Addr>().is_err() {
+                return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
             }
         }
         Ok(())
@@ -84,7 +106,41 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: Some("203.0.113.7:51820".into()),
             backends: vec!["10.60.0.2:25565".into()],
+            tunnel_address: None,
         }
+    }
+
+    #[test]
+    fn backends_accept_the_port_shorthand() {
+        let mut reg = valid();
+        reg.backends = vec![":25565".into(), "10.60.0.2:25566".into()];
+        assert!(reg.validate().is_ok());
+        reg.backends = vec![":notaport".into()];
+        assert!(reg.validate().is_err());
+    }
+
+    #[test]
+    fn a_malformed_tunnel_address_fails_validation() {
+        let mut reg = valid();
+        reg.tunnel_address = Some("not-an-ip".into());
+        assert!(reg.validate().is_err());
+        reg.tunnel_address = Some("10.60.0.9".into());
+        assert!(reg.validate().is_ok());
+        assert_eq!(reg.requested_address(), Some("10.60.0.9".parse().unwrap()));
+    }
+
+    #[test]
+    fn tunnel_address_is_omitted_from_json_when_absent() {
+        let json = serde_json::to_string(&valid()).unwrap();
+        assert!(!json.contains("tunnel_address"));
+    }
+
+    #[test]
+    fn a_registration_from_an_older_log_still_decodes() {
+        // Written before this field existed.
+        let old = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":null,"backends":["10.60.0.2:1"]}"#;
+        let reg: PeerRegistration = serde_json::from_str(old).unwrap();
+        assert_eq!(reg.tunnel_address, None);
     }
 
     #[test]

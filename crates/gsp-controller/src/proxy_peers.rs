@@ -31,6 +31,8 @@
 
 pub mod api;
 
+use std::net::Ipv4Addr;
+
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +46,18 @@ pub struct ProxyRegistration {
     pub pubkey: String,
     /// This proxy's public dial-out address — required (see module doc).
     pub endpoint: String,
+    /// This proxy's tunnel-internal IPv4 address. Optional on request (omit to
+    /// be allocated one, or give one to claim it); always set once stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_address: Option<String>,
 }
 
 impl ProxyRegistration {
+    /// The address this registration asks for, if it names one.
+    pub fn requested_address(&self) -> Option<Ipv4Addr> {
+        self.tunnel_address.as_deref().and_then(|a| a.parse().ok())
+    }
+
     /// Same posture as `crate::peers::PeerRegistration::validate` — reject a
     /// malformed submission before it's ever broadcast.
     pub fn validate(&self) -> Result<(), String> {
@@ -62,6 +73,11 @@ impl ProxyRegistration {
                 self.endpoint
             ));
         }
+        if let Some(a) = &self.tunnel_address {
+            if a.parse::<Ipv4Addr>().is_err() {
+                return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
+            }
+        }
         Ok(())
     }
 }
@@ -75,7 +91,32 @@ mod tests {
             name: "edge-eu-1".into(),
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
+            tunnel_address: None,
         }
+    }
+
+    #[test]
+    fn a_malformed_tunnel_address_fails_validation() {
+        let mut reg = valid();
+        reg.tunnel_address = Some("not-an-ip".into());
+        assert!(reg.validate().is_err());
+        reg.tunnel_address = Some("10.60.0.9".into());
+        assert!(reg.validate().is_ok());
+        assert_eq!(reg.requested_address(), Some("10.60.0.9".parse().unwrap()));
+    }
+
+    #[test]
+    fn tunnel_address_is_omitted_from_json_when_absent() {
+        let json = serde_json::to_string(&valid()).unwrap();
+        assert!(!json.contains("tunnel_address"));
+    }
+
+    #[test]
+    fn a_registration_from_an_older_log_still_decodes() {
+        // Written before this field existed.
+        let old = r#"{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820"}"#;
+        let reg: ProxyRegistration = serde_json::from_str(old).unwrap();
+        assert_eq!(reg.tunnel_address, None);
     }
 
     #[test]

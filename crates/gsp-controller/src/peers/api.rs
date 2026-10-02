@@ -19,6 +19,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use super::PeerRegistration;
+use crate::addresses::api::claim_error_response;
+use crate::addresses::{expand_backends, now_secs, AddressBook, Role};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
@@ -37,10 +39,12 @@ pub struct PeersState {
     /// leave the API open — same posture as `crate::api::AppState`'s and
     /// `crate::intent::api::IntentState`'s own `auth_token`.
     auth_token: Option<Arc<str>>,
+    /// The shared tunnel-address book every registration claims from.
+    book: Arc<AddressBook>,
 }
 
 impl PeersState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>) -> Self {
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, book: Arc<AddressBook>) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         let current = store
             .db()
@@ -51,6 +55,7 @@ impl PeersState {
             current,
             updates,
             auth_token: auth_token.map(Arc::from),
+            book,
         }
     }
 
@@ -133,6 +138,9 @@ async fn require_bearer(State(state): State<PeersState>, req: Request, next: Nex
 #[derive(Serialize)]
 struct SubmitResponse {
     revision: u64,
+    tunnel_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_network: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,7 +151,7 @@ struct ErrorResponse {
 /// `POST /peers` — body is one JSON [`PeerRegistration`]. Validated before it
 /// ever reaches the store, same posture as `crate::intent::api::submit_intent`.
 async fn register(State(state): State<PeersState>, body: String) -> Response {
-    let reg: PeerRegistration = match serde_json::from_str(&body) {
+    let mut reg: PeerRegistration = match serde_json::from_str(&body) {
         Ok(reg) => reg,
         Err(e) => {
             return (
@@ -163,10 +171,45 @@ async fn register(State(state): State<PeersState>, body: String) -> Response {
             .into_response();
     }
 
+    let assignment =
+        match state
+            .book
+            .claim(Role::Origin, &reg.name, reg.requested_address(), now_secs())
+        {
+            Ok(a) => a,
+            Err(e) => return claim_error_response(&e),
+        };
+    // Note: the claim above is kept even if the backends below are rejected —
+    // the owner's corrected retry gets the same address (Review Focus 1).
+    reg.backends = match expand_backends(&reg.backends, assignment.address) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse { error: e }),
+            )
+                .into_response()
+        }
+    };
+    reg.tunnel_address = Some(assignment.address.to_string());
+
     match state.register(&reg) {
         Ok(revision) => {
-            tracing::info!(revision, name = %reg.name, "registered a backend peer");
-            (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
+            tracing::info!(
+                revision,
+                name = %reg.name,
+                address = %assignment.address,
+                "registered a backend peer"
+            );
+            (
+                StatusCode::OK,
+                Json(SubmitResponse {
+                    revision,
+                    tunnel_address: assignment.address.to_string(),
+                    tunnel_network: state.book.network().map(|n| n.to_string()),
+                }),
+            )
+                .into_response()
         }
         Err(e) => store_error_response(e),
     }
@@ -312,10 +355,48 @@ mod tests {
 
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-    fn test_state() -> (PeersState, tempfile::TempDir) {
+    use crate::addresses::{AddressBook, Network, Role};
+
+    fn test_state() -> (PeersState, Arc<AddressBook>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path()).unwrap());
-        (PeersState::new(store, None), dir)
+        let store = Arc::new(Store::open(&dir.path().join("peers")).unwrap());
+        let book = Arc::new(
+            AddressBook::open(
+                &dir.path().join("addresses"),
+                Some(Network::parse("10.60.0.0/16").unwrap()),
+            )
+            .unwrap(),
+        );
+        (PeersState::new(store, None, book.clone()), book, dir)
+    }
+
+    async fn post(app: &Router, body: String) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(Request::post("/peers").body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn body_with(name: &str, backends: &[&str], tunnel_address: Option<&str>) -> String {
+        let mut v = serde_json::json!({
+            "name": name,
+            "pubkey": KEY,
+            "endpoint": "203.0.113.7:51820",
+            "backends": backends,
+        });
+        if let Some(a) = tunnel_address {
+            v["tunnel_address"] = serde_json::json!(a);
+        }
+        v.to_string()
     }
 
     fn reg_body(name: &str, backends: &[&str]) -> String {
@@ -330,12 +411,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_valid_registration_is_accepted() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
                 Request::post("/peers")
-                    .body(Body::from(reg_body("home", &["10.60.0.2:25565"])))
+                    .body(Body::from(reg_body("home", &[":25565"])))
                     .unwrap(),
             )
             .await
@@ -345,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalid_registration_is_rejected_before_touching_the_store() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -360,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_is_rejected() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -375,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_one_is_404_before_any_registration() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(Request::get("/peers/nope").body(Body::empty()).unwrap())
@@ -386,13 +467,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_registration_replaces_the_current_view_for_that_name() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
 
         app.clone()
             .oneshot(
                 Request::post("/peers")
-                    .body(Body::from(reg_body("home", &["10.60.0.2:1"])))
+                    .body(Body::from(reg_body("home", &[":1"])))
                     .unwrap(),
             )
             .await
@@ -400,7 +481,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/peers")
-                    .body(Body::from(reg_body("home", &["10.60.0.2:2"])))
+                    .body(Body::from(reg_body("home", &[":2"])))
                     .unwrap(),
             )
             .await
@@ -415,12 +496,12 @@ mod tests {
             .await
             .unwrap();
         let reg: PeerRegistration = serde_json::from_slice(&body).unwrap();
-        assert_eq!(reg.backends, vec!["10.60.0.2:2"]);
+        assert_eq!(reg.backends, vec!["10.60.0.1:2"]);
     }
 
     #[tokio::test]
     async fn list_returns_every_currently_registered_origin() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         app.clone()
             .oneshot(
@@ -456,8 +537,15 @@ mod tests {
     #[tokio::test]
     async fn a_missing_bearer_token_is_rejected_when_one_is_configured() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = PeersState::new(store, Some("secret".into()));
+        let store = Arc::new(Store::open(&dir.path().join("peers")).unwrap());
+        let book = Arc::new(
+            AddressBook::open(
+                &dir.path().join("addresses"),
+                Some(Network::parse("10.60.0.0/16").unwrap()),
+            )
+            .unwrap(),
+        );
+        let state = PeersState::new(store, Some("secret".into()), book);
         let app = router(state);
         let resp = app
             .oneshot(Request::get("/peers").body(Body::empty()).unwrap())
@@ -477,6 +565,7 @@ mod tests {
                     pubkey: KEY.into(),
                     endpoint: None,
                     backends: vec![],
+                    tunnel_address: None,
                 })
                 .unwrap(),
             )
@@ -496,6 +585,7 @@ mod tests {
                     pubkey: KEY.into(),
                     endpoint: None,
                     backends: vec!["10.60.0.2:1".into()],
+                    tunnel_address: None,
                 })
                 .unwrap(),
             )
@@ -503,5 +593,86 @@ mod tests {
         updates_tx.send(rev2).unwrap();
         let (got_rev2, _) = rx.recv().await.unwrap();
         assert_eq!(got_rev2, rev2);
+    }
+
+    #[tokio::test]
+    async fn a_registration_without_an_address_is_allocated_one_and_told_the_network() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, body) = post(&app, body_with("home", &[":25565"], None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["tunnel_address"], "10.60.0.1");
+        assert_eq!(body["tunnel_network"], "10.60.0.0/16");
+        assert!(body["revision"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn re_registering_returns_the_same_address_and_two_origins_get_distinct_ones() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (_, first) = post(&app, body_with("a", &[], None)).await;
+        let (_, again) = post(&app, body_with("a", &[], None)).await;
+        let (_, other) = post(&app, body_with("b", &[], None)).await;
+        assert_eq!(first["tunnel_address"], again["tunnel_address"]);
+        assert_ne!(first["tunnel_address"], other["tunnel_address"]);
+    }
+
+    #[tokio::test]
+    async fn a_pinned_address_held_by_a_proxy_is_a_409_naming_the_holder() {
+        let (state, book, _dir) = test_state();
+        book.claim(Role::Proxy, "edge-1", Some("10.60.0.9".parse().unwrap()), 1)
+            .unwrap();
+        let app = router(state);
+        let (status, body) = post(&app, body_with("home", &[], Some("10.60.0.9"))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("proxy \"edge-1\""));
+    }
+
+    #[tokio::test]
+    async fn a_pin_outside_the_network_is_a_422() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, _) = post(&app, body_with("home", &[], Some("192.168.1.5"))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn the_port_shorthand_is_expanded_in_the_stored_registration() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        post(&app, body_with("home", &[":25565"], None)).await;
+        let resp = app
+            .oneshot(Request::get("/peers/home").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reg: PeerRegistration = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reg.tunnel_address.as_deref(), Some("10.60.0.1"));
+        assert_eq!(reg.backends, vec!["10.60.0.1:25565"]);
+    }
+
+    #[tokio::test]
+    async fn a_backend_on_another_host_is_a_422() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, body) = post(&app, body_with("home", &["10.60.0.77:25565"], None)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains("own address"));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_registration_keeps_the_address_for_the_retry() {
+        // Review Focus 1: the claim precedes the backend check, so the owner
+        // already holds an address — the corrected retry must get the same one.
+        let (state, book, _dir) = test_state();
+        let app = router(state);
+        let (bad, _) = post(&app, body_with("home", &["10.60.0.77:1"], None)).await;
+        assert_eq!(bad, StatusCode::UNPROCESSABLE_ENTITY);
+        let held = book.get(Role::Origin, "home").unwrap().unwrap().address;
+        let (ok, body) = post(&app, body_with("home", &[":1"], None)).await;
+        assert_eq!(ok, StatusCode::OK);
+        assert_eq!(body["tunnel_address"], held.to_string());
     }
 }

@@ -19,6 +19,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use super::ProxyRegistration;
+use crate::addresses::api::claim_error_response;
+use crate::addresses::{now_secs, AddressBook, Role};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
@@ -31,10 +33,12 @@ pub struct ProxyPeersState {
     current: sled::Tree,
     updates: broadcast::Sender<u64>,
     auth_token: Option<Arc<str>>,
+    /// The shared tunnel-address book every registration claims from.
+    book: Arc<AddressBook>,
 }
 
 impl ProxyPeersState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>) -> Self {
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, book: Arc<AddressBook>) -> Self {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         let current = store
             .db()
@@ -45,6 +49,7 @@ impl ProxyPeersState {
             current,
             updates,
             auth_token: auth_token.map(Arc::from),
+            book,
         }
     }
 
@@ -127,6 +132,9 @@ async fn require_bearer(
 #[derive(Serialize)]
 struct SubmitResponse {
     revision: u64,
+    tunnel_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_network: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -135,7 +143,7 @@ struct ErrorResponse {
 }
 
 async fn register(State(state): State<ProxyPeersState>, body: String) -> Response {
-    let reg: ProxyRegistration = match serde_json::from_str(&body) {
+    let mut reg: ProxyRegistration = match serde_json::from_str(&body) {
         Ok(reg) => reg,
         Err(e) => {
             return (
@@ -155,10 +163,33 @@ async fn register(State(state): State<ProxyPeersState>, body: String) -> Respons
             .into_response();
     }
 
+    let assignment =
+        match state
+            .book
+            .claim(Role::Proxy, &reg.name, reg.requested_address(), now_secs())
+        {
+            Ok(a) => a,
+            Err(e) => return claim_error_response(&e),
+        };
+    reg.tunnel_address = Some(assignment.address.to_string());
+
     match state.register(&reg) {
         Ok(revision) => {
-            tracing::info!(revision, name = %reg.name, "registered a proxy peer");
-            (StatusCode::OK, Json(SubmitResponse { revision })).into_response()
+            tracing::info!(
+                revision,
+                name = %reg.name,
+                address = %assignment.address,
+                "registered a proxy peer"
+            );
+            (
+                StatusCode::OK,
+                Json(SubmitResponse {
+                    revision,
+                    tunnel_address: assignment.address.to_string(),
+                    tunnel_network: state.book.network().map(|n| n.to_string()),
+                }),
+            )
+                .into_response()
         }
         Err(e) => store_error_response(e),
     }
@@ -299,10 +330,51 @@ mod tests {
 
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-    fn test_state() -> (ProxyPeersState, tempfile::TempDir) {
+    use crate::addresses::{AddressBook, Network, Role};
+
+    fn test_state() -> (ProxyPeersState, Arc<AddressBook>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path()).unwrap());
-        (ProxyPeersState::new(store, None), dir)
+        let store = Arc::new(Store::open(&dir.path().join("proxy-peers")).unwrap());
+        let book = Arc::new(
+            AddressBook::open(
+                &dir.path().join("addresses"),
+                Some(Network::parse("10.60.0.0/16").unwrap()),
+            )
+            .unwrap(),
+        );
+        (ProxyPeersState::new(store, None, book.clone()), book, dir)
+    }
+
+    async fn post(app: &Router, body: String) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn body_with(name: &str, tunnel_address: Option<&str>) -> String {
+        let mut v = serde_json::json!({
+            "name": name,
+            "pubkey": KEY,
+            "endpoint": "203.0.113.9:51820",
+        });
+        if let Some(a) = tunnel_address {
+            v["tunnel_address"] = serde_json::json!(a);
+        }
+        v.to_string()
     }
 
     fn reg_body(name: &str, endpoint: &str) -> String {
@@ -316,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_valid_registration_is_accepted() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -331,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalid_registration_is_rejected_before_touching_the_store() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -348,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_is_rejected() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -363,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_one_is_404_before_any_registration() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -378,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_registration_replaces_the_current_view_for_that_name() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
 
         app.clone()
@@ -416,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_returns_every_currently_registered_proxy() {
-        let (state, _dir) = test_state();
+        let (state, _book, _dir) = test_state();
         let app = router(state);
         app.clone()
             .oneshot(
@@ -452,8 +524,15 @@ mod tests {
     #[tokio::test]
     async fn a_missing_bearer_token_is_rejected_when_one_is_configured() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path()).unwrap());
-        let state = ProxyPeersState::new(store, Some("secret".into()));
+        let store = Arc::new(Store::open(&dir.path().join("proxy-peers")).unwrap());
+        let book = Arc::new(
+            AddressBook::open(
+                &dir.path().join("addresses"),
+                Some(Network::parse("10.60.0.0/16").unwrap()),
+            )
+            .unwrap(),
+        );
+        let state = ProxyPeersState::new(store, Some("secret".into()), book);
         let app = router(state);
         let resp = app
             .oneshot(Request::get("/proxy-peers").body(Body::empty()).unwrap())
@@ -472,6 +551,7 @@ mod tests {
                     name: "edge-1".into(),
                     pubkey: KEY.into(),
                     endpoint: "203.0.113.9:51820".into(),
+                    tunnel_address: None,
                 })
                 .unwrap(),
             )
@@ -490,6 +570,7 @@ mod tests {
                     name: "edge-1".into(),
                     pubkey: KEY.into(),
                     endpoint: "203.0.113.9:51821".into(),
+                    tunnel_address: None,
                 })
                 .unwrap(),
             )
@@ -497,5 +578,65 @@ mod tests {
         updates_tx.send(rev2).unwrap();
         let (got_rev2, _) = rx.recv().await.unwrap();
         assert_eq!(got_rev2, rev2);
+    }
+
+    #[tokio::test]
+    async fn a_registration_without_an_address_is_allocated_one_and_told_the_network() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, body) = post(&app, body_with("edge-1", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["tunnel_address"], "10.60.0.1");
+        assert_eq!(body["tunnel_network"], "10.60.0.0/16");
+    }
+
+    #[tokio::test]
+    async fn re_registering_returns_the_same_address_and_two_proxies_get_distinct_ones() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (_, first) = post(&app, body_with("a", None)).await;
+        let (_, again) = post(&app, body_with("a", None)).await;
+        let (_, other) = post(&app, body_with("b", None)).await;
+        assert_eq!(first["tunnel_address"], again["tunnel_address"]);
+        assert_ne!(first["tunnel_address"], other["tunnel_address"]);
+    }
+
+    #[tokio::test]
+    async fn a_pinned_address_held_by_an_origin_is_a_409_naming_the_holder() {
+        let (state, book, _dir) = test_state();
+        book.claim(Role::Origin, "home", Some("10.60.0.9".parse().unwrap()), 1)
+            .unwrap();
+        let app = router(state);
+        let (status, body) = post(&app, body_with("edge-1", Some("10.60.0.9"))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("origin \"home\""));
+    }
+
+    #[tokio::test]
+    async fn a_pin_outside_the_network_is_a_422() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let (status, _) = post(&app, body_with("edge-1", Some("192.168.1.5"))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn the_stored_registration_carries_the_allocated_address() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        post(&app, body_with("edge-1", None)).await;
+        let resp = app
+            .oneshot(
+                Request::get("/proxy-peers/edge-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reg: ProxyRegistration = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reg.tunnel_address.as_deref(), Some("10.60.0.1"));
     }
 }
