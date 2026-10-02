@@ -19,12 +19,12 @@ static EXTRA_ROOTS: OnceLock<Vec<Certificate>> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum CaError {
-    #[error("--ca-file {}: {source}", path.display())]
+    #[error("--ca-file {}: cannot read the file", path.display())]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("--ca-file {}: invalid certificate: {source}", path.display())]
+    #[error("--ca-file {}: invalid certificate", path.display())]
     Parse {
         path: PathBuf,
         source: reqwest::Error,

@@ -106,7 +106,7 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = format!("{e:#}"), controller = %base_url, cursor,
+                    error = %format_args!("{e:#}"), controller = %base_url, cursor,
                     "controller subscribe connection failed; keeping the last known \
                      configuration and retrying"
                 );

@@ -18,7 +18,7 @@ struct Cluster {
     plain: Vec<String>,
     /// TLS connections each replica's terminator has accepted so far.
     accepted: Vec<Arc<AtomicUsize>>,
-    _procs: Vec<Proc>,
+    procs: Vec<Proc>,
     _fronts: Vec<JoinHandle<()>>,
     _dirs: Vec<tempfile::TempDir>,
 }
@@ -71,7 +71,7 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
             .map(|p| format!("http://127.0.0.1:{p}"))
             .collect(),
         accepted,
-        _procs: procs,
+        procs,
         _fronts: fronts,
         _dirs: dirs,
     })
@@ -166,7 +166,7 @@ async fn three_replicas_replicate_through_tls_terminators() -> Result<()> {
 /// leader is ever elected and every write is refused.
 #[tokio::test]
 async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
-    let c = cluster(false).await?;
+    let mut c = cluster(false).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while tokio::time::Instant::now() < deadline {
         ensure!(
@@ -175,6 +175,21 @@ async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    // Refused for the right reason: every replica is up, and their peers'
+    // certificates are what fails.
+    for p in &mut c.procs {
+        ensure!(p.exit_code().is_none(), "a replica exited:\n{}", p.log());
+    }
+    let logs = c
+        .procs
+        .iter()
+        .map(|p| p.log())
+        .collect::<String>()
+        .to_lowercase();
+    ensure!(
+        logs.contains("unknownissuer") || logs.contains("certificate"),
+        "no replica logged a certificate failure:\n{logs}"
+    );
     Ok(())
 }
 
