@@ -15,7 +15,7 @@ use anyhow::Result;
 use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
 use gsp_fleet_tests::tunnel::{TunnelLab, PUBLIC_PORT};
-use gsp_fleet_tests::{spawn_controller_on, wait_http_up};
+use gsp_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
 #[test]
@@ -176,7 +176,7 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
     ensure_built();
     let mut t = TunnelLab::new().await?;
     t.start_origin(false).await?; // agent up, nothing listening on :7000 yet
-    let edge = t.start_edge("edge-1", 1, None).await?;
+    let edge = t.start_edge("edge-1", None).await?;
 
     // Tunnel up first (via a probe port outside the pool), so the unhealthy
     // state below can only be because nothing listens on :7000 — not because a
@@ -211,7 +211,7 @@ async fn tunnel_stays_up_across_many_re_registrations() -> Result<()> {
     ensure_built();
     let mut t = TunnelLab::new().await?;
     t.start_origin(true).await?;
-    let edge = t.start_edge("edge-1", 1, None).await?;
+    let edge = t.start_edge("edge-1", None).await?;
     t.wait_roundtrip(edge).await?;
 
     let public = t.public_addr(edge);
@@ -233,21 +233,18 @@ async fn tunnel_stays_up_across_many_re_registrations() -> Result<()> {
 /// with one proxy; a *second* proxy joins later. The agent is never restarted
 /// or reconfigured: it must learn the new proxy from the proxy-peers registry,
 /// and traffic must flow through the new proxy.
-///
-/// (That the *first* proxy keeps working alongside it is NOT asserted here —
-/// it doesn't today; see `known_bug_two_proxies_cannot_share_one_origin`.)
 #[tokio::test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
 async fn a_proxy_added_later_is_learned_without_restarting_the_agent() -> Result<()> {
     ensure_built();
     let mut t = TunnelLab::new().await?;
     t.start_origin(true).await?;
-    let first = t.start_edge("edge-1", 1, None).await?;
+    let first = t.start_edge("edge-1", None).await?;
     t.wait_roundtrip(first).await?;
 
-    // New proxy: own namespace, own tunnel address (.3) and key. Nothing about
+    // New proxy: own namespace, own tunnel address and key. Nothing about
     // the origin is touched.
-    let second = t.start_edge("edge-2", 3, None).await?;
+    let second = t.start_edge("edge-2", None).await?;
     t.wait_roundtrip(second).await?;
 
     let big = vec![0x42u8; 64 * 1024];
@@ -260,28 +257,19 @@ async fn a_proxy_added_later_is_learned_without_restarting_the_agent() -> Result
     Ok(())
 }
 
-/// KNOWN BUG, found by scenario 3 on 2026-10-01 — excluded from `make
-/// tunnel-e2e` (`--skip known_bug_`); run it on purpose with
-/// `unshare -Urnm … cargo test -p gsp-fleet-tests --test tunnel known_bug -- --ignored`.
-///
-/// `gsp-agent` gives every proxy peer `AllowedIPs = 0.0.0.0/0`
-/// (`crates/gsp-agent/src/proxy_subscribe.rs`), and `ProxyRegistration` carries
-/// no tunnel address to narrow it to. WireGuard assigns an allowed-IP range to
-/// one peer per interface, so the proxy that registers last takes the route and
-/// the earlier proxy's replies are encrypted to the wrong key: its connections
-/// to the backend time out. Phase 14 slice 7's "scales to N proxies" therefore
-/// holds for one proxy at a time only. The fix needs the proxy's tunnel address
-/// in its registration (a protocol change) — see HANDOVER.md; it belongs with
-/// the tunnel-address-authority work.
+/// Scenario 5 — the multi-proxy fix. Two proxies share one origin and both
+/// must carry traffic at the same time. Before the address authority the agent
+/// gave every proxy `AllowedIPs = 0.0.0.0/0`, so the proxy that registered last
+/// stole the earlier one's route and its connections timed out.
 #[tokio::test]
-#[ignore = "KNOWN BUG (see doc comment): fails until proxy registrations carry a tunnel address"]
-async fn known_bug_two_proxies_cannot_share_one_origin() -> Result<()> {
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn two_proxies_share_one_origin() -> Result<()> {
     ensure_built();
     let mut t = TunnelLab::new().await?;
     t.start_origin(true).await?;
-    let first = t.start_edge("edge-1", 1, None).await?;
+    let first = t.start_edge("edge-1", None).await?;
     t.wait_roundtrip(first).await?;
-    let second = t.start_edge("edge-2", 3, None).await?;
+    let second = t.start_edge("edge-2", None).await?;
     t.wait_roundtrip(second).await?;
 
     // Both proxies must carry traffic at the same time.
@@ -311,7 +299,7 @@ async fn a_pinned_key_that_does_not_match_the_registry_is_refused() -> Result<()
     // 32 zero bytes, base64 — a valid key, just not the origin's.
     let wrong = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     assert_ne!(t.origin_pubkey(), wrong);
-    let edge = t.start_edge("edge-bad", 1, Some(wrong)).await?;
+    let edge = t.start_edge("edge-bad", Some(wrong)).await?;
 
     // Bounded negative window: the source refreshes every 1 s, so 8 s is
     // several refresh cycles — long enough that "never got a backend" means
@@ -328,6 +316,82 @@ async fn a_pinned_key_that_does_not_match_the_registry_is_refused() -> Result<()
 
     let attempt = tcp_roundtrip(t.public_addr(edge), b"nope").await;
     assert!(attempt.is_err(), "traffic must not flow, got {attempt:?}");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 6 — a hand-picked address another peer already holds is refused
+/// with a clear error, and the holder is unaffected.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn a_pinned_address_collision_is_refused() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let taken = t.origin_ip();
+    let log = t.agent_refused("origin-b", &format!("{taken}/16")).await?;
+    assert!(
+        log.contains("already held"),
+        "the refusal should say why, got:\n{log}"
+    );
+    assert!(t.agent_alive(), "the first origin must be unaffected");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 7 — an edge that restarts keeps its tunnel address (the
+/// controller's allocation is sticky) and traffic recovers.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn an_edge_restart_keeps_its_address() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    let before = t.proxy_address("edge-1").await?;
+
+    t.restart_edge(edge).await?;
+    t.wait_roundtrip_after_restart(edge).await?;
+    assert_eq!(t.proxy_address("edge-1").await?, before);
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 8 — Review Focus 5. An edge restarts while the controller is down:
+/// it must come up on its saved address (admin `/healthz` answers), and when
+/// the controller returns it re-registers with the same address.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    let before = t.proxy_address("edge-1").await?;
+    let seen_before = t.proxy_last_seen("edge-1").await?;
+
+    t.stop_controller().await?;
+    // `restart_edge` returns only once the admin API answers — i.e. startup
+    // went ahead on the saved address instead of failing.
+    t.restart_edge(edge).await?;
+    t.start_controller().await?;
+
+    {
+        let t = &t;
+        wait_until(
+            || async move {
+                Ok(t.proxy_last_seen("edge-1")
+                    .await
+                    .is_ok_and(|s| s > seen_before))
+            },
+            Duration::from_secs(30),
+            "the restarted edge to re-register with the returned controller",
+        )
+        .await?;
+    }
+    assert_eq!(t.proxy_address("edge-1").await?, before);
     t.pass();
     Ok(())
 }

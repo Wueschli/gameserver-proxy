@@ -76,14 +76,14 @@ endif
 tunnel-e2e:
 	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
 	cargo test -p gsp-fleet-tests --test tunnel --no-run
-	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --skip known_bug_ --test-threads=1 --nocapture'
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## tunnel-e2e-ci: tunnel-e2e under cargo-nextest, writing a JUnit report for the CI run
 ## summary (needs cargo-nextest; `make tunnel-e2e` stays on plain cargo test)
 tunnel-e2e-ci:
 	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
-	cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -E 'not test(known_bug_)' --no-run
-	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -E "not test(known_bug_)" -j1 --no-capture'
+	cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
 
 ## deploy-images: build the five deploy/ images and run --version on each (needs Docker)
 deploy-images:
