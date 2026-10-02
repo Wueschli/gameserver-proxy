@@ -625,6 +625,11 @@ mod tests {
         // gives synthetic WAT fixtures above — use the config default.
         let mut sc = cfg(&dir);
         sc.max_memory_bytes = 16 * 1024 * 1024;
+        // A long runway, as in `wasm_boundary_latency_vs_nfr_n1`: a call that
+        // straddles an epoch tick legitimately times out, and on a busy CI
+        // runner a 50 ms tick made this test fail now and then. Timeouts have
+        // their own test (`wasm_plugin_call_times_out_under_the_epoch_deadline`).
+        sc.call_timeout = Duration::from_secs(10);
         let (_loader, registry) = build_sniffers(&sc).unwrap();
 
         let a2s = registry.get("a2s").expect("a2s.wasm not built");
@@ -675,6 +680,7 @@ mod tests {
 
         let mut sc = cfg(&dir);
         sc.max_memory_bytes = 16 * 1024 * 1024;
+        sc.call_timeout = Duration::from_secs(10); // see the test above
         sc.modules.push(gsp_config::SnifferModulePin {
             name: "regex_firstbytes".into(),
             sha256: format!("{:x}", Sha256::digest(&bytes)),

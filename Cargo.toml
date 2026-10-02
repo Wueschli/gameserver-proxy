@@ -65,8 +65,9 @@ wat = "1"
 sha2 = "0.10"
 sled = "0.34"
 tempfile = "3"
-gsp-http = { path = "crates/gsp-http" }
-# Test-only TLS servers (gsp-http, gsp-fleet-tests); same ring provider reqwest uses.
+gsp-http = { path = "crates/gsp-http", default-features = false }
+# Native TLS servers (gsp-http's `server` feature) and the test TLS terminator in
+# gsp-fleet-tests; same ring provider reqwest uses.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-stream = "0.1"
 similar = "2"
