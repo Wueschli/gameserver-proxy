@@ -26,6 +26,7 @@ check "Dockerfile ignore"                ".dockerignore" "ui=false plugins=false
 check "Cargo.lock: all rust + deploy"    "Cargo.lock" "ui=false plugins=true tunnel=true deploy=true fuzz=true"
 check "Makefile: tunnel + deploy"        "Makefile" "ui=false plugins=false tunnel=true deploy=true fuzz=false"
 check "ui lockfile: ui + deploy (image scan)" "crates/gsp-ui/web/package-lock.json" "ui=true plugins=false tunnel=false deploy=true fuzz=false"
+check ".trivyignore runs deploy"         ".trivyignore" "ui=false plugins=false tunnel=false deploy=true fuzz=false"
 check "workflow edit runs everything"    ".github/workflows/ci.yml" "ui=true plugins=true tunnel=true deploy=true fuzz=true"
 check "mixed: ui web + deploy"           "crates/gsp-ui/web/package.json
 deploy/Dockerfile" "ui=true plugins=false tunnel=false deploy=true fuzz=false"

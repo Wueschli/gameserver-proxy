@@ -53,6 +53,7 @@ jobs:
         run: |
           sh .github/scripts/changes_test.sh
           python3 .github/scripts/test_summary_test.py
+          python3 .github/scripts/trivy_summary_test.py
       - name: Detect changed areas
         id: f
         env:
@@ -293,32 +294,52 @@ jobs:
         run: make deploy-lint
       - name: Build all five images and run --version on each
         run: make deploy-images
-      # Not aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
-      # force-pushed to a credential stealer, and a backdoored Trivy 0.69.4 was
-      # published. A fixed release checked against a hash pinned here can't be
-      # swapped underneath us; bump TRIVY_VERSION and TRIVY_SHA256 together
-      # (from the release's trivy_<v>_checksums.txt).
-      - name: Install Trivy (pinned release, checksum-verified)
-        env:
-          TRIVY_VERSION: "0.75.0"
-          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
-        run: |
-          curl -fsSL -o "$RUNNER_TEMP/trivy.tgz" \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
-          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
-          sudo tar -xzf "$RUNNER_TEMP/trivy.tgz" -C /usr/local/bin trivy
-          trivy --version
-      # Fails on a HIGH/CRITICAL vulnerability with a fix available, in an image's
-      # OS packages or secrets, in Cargo.lock (the binaries' crates) or in the UI's
-      # package-lock.json. The nightly run catches newly published CVEs.
-      - name: Trivy scan (images + the lockfiles they're built from)
-        run: make deploy-scan
       - name: Compose smoke test
         run: make deploy-smoke
       - name: Validate Kubernetes manifests (schema only)
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
+      # Trivy is informational (owner's call): it never fails the job. Findings show
+      # as a table on the run's summary page, as warning annotations, and as JSON +
+      # SARIF in the trivy-reports artifact (GitHub's Security tab would take the
+      # SARIF, but on a private repo only with GitHub Code Security enabled).
+      #
+      # Not aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
+      # force-pushed to a credential stealer, and a backdoored Trivy 0.69.4 was
+      # published. A fixed release checked against a hash pinned here can't be
+      # swapped underneath us; bump TRIVY_VERSION and TRIVY_SHA256 together
+      # (from the release's trivy_<v>_checksums.txt).
+      - name: Install Trivy (pinned release, checksum-verified)
+        id: trivy-install
+        continue-on-error: true
+        env:
+          TRIVY_VERSION: "0.75.0"
+          TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/trivy.tgz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/trivy.tgz" -C /usr/local/bin trivy
+          trivy --version
+      - name: Trivy scan (images + the lockfiles they're built from; informational)
+        if: steps.trivy-install.outcome == 'success'
+        continue-on-error: true
+        env:
+          TRIVY_REPORT_DIR: target/trivy
+        run: make deploy-scan
+      - name: Trivy report
+        if: always() && steps.trivy-install.outcome == 'success'
+        run: |
+          python3 .github/scripts/trivy_summary.py target/trivy >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/trivy_summary.py --annotations target/trivy
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.trivy-install.outcome == 'success'
+        with:
+          name: trivy-reports
+          path: target/trivy/
+          retention-days: 14
+          if-no-files-found: ignore
 
   fuzz:
     needs: changes
