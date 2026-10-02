@@ -1,0 +1,20 @@
+[package]
+name = "gsp-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The one place the fleet binaries build outbound HTTP clients (`--ca-file`).
+# Deliberately reqwest-only: gsp-aggregator and gsp-ui depend on it and must
+# stay free of gsp-core / gsp-config.
+
+[dependencies]
+reqwest.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tempfile = { workspace = true }

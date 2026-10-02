@@ -1429,6 +1429,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsp-http"
+version = "0.0.1"
+dependencies = [
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "gsp-ui"
 version = "0.0.1"
 dependencies = [
