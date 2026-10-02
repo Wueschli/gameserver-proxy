@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         backends: args.backends.clone(),
         address: pinned_cidr.map(|c| address_store::ip_of(c).to_string()),
     };
-    let client = reqwest::Client::new();
+    let client = register::http_client();
     let addr_path = args.data_dir.join("tunnel-address");
     let outcome = register::register_with_retry(
         &client,

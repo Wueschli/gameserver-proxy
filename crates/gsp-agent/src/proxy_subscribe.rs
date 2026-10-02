@@ -341,13 +341,16 @@ mod tests {
         let mut applied = HashMap::new();
         let r = reg(Some("10.60.0.3"));
         let add = Event::Registered(r.clone());
-        if let Action::Reconcile(reg) = plan(&applied, &add) {
-            applied.insert(reg.name.clone(), reg.clone());
+        match plan(&applied, &add) {
+            Action::Reconcile(reg) => {
+                applied.insert(reg.name.clone(), reg.clone());
+            }
+            other => panic!("expected Reconcile, got {other:?}"),
         }
+        assert_eq!(applied.len(), 1);
         let del = Event::Removed("edge-1".into());
-        if let Action::Remove(_) = plan(&applied, &del) {
-            applied.remove("edge-1");
-        }
+        assert_eq!(plan(&applied, &del), Action::Remove(r.pubkey.clone()));
+        applied.remove("edge-1");
         assert!(applied.is_empty());
     }
 

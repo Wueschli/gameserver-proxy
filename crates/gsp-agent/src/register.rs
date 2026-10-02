@@ -73,6 +73,17 @@ impl std::fmt::Display for RegisterError {
 
 impl std::error::Error for RegisterError {}
 
+/// The HTTP client for every controller call. The timeouts are what make the
+/// retry budget real: without them a controller that accepts TCP but never
+/// answers would block startup (and the refresh loop) forever.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("a reqwest client with only timeouts always builds")
+}
+
 /// One registration attempt.
 pub async fn register_once(
     client: &reqwest::Client,
@@ -299,5 +310,53 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "must not retry a 409"
         );
+    }
+
+    #[tokio::test]
+    async fn a_hung_controller_does_not_block_startup_past_the_budget() {
+        // Accepts the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                held.push(s);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(
+            Duration::from_secs(10),
+            register_with_retry(&client, &url, None, &reg(), Duration::from_secs(1)),
+        )
+        .await
+        .expect("registration hung past the retry budget");
+        assert!(matches!(got, Err(RegisterError::Transient(_))));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn the_production_client_has_a_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                held.push(s);
+            }
+        });
+        // Must give up on its own (10 s request timeout), never hang.
+        let got = tokio::time::timeout(
+            Duration::from_secs(20),
+            register_once(&http_client(), &url, None, &reg()),
+        )
+        .await
+        .expect("http_client() has no request timeout");
+        assert!(matches!(got, Err(RegisterError::Transient(_))));
     }
 }
