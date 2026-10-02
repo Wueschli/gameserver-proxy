@@ -158,18 +158,46 @@ deployment requirement.
 
 ## `gsp-controller` behind TLS
 
-`gsp-controller` (and the aggregator, the UI and `gsp`'s admin API) serve **plain
-HTTP**. Run as-is across a network, that exposes:
+Without the flags below, `gsp-controller` (and always the aggregator, the UI and
+`gsp`'s admin API) serves **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
 - the full config text, on `GET /config` and the SSE `GET /config/subscribe`;
 - every origin's registration (WireGuard public key, public endpoint, fronted
   backend addresses) on the `/peers*` and `/proxy-peers*` routes.
 
-The supported pattern is a **reverse proxy you run that terminates TLS**, with the
-controller listening only on loopback or a private network
-(`--listen 127.0.0.1:9901`, or a private bridge/pod network). There is no native TLS
-in the controller.
+Two ways to encrypt it: **native TLS** in the controller (below), or a **reverse proxy
+you run that terminates TLS**, with the controller listening only on loopback or a
+private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
+aggregator, the UI and `gsp`'s admin API have no native TLS yet, so for them the proxy
+is the only option.
+
+### Native TLS
+
+```sh
+gsp-controller --listen 0.0.0.0:8443 \
+  --tls-cert /etc/gsp/tls/fullchain.pem --tls-key /etc/gsp/tls/privkey.pem
+```
+
+- `--tls-cert` is a PEM chain, leaf first (a Let's Encrypt `fullchain.pem` works);
+  `--tls-key` a PEM private key (PKCS#8, SEC1 or PKCS#1). Both or neither. With them,
+  `--listen` speaks **HTTPS only** — every route, including the SSE streams.
+- **Renewal without a restart:** both files are checked every 30 s and a changed pair is
+  swapped in for new connections. A broken or half-written pair (no certificate, no
+  key, key not matching the certificate) is logged and the current certificate stays in
+  service until a good pair appears. Bad files at **startup** stop the controller with
+  an error naming the file.
+- Clients use `https://` URLs; with a private CA they add `--ca-file`. HA replicas can
+  each serve native TLS and name their peers `--ha-peers 1=https://ctl-1:8443,…`
+  (plus `--ca-file`), with no terminator at all.
+- TLS handshakes run in their own tasks with a 10 s timeout, so a client that connects
+  and stalls cannot hold up others. No client certificates (mTLS).
+
+Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
+`UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
+TLS; `--tls-cert` alone is refused) and `ha_tls.rs`
+`three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
+listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
 
 ### Proxy configuration
 
@@ -283,16 +311,16 @@ needs a membership change, which is not built yet.
   into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`) plus `--ca-file`, **not**
   the OS store or `SSL_CERT_FILE`. For a private or internal CA — or a self-signed
   certificate — pass it with `--ca-file`. No client certificates (mTLS).
-- **HA over TLS needs a terminator per replica and a fresh cluster** (see "HA
-  replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
+- **HA over TLS needs a fresh cluster** (native TLS on each replica, or a terminator
+  per replica; see "HA replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
-- **The other services are plain HTTP too.** The aggregator, `gsp`'s admin API and
-  the UI have the same exposure; the same reverse-proxy pattern applies. For the UI
+- **The other services are plain HTTP.** The aggregator, `gsp`'s admin API and the UI
+  have no native TLS yet; the reverse-proxy pattern applies. For the UI
   this matters most: it carries a password login, and its session cookie is
   `HttpOnly; SameSite=Lax` but **not** `Secure`, so redirect HTTP to HTTPS (and
   consider HSTS) at the proxy.
 - **A TLS proxy is a trust boundary.** It sees every token and registration in the
-  clear. Run it on a host you control.
+  clear. Run it on a host you control — or use native TLS for the controller.
 
 ## Tunnel addressing
 
