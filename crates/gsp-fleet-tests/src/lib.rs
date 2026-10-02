@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 pub mod echo;
 pub mod netns;
+pub mod tls_front;
 pub mod tunnel;
 
 /// An OS-assigned loopback port, freed immediately before the caller binds

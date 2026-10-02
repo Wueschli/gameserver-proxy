@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use gsp_fleet_tests::{bin_path, build_fleet_bins};
+use gsp_fleet_tests::tls_front::{tls_front, TEST_CA};
+use gsp_fleet_tests::{
+    bin_path, build_fleet_bins, free_port, minimal_gsp_config, spawn_controller, wait_http_up,
+};
 use tokio::process::Command;
 
 const MISSING: &str = "/nonexistent/gsp-ca.pem";
@@ -54,5 +57,58 @@ async fn every_binary_rejects_a_missing_ca_file() -> Result<()> {
             "{bin} did not name the file:\n{text}"
         );
     }
+    Ok(())
+}
+
+/// The docs/12 "behind TLS" pattern with a private CA: a TLS terminator whose
+/// certificate the test CA signed, in front of a real `gsp-controller`.
+#[tokio::test]
+async fn gsp_check_reaches_a_private_ca_controller() -> Result<()> {
+    build_fleet_bins()?;
+    let data = tempfile::tempdir()?;
+    let port = free_port()?;
+    let _controller = spawn_controller(data.path(), port)?;
+    let plain = format!("http://127.0.0.1:{port}");
+    wait_http_up(&format!("{plain}/healthz"), Duration::from_secs(30)).await?;
+    reqwest::Client::new()
+        .post(format!("{plain}/config"))
+        .body(minimal_gsp_config(free_port()?, free_port()?, free_port()?))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let (front, _front_task) = tls_front(([127, 0, 0, 1], port).into()).await?;
+    let https = format!("https://localhost:{}", front.port());
+    let check = |extra: &'static [&'static str]| {
+        let https = https.clone();
+        async move {
+            let out = tokio::time::timeout(
+                Duration::from_secs(60),
+                Command::new(bin_path("gsp"))
+                    .args(["--check", "--controller", &https])
+                    .args(extra)
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await??;
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            anyhow::Ok((out.status.success(), text))
+        }
+    };
+
+    let (ok, text) = check(&[]).await?;
+    assert!(!ok, "trusted a private CA without --ca-file:\n{text}");
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("certificate") || lower.contains("unknownissuer"),
+        "failed, but not on certificate verification:\n{text}"
+    );
+
+    let (ok, text) = check(&["--ca-file", TEST_CA]).await?;
+    assert!(ok, "gsp --check failed with --ca-file:\n{text}");
     Ok(())
 }
