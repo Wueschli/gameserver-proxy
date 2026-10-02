@@ -110,7 +110,7 @@ crates/
     address_store.rs        persists the controller-assigned tunnel address next to the key (start-from-saved while the controller is down)
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
-  gsp-http/                  reqwest-only: the one place production HTTP clients are built (`builder()`/`client()`), with `--ca-file`'s extra roots (set once from each binary's `main`); test-only CA fixtures in `tests/fixtures/`
+  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `tls`, the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`); test-only CA/cert fixtures in `tests/fixtures/`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
