@@ -22,6 +22,17 @@ pub const TEST_CA: &str = concat!(
     "/../gsp-http/tests/fixtures/ca.pem"
 );
 
+/// Paths of the test-only `localhost` certificate and key the CA above signed,
+/// for a binary that serves TLS itself (`--tls-cert`/`--tls-key`).
+pub const TEST_LEAF: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../gsp-http/tests/fixtures/leaf.pem"
+);
+pub const TEST_LEAF_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../gsp-http/tests/fixtures/leaf.key"
+);
+
 const LEAF: &[u8] = include_bytes!("../../gsp-http/tests/fixtures/leaf.pem");
 const LEAF_KEY: &[u8] = include_bytes!("../../gsp-http/tests/fixtures/leaf.key");
 
