@@ -4,7 +4,6 @@
 //! `GET /config/subscribe`. Slice 5: revision history/diff/rollback +
 //! `--auth-token`.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,7 +67,10 @@ struct Args {
 
     /// The tier's full replica set, `id=host:port` pairs separated by
     /// commas (e.g. `1=127.0.0.1:9901,2=127.0.0.1:9911,3=127.0.0.1:9921`),
-    /// identical on every replica. Setting this turns on HA: writes
+    /// identical on every replica. `host:port` is plain HTTP; an entry may
+    /// instead be a base URL, `id=https://host[:port]` (e.g. a TLS
+    /// terminator in front of that replica; trusts `--ca-file`). Read only
+    /// when the cluster is first bootstrapped. Setting this turns on HA: writes
     /// propose a Raft entry instead of writing the store directly, and a
     /// non-leader replica transparently forwards a write to the current
     /// leader. Requires `--ha-node-id`. **Mutually exclusive with `--role
@@ -100,20 +102,6 @@ struct Args {
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
-}
-
-fn parse_ha_peers(raw: &[String]) -> anyhow::Result<BTreeMap<HaNodeId, openraft::BasicNode>> {
-    let mut peers = BTreeMap::new();
-    for pair in raw {
-        let (id, addr) = pair
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--ha-peers entry {pair:?} is not id=host:port"))?;
-        let id: HaNodeId = id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("--ha-peers entry {pair:?} has an invalid id: {e}"))?;
-        peers.insert(id, openraft::BasicNode::new(addr));
-    }
-    Ok(peers)
 }
 
 #[tokio::main]
@@ -255,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
         None
     } else {
         let node_id = args.ha_node_id.expect("checked above");
-        let peers = parse_ha_peers(&args.ha_peers)?;
+        let peers = ha::peers::parse_peers(&args.ha_peers)?;
         let self_addr = peers
             .get(&node_id)
             .map(|n| n.addr.clone())

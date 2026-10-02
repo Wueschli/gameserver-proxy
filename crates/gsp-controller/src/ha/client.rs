@@ -80,7 +80,7 @@ async fn forward_to_leader(
     body: String,
     actor: Option<&str>,
 ) -> Response {
-    let url = format!("http://{leader_addr}{path}");
+    let url = super::peers::peer_url(leader_addr, path);
     let mut req = gsp_http::client().post(&url).body(body);
     if let Some(actor) = actor {
         req = req.header("X-Actor", actor);
