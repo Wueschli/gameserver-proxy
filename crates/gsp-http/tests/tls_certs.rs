@@ -154,3 +154,23 @@ fn garbage_on_reload_keeps_the_old_cert() {
     assert!(matches!(e, TlsError::NoCertificate { .. }), "{e:?}");
     assert_eq!(cert.current().cert[0].to_vec(), leaf_der("leaf.pem"));
 }
+
+/// A certificate file cut off mid-chain (a renewal caught half-written) must be
+/// rejected, not served as a leaf-only chain.
+#[test]
+fn a_truncated_chain_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("chain.pem");
+    let mut pem = std::fs::read(fixture("leaf.pem")).unwrap();
+    let ca = std::fs::read(fixture("ca.pem")).unwrap();
+    pem.extend_from_slice(&ca[..ca.len() / 2]);
+    std::fs::write(&cert, pem).unwrap();
+    let e = load_certified_key(&TlsFiles {
+        cert,
+        key: fixture("leaf.key"),
+    })
+    .unwrap_err();
+    assert!(matches!(e, TlsError::BadCertificate { .. }), "{e:?}");
+    assert!(e.to_string().starts_with("--tls-cert "), "{e}");
+    assert_cause_once(&e);
+}

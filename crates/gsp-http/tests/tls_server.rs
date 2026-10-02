@@ -126,3 +126,43 @@ async fn the_reloader_picks_up_new_files() {
         }
     }
 }
+
+/// The listener offers ALPN `h2`, so it must speak HTTP/2 when a client picks
+/// it (curl, browsers, Go clients do). Raw check: send the HTTP/2 preface and an
+/// empty SETTINGS frame; an HTTP/2 server answers with its own SETTINGS frame
+/// (type 0x4). Run with `-p gsp-http` alone, where no other crate's features can
+/// switch HTTP/2 on behind this crate's back.
+#[tokio::test]
+async fn speaks_http2_when_alpn_picks_it() {
+    use tokio_rustls::rustls::pki_types::pem::PemObject;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::rustls::{crypto::ring, ClientConfig, RootCertStore};
+
+    let (addr, _) = serve(fixture_files()).await;
+    let mut roots = RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(fixture("ca.pem")).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let mut config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+    tls.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .await
+        .unwrap();
+    tls.write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0]).await.unwrap(); // empty SETTINGS
+    let mut header = [0u8; 9];
+    tokio::time::timeout(Duration::from_secs(2), tls.read_exact(&mut header))
+        .await
+        .expect("no HTTP/2 answer within 2 s")
+        .expect("the server closed the connection instead of speaking HTTP/2");
+    assert_eq!(header[3], 0x4, "first frame is not SETTINGS: {header:?}");
+}

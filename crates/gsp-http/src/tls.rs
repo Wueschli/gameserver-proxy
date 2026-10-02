@@ -42,6 +42,11 @@ pub enum TlsError {
     },
     #[error("--tls-cert {}: no PEM certificate found", path.display())]
     NoCertificate { path: PathBuf },
+    #[error("--tls-cert {}: malformed PEM certificate", path.display())]
+    BadCertificate {
+        path: PathBuf,
+        source: tokio_rustls::rustls::pki_types::pem::Error,
+    },
     #[error("--tls-key {}: no PEM private key found", path.display())]
     NoKey { path: PathBuf },
     #[error("--tls-key {}: unsupported or invalid private key", path.display())]
@@ -69,9 +74,14 @@ fn read(flag: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
 /// supports in any PEM encoding, and a key that matches the leaf certificate.
 pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
     let cert_pem = read("--tls-cert", &files.cert)?;
+    // Every PEM section must parse: a file cut off mid-chain is an error, not a
+    // shorter chain.
     let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|source| TlsError::BadCertificate {
+            path: files.cert.clone(),
+            source,
+        })?;
     if chain.is_empty() {
         return Err(TlsError::NoCertificate {
             path: files.cert.clone(),
