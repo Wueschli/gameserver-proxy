@@ -15,7 +15,9 @@ publish = false
 reqwest.workspace = true
 thiserror.workspace = true
 # Server side (`tls`): serving HTTPS for axum.
-axum.workspace = true
+# `http2`: TlsListener offers ALPN h2, so axum must be able to serve it (not
+# only when another crate in the build happens to switch it on).
+axum = { workspace = true, features = ["http2"] }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 arc-swap.workspace = true
