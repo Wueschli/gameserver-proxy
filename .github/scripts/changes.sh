@@ -19,12 +19,12 @@ out() { if touches "$2"; then echo "$1=true"; else echo "$1=false"; fi; }
 # Cargo.* / toolchain changes affect every Rust job.
 RUSTWIDE='^(Cargo\.(toml|lock)|rust-toolchain\.toml)$|^\.cargo/'
 
-PLUGINS="^crates/(plugins|gsp|gsp-core|gsp-config)/|$RUSTWIDE"
+PLUGINS="^crates/(plugins|gsp|gsp-core|gsp-config|gsp-http)/|$RUSTWIDE"
 DEPLOY='^deploy/|^\.dockerignore$|^Makefile$|^Cargo\.(toml|lock)$'
 
 out ui      '^crates/gsp-ui/web/'
 out plugins "$PLUGINS"
-out tunnel  "^crates/(gsp|gsp-core|gsp-config|gsp-agent|gsp-controller|gsp-aggregator|gsp-fleet-tests)/|^crates/gsp-ui/(src|tests|Cargo\.toml|build\.rs)|^Makefile$|$RUSTWIDE"
+out tunnel  "^crates/(gsp|gsp-core|gsp-config|gsp-http|gsp-agent|gsp-controller|gsp-aggregator|gsp-fleet-tests)/|^crates/gsp-ui/(src|tests|Cargo\.toml|build\.rs)|^Makefile$|$RUSTWIDE"
 out deploy  "$DEPLOY"
 out fuzz    "^crates/gsp-config/|$RUSTWIDE"
 # The shared release build (build-release job) feeds plugins and deploy.

@@ -234,7 +234,9 @@ certificates to trust for **all** of that process's outbound HTTPS, in addition 
 built-in Mozilla roots (it never replaces them, so public endpoints keep working).
 Non-certificate PEM sections (a private key pasted into the same file) are ignored. A
 missing or unreadable file, one with no certificates, or a malformed certificate stops
-the process at startup with an error naming the file.
+the process at startup with an error naming the file. The file is read **once, at
+startup**: `SIGHUP` / a config reload does not re-read it, so restart the process after
+changing it (e.g. when rotating the CA).
 
 ```sh
 gsp --check --controller https://controller.internal:8443 --ca-file /etc/gsp/ca.pem
