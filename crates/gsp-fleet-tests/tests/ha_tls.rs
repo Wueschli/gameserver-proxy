@@ -5,7 +5,10 @@
 use std::time::Duration;
 
 use anyhow::{ensure, Result};
-use gsp_fleet_tests::tls_front::{tls_front, TEST_CA};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use gsp_fleet_tests::tls_front::{tls_front_counted, TEST_CA};
 use gsp_fleet_tests::{
     build_fleet_bins, free_port, minimal_gsp_config, spawn_controller_with, wait_until, Proc,
 };
@@ -13,6 +16,8 @@ use tokio::task::JoinHandle;
 
 struct Cluster {
     plain: Vec<String>,
+    /// TLS connections each replica's terminator has accepted so far.
+    accepted: Vec<Arc<AtomicUsize>>,
     _procs: Vec<Proc>,
     _fronts: Vec<JoinHandle<()>>,
     _dirs: Vec<tempfile::TempDir>,
@@ -25,12 +30,14 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
     let mut plain_ports = Vec::new();
     let mut fronts = Vec::new();
     let mut front_ports = Vec::new();
+    let mut accepted = Vec::new();
     for _ in 0..3 {
         let p = free_port()?;
-        let (front, task) = tls_front(([127, 0, 0, 1], p).into()).await?;
+        let (front, task, count) = tls_front_counted(([127, 0, 0, 1], p).into()).await?;
         plain_ports.push(p);
         front_ports.push(front.port());
         fronts.push(task);
+        accepted.push(count);
     }
     let peers = front_ports
         .iter()
@@ -63,6 +70,7 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
             .iter()
             .map(|p| format!("http://127.0.0.1:{p}"))
             .collect(),
+        accepted,
         _procs: procs,
         _fronts: fronts,
         _dirs: dirs,
@@ -167,5 +175,38 @@ async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    Ok(())
+}
+
+/// Raft heartbeats every 250 ms; dialling a new TLS connection for each RPC
+/// would cost a full handshake per heartbeat (~8 connections/s here). One
+/// reused client per replica keeps the connections open.
+#[tokio::test]
+async fn raft_traffic_reuses_its_tls_connections() -> Result<()> {
+    let c = cluster(true).await?;
+    let first = config()?;
+    wait_until(
+        || {
+            let (base, body) = (c.plain[0].clone(), first.clone());
+            async move { Ok(submit(&base, body).await.is_some()) }
+        },
+        Duration::from_secs(60),
+        "a raft leader to accept a write",
+    )
+    .await?;
+    let total = || {
+        c.accepted
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum::<usize>()
+    };
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before = total();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let opened = total() - before;
+    ensure!(
+        opened < 6,
+        "{opened} new TLS connections in 5 s of steady-state Raft traffic"
+    );
     Ok(())
 }
