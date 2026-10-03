@@ -1,6 +1,6 @@
 # HA-replicated tunnel address allocation and live HA membership
 
-Date: 2026-10-03 · Status: designed (not built) · Follows the
+Date: 2026-10-03 · Status: designed (not built); revised after the first spec review on PR #25 · Follows the
 [tunnel address authority](2026-10-02-tunnel-address-authority-design.md) spec, whose
 "HA-replicated allocation" non-goal this resolves, and closes the HANDOVER row "Change a
 live HA member's address".
@@ -39,11 +39,12 @@ Success:
 - **Only real changes go through Raft.** A new or changed registration, a release, and a
   last-seen refresh at most once an hour are Raft entries. An unchanged re-registration
   (every 30 s per client) is answered from the local copy. Rejected: every re-registration
-  through Raft (about 2 entries per peer per minute into a log that is never purged, so
-  compaction would have to come first); per-node `last_seen` (stale warnings would differ
+  through Raft (about 2 entries per peer per minute, turning snapshot install into the
+  hot path for every lagging follower); per-node `last_seen` (stale warnings would differ
   per node).
-- **Import on upgrade.** The first leader of a fresh cluster imports its pre-HA
-  registrations and address book once. Rejected: starting empty (clients without a pinned
+- **Import on upgrade.** A fresh cluster imports one node's pre-HA registrations and
+  address book once, from whichever node holds them, not from whichever node wins the
+  first election (see Import). Rejected: starting empty (clients without a pinned
   address would get new addresses on their next restart).
 - **Live membership changes are in scope**: join, add, remove, change address.
 - **Deterministic apply.** A Raft entry carries the *request*; every replica runs the
@@ -58,8 +59,8 @@ Success:
 - A CLI verb or a `gsp-ui` page for membership. The HTTP routes plus a `curl` recipe in
   `docs/12` cover it.
 - HA combined with `--role slave` (still refused; unchanged, see `crate::ha`'s module doc).
-- Raft log compaction. Still not needed: registration traffic is bounded by the
-  "changes only" rule above.
+- Tuning the snapshot policy beyond openraft's defaults. Snapshots become first-class
+  here (see Snapshots); their thresholds stay at the library defaults.
 - Carrying over a tombstone the old single node wrote that an edge had not received yet
   (see Import, "Known gap").
 - Automatic lease expiry, release from `gsp-ui`, live address change of a *peer*
@@ -90,8 +91,14 @@ status codes and bodies:
 - `Revision(Option<u64>)` — config, intent, promote, and Raft-internal entries (as today).
 - `Registered { revision, address }` → `200 {revision, tunnel_address, tunnel_network}`.
 - `Released { revision, address: Option<IpAddr> }` → `200 {revision, released}`.
-- `Rejected(ClaimError)` → `409` / `422` / `503` exactly as `claim_error_response` maps
+- `Rejected(Rejection)` → `409` / `422` / `503` exactly as `claim_error_response` maps
   them today, including the backend-host `422` (and its "the claim is kept" behaviour).
+  `Rejection` holds only the **deterministic** outcomes: address held, owner has a
+  different address, outside the network, not a host address, no network (pin-only),
+  network exhausted, backend host mismatch. `ClaimError::Storage` is never a
+  `Rejection`: in apply a storage failure is returned as openraft's `StorageError`, which
+  stops that node, because turning one replica's disk error into a response would let
+  replicas silently diverge.
 - `NotFound` → `404` for a `Release` of an unknown name.
 
 ### Deterministic apply
@@ -115,33 +122,43 @@ cursor across nodes. Registrations write far more often than config, so the wind
 matters now.
 
 Fix: every `sled` database the state machine writes (config, intent, peers, proxy-peers,
-tunnel-addresses) records an `applied_index` key **in the same transaction** as the write
-it belongs to, and an apply step skips its write when that database's `applied_index` is
-already at or past the entry's log index. Concretely:
+tunnel-addresses) records an `applied_index` key **in the same transaction** as the step
+it belongs to, and a step whose database's `applied_index` is already at or past the
+entry's log index is **skipped entirely**: neither evaluated nor written. A step that
+rejects or decides "no change" still advances its database's `applied_index` (in a
+transaction of its own), so a replayed rejection is never re-evaluated against later
+state, where it might succeed. Concretely:
 
 - `Store::put` gets an applied-index variant (`put_applied(bytes, index)`) that writes the
-  revision, the current pointer and `applied_index` in one transaction, and returns the
-  existing revision when already applied.
+  revision, the current pointer and `applied_index` in one transaction.
 - The registries' `current` tree moves into that same transaction (today `register` and
   `remove` update it in a second, separate write after `Store::put`), and so do the config
   state's sibling trees (`stage`, actor) for config entries.
 - `AddressBook::claim`/`release`/`touch` take the index and write it in their existing
-  two-tree transaction.
+  two-tree transaction, together with a `last_outcome` record: the claim's result
+  (assignment or `Rejection`) for that index. Rejections write `applied_index` and
+  `last_outcome` only.
 
 An entry that touches two databases (a `Register` claims in tunnel-addresses, then puts in
-a registry) is safe because each step is idempotent on its own: a crash between them
-re-runs only the missing step. A step that was skipped as already applied must still
-produce the same `WriteResponse` (read back the stored revision/assignment).
+a registry) runs its steps in a fixed order. On replay after a crash between them, the
+book step is skipped and the registry step reads the book's `last_outcome` for the
+entry's index (entries apply one at a time, so only the latest entry can be half-applied)
+to decide whether and with which address to write. Replayed entries need no response:
+openraft only routes `client_write` responses for entries proposed in the live term, so
+nothing waits on a replay.
 
 ### The cluster's tunnel network
 
 Apply depends on the network, so it must be one replicated value, not each node's flag.
 Before the first registry write of a fresh cluster, the leader records the network
-with exactly one entry: `Import` (carrying the source node's network) when it has
-`.pre-ha` data, else `SetTunnelNetwork(<its --tunnel-network or none>)`. Both set the
-replicated `initialized` marker, so neither is proposed again by a later leader. Afterwards a node whose `--tunnel-network` differs from the recorded value (a
-different network, or one where none is recorded, or the reverse) logs an `ERROR` naming both and answers registry writes
-with `503` naming both, until its flag is fixed. Changing the recorded network is a
+with exactly one entry: `Import` (carrying the source node's network) when a node holds
+pre-HA data, else `SetTunnelNetwork(<its --tunnel-network or none>)`; Import, "Choosing
+the source", says how the leader decides. Both set the replicated `initialized` marker,
+so neither is proposed again by a later leader.
+
+Afterwards a node whose `--tunnel-network` differs from the recorded value (a different
+network, one where none is recorded, or the reverse) logs an `ERROR` naming both and
+answers registry writes with `503` naming both, until its flag is fixed. Changing the recorded network is a
 non-goal. Pin-only mode under HA is the "recorded: none" case and works the same
 way, but now with cluster-wide uniqueness, so its startup warning goes away.
 
@@ -157,9 +174,19 @@ underlay. This design is family-agnostic by construction:
   `Ipv4Addr` or a fixed four-byte key. Whichever spec lands second adapts the
   address-book types (`Network`, the `by_address` key encoding, `Assignment::address`);
   this spec's entry and snapshot formats need no change for that.
-- Lowest-free allocation in a `/64` must not scan linearly — the IPv6 spec owns the
-  allocator; deterministic apply only requires that it stay a pure function of the
-  replicated state.
+- The IPv6 spec (PR #24) keeps lowest-free allocation as a linear scan bounded by its
+  65 534-entry cap. That is fine inside apply too (at most that many `sled` lookups, and
+  only when nearly full); deterministic apply only requires the allocator to stay a pure
+  function of the replicated state.
+- PR #24's `--tunnel-readdress` changes the network of a running controller. Until network
+  changes are in scope here, `--tunnel-readdress` together with `--ha-peers` or
+  `--ha-join` is refused at startup; whichever of the two specs lands second adds the
+  refusal.
+- All comparisons in this design (the unchanged check, a requested address against a
+  stored one, a node's network against the recorded one) compare **parsed** values
+  (`IpAddr`, `SocketAddr`, `Network`), never strings, so `[fd49:0::2]:25565` and
+  `[fd49::2]:25565` are the same backend and don't send every re-registration through
+  Raft.
 
 ### Reads
 
@@ -172,12 +199,30 @@ cursor. A cursor ahead of a lagging follower's head just waits for the tail (tod
 
 ### Snapshots
 
-`build_snapshot` and `install_snapshot` include both registries as `(revision, bytes)`
-pairs plus their `current` maps, the address-book entries, the recorded network and the
-`initialized` marker. Install writes revisions **at their stored numbers** (a registry log can
-start above 1 after Import), not renumbered from 1 as config/intent are today. Snapshots
-are still only reachable if the log is purged, which nothing does; this keeps them
-correct for when it does.
+The premise "the log is never purged" in today's comments is wrong. `main.rs` builds
+`openraft::Config { ..Default::default() }`, and openraft 0.9.25 defaults to
+`snapshot_policy: LogsSinceLast(5000)`, `max_in_snapshot_log_to_keep: 1000` and
+`replication_lag_threshold: 5000`, and `ha/log_store.rs` implements `purge`. Config writes
+never reached 5 000 entries; registrations and hourly touches will (100 peers reach it in
+about two days on touches alone). After that a `--ha-join` learner, or any follower more
+than 5 000 entries behind, is caught up by snapshot, so the snapshot path becomes a main
+path. This spec makes snapshots first-class, in build slice 1:
+
+- `build_snapshot` includes config and intent revisions *with their numbers and stage /
+  actor metadata*, both registries as `(revision, bytes)` pairs plus their `current` maps,
+  the address-book entries, the recorded network, the `initialized` marker, and each
+  database's `applied_index`.
+- `install_snapshot` **replaces** each store: clear it, then write every revision at its
+  stored number (a registry log can start above 1 after Import), in one transaction per
+  database. Today's install replays into existing stores without clearing them and
+  renumbers from 1, which gives a non-empty lagging follower duplicate revisions.
+- `get_current_snapshot` returns the last built snapshot, persisted next to the HA meta
+  tree, instead of `None`.
+- The misleading comments in `ha/state_machine.rs` and the "log grows unbounded" note in
+  `docs/10` are corrected.
+
+Snapshot size is bounded by the registries' logs, which only grow by real changes;
+compacting a registry log down to its current entries is a non-goal for now.
 
 ## Write path
 
@@ -186,14 +231,21 @@ correct for when it does.
 `POST /peers` / `POST /proxy-peers` under HA:
 
 1. Parse and `validate()` locally, exactly as today (`422` before anything is proposed).
-2. **Unchanged check, on any node.** If the local replica already holds a registration
-   for this name with the same pubkey, endpoint, backends (after expanding `:port` against
-   the stored address) and address (or no address requested), it is unchanged:
+2. **Unchanged check, on any node.** Normalize the incoming registration the way apply
+   would store it: fill in the stored address when none was requested, expand `:port`
+   backends against it, and parse addresses into canonical values. It is unchanged when
+   the normalized registration **equals the stored one, field for field** (the whole
+   struct, so `ProxyRegistration.boot_id`, which changes on every proxy restart and is how
+   agents learn to drop a dead WireGuard session, counts, and so does any field added
+   later):
    - `last_seen` younger than one hour → answer `200` from the local copy (current
      revision, address, recorded network). No Raft traffic.
-   - older → propose `Touch` (forwarded to the leader if this node is not it) and answer
-     `200` from the local copy whether or not the touch commits. No quorum degrades to a
-     missed touch, never to a failed re-registration.
+   - older → answer `200` from the local copy right away and propose `Touch` in the
+     background (forwarded to the leader if this node is not it). No quorum degrades to
+     a missed touch, never to a failed or delayed re-registration.
+   - This also holds on a node whose `--tunnel-network` mismatches the recorded one: an
+     unchanged re-registration is a read and is answered `200`; only writes get the
+     mismatch `503`.
 3. Otherwise propose `Register` through `ha::client::propose_write`, which forwards the
    original body to the leader's `/peers` (or `/proxy-peers`) when this node is not the
    leader. No quorum → `503`, as config writes do today.
@@ -222,19 +274,37 @@ At startup with `--ha-peers` or `--ha-join`, each of `peers/`, `proxy-peers/` an
 renames it to `<dir>.pre-ha` (never deletes it) and opens a fresh database in its place.
 A node that later finds a marker treats the directory as replicated state.
 
-### Proposing the import
+### Choosing the source
 
-The replicated `initialized` marker (see "The cluster's tunnel network") is unset only
-in a fresh cluster. While it is unset, the leader, on winning an election and before
-proposing any registry write, proposes one `Import(ImportContent)` if it has `.pre-ha`
-data (otherwise `SetTunnelNetwork`). A registry write that reaches a leader while the
-marker is unset waits for that entry to commit first:
+The leader of a fresh cluster must not decide from its own disk alone: in the usual
+upgrade (the old controller restarted with `--ha-peers` next to two empty nodes) an empty
+node wins the first election about two times in three, and `SetTunnelNetwork` would then
+set `initialized` and lose every address.
 
-- `ImportContent` = the current registration per name for each registry, the address-book
-  entries (`role`, `name`, `address`, `first_seen`, `last_seen`), the source's tunnel
-  network, and each registry's last revision number.
-- It does **not** copy the registries' full logs (the 30-second history could be millions
-  of entries); it re-writes each current registration as a new revision.
+- `/raft/whoami` (peer-token gated, see Live membership) also reports `pre_ha`: whether
+  this node set aside pre-HA data, and its counts.
+- While `initialized` is unset, the leader proposes no registry entry and answers
+  registry writes `503` ("cluster is initializing its registries"), until it has a
+  `whoami` answer from **every voter** in the membership. Then:
+  - no node has pre-HA data → `SetTunnelNetwork`;
+  - exactly one node has it → the leader fetches that node's content with
+    `GET /raft/pre-ha` (peer-token gated) and proposes `Import(ImportContent)`;
+  - more than one node has it (today's pin-only `--ha-peers` deployments, where each node
+    kept its own registries) → nothing is initialized; the leader logs an `ERROR` naming
+    the nodes and their counts, and registry writes stay `503` until the operator restarts
+    the nodes with `--ha-import-source <node-id>`.
+- `--ha-import-source <node-id|none>` (same value on every node, like `--ha-peers`) names
+  the source explicitly; with it the leader waits only for that node (or for nobody with
+  `none`), so a voter that is down during the upgrade cannot block it. The other nodes'
+  set-aside data is left untouched with a `WARN`. Their clients' pins come back within
+  30 s; a pin that only ever collided across nodes now gets `409`, and the upgrade notes
+  in `docs/12` say so.
+
+`ImportContent` = the current registration per name for each registry, the address-book
+entries (`role`, `name`, `address`, `first_seen`, `last_seen`), the source's tunnel
+network, and each registry's last revision number. It does **not** copy the registries'
+full logs (the 30-second history could be millions of entries); it re-writes each
+current registration as a new revision.
 
 Apply: if `initialized` is already set, the entry is a no-op (so a second leader racing an
 import cannot import twice). Otherwise it seeds the address book, records the network,
@@ -273,11 +343,11 @@ logged at `info` with their `X-Actor`:
 - `GET /admin/ha/members` → voters, learners (id and address each), current leader id.
   Served locally by any node.
 - `POST /admin/ha/members {id, addr}` → identity check (below), `add_learner(id, addr,
-  blocking = true)` (waits until the learner has caught up; no snapshot is needed because
-  the log is never purged), then `change_membership(AddVoterIds{id})`. `409` if `id` is
+  blocking = true)` (waits until the learner has caught up, by log entries or by snapshot once
+  the log has been purged), then `change_membership(AddVoterIds{id})`. `409` if `id` is
   already a voter.
-- `DELETE /admin/ha/members/{id}` → `change_membership(RemoveVoters{id})`, then
-  `change_membership(RemoveNodes{id})`. `422` when it would remove the last voter; `404`
+- `DELETE /admin/ha/members/{id}` → `change_membership(RemoveVoters{id}, retain =
+  false)`, which removes the node entirely. `422` when it would remove the last voter; `404`
   for an unknown id. Removing the current leader is allowed (openraft steps it down after
   the change commits).
 - `PUT /admin/ha/members/{id} {addr}` → identity check, then
@@ -288,7 +358,7 @@ logged at `info` with their `X-Actor`:
 openraft warns that `SetNodes` pointing a node at another node's address can produce two
 leaders (`docs/cluster_control/dynamic-membership.md`, "Update Node"). Before `POST` and
 `PUT`, the leader calls `GET <addr>/raft/whoami` (behind `--ha-token`), which returns the
-node's `--ha-node-id` and whether its log is empty. The change is refused with `422`
+node's `--ha-node-id`, whether its log is empty, and its `pre_ha` summary (see Import). The change is refused with `422`
 unless the id matches; a `POST` additionally requires an empty log or a node that is
 already a learner of this cluster. Unreachable → `503`.
 
@@ -303,6 +373,8 @@ moving a cluster to `https://` peers becomes a `PUT` per member.
 Unchanged for registrations (`409`/`422`/`503`/`404` with `{"error": …}`). New:
 
 - `503` "tunnel network mismatch: this node has X, the cluster recorded Y".
+- `503` "cluster is initializing its registries" (waiting for `whoami` answers, or
+  several nodes hold pre-HA data and no `--ha-import-source` is set).
 - `503` with the existing "no raft leader elected yet; retry shortly" for writes without
   quorum (unchanged text).
 - Membership: `409` already a voter, `422` identity mismatch / last voter / non-empty
@@ -313,11 +385,13 @@ Unchanged for registrations (`409`/`422`/`503`/`404` with `{"error": …}`). New
 - Code (`gsp-controller`): `ha/mod.rs` (entries, response enum), `ha/state_machine.rs`
   (registry + address-book apply, idempotent apply, snapshot), `ha/client.rs`
   (generic response mapping), new `ha/members.rs` (admin routes, whoami), `ha/routes.rs`
-  (`/raft/whoami`), `store.rs` (`put_applied`, start-at revision), `addresses.rs`
+  (`/raft/whoami` with `pre_ha`, `/raft/pre-ha`), new shared registry core (extracted from
+  `peers/api.rs` and `proxy_peers/api.rs`), `store.rs` (`put_applied`, start-at revision), `addresses.rs`
   (index-aware claim/release/touch, `IpAddr`-ready entry formats), `peers*.rs`,
   `proxy_peers*.rs` (HA write path, transactional `current`), `main.rs` (drop the
   `resolve_flags` HA refusal and the pin-only warning, `--ha-join`, pre-HA set-aside,
-  import trigger, network recording).
+  import source choice, `--ha-import-source`, network recording, a snapshot policy
+  tests can lower).
 - Tests: `gsp-fleet-tests` (`tests/ha_tunnel_addresses.rs`, reusing the `ha_tls.rs`
   cluster helpers).
 - Docs: `docs/10` (registries join the replicated state; membership), `docs/11`
@@ -333,41 +407,51 @@ TDD throughout; each layer's test fails first.
 1. **State machine (unit):** two state machines fed the same entries end with identical
    registries, address books and revision numbers; 64 interleaved `Register` entries
    never share an address; each `Rejected` outcome matches the non-HA handler's; replaying
-   any suffix of applied entries (simulated crash before `write_meta`) changes nothing and
-   returns the same responses; `Touch` changes `last_seen` only; snapshot round trip
-   preserves revision numbers above 1.
-2. **Import (unit):** applies once, a second `Import` is a no-op; registry logs continue
+   any suffix of applied entries (simulated crash before `write_meta`) changes nothing,
+   including a replayed rejection that would succeed against later state; a crash between
+   the book step and the registry step completes from `last_outcome`; a storage failure
+   in apply is a `StorageError`, never a `Rejected`; `Touch` changes `last_seen` only.
+2. **Snapshots (unit + fleet):** install into a *non-empty* follower replaces its stores
+   (no duplicate revisions) and keeps revision numbers above 1; with a low
+   `LogsSinceLast` in a test config, a snapshot is built, the log purged, and a node that
+   joins afterwards catches up by snapshot.
+3. **Import (unit + fleet):** applies once, a second `Import` is a no-op; registry logs continue
    at source head + 1; a subscriber with an old cursor receives the imported
-   registrations; set-aside renames only unmarked, non-empty directories.
-3. **Handlers (in-module, single-node Raft):** unchanged re-registration proposes nothing
-   (count proposals); a stale `last_seen` proposes one `Touch`; a changed backend proposes
-   `Register`; response shapes and status codes equal today's for every path; network
+   registrations; set-aside renames only unmarked, non-empty directories; the source is
+   chosen from `whoami` answers whichever node leads (fleet: the data node is forced to be
+   a follower); several sources without `--ha-import-source` initialize nothing.
+4. **Handlers (in-module, single-node Raft):** unchanged re-registration proposes nothing
+   (count proposals), including one spelled with a non-canonical IPv6 address; a stale
+   `last_seen` answers at once and proposes one `Touch`; a changed backend proposes
+   `Register`; a changed `boot_id` proposes `Register`; response shapes and status codes equal today's for every path; network
    mismatch → `503`.
-4. **Membership (in-module + whoami):** id mismatch refused; last voter refused;
+5. **Membership (in-module + whoami):** id mismatch refused; last voter refused;
    `--ha-join` with `--ha-peers` is a startup error; a `--ha-join` node never initializes.
-5. **Fleet (`gsp-fleet-tests`, real processes):** three nodes with `--tunnel-network`:
+6. **Fleet (`gsp-fleet-tests`, real processes):** three nodes with `--tunnel-network`:
    register on node 1, subscribe on node 3, see it; kill the leader, register a new
    origin on a survivor, no duplicate address, and a subscriber reconnecting to another
    node with its cursor misses nothing; single node with allocations restarted as one
    member of a fresh cluster keeps every address; a fourth node joins via `--ha-join` and
    `POST /admin/ha/members`, then the leader is removed and the cluster keeps writing; a
    `PUT` to a new port moves a member.
-6. **Tunnel e2e:** unchanged scenarios stay green (single controller). No new netns
+7. **Tunnel e2e:** unchanged scenarios stay green (single controller). No new netns
    scenario — the fleet tests cover the controller side, and clients see no wire change.
 
 ## Build order
 
 Each slice green under `make check` before the next:
 
-1. Crash-idempotent apply for config and intent (`put_applied`, sibling trees in the
-   transaction) — fixes the existing bug alone.
-2. Transactional `current` in both registries; index-aware address book; `IpAddr`-ready
-   entry formats.
+1. Crash-idempotent apply and first-class snapshots for config and intent
+   (`put_applied`, sibling trees in the transaction, replacing install, persisted current
+   snapshot) — fixes the two existing bugs alone.
+2. Extract a shared registry core from `peers` and `proxy_peers` (today about 60%
+   identical, 913 and 854 lines in `api.rs`), so every later change lands once;
+   transactional `current` in it; index-aware address book; `IpAddr`-ready entry formats.
 3. Registry entries in the state machine (`Register`/`Release`/`Touch`,
    `SetTunnelNetwork`, the `initialized` marker), response enum, HA write path with the unchanged check; drop the
    startup refusal.
 4. Snapshot content for registries and the address book.
-5. Import (set-aside, trigger, apply).
+5. Import (set-aside, `whoami`'s `pre_ha`, source choice, `--ha-import-source`, apply).
 6. Membership (`--ha-join`, whoami, admin routes).
 7. Fleet tests for the end-to-end scenarios, then docs.
 
@@ -375,7 +459,7 @@ Each slice green under `make check` before the next:
 
 Determinism of apply (no `now_secs()`, no local flag read inside apply); the idempotent
 skip returning the same response; the unchanged check comparing expanded backends; the
-import race between two leaders; a registry write reaching a leader before the `initialized` marker commits; the
+import source choice when an empty node leads; a registry write reaching a leader before the `initialized` marker commits; the
 identity check against split brain; removing the leader; a replacement node started
 without `--ha-join`.
 
