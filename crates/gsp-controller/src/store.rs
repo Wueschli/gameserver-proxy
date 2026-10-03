@@ -130,6 +130,11 @@ impl Store {
         Ok(out)
     }
 
+    /// Every revision, oldest first, with its number.
+    pub fn all_revisions(&self) -> Result<Vec<(u64, RevisionBytes)>, StoreError> {
+        self.revisions_after(0)
+    }
+
     /// Accepts a new revision: assigns the next monotonic number, persists
     /// the bytes and moves the `current` pointer in one `sled` transaction
     /// (across both trees), then flushes — a crash can lose the very last
@@ -222,21 +227,7 @@ impl Store {
         revision: Option<(u64, RevisionBytes)>,
         siblings: Vec<SiblingWrite<'_>>,
     ) -> Result<bool, StoreError> {
-        // Trees 0 and 1 are `revisions` and `meta`; each distinct sibling
-        // tree follows, `slots[i]` naming the position of `siblings[i]`'s.
-        let mut trees: Vec<&sled::Tree> = vec![&self.revisions, &self.meta];
-        let mut slots = Vec::with_capacity(siblings.len());
-        for w in &siblings {
-            let slot = match trees.iter().position(|t| t.name() == w.tree.name()) {
-                Some(slot) => slot,
-                None => {
-                    trees.push(w.tree);
-                    trees.len() - 1
-                }
-            };
-            slots.push(slot);
-        }
-
+        let (trees, slots) = self.transaction_trees(&siblings);
         let outcome = trees[..].transaction(|views| {
             let (revisions, meta) = (&views[0], &views[1]);
             if let Some(done) = meta.get(APPLIED_INDEX_KEY)? {
@@ -271,6 +262,112 @@ impl Store {
             self.db.flush()?;
         }
         Ok(written)
+    }
+
+    /// Replaces the whole store in one transaction — a Raft snapshot
+    /// install: every existing revision is removed, `revisions` written at
+    /// their given numbers (which need not start at 1), `current` set to
+    /// the highest of them (removed when there are none) and
+    /// `applied_index` set to `applied_index` (removed when `None`).
+    pub fn replace_all(
+        &self,
+        revisions: &[(u64, RevisionBytes)],
+        applied_index: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.replace_all_with(revisions, applied_index, &[], Vec::new())
+    }
+
+    /// [`Store::replace_all`] that also empties every tree in `clear` and
+    /// then applies `siblings`, all in the same transaction (the config
+    /// store's stage and actor trees). Like [`Store::put_applied_with`]'s
+    /// siblings, every tree must come from this store's own [`Store::db`]:
+    /// trees are matched to the transaction by name only.
+    ///
+    /// `sled` transactions cannot iterate, so the keys to remove are read
+    /// just before the transaction; the caller must be the only writer
+    /// (the Raft state-machine worker, which serializes install with
+    /// apply).
+    pub fn replace_all_with<'a>(
+        &self,
+        revisions: &[(u64, RevisionBytes)],
+        applied_index: Option<u64>,
+        clear: &[&'a sled::Tree],
+        siblings: Vec<SiblingWrite<'a>>,
+    ) -> Result<(), StoreError> {
+        let stale = self
+            .revisions
+            .iter()
+            .keys()
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut writes = Vec::new();
+        for tree in clear {
+            for key in tree.iter().keys() {
+                writes.push(SiblingWrite {
+                    tree,
+                    key: key?.to_vec(),
+                    value: None,
+                });
+            }
+        }
+        writes.extend(siblings);
+        let current = revisions.iter().map(|(r, _)| *r).max();
+
+        let (trees, slots) = self.transaction_trees(&writes);
+        trees[..]
+            .transaction(|views| {
+                let (revs, meta) = (&views[0], &views[1]);
+                for key in &stale {
+                    revs.remove(key)?;
+                }
+                for (revision, bytes) in revisions {
+                    revs.insert(&encode_rev(*revision), bytes.as_slice())?;
+                }
+                match current {
+                    Some(r) => meta.insert(CURRENT_KEY, &encode_rev(r))?,
+                    None => meta.remove(CURRENT_KEY)?,
+                };
+                match applied_index {
+                    Some(i) => meta.insert(APPLIED_INDEX_KEY, &encode_rev(i))?,
+                    None => meta.remove(APPLIED_INDEX_KEY)?,
+                };
+                for (w, slot) in writes.iter().zip(&slots) {
+                    match &w.value {
+                        Some(v) => views[*slot].insert(w.key.as_slice(), v.as_slice())?,
+                        None => views[*slot].remove(w.key.as_slice())?,
+                    };
+                }
+                Ok::<_, TxError>(())
+            })
+            .map_err(|e| match e {
+                sled::transaction::TransactionError::Storage(e) => StoreError::Sled(e),
+                sled::transaction::TransactionError::Abort(TxAbort::RevisionRaced) => {
+                    StoreError::ConcurrentWrite
+                }
+            })?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// The trees a transaction over `revisions`, `meta` and `writes` spans:
+    /// trees 0 and 1 are `revisions` and `meta`, each distinct sibling tree
+    /// follows, and `slots[i]` names the position of `writes[i]`'s tree.
+    fn transaction_trees<'t>(
+        &'t self,
+        writes: &[SiblingWrite<'t>],
+    ) -> (Vec<&'t sled::Tree>, Vec<usize>) {
+        let mut trees: Vec<&sled::Tree> = vec![&self.revisions, &self.meta];
+        let mut slots = Vec::with_capacity(writes.len());
+        for w in writes {
+            let slot = match trees.iter().position(|t| t.name() == w.tree.name()) {
+                Some(slot) => slot,
+                None => {
+                    trees.push(w.tree);
+                    trees.len() - 1
+                }
+            };
+            slots.push(slot);
+        }
+        (trees, slots)
     }
 }
 
@@ -465,5 +562,38 @@ mod tests {
             .unwrap();
         assert!(matches!(applied, Applied::AlreadyApplied));
         assert!(side.get(1u64.to_be_bytes()).unwrap().is_some());
+    }
+
+    #[test]
+    fn replace_all_with_clears_and_writes_at_the_given_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let side = store.db().open_tree("side").unwrap();
+        for i in 1..=3 {
+            store.put_applied(vec![i as u8], i).unwrap();
+            side.insert(i.to_be_bytes(), b"old".to_vec()).unwrap();
+        }
+
+        let revisions = vec![(5, b"five".to_vec()), (6, b"six".to_vec())];
+        let writes = vec![SiblingWrite {
+            tree: &side,
+            key: 6u64.to_be_bytes().to_vec(),
+            value: Some(b"new".to_vec()),
+        }];
+        store
+            .replace_all_with(&revisions, Some(9), &[&side], writes)
+            .unwrap();
+
+        assert_eq!(store.all_revisions().unwrap(), revisions);
+        assert_eq!(store.current_revision().unwrap(), Some(6));
+        assert_eq!(store.applied_index().unwrap(), Some(9));
+        let side_keys: Vec<_> = side.iter().keys().map(|k| k.unwrap().to_vec()).collect();
+        assert_eq!(side_keys, vec![6u64.to_be_bytes().to_vec()]);
+
+        // An empty snapshot empties the store and forgets the index.
+        store.replace_all(&[], None).unwrap();
+        assert!(store.all_revisions().unwrap().is_empty());
+        assert_eq!(store.current_revision().unwrap(), None);
+        assert_eq!(store.applied_index().unwrap(), None);
     }
 }

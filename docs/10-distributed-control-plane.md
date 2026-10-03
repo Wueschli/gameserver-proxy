@@ -558,7 +558,11 @@ what order," which a stateless replica set cannot give.
   fed by `openraft` applying a committed entry instead of a direct HTTP
   handler call. The Raft log itself (openraft's own append-only log of
   proposals, distinct from the config/intent revision logs it carries) lives
-  in a **third** `sled` tree, `<data_dir>/raft`, on every replica.
+  in a **third** `sled` tree, `<data_dir>/raft`, on every replica. That log
+  is purged per `openraft`'s snapshot policy (a snapshot every 5 000 entries,
+  the last 1 000 entries kept); a follower or learner behind the purge point
+  is caught up by snapshot, which replaces its config and intent stores
+  (revision numbers, stage and actor included).
 - **Writes go through Raft; reads don't.** `POST /config`, `POST /intent`,
   and `POST /admin/adopt` propose a Raft entry and wait for it to commit
   before responding (this is where "who is the leader" matters). `GET

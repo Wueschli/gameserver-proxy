@@ -6,9 +6,19 @@
 //! same `sled` transaction so a replayed entry is skipped (crash-idempotent
 //! apply) — see `crate::ha`'s module doc. `sled` (via those two
 //! `Store`s) is the actual durable content; this module only adds the
-//! bookkeeping `openraft` needs on top (last-applied log id, membership,
-//! and a snapshot for a follower whose log entries have been purged — which
-//! never happens in this slice, see the note on `build_snapshot` below).
+//! bookkeeping `openraft` needs on top: last-applied log id, membership,
+//! and snapshots.
+//!
+//! Snapshots are a main path, not a corner case: `openraft` purges the log
+//! per [`super::raft_config`]'s snapshot policy, and a follower or learner
+//! that lags behind the purge point is caught up by snapshot. A snapshot
+//! carries every config and intent revision *at its number* (with the
+//! config revision's stage and actor) and each store's `applied_index`;
+//! installing one **replaces** both stores. `get_snapshot_builder` copies
+//! that state while serialized with `apply` (the builder then runs in
+//! parallel with later applies and never reads live state), and the last
+//! built or installed snapshot is persisted in the `raft_snapshot` tree so
+//! `get_current_snapshot` can serve it.
 
 use std::sync::Arc;
 
@@ -20,29 +30,67 @@ use openraft::{
 use serde::{Deserialize, Serialize};
 
 use super::{NodeId, TypeConfig, WriteRequest, WriteResponse};
-use crate::api::AppState;
+use crate::api::{AppState, Stage};
 use crate::intent::api::IntentState;
+use crate::store::SiblingWrite;
 
 const SM_META_KEY: &[u8] = b"sm_meta";
+/// Keys of the `raft_snapshot` tree: the current snapshot's
+/// [`SnapshotMeta`] (JSON) and its serialized [`SnapshotContent`].
+const SNAPSHOT_META_KEY: &[u8] = b"meta";
+const SNAPSHOT_DATA_KEY: &[u8] = b"data";
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+type Membership = StoredMembership<NodeId, openraft::BasicNode>;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct SmMeta {
     last_applied_log: Option<LogId<NodeId>>,
-    last_membership: StoredMembership<NodeId, openraft::BasicNode>,
+    last_membership: Membership,
 }
 
-/// The full snapshot content: every revision from both logs, enough to
-/// rebuild a from-scratch replica's config+intent `Store`s exactly.
-#[derive(Serialize, Deserialize)]
-struct SnapshotContent {
-    config_revisions: Vec<(u64, Vec<u8>)>,
-    intent_revisions: Vec<(u64, Vec<u8>)>,
+/// One config revision in a snapshot, with the metadata stored beside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevisionSnap {
+    pub revision: u64,
+    pub bytes: Vec<u8>,
+    pub stage: Stage,
+    pub actor: Option<String>,
+}
+
+/// The full snapshot content: every revision of both logs at its number,
+/// and each store's `applied_index` — enough to replace a replica's
+/// config and intent `Store`s exactly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotContent {
+    pub config: Vec<RevisionSnap>,
+    pub intent: Vec<(u64, Vec<u8>)>,
+    pub config_applied: Option<u64>,
+    pub intent_applied: Option<u64>,
+}
+
+/// An owned copy of everything a snapshot holds, taken by
+/// `get_snapshot_builder` on the state-machine worker (serialized with
+/// `apply`), so building it later never reads live state.
+pub struct SnapshotCopy {
+    content: SnapshotContent,
+    meta: SmMeta,
+}
+
+/// `openraft`'s snapshot builder: serializes its [`SnapshotCopy`] and
+/// persists the result as the current snapshot. `copy` is the error when
+/// taking the copy failed (`get_snapshot_builder` cannot return one);
+/// `build_snapshot` reports it.
+pub struct SnapshotBuilder {
+    copy: Result<SnapshotCopy, StorageError<NodeId>>,
+    snapshots: sled::Tree,
 }
 
 pub struct StateMachineStore {
     config: Arc<AppState>,
     intent: Arc<IntentState>,
     meta: sled::Tree,
+    /// The last built or installed snapshot (`meta`, `data`).
+    snapshots: sled::Tree,
 }
 
 impl StateMachineStore {
@@ -55,6 +103,7 @@ impl StateMachineStore {
             config,
             intent,
             meta: db.open_tree("raft_sm_meta")?,
+            snapshots: db.open_tree("raft_snapshot")?,
         })
     }
 
@@ -81,44 +130,158 @@ impl StateMachineStore {
         self.meta.flush().map_err(|e| StorageIOError::write(&e))?;
         Ok(())
     }
+
+    /// Copies both stores (revisions, stage, actor, `applied_index`) and
+    /// the HA meta. Runs on the state-machine worker, so no apply
+    /// interleaves.
+    #[allow(clippy::result_large_err)] // same as `read_meta` above
+    fn copy(&self) -> Result<SnapshotCopy, StorageError<NodeId>> {
+        let config_store = &self.config.store;
+        let mut config = Vec::new();
+        for (revision, bytes) in config_store
+            .all_revisions()
+            .map_err(|e| StorageIOError::read_state_machine(&e))?
+        {
+            let key = revision.to_be_bytes();
+            let stage = match self
+                .config
+                .stage
+                .get(key)
+                .map_err(|e| StorageIOError::read_state_machine(&e))?
+            {
+                Some(v) => serde_json::from_slice(&v)
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                None => Stage::promoted(),
+            };
+            let actor = self
+                .config
+                .actors
+                .get(key)
+                .map_err(|e| StorageIOError::read_state_machine(&e))?
+                .map(|v| String::from_utf8_lossy(&v).into_owned());
+            config.push(RevisionSnap {
+                revision,
+                bytes,
+                stage,
+                actor,
+            });
+        }
+        let intent_store = &self.intent.store;
+        Ok(SnapshotCopy {
+            content: SnapshotContent {
+                config,
+                intent: intent_store
+                    .all_revisions()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                config_applied: config_store
+                    .applied_index()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                intent_applied: intent_store
+                    .applied_index()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+            },
+            meta: self.read_meta()?,
+        })
+    }
+
+    /// Replaces the config store (with its stage and actor trees) and the
+    /// intent store by `content`, one transaction per database.
+    #[allow(clippy::result_large_err)] // same as `read_meta` above
+    fn replace_stores(&self, content: &SnapshotContent) -> Result<(), StorageError<NodeId>> {
+        let config = &self.config;
+        let revisions: Vec<_> = content
+            .config
+            .iter()
+            .map(|r| (r.revision, r.bytes.clone()))
+            .collect();
+        let mut siblings = Vec::new();
+        for r in &content.config {
+            let key = r.revision.to_be_bytes().to_vec();
+            siblings.push(SiblingWrite {
+                tree: &config.stage,
+                key: key.clone(),
+                value: Some(
+                    serde_json::to_vec(&r.stage)
+                        .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                ),
+            });
+            if let Some(actor) = &r.actor {
+                siblings.push(SiblingWrite {
+                    tree: &config.actors,
+                    key,
+                    value: Some(actor.as_bytes().to_vec()),
+                });
+            }
+        }
+        config
+            .store
+            .replace_all_with(
+                &revisions,
+                content.config_applied,
+                &[&config.stage, &config.actors],
+                siblings,
+            )
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.intent
+            .store
+            .replace_all(&content.intent, content.intent_applied)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+
+        // Wake live subscribers so they re-read from the replaced store.
+        if let Some(r) = content.config.last() {
+            let _ = config.updates.send(r.revision);
+        }
+        if let Some((r, _)) = content.intent.last() {
+            let _ = self.intent.updates.send(*r);
+        }
+        Ok(())
+    }
 }
 
-impl RaftSnapshotBuilder<TypeConfig> for Arc<StateMachineStore> {
-    async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        // Exercised only if a follower ever needs log entries this node has
-        // purged — which never happens in this slice (the log store never
-        // purges; see `docs/10` "Intra-tier HA (design)"'s accepted
-        // "log grows unbounded, compact later" tradeoff). Implemented
-        // correctly anyway rather than stubbed, since `openraft` requires
-        // the trait regardless and a half-correct snapshot would be a
-        // silent landmine for whenever compaction *is* added.
-        let config_revisions = self
-            .config
-            .store
-            .revisions_after(0)
-            .map_err(|e| StorageIOError::read_state_machine(&e))?;
-        let intent_revisions = self
-            .intent
-            .store
-            .revisions_after(0)
-            .map_err(|e| StorageIOError::read_state_machine(&e))?;
-        let content = SnapshotContent {
-            config_revisions,
-            intent_revisions,
-        };
-        let data =
-            serde_json::to_vec(&content).map_err(|e| StorageIOError::read_state_machine(&e))?;
+/// Persists `meta` + `data` as the current snapshot, in one transaction.
+#[allow(clippy::result_large_err)] // `StorageError` is openraft's, see `read_meta`
+fn save_snapshot(
+    tree: &sled::Tree,
+    meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
+    data: &[u8],
+) -> Result<(), StorageError<NodeId>> {
+    let meta_bytes = serde_json::to_vec(meta)
+        .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
+    tree.transaction(|t| {
+        t.insert(SNAPSHOT_META_KEY, meta_bytes.as_slice())?;
+        t.insert(SNAPSHOT_DATA_KEY, data)?;
+        Ok::<_, sled::transaction::ConflictableTransactionError<std::convert::Infallible>>(())
+    })
+    .map_err(|e| match e {
+        sled::transaction::TransactionError::Storage(e) => {
+            StorageIOError::write_snapshot(Some(meta.signature()), &e)
+        }
+        sled::transaction::TransactionError::Abort(never) => match never {},
+    })?;
+    tree.flush()
+        .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
+    Ok(())
+}
 
-        let meta = self.read_meta()?;
+impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
+    async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
+        // Only serializes the copy `get_snapshot_builder` took: `openraft`
+        // runs this in parallel with later applies, so the live stores may
+        // already be ahead of `self.copy.meta`.
+        let copy = self.copy.as_ref().map_err(Clone::clone)?;
+        let data = serde_json::to_vec(&copy.content)
+            .map_err(|e| StorageIOError::read_state_machine(&e))?;
+        let meta = &copy.meta;
         let snapshot_id = match &meta.last_applied_log {
             Some(id) => format!("{}-{}", id.leader_id, id.index),
             None => "empty".to_string(),
         };
         let snapshot_meta = SnapshotMeta {
             last_log_id: meta.last_applied_log,
-            last_membership: meta.last_membership,
+            last_membership: meta.last_membership.clone(),
             snapshot_id,
         };
+        save_snapshot(&self.snapshots, &snapshot_meta, &data)?;
 
         Ok(Snapshot {
             meta: snapshot_meta,
@@ -128,7 +291,7 @@ impl RaftSnapshotBuilder<TypeConfig> for Arc<StateMachineStore> {
 }
 
 impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
-    type SnapshotBuilder = Self;
+    type SnapshotBuilder = SnapshotBuilder;
 
     async fn applied_state(
         &mut self,
@@ -212,7 +375,10 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        self.clone()
+        SnapshotBuilder {
+            copy: self.copy(),
+            snapshots: self.snapshots.clone(),
+        }
     }
 
     async fn begin_receiving_snapshot(
@@ -229,37 +395,42 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
         let content: SnapshotContent = serde_json::from_slice(snapshot.get_ref())
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), &e))?;
 
-        // Replay every revision straight through `apply_revision` — the
-        // installing node's config/intent `Store`s start empty (a snapshot
-        // is only ever installed on a follower catching up from nothing),
-        // so re-numbering from 1 upward reproduces the source exactly.
-        for (_, bytes) in content.config_revisions {
-            self.config
-                .apply_revision(bytes)
-                .map_err(|e| StorageIOError::write_state_machine(&e))?;
-        }
-        for (_, bytes) in content.intent_revisions {
-            self.intent
-                .apply_revision(bytes)
-                .map_err(|e| StorageIOError::write_state_machine(&e))?;
-        }
-
+        // Stores first, HA meta second: a crash in between leaves stores
+        // whose `applied_index` already covers the snapshot, so the entries
+        // openraft re-delivers from the older `last_applied_log` are
+        // skipped rather than applied twice.
+        self.replace_stores(&content)?;
         self.write_meta(&SmMeta {
             last_applied_log: meta.last_log_id,
             last_membership: meta.last_membership.clone(),
         })?;
+        save_snapshot(&self.snapshots, meta, snapshot.get_ref())?;
         Ok(())
     }
 
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        // No separate "current snapshot" cache kept: `build_snapshot` is
-        // cheap (a linear read of both `Store`s) and this path is only ever
-        // hit alongside `build_snapshot` in the unpurged-log world this
-        // slice ships, so there is nothing to gain from also persisting a
-        // copy of the last-built snapshot.
-        Ok(None)
+        let Some(meta) = self
+            .snapshots
+            .get(SNAPSHOT_META_KEY)
+            .map_err(|e| StorageIOError::read_snapshot(None, &e))?
+        else {
+            return Ok(None);
+        };
+        let Some(data) = self
+            .snapshots
+            .get(SNAPSHOT_DATA_KEY)
+            .map_err(|e| StorageIOError::read_snapshot(None, &e))?
+        else {
+            return Ok(None);
+        };
+        let meta: SnapshotMeta<NodeId, openraft::BasicNode> =
+            serde_json::from_slice(&meta).map_err(|e| StorageIOError::read_snapshot(None, &e))?;
+        Ok(Some(Snapshot {
+            meta,
+            snapshot: Box::new(std::io::Cursor::new(data.to_vec())),
+        }))
     }
 }
 
@@ -387,7 +558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_round_trip_replays_every_revision() {
+    async fn snapshot_round_trip_restores_both_stores() {
         let (mut sm, _dirs) = test_sm();
         sm.apply(vec![normal_entry(
             1,
@@ -406,7 +577,12 @@ mod tests {
         .await
         .unwrap();
 
-        let snapshot = sm.build_snapshot().await.unwrap();
+        let snapshot = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
 
         // Install onto a fresh, empty state machine.
         let (mut fresh, _dirs2) = test_sm();
@@ -519,6 +695,155 @@ mod tests {
             .unwrap();
         assert_eq!(sm.config.promote_entry(2, 1).unwrap(), None);
         assert!(!sm.config.stage_of(1).promoted);
+    }
+
+    fn config_entry(index: u64, bytes: &[u8]) -> Entry<TypeConfig> {
+        normal_entry(
+            index,
+            WriteRequest::Config {
+                bytes: bytes.to_vec(),
+                stage: crate::api::Stage::promoted(),
+                actor: None,
+            },
+        )
+    }
+
+    /// Reopens the state machine on `dirs`' HA db (config/intent stores
+    /// fresh — only the HA trees matter to the callers).
+    fn reopen_ha(dirs: &TestDirs) -> (Arc<StateMachineStore>, TestDirs) {
+        let (fresh, fresh_dirs) = test_sm();
+        let db = crate::store::reopen_when_unlocked(|| sled::open(dirs.ha.path()));
+        let sm = StateMachineStore::open(&db, fresh.config.clone(), fresh.intent.clone()).unwrap();
+        (Arc::new(sm), fresh_dirs)
+    }
+
+    #[tokio::test]
+    async fn install_replaces_a_non_empty_store() {
+        let (mut follower, _f) = test_sm();
+        follower
+            .apply(vec![
+                config_entry(1, b"a"),
+                config_entry(2, b"b"),
+                config_entry(3, b"stale"),
+            ])
+            .await
+            .unwrap();
+        let (mut leader, _l) = test_sm();
+        leader
+            .apply(vec![config_entry(1, b"a"), config_entry(2, b"b")])
+            .await
+            .unwrap();
+
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        follower
+            .install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        let want = leader.config.store.all_revisions().unwrap();
+        assert_eq!(want.len(), 2);
+        assert_eq!(follower.config.store.all_revisions().unwrap(), want);
+        assert_eq!(follower.config.store.current_revision().unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn install_keeps_revision_numbers_and_metadata() {
+        let (mut leader, _l) = test_sm();
+        let canary = crate::api::Stage {
+            promoted: false,
+            canary_groups: vec!["g".into()],
+        };
+        leader
+            .apply(vec![normal_entry(
+                1,
+                WriteRequest::Config {
+                    bytes: b"a".to_vec(),
+                    stage: canary.clone(),
+                    actor: Some("bob".into()),
+                },
+            )])
+            .await
+            .unwrap();
+
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let (mut follower, _f) = test_sm();
+        follower
+            .install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        assert_eq!(follower.config.store.get(1).unwrap().unwrap(), b"a");
+        assert_eq!(follower.config.stage_of(1), canary);
+        assert_eq!(follower.config.actor_of(1).as_deref(), Some("bob"));
+        assert_eq!(follower.config.store.applied_index().unwrap(), Some(1));
+        let (last_applied, _) = follower.applied_state().await.unwrap();
+        assert_eq!(last_applied.unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn current_snapshot_is_the_last_built_one() {
+        let (mut sm, dirs) = test_sm();
+        sm.apply(vec![config_entry(1, b"a")]).await.unwrap();
+        let built = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let current = sm.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, built.meta.snapshot_id);
+        drop(sm);
+
+        let (mut reopened, _r) = reopen_ha(&dirs);
+        let current = reopened.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, built.meta.snapshot_id);
+        assert_eq!(current.meta.last_log_id, built.meta.last_log_id);
+        assert_eq!(current.snapshot.get_ref(), built.snapshot.get_ref());
+    }
+
+    #[tokio::test]
+    async fn a_builder_is_not_affected_by_later_applies() {
+        let (mut leader, _l) = test_sm();
+        leader
+            .apply((1..=3).map(|i| config_entry(i, format!("c{i}").as_bytes())))
+            .await
+            .unwrap();
+        let mut builder = leader.get_snapshot_builder().await;
+        leader
+            .apply((4..=6).map(|i| config_entry(i, format!("c{i}").as_bytes())))
+            .await
+            .unwrap();
+
+        let snapshot = builder.build_snapshot().await.unwrap();
+        assert_eq!(snapshot.meta.last_log_id.unwrap().index, 3);
+        let content: SnapshotContent = serde_json::from_slice(snapshot.snapshot.get_ref()).unwrap();
+        assert_eq!(content.config.len(), 3);
+        assert_eq!(content.config_applied, Some(3));
+
+        let (mut fresh, _f) = test_sm();
+        fresh
+            .install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+        fresh
+            .apply((4..=6).map(|i| config_entry(i, format!("c{i}").as_bytes())))
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.config.store.all_revisions().unwrap(),
+            leader.config.store.all_revisions().unwrap()
+        );
     }
 
     #[tokio::test]
