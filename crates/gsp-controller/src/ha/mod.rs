@@ -128,4 +128,8 @@ pub struct HaHandle {
     /// (slave-to-parent), matching every other cross-service credential
     /// pair in this fleet.
     pub ha_token: Option<Arc<str>>,
+    /// Carries writes this replica forwards to the leader
+    /// ([`client::forward_client`]): shared, and bounded by
+    /// [`client::FORWARD_TIMEOUT`].
+    pub forward: reqwest::Client,
 }
