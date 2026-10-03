@@ -51,6 +51,7 @@
 pub mod apply_registry;
 pub mod client;
 pub mod cluster_state;
+pub mod import;
 pub mod init;
 pub mod log_store;
 pub mod members;
@@ -119,6 +120,9 @@ pub enum WriteRequest {
     /// Records the cluster's tunnel network (CIDR string; `None` =
     /// pin-only) once, before the first registry write.
     SetTunnelNetwork(Option<String>),
+    /// The pre-HA registrations of one node, adopted once as the cluster's
+    /// initial registry state (see [`import`]).
+    Import(Box<import::ImportContent>),
 }
 
 /// What applying one entry did — the HTTP layer maps it back to the status
@@ -224,6 +228,9 @@ pub struct HaHandle {
     /// ([`client::forward_client`]): shared, and bounded by
     /// [`client::FORWARD_TIMEOUT`].
     pub forward: reqwest::Client,
+    /// This node's own set-aside pre-HA data, which `/raft/whoami` reports
+    /// and `/raft/pre-ha` serves ([`import`]).
+    pub pre_ha: import::LocalPreHa,
 }
 
 #[cfg(test)]

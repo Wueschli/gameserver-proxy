@@ -23,50 +23,87 @@ struct Cluster {
 }
 
 async fn cluster() -> Result<Cluster> {
-    build_fleet_bins()?;
-    let ports = (0..3).map(|_| free_port()).collect::<Result<Vec<_>>>()?;
-    let peers = ports
-        .iter()
-        .enumerate()
-        .map(|(i, p)| format!("{}=127.0.0.1:{p}", i + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut procs = Vec::new();
-    let mut dirs = Vec::new();
-    for (i, p) in ports.iter().enumerate() {
-        let dir = tempfile::tempdir()?;
-        let extra = [
-            "--ha-node-id",
-            &(i + 1).to_string(),
-            "--ha-peers",
-            &peers,
-            "--tunnel-network",
-            "10.60.0.0/24",
-        ]
-        .map(String::from);
-        procs.push(Some(spawn_controller_with(
-            dir.path(),
-            &format!("127.0.0.1:{p}"),
-            &extra,
-        )?));
-        dirs.push(dir);
-    }
-    let bases: Vec<String> = ports
-        .iter()
-        .map(|p| format!("http://127.0.0.1:{p}"))
-        .collect();
-    for b in &bases {
-        wait_http_up(&format!("{b}/healthz"), Duration::from_secs(10)).await?;
-    }
-    Ok(Cluster {
-        bases,
-        procs,
-        http: reqwest::Client::new(),
-        _dirs: dirs,
-    })
+    Cluster::start(None, false).await
 }
 
 impl Cluster {
+    /// Three nodes on loopback with `--tunnel-network 10.60.0.0/24`. With
+    /// `seed`, node 1 starts on that (pre-HA) data directory; with
+    /// `node1_last` it starts only after nodes 2 and 3 have elected a leader.
+    async fn start(seed: Option<tempfile::TempDir>, node1_last: bool) -> Result<Cluster> {
+        build_fleet_bins()?;
+        let ports = (0..3).map(|_| free_port()).collect::<Result<Vec<_>>>()?;
+        let peers = ports
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{}=127.0.0.1:{p}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let bases: Vec<String> = ports
+            .iter()
+            .map(|p| format!("http://127.0.0.1:{p}"))
+            .collect();
+        let dirs = (0..3)
+            .map(|_| tempfile::tempdir())
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut c = Cluster {
+            bases,
+            procs: vec![None, None, None],
+            http: reqwest::Client::new(),
+            _dirs: Vec::new(),
+        };
+        let spawn = |i: usize, dir: &std::path::Path| -> Result<Proc> {
+            let extra = [
+                "--ha-node-id",
+                &(i + 1).to_string(),
+                "--ha-peers",
+                &peers,
+                "--tunnel-network",
+                "10.60.0.0/24",
+            ]
+            .map(String::from);
+            spawn_controller_with(dir, &format!("127.0.0.1:{}", ports[i]), &extra)
+        };
+        // Node 1's directory is the seed's when there is one.
+        let node1_dir = match &seed {
+            Some(seed) => seed.path().to_path_buf(),
+            None => dirs[0].path().to_path_buf(),
+        };
+        let dir_of = |i: usize| {
+            if i == 0 {
+                node1_dir.clone()
+            } else {
+                dirs[i].path().to_path_buf()
+            }
+        };
+        let order: Vec<usize> = if node1_last {
+            vec![1, 2, 0]
+        } else {
+            vec![0, 1, 2]
+        };
+        for (n, &i) in order.iter().enumerate() {
+            if node1_last && n == 2 {
+                // Nodes 2 and 3 are a majority: wait for them to elect a leader.
+                wait_until(
+                    || {
+                        let c = &c;
+                        async move { Ok(c.leader().await.is_ok()) }
+                    },
+                    Duration::from_secs(15),
+                    "nodes 2 and 3 to elect a leader without node 1",
+                )
+                .await?;
+            }
+            c.procs[i] = Some(spawn(i, &dir_of(i))?);
+            wait_http_up(&format!("{}/healthz", c.bases[i]), Duration::from_secs(10)).await?;
+        }
+        c._dirs = dirs;
+        if let Some(seed) = seed {
+            c._dirs.push(seed);
+        }
+        Ok(c)
+    }
+
     /// The leader's node id, as any live node reports it.
     async fn leader(&self) -> Result<u64> {
         for (i, b) in self.bases.iter().enumerate() {
@@ -231,4 +268,93 @@ async fn a_subscriber_resumes_on_another_node_with_its_cursor() -> Result<()> {
     );
     ensure!(next[0].to_string().contains("o3"), "{}", next[0]);
     Ok(())
+}
+
+/// A pre-HA controller on `--tunnel-network 10.60.0.0/24` registers three
+/// origins and stops; returns its data directory and the addresses it gave.
+async fn pre_ha_controller() -> Result<(tempfile::TempDir, Vec<(String, Value)>)> {
+    build_fleet_bins()?;
+    let dir = tempfile::tempdir()?;
+    let port = free_port()?;
+    let base = format!("http://127.0.0.1:{port}");
+    let ctl = spawn_controller_with(
+        dir.path(),
+        &format!("127.0.0.1:{port}"),
+        &["--tunnel-network".to_string(), "10.60.0.0/24".to_string()],
+    )?;
+    wait_http_up(&format!("{base}/healthz"), Duration::from_secs(10)).await?;
+    let http = reqwest::Client::new();
+    let mut given = Vec::new();
+    for name in ["o1", "o2", "o3"] {
+        let r: Value = http
+            .post(format!("{base}/peers"))
+            .json(&json!({"name": name, "pubkey": KEY, "backends": [":25565"]}))
+            .send()
+            .await?
+            .json()
+            .await?;
+        given.push((name.to_string(), r["tunnel_address"].clone()));
+    }
+    ctl.kill().await?;
+    Ok((dir, given))
+}
+
+/// Waits until `GET /peers` on `base` lists exactly `given` with the same
+/// addresses.
+async fn assert_imported(c: &Cluster, base: &str, given: &[(String, Value)]) -> Result<()> {
+    let (http, url) = (c.http.clone(), format!("{base}/peers"));
+    wait_until(
+        || {
+            let (http, url) = (http.clone(), url.clone());
+            async move {
+                let Ok(r) = http.get(url).send().await else {
+                    return Ok(false);
+                };
+                if !r.status().is_success() {
+                    return Ok(false);
+                }
+                let listed: Value = r.json().await?;
+                let Some(list) = listed.as_array() else {
+                    return Ok(false);
+                };
+                Ok(list.len() == 3)
+            }
+        },
+        Duration::from_secs(20),
+        "the imported origins to be listed",
+    )
+    .await?;
+    for (name, address) in given {
+        let r: Value = c
+            .http
+            .get(format!("{base}/peers/{name}"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        ensure!(
+            &r["tunnel_address"] == address,
+            "{name} moved from {address} to {}",
+            r["tunnel_address"]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_single_node_upgrades_without_losing_addresses() -> Result<()> {
+    let (dir, given) = pre_ha_controller().await?;
+    let c = Cluster::start(Some(dir), false).await?;
+    assert_imported(&c, &c.bases[1], &given).await?;
+    // The set-aside data is kept, and a new origin gets the next address.
+    let fresh = c.register(&c.bases[2], "o4").await?;
+    ensure!(fresh["tunnel_address"] == "10.60.0.4", "{fresh}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn import_happens_when_an_empty_node_leads() -> Result<()> {
+    let (dir, given) = pre_ha_controller().await?;
+    let c = Cluster::start(Some(dir), true).await?;
+    assert_imported(&c, &c.bases[1], &given).await
 }

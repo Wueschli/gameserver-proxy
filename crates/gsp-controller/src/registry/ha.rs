@@ -429,6 +429,7 @@ mod tests {
                 node_id: 1,
                 ha_token: None,
                 forward: client::forward_client(client::FORWARD_TIMEOUT),
+                pre_ha: Default::default(),
             }),
             cluster,
             local_network: local.map(|n| Network::parse(n).unwrap()),
@@ -729,7 +730,7 @@ mod tests {
                 h.ha.handle.clone(),
                 h.ha.cluster.clone(),
                 local,
-                ImportPolicy::Never,
+                ImportPolicy::Auto,
             ),
         )
         .await
@@ -750,7 +751,7 @@ mod tests {
                 h.ha.handle.clone(),
                 h.ha.cluster.clone(),
                 h.ha.local_network,
-                ImportPolicy::Never,
+                ImportPolicy::Auto,
             ),
         )
         .await

@@ -89,6 +89,13 @@ struct Args {
     /// Build a Raft snapshot (and let the log be purged) every this many
     /// log entries. Test-only: fleet tests lower it to exercise catch-up by
     /// snapshot.
+    /// Which node's pre-HA registry data seeds a freshly bootstrapped HA
+    /// cluster: a node id, or `none` to import nothing. Needed only when more
+    /// than one node holds data from before HA (the controller refuses to
+    /// guess); give every node the same value, like `--ha-peers`.
+    #[arg(long, value_name = "ID|none")]
+    ha_import_source: Option<String>,
+
     #[arg(long, hide = true, default_value_t = ha::SNAPSHOT_AFTER)]
     ha_snapshot_after: u64,
 
@@ -158,6 +165,25 @@ async fn main() -> anyhow::Result<()> {
     }
     // Load (and validate) the serving certificate before anything else starts.
     let tls_cert = args.tls.load()?;
+    let ha_enabled = !args.ha_peers.is_empty();
+    let import_policy = match args.ha_import_source.as_deref() {
+        None => ha::init::ImportPolicy::Auto,
+        Some("none") => ha::init::ImportPolicy::None,
+        Some(id) => ha::init::ImportPolicy::Source(id.parse().map_err(|_| {
+            anyhow::anyhow!("--ha-import-source takes a node id or `none`, not {id:?}")
+        })?),
+    };
+    // Registry data from before HA is set aside (never deleted) before any
+    // database opens; the cluster's leader imports one node's copy.
+    let pre_ha = if ha_enabled {
+        ha::import::LocalPreHa {
+            summary: ha::import::set_aside_pre_ha(&args.data_dir)?,
+            data_dir: args.data_dir.clone(),
+            network: tunnel_network,
+        }
+    } else {
+        ha::import::LocalPreHa::default()
+    };
 
     let store = Arc::new(
         Store::open(&args.data_dir)
@@ -205,7 +231,6 @@ async fn main() -> anyhow::Result<()> {
     // Under HA the book carries no network of its own: the state machine
     // applies every claim against the network the cluster recorded, so a
     // node's flag never decides an address (see `ha::init`).
-    let ha_enabled = !args.ha_peers.is_empty();
     let book_network = if ha_enabled { None } else { tunnel_network };
     let book = gsp_controller::addresses::AddressBook::open(&addresses_dir, book_network)
         .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?
@@ -289,7 +314,8 @@ async fn main() -> anyhow::Result<()> {
                     book: book.clone(),
                 },
             )
-            .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?
+            .with_pre_ha_notice(node_id, args.data_dir.clone()),
         );
 
         let cluster = state_machine.cluster().clone();
@@ -329,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
             node_id,
             ha_token,
             forward: ha::client::forward_client(ha::client::FORWARD_TIMEOUT),
+            pre_ha,
         });
         config_state = config_state.with_ha(Some(handle.clone()));
         intent_state_val = intent_state_val.with_ha(Some(handle.clone()));
@@ -351,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
             handle.clone(),
             cluster.clone(),
             tunnel_network,
-            ha::init::ImportPolicy::Never,
+            import_policy,
         ));
     }
     let leader_handle = ha_handle.as_ref().map(|(h, _)| h.clone());
