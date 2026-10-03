@@ -357,8 +357,30 @@ needs a membership change, which is not built yet.
 
 ## Tunnel addressing
 
-Tunnel-internal addressing (the WireGuard-side `10.x.x.x` space between proxies and
-origins) is not an open question any more: `gsp-controller --tunnel-network` allocates
-the addresses, so nothing here hand-picks one. See `docs/11` "Address authority". This
-document covers only the container/orchestrator-facing side of the proxy's public
-listeners.
+Tunnel-internal addressing (the WireGuard-side space between proxies and origins) is
+not an open question any more: `gsp-controller --tunnel-network` allocates the
+addresses, so nothing here hand-picks one. See `docs/11` "Address authority".
+
+**Choosing the network.** Use an IPv6 unique local address (ULA) network by default:
+generate a random `/48` once and take a `/64` from it, so it cannot clash with any
+origin's own LAN or another deployment's tunnel:
+
+```
+printf 'fd%02x:%02x%02x:%02x%02x::/48\n' $(od -An -N5 -tu1 /dev/urandom)
+# e.g. fd49:89c1:4b5e::/48 -> --tunnel-network fd49:89c1:4b5e:60::/64
+```
+
+Choose an IPv4 network (`/16` to `/30`, e.g. `10.60.0.0/16`) instead when a game server
+binds `0.0.0.0` only: it cannot be reached on an IPv6 tunnel address. The family is
+fixed per controller; changing it later needs `--tunnel-readdress` (docs/11).
+
+**Containers.** The tunnel interface needs IPv6 enabled in its network namespace.
+Docker starts containers on a network without IPv6 with
+`net.ipv6.conf.all.disable_ipv6=1`; for a container with its own network namespace set
+`sysctls: { net.ipv6.conf.all.disable_ipv6: "0" }` (Compose) or the equivalent
+`securityContext.sysctls` entry (Kubernetes). With host networking, as in
+`deploy/compose/compose.tunnel.yml` and the DaemonSet's `hostNetwork`, the host's own
+setting applies and such a sysctl is refused, so the host must not have IPv6 disabled.
+
+This document otherwise covers only the container/orchestrator-facing side of the
+proxy's public listeners.

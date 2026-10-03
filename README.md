@@ -140,7 +140,8 @@ examples) or from an external routing service you control.
 
 - **`gsp-agent`** runs next to game servers that are not on a network the proxy can
   reach. It brings up WireGuard (kernel module, `boringtun` userspace fallback) and
-  registers with `gsp-controller`, which allocates tunnel addresses.
+  registers with `gsp-controller`, which allocates tunnel addresses from an IPv6
+  (default) or IPv4 tunnel network; the WireGuard underlay may be either family.
 - Proxies peer with every registered origin automatically, and a
   `backend_sources[].type: tunnel` source turns an origin into ordinary backends.
 - Needs `CAP_NET_ADMIN` and `/dev/net/tun`. Origins behind CGNAT on both sides are a
