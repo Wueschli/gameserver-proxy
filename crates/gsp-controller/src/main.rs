@@ -92,8 +92,8 @@ struct Args {
     #[arg(long, hide = true, default_value_t = ha::SNAPSHOT_AFTER)]
     ha_snapshot_after: u64,
 
-    /// IPv4 network tunnel addresses are allocated from, e.g. `10.60.0.0/16`
-    /// (between `/16` and `/30`).
+    /// Network tunnel addresses are allocated from: IPv6 `/64` to `/120`, e.g.
+    /// `fd49:89c1:4b5e:60::/64`, or IPv4 `/16` to `/30`, e.g. `10.60.0.0/16`.
     /// Omit for pin-only mode: requested addresses are checked for uniqueness
     /// but nothing is allocated. Cannot be combined with `--ha-peers`.
     #[arg(long)]
@@ -104,6 +104,13 @@ struct Args {
     /// s, m, h, d. `0` disables it.
     #[arg(long, default_value = "14d")]
     tunnel_stale_after: String,
+
+    /// Start even though stored tunnel addresses fall outside
+    /// `--tunnel-network`, and move each such peer into the network at its
+    /// next registration (docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md).
+    /// Re-addressing interrupts the peer's traffic until it restarts.
+    #[arg(long)]
+    tunnel_readdress: bool,
 
     /// PEM file of extra CA certificates to trust for outbound HTTPS, in
     /// addition to the built-in Mozilla roots.
@@ -136,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         args.tunnel_network.as_deref(),
         &args.tunnel_stale_after,
         !args.ha_peers.is_empty(),
+        args.tunnel_readdress,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -202,10 +210,22 @@ async fn main() -> anyhow::Result<()> {
     // The address book (spec: Controller/State) — its own sled database like
     // every other registry, shared by both peer registries below.
     let addresses_dir = args.data_dir.join("tunnel-addresses");
-    let book = Arc::new(
-        gsp_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
-            .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?,
-    );
+    let book = gsp_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
+        .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?
+        .with_readdress(args.tunnel_readdress);
+    // Before any listener binds: a changed network is refused unless the
+    // operator opted in, so a mistyped flag never re-addresses anyone.
+    let moving = gsp_controller::addresses::check_network_change(&book, args.tunnel_readdress)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if !moving.is_empty() {
+        tracing::warn!(
+            "--tunnel-readdress: {} stored tunnel address(es) are outside the network and \
+             move at their owner's next registration:\n{}",
+            moving.len(),
+            gsp_controller::addresses::summarize(&moving)
+        );
+    }
+    let book = Arc::new(book);
     match tunnel_network {
         Some(n) => tracing::info!(network = %n, "tunnel address allocation enabled"),
         None => tracing::info!("no --tunnel-network: pin-only tunnel addresses (no allocation)"),

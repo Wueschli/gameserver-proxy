@@ -14,6 +14,13 @@ use defguard_wireguard_rs::{
     InterfaceConfiguration, Kernel, Userspace, WGApi, WireguardInterfaceApi,
 };
 
+/// The tunnel interface MTU, set explicitly for both backends: the kernel
+/// module defaults to 1420, but boringtun's TUN device comes up at 1500
+/// (seen in the IPv6-underlay e2e), which leaves no room for WireGuard's
+/// 80-byte overhead over an IPv6 underlay. 1420 also stays above IPv6's
+/// 1280 minimum.
+pub const TUNNEL_MTU: u32 = 1420;
+
 /// Creates and configures the interface, trying the kernel backend first
 /// unless `prefer_userspace` forces boringtun directly (for hosts known not
 /// to have `CAP_NET_ADMIN` or the `wireguard` kernel module, where trying
@@ -40,7 +47,7 @@ pub fn bring_up_with(
         addresses: vec![address],
         port: listen_port,
         peers,
-        mtu: None,
+        mtu: Some(TUNNEL_MTU),
         fwmark: None,
     };
 

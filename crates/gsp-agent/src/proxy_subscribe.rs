@@ -23,6 +23,7 @@
 //! proxy that predates the registry or a deployment too small to bother
 //! with it.
 
+use defguard_wireguard_rs::net::IpAddrMask;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,7 @@ struct ProxyRegistration {
 }
 
 /// Builds the WireGuard peer this registration implies: a **host route to the
-/// proxy's own tunnel address** (`/32`) — never `0.0.0.0/0`, which let the
+/// proxy's own tunnel address** (`/32` or `/128`) — never `0.0.0.0/0`, which let the
 /// last-registered proxy steal every earlier proxy's route — with a keepalive,
 /// since a proxy's endpoint is stable but this origin may still be behind NAT.
 fn to_wg_peer(reg: &ProxyRegistration) -> anyhow::Result<Peer> {
@@ -68,16 +69,15 @@ fn to_wg_peer(reg: &ProxyRegistration) -> anyhow::Result<Peer> {
             reg.name
         )
     })?;
-    let ip: std::net::Ipv4Addr = addr.parse().map_err(|e| {
+    let ip: std::net::IpAddr = addr.parse().map_err(|e| {
         anyhow::anyhow!(
             "proxy {:?} tunnel_address {addr:?} is invalid: {e}",
             reg.name
         )
     })?;
     let mut peer = Peer::new(key);
-    peer.set_allowed_ips(vec![format!("{ip}/32")
-        .parse()
-        .expect("an IPv4 /32 always parses")]);
+    // `/32` for IPv4, `/128` for IPv6.
+    peer.set_allowed_ips(vec![IpAddrMask::host(ip)]);
     peer.set_endpoint(&reg.endpoint).map_err(|e| {
         anyhow::anyhow!(
             "proxy {:?} endpoint {:?} is invalid: {e}",
@@ -321,6 +321,17 @@ mod tests {
             Event::Registered(r) => assert_eq!(r.boot_id.as_deref(), Some("abc")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_ipv6_proxy_is_routed_as_a_slash_128_over_an_ipv6_endpoint() {
+        let mut r = reg(Some("fd49::3"));
+        r.endpoint = "[2001:db8::9]:51820".into();
+        let peer = to_wg_peer(&r).unwrap();
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.allowed_ips[0].cidr, 128);
+        assert_eq!(peer.allowed_ips[0].address.to_string(), "fd49::3");
+        assert_eq!(peer.endpoint, Some("[2001:db8::9]:51820".parse().unwrap()));
     }
 
     #[test]

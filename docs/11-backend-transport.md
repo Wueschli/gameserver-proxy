@@ -200,14 +200,37 @@ routing, neither a reimplementation of cryptography or tunnel framing.
 
 `gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
 mis-chooses) one. Design and decisions:
-[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
+[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md);
+IPv6 (built 2026-10-03):
+[`docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md`](superpowers/specs/2026-10-03-ipv6-tunnel-design.md).
 
-- **Allocation.** Start the controller with `--tunnel-network 10.60.0.0/16` (IPv4,
-  `/16` to `/30`; larger networks are refused because allocation scans the pool). A registration that omits its address is allocated the lowest
+- **Allocation.** Start the controller with `--tunnel-network fd49:89c1:4b5e:60::/64`
+  (IPv6, `/64` to `/120`; the default in the docs and examples, and a ULA cannot clash
+  with an origin's own LAN) or `--tunnel-network 10.60.0.0/16` (IPv4, `/16` to `/30`).
+  One family per controller and one address per peer; choose IPv4 when a game server
+  binds `0.0.0.0` only, since it cannot be reached on an IPv6 tunnel address. Either
+  family holds at most 65 534 entries (pins included), because allocation scans the
+  pool; `capacity` in `GET /tunnel/addresses` is the smaller of that and the host
+  count. The network and all-ones addresses are never handed out, and IPv4 written as
+  IPv6 (`::ffff:a.b.c.d`) is refused. A registration that omits its address is allocated the lowest
   free host address; the allocation is sticky per `(role, name)`. A registration may
   instead **pin** an address, which is granted only if free (`409` otherwise). One
   global address space is shared by origins and proxies. Without `--tunnel-network`
-  the controller is pin-only: it enforces uniqueness but allocates nothing.
+  the controller is pin-only: it enforces uniqueness but allocates nothing, and accepts
+  pins of either family (mixing them is the operator's responsibility: peers of
+  different families cannot reach each other).
+- **Underlay.** Independent of the tunnel's family: WireGuard endpoints
+  (`--endpoint`, `--tunnel-endpoint`, `--peer-endpoint`, written `[2001:db8::7]:51820`
+  for IPv6) and the controller URL (`http://[fd99::1]:7070`) may be IPv4 or IPv6.
+- **Changing the network.** At startup the controller refuses to run when stored
+  addresses fall outside `--tunnel-network`, naming up to ten of them. Restore the
+  previous network, or pass `--tunnel-readdress`: the controller then starts, warns
+  once, and gives each such peer a new address at its next registration. The running
+  peer logs the change and keeps its old address until it restarts, so its traffic is
+  interrupted until then. Peers that are offline keep their old entry until they
+  register again; `DELETE` the ones that will not come back. `--tunnel-readdress` is
+  refused without a network and together with `--ha-peers`, and is harmless when
+  nothing is outside the network.
 - **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
   interface up (the answer is its address), persist the answer next to their key, and
   can start from it while the controller is down. For `gsp --tunnel-*` that fallback
@@ -217,10 +240,11 @@ mis-chooses) one. Design and decisions:
   needs a restart once the controller is back. `408`/`429` count as "controller unavailable", any other
   `4xx` refuses startup. A later,
   different answer is logged as an error and not applied until a restart.
-- **Routing.** Every peer is a `/32`: origins route each proxy's tunnel address
+- **Routing.** Every peer is a host route (`/32`, or `/128` for IPv6): origins route each proxy's tunnel address
   (this fixed the earlier `AllowedIPs 0.0.0.0/0` bug where a second proxy stole the
   first one's route), proxies route each origin's. Backends must be on the
-  registrant's own address; `--backends :25565` means "my address, port 25565".
+  registrant's own address; `--backends :25565` means "my address, port 25565" (stored
+  as `[fd49:89c1:4b5e:60::1]:25565` on an IPv6 network).
 - **Release.** `DELETE /peers/{name}` / `DELETE /proxy-peers/{name}` free the address
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
@@ -230,8 +254,11 @@ mis-chooses) one. Design and decisions:
 - **Limits.** `--tunnel-network` is not combinable with `--ha-peers`. Pin-only mode
   (no network) is allowed under `--ha-peers`, but each controller node keeps its own
   unreplicated address book, so pin uniqueness is enforced per node only (the controller
-  logs a startup warning); point all origins and proxies at one node. IPv6, lease expiry and
-  live address changes are future work (HANDOVER "Known follow-ups").
+  logs a startup warning); point all origins and proxies at one node. Transparent mode
+  (`transparent: true`) does not apply to tunnel backends whose family differs from the
+  client's: the proxy logs a warning and connects without the client's source address.
+  Dual-stack tunnels, lease expiry and live address changes are future work (HANDOVER
+  "Known follow-ups").
 
 ## Open questions
 

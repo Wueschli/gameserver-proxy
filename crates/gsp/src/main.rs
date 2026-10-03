@@ -433,9 +433,9 @@ async fn run(
             // listener binds — a failure here is a failing `--tunnel-*`.
             let pinned_cidr = tc.address.clone();
             if let Some(c) = pinned_cidr.as_deref() {
-                tunnel_address::ip_of(c)
-                    .parse::<std::net::Ipv4Addr>()
-                    .with_context(|| format!("--tunnel-address {c:?} must be an IPv4 ip/prefix"))?;
+                tunnel_address::tunnel_ip(tunnel_address::ip_of(c)).map_err(|e| {
+                    anyhow::anyhow!("--tunnel-address {c:?} must be an ip/prefix: {e}")
+                })?;
             }
             let reg = proxy_register::Registration {
                 name: tc.name.clone(),

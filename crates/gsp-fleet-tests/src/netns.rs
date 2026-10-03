@@ -6,12 +6,13 @@
 //! is a further, nested network namespace kept alive by a `sleep infinity`
 //! "holder" process and addressed by that process's PID (`ip netns` is
 //! avoided: it needs a writable `/var/run/netns`). Namespace *i* is joined
-//! to the lab by a veth pair (`10.99.i.1/30` lab side, `10.99.i.2/30` inside);
+//! to the lab by a veth pair (`10.99.i.1/30` lab side, `10.99.i.2/30` inside,
+//! plus `fd99:i::1/64` and `fd99:i::2/64` for the IPv6 underlay);
 //! the lab forwards between namespaces, so traffic from one to another
 //! really crosses the lab like it would cross the internet.
 
 use std::fs::File;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::JoinHandle;
@@ -109,6 +110,16 @@ impl Ns {
         Ipv4Addr::new(10, 99, self.idx, 1)
     }
 
+    /// This namespace's IPv6 address on its veth to the lab.
+    pub fn underlay6(&self) -> Ipv6Addr {
+        Ipv6Addr::new(0xfd99, u16::from(self.idx), 0, 0, 0, 0, 0, 2)
+    }
+
+    /// The lab's IPv6 address on the same veth (this namespace's IPv6 gateway).
+    pub fn lab_addr6(&self) -> Ipv6Addr {
+        Ipv6Addr::new(0xfd99, u16::from(self.idx), 0, 0, 0, 0, 0, 1)
+    }
+
     /// Run a command inside this namespace, returning its stdout.
     pub fn run(&self, argv: &[&str]) -> Result<String> {
         let net = format!("--net={}", self.ns_path());
@@ -163,6 +174,8 @@ impl Lab {
         run(&["ip", "link", "set", "lo", "up"])?;
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .context("enabling ip_forward in the lab namespace")?;
+        std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1")
+            .context("enabling IPv6 forwarding in the lab namespace (is IPv6 available?)")?;
         Ok(Self { _private: () })
     }
 
@@ -199,6 +212,9 @@ impl Lab {
             "dev",
             &lab_if,
         ])?;
+        // `nodad`: usable at once, not held "tentative" for a second.
+        let lab6 = format!("{}/64", ns.lab_addr6());
+        run(&["ip", "-6", "addr", "add", &lab6, "dev", &lab_if, "nodad"])?;
         run(&["ip", "link", "set", &lab_if, "up"])?;
         ns.run(&["ip", "link", "set", "lo", "up"])?;
         ns.run(&[
@@ -209,7 +225,11 @@ impl Lab {
             "dev",
             &ns_if,
         ])?;
+        let ns6 = format!("{}/64", ns.underlay6());
+        ns.run(&["ip", "-6", "addr", "add", &ns6, "dev", &ns_if, "nodad"])?;
         ns.run(&["ip", "link", "set", &ns_if, "up"])?;
+        let gw6 = ns.lab_addr6().to_string();
+        ns.run(&["ip", "-6", "route", "add", "default", "via", &gw6])?;
         ns.run(&[
             "ip",
             "route",

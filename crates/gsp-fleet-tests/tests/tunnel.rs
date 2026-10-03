@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
-use gsp_fleet_tests::tunnel::{TunnelLab, PUBLIC_PORT};
+use gsp_fleet_tests::tunnel::{LabOptions, TunnelLab, Underlay, PUBLIC_PORT};
 use gsp_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
@@ -329,7 +329,9 @@ async fn a_pinned_address_collision_is_refused() -> Result<()> {
     let mut t = TunnelLab::new().await?;
     t.start_origin(true).await?;
     let taken = t.origin_ip();
-    let log = t.agent_refused("origin-b", &format!("{taken}/16")).await?;
+    let log = t
+        .agent_refused("origin-b", &format!("{taken}/{}", t.tunnel_prefix()))
+        .await?;
     assert!(
         log.contains("already held"),
         "the refusal should say why, got:\n{log}"
@@ -403,6 +405,106 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
         .await?;
     }
     assert_eq!(t.proxy_address("edge-1").await?, before);
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 9 — an IPv4 tunnel network still works end to end (every other
+/// scenario runs on the IPv6 default).
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tcp_and_udp_round_trip_on_an_ipv4_tunnel_network() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        tunnel_network: "10.60.0.0/16",
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    assert!(t.origin_ip().is_ipv4(), "{}", t.origin_ip());
+    let public = t.public_addr(edge);
+    assert_eq!(udp_roundtrip(public, b"udp").await?, b"udp");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 10 — origin, proxy and controller talk over an IPv6-only
+/// underlay (endpoints, controller URL, public listener), with the IPv6
+/// tunnel network inside. Also checks the spec's lab-only points: the tunnel
+/// interface's MTU and that its IPv6 address is not stuck "tentative" (DAD).
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tcp_and_udp_round_trip_over_an_ipv6_underlay() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        underlay: Underlay::V6,
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    let public = t.public_addr(edge);
+    assert!(public.is_ipv6(), "{public}");
+    assert_eq!(udp_roundtrip(public, b"udp").await?, b"udp");
+
+    let reg = t.proxy_registration("edge-1").await?;
+    let endpoint = reg["endpoint"].as_str().unwrap_or_default();
+    assert!(
+        endpoint.starts_with('['),
+        "an IPv6 endpoint, got {endpoint:?}"
+    );
+
+    let link = t.edge_run(edge, &["ip", "link", "show", "gsp-tunnel0"])?;
+    assert!(link.contains("mtu 1420"), "{link}");
+    let addr = t.edge_run(edge, &["ip", "-6", "addr", "show", "dev", "gsp-tunnel0"])?;
+    assert!(addr.contains("fd49:89c1:4b5e:60::"), "{addr}");
+    assert!(!addr.contains("tentative"), "{addr}");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 11 — restarting the controller on a network that no longer holds
+/// the stored addresses is refused; with `--tunnel-readdress` it starts, and
+/// restarted peers come up on new addresses in the new network and carry
+/// traffic again.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn a_changed_tunnel_network_is_refused_until_readdress() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        tunnel_network: "10.60.0.0/16",
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+
+    let log = t
+        .controller_refused(&["--tunnel-network", "fd49:89c1:4b5e:60::/64"])
+        .await?;
+    assert!(log.contains("--tunnel-readdress"), "{log}");
+    assert!(log.contains("origin origin-a 10.60.0."), "{log}");
+
+    t.restart_controller(&[
+        "--tunnel-network",
+        "fd49:89c1:4b5e:60::/64",
+        "--tunnel-readdress",
+    ])
+    .await?;
+    t.restart_origin().await?;
+    t.restart_edge(edge).await?;
+    assert!(
+        t.origin_ip().to_string().starts_with("fd49:89c1:4b5e:60::"),
+        "{}",
+        t.origin_ip()
+    );
+    let proxy = t.proxy_address("edge-1").await?;
+    assert!(proxy.starts_with("fd49:89c1:4b5e:60::"), "{proxy}");
+    t.wait_roundtrip(edge).await?;
     t.pass();
     Ok(())
 }
