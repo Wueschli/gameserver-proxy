@@ -166,7 +166,17 @@ pub async fn register_with_retry(
 /// the one this process is running with. Never fatal: a live interface must
 /// not be torn down over a registry change — a restart applies the new one.
 pub fn address_change(running: &str, reported: &str) -> Option<String> {
-    (running != reported).then(|| {
+    // Compare parsed addresses where both parse, so IPv6 spellings of the
+    // same address (`fd49:0::5` and the controller's canonical `fd49::5`)
+    // are not a change.
+    let same = match (
+        running.parse::<std::net::IpAddr>(),
+        reported.parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => running == reported,
+    };
+    (!same).then(|| {
         format!(
             "the controller now assigns tunnel address {reported} but this process is running \
              with {running}; keeping {running} — restart to apply the new address"
@@ -263,6 +273,14 @@ mod tests {
         let msg = address_change("10.60.0.5", "10.60.0.9").unwrap();
         assert!(msg.contains("10.60.0.5") && msg.contains("10.60.0.9"));
         assert!(msg.contains("restart"));
+    }
+
+    #[test]
+    fn address_change_compares_ipv6_as_addresses_not_text() {
+        assert_eq!(address_change("fd49:0::5", "fd49::5"), None);
+        assert_eq!(address_change("FD49::5", "fd49::5"), None);
+        assert!(address_change("fd49::5", "fd49::6").is_some());
+        assert!(address_change("10.60.0.5", "fd49::5").is_some());
     }
 
     /// A one-shot HTTP server answering every request with a canned response.

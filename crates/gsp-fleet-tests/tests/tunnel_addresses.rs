@@ -70,6 +70,51 @@ async fn the_controller_allocates_refuses_conflicts_and_lists_the_table() -> Res
 }
 
 #[tokio::test]
+async fn an_ipv6_tunnel_network_allocates_ipv6_addresses_and_bracketed_backends() -> Result<()> {
+    let (_ctl, _dir, base) = controller(&["--tunnel-network", "fd49:89c1:4b5e:60::/64"]).await?;
+    let http = reqwest::Client::new();
+
+    let r: Value = http
+        .post(format!("{base}/peers"))
+        .json(&json!({"name": "o1", "pubkey": KEY, "backends": [":25565"]}))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(r["tunnel_address"], "fd49:89c1:4b5e:60::1");
+    assert_eq!(r["tunnel_network"], "fd49:89c1:4b5e:60::/64");
+
+    let reg: Value = http
+        .get(format!("{base}/peers/o1"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(reg["backends"][0], "[fd49:89c1:4b5e:60::1]:25565");
+
+    // An IPv6 underlay endpoint, and a pin of the other family.
+    let wrong_family = http
+        .post(format!("{base}/proxy-peers"))
+        .json(
+            &json!({"name": "p1", "pubkey": KEY, "endpoint": "[2001:db8::7]:51820",
+                      "tunnel_address": "10.60.0.2"}),
+        )
+        .send()
+        .await?;
+    assert_eq!(wrong_family.status(), 422);
+
+    let table: Value = http
+        .get(format!("{base}/tunnel/addresses"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(table["capacity"], 65534);
+    assert_eq!(table["network"], "fd49:89c1:4b5e:60::/64");
+    Ok(())
+}
+
+#[tokio::test]
 async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
     build_fleet_bins()?;
     let dir = tempfile::tempdir()?;

@@ -65,14 +65,14 @@ struct ErrorBody {
 }
 
 /// `409` address held / owner has a different one, `422` invalid address or no
-/// network configured, `503` network exhausted, `500` storage.
+/// network configured, `503` network exhausted or book full, `500` storage.
 pub fn claim_error_response(e: &ClaimError) -> Response {
     let status = match e {
         ClaimError::Held { .. } | ClaimError::OwnerHasDifferent { .. } => StatusCode::CONFLICT,
         ClaimError::OutsideNetwork { .. } | ClaimError::NotHost(_) | ClaimError::NoNetwork => {
             StatusCode::UNPROCESSABLE_ENTITY
         }
-        ClaimError::Exhausted { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        ClaimError::Exhausted { .. } | ClaimError::Full { .. } => StatusCode::SERVICE_UNAVAILABLE,
         ClaimError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
@@ -232,8 +232,8 @@ mod tests {
 
     #[test]
     fn claim_errors_map_to_the_documented_statuses() {
-        use std::net::Ipv4Addr;
-        let a: Ipv4Addr = "10.60.0.1".parse().unwrap();
+        use std::net::IpAddr;
+        let a: IpAddr = "10.60.0.1".parse().unwrap();
         let net = Network::parse("10.60.0.0/24").unwrap();
         let status = |e: ClaimError| claim_error_response(&e).status();
         assert_eq!(

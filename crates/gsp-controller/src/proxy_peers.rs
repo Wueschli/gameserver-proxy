@@ -31,7 +31,7 @@
 
 pub mod api;
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ pub struct ProxyRegistration {
     pub pubkey: String,
     /// This proxy's public dial-out address — required (see module doc).
     pub endpoint: String,
-    /// This proxy's tunnel-internal IPv4 address. Optional on request (omit to
+    /// This proxy's tunnel-internal IP address (IPv4 or IPv6). Optional on request (omit to
     /// be allocated one, or give one to claim it); always set once stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_address: Option<String>,
@@ -64,7 +64,7 @@ const BOOT_ID_MAX: usize = 64;
 
 impl ProxyRegistration {
     /// The address this registration asks for, if it names one.
-    pub fn requested_address(&self) -> Option<Ipv4Addr> {
+    pub fn requested_address(&self) -> Option<IpAddr> {
         self.tunnel_address.as_deref().and_then(|a| a.parse().ok())
     }
 
@@ -84,8 +84,8 @@ impl ProxyRegistration {
             ));
         }
         if let Some(a) = &self.tunnel_address {
-            if a.parse::<Ipv4Addr>().is_err() {
-                return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
+            if a.parse::<IpAddr>().is_err() {
+                return Err(format!("tunnel_address {a:?} is not an IP address"));
             }
         }
         if let Some(b) = &self.boot_id {
@@ -145,6 +145,11 @@ mod tests {
         reg.tunnel_address = Some("10.60.0.9".into());
         assert!(reg.validate().is_ok());
         assert_eq!(reg.requested_address(), Some("10.60.0.9".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::2".into());
+        assert!(reg.validate().is_ok());
+        assert_eq!(reg.requested_address(), Some("fd49::2".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::zz".into());
+        assert!(reg.validate().is_err());
     }
 
     #[test]
@@ -182,6 +187,15 @@ mod tests {
     fn a_malformed_pubkey_fails_validation() {
         let mut reg = valid();
         reg.pubkey = "not-a-key".into();
+        assert!(reg.validate().is_err());
+    }
+
+    #[test]
+    fn an_ipv6_endpoint_is_valid() {
+        let mut reg = valid();
+        reg.endpoint = "[2001:db8::7]:51820".into();
+        assert!(reg.validate().is_ok());
+        reg.endpoint = "2001:db8::7:51820".into();
         assert!(reg.validate().is_err());
     }
 
