@@ -38,6 +38,7 @@ use sled::transaction::{ConflictableTransactionError, TransactionError};
 
 use super::apply_registry;
 use super::cluster_state::{ClusterSnapshot, ClusterState};
+use super::import;
 use super::{NodeId, TypeConfig, WriteRequest, WriteResponse};
 use crate::addresses::{AddressBook, BookSnapshot, Network, Rejection, Role};
 use crate::api::{AppState, Stage};
@@ -133,6 +134,8 @@ pub struct StateMachineStore {
     book: Arc<AddressBook>,
     /// The replicated network registry entries are applied against.
     cluster: Arc<ClusterState>,
+    /// `Some((node id, data dir))` to warn about unimported pre-HA data.
+    pre_ha_notice: Option<(NodeId, std::path::PathBuf)>,
     meta: sled::Tree,
     /// The last built or installed snapshot (`meta`, `data`).
     snapshots: sled::Tree,
@@ -152,9 +155,38 @@ impl StateMachineStore {
             proxy_peers: registries.proxy_peers,
             book: registries.book,
             cluster: Arc::new(ClusterState::open(db)?),
+            pre_ha_notice: None,
             meta: db.open_tree("raft_sm_meta")?,
             snapshots: db.open_tree("raft_snapshot")?,
         })
+    }
+
+    /// Makes an applied `Import` warn on a node that set its own pre-HA data
+    /// aside but was not the source: that data stays untouched.
+    pub fn with_pre_ha_notice(mut self, node_id: NodeId, data_dir: std::path::PathBuf) -> Self {
+        self.pre_ha_notice = Some((node_id, data_dir));
+        self
+    }
+
+    fn warn_if_unimported(&self, content: &import::ImportContent) {
+        let Some((node_id, data_dir)) = &self.pre_ha_notice else {
+            return;
+        };
+        if *node_id == content.source {
+            return;
+        }
+        for name in ["peers", "proxy-peers", "tunnel-addresses"] {
+            let dir = data_dir.join(format!("{name}.pre-ha"));
+            if dir.exists() {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    source = content.source,
+                    "the cluster imported node {}'s pre-HA registrations; this node's own \
+                     pre-HA data is left untouched and was not imported",
+                    content.source
+                );
+            }
+        }
     }
 
     /// The replicated cluster state (the recorded tunnel network).
@@ -536,6 +568,18 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                         )?,
                         WriteRequest::SetTunnelNetwork(network) => {
                             self.set_tunnel_network(network, index)?
+                        }
+                        WriteRequest::Import(content) => {
+                            let response = import::apply_import(
+                                &self.peers,
+                                &self.proxy_peers,
+                                &self.book,
+                                &self.cluster,
+                                &content,
+                                index,
+                            )?;
+                            self.warn_if_unimported(&content);
+                            response
                         }
                     }
                 }

@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{ensure, Result};
 use gsp_fleet_tests::{
-    build_fleet_bins, free_port, minimal_gsp_config, spawn_controller_with, wait_until, Proc,
+    build_fleet_bins, free_port, minimal_gsp_config, spawn_controller_with, wait_http_up,
+    wait_until, Proc,
 };
 
 /// Comfortably past `max_in_snapshot_log_to_keep` (1000) plus one snapshot
@@ -56,7 +57,6 @@ fn spawn_node(dir: &tempfile::TempDir, port: u16, extra: &[&str]) -> Result<Proc
 }
 
 #[tokio::test]
-#[ignore = "needs --ha-join (Task 9)"]
 async fn a_node_that_joins_after_a_purge_catches_up_by_snapshot() -> Result<()> {
     build_fleet_bins()?;
     let client = reqwest::Client::new();
@@ -103,8 +103,27 @@ async fn a_node_that_joins_after_a_purge_catches_up_by_snapshot() -> Result<()> 
         );
     }
 
-    // A fourth node joins the running cluster; the leader can only catch it
-    // up by snapshot, since the start of its log is gone.
+    // The leader's log no longer starts at entry 1, so a fourth node joining
+    // now can only be caught up by snapshot.
+    let members: serde_json::Value = client
+        .get(format!("{}/admin/ha/members", bases[0]))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let leader = members["leader"].as_u64().expect("a leader") as usize;
+    let on_leader: serde_json::Value = client
+        .get(format!("{}/admin/ha/members", bases[leader - 1]))
+        .send()
+        .await?
+        .json()
+        .await?;
+    ensure!(
+        on_leader["purged_index"].as_u64().is_some_and(|p| p > 0),
+        "the leader has not purged its log: {on_leader}"
+    );
+
+    // A fourth node joins the running cluster.
     let port4 = free_port()?;
     let dir4 = tempfile::tempdir()?;
     procs.push(spawn_node(
@@ -114,6 +133,7 @@ async fn a_node_that_joins_after_a_purge_catches_up_by_snapshot() -> Result<()> 
     )?);
     dirs.push(dir4);
     let base4 = format!("http://127.0.0.1:{port4}");
+    wait_http_up(&format!("{base4}/healthz"), Duration::from_secs(10)).await?;
     let added = client
         .post(format!("{}/admin/ha/members", bases[0]))
         .json(&serde_json::json!({ "id": 4, "addr": format!("127.0.0.1:{port4}") }))

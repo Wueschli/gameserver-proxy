@@ -51,6 +51,7 @@
 pub mod apply_registry;
 pub mod client;
 pub mod cluster_state;
+pub mod import;
 pub mod init;
 pub mod log_store;
 pub mod members;
@@ -58,6 +59,8 @@ pub mod network;
 pub mod peers;
 pub mod routes;
 pub mod state_machine;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -69,6 +72,37 @@ use crate::peers::PeerRegistration;
 use crate::proxy_peers::ProxyRegistration;
 
 pub type NodeId = u64;
+
+/// Startup checks on the HA flags together: `--ha-peers` (bootstrap a cluster
+/// with a static member list) and `--ha-join` (wait to be added) are mutually
+/// exclusive, either needs `--ha-node-id`, and neither combines with
+/// `--role slave` yet.
+pub fn check_flags(
+    ha_peers: bool,
+    ha_join: bool,
+    node_id: Option<NodeId>,
+    slave: bool,
+) -> Result<(), String> {
+    if ha_peers && ha_join {
+        return Err(
+            "--ha-join and --ha-peers are mutually exclusive: --ha-peers bootstraps a \
+             new cluster, --ha-join starts a node that is added to a running one"
+                .into(),
+        );
+    }
+    let flag = if ha_join { "--ha-join" } else { "--ha-peers" };
+    if (ha_peers || ha_join) && node_id.is_none() {
+        return Err(format!("{flag} requires --ha-node-id"));
+    }
+    if (ha_peers || ha_join) && slave {
+        // Scope cut — see this module's doc.
+        return Err(format!(
+            "{flag} cannot be combined with --role slave yet: the upward relay needs to run \
+             leader-only with a replicated cursor, which is designed (docs/10) but not built"
+        ));
+    }
+    Ok(())
+}
 
 /// One proposed write, tagged by which log it targets — the Raft log
 /// carries both the config and intent logs' entries interleaved, since one
@@ -119,6 +153,9 @@ pub enum WriteRequest {
     /// Records the cluster's tunnel network (CIDR string; `None` =
     /// pin-only) once, before the first registry write.
     SetTunnelNetwork(Option<String>),
+    /// The pre-HA registrations of one node, adopted once as the cluster's
+    /// initial registry state (see [`import`]).
+    Import(Box<import::ImportContent>),
 }
 
 /// What applying one entry did — the HTTP layer maps it back to the status
@@ -181,12 +218,21 @@ pub const SNAPSHOT_AFTER: u64 = 5000;
 /// purge path), after which `openraft` purges the log and catches a lagging
 /// follower or learner up by snapshot. `max_in_snapshot_log_to_keep` and
 /// `replication_lag_threshold` stay at their defaults.
+///
+/// A snapshot travels as JSON, where each byte of its content costs several
+/// characters: it is sent in 256 KiB chunks so a chunk stays well under the
+/// `/raft/*` routes' body limit, and each chunk gets 30 s instead of
+/// `openraft`'s 200 ms default, which a catch-up of a real registry never
+/// meets.
+#[allow(deprecated)] // `snapshot_max_chunk_size` is how chunks are sized in 0.9
 pub fn raft_config(snapshot_after: u64) -> openraft::Config {
     openraft::Config {
         heartbeat_interval: 250,
         election_timeout_min: 800,
         election_timeout_max: 1500,
         snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(snapshot_after),
+        snapshot_max_chunk_size: 256 * 1024,
+        install_snapshot_timeout: 30_000,
         ..Default::default()
     }
 }
@@ -224,11 +270,36 @@ pub struct HaHandle {
     /// ([`client::forward_client`]): shared, and bounded by
     /// [`client::FORWARD_TIMEOUT`].
     pub forward: reqwest::Client,
+    /// This node's own set-aside pre-HA data, which `/raft/whoami` reports
+    /// and `/raft/pre-ha` serves ([`import`]).
+    pub pre_ha: import::LocalPreHa,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ha_join_and_ha_peers_together_are_refused() {
+        let e = check_flags(true, true, Some(1), false).unwrap_err();
+        assert!(e.contains("--ha-join") && e.contains("--ha-peers"), "{e}");
+        assert!(check_flags(true, false, Some(1), false).is_ok());
+        assert!(check_flags(false, true, Some(4), false).is_ok());
+        assert!(check_flags(false, false, None, false).is_ok());
+    }
+
+    #[test]
+    fn ha_needs_a_node_id_and_refuses_the_slave_role() {
+        assert!(check_flags(true, false, None, false)
+            .unwrap_err()
+            .contains("--ha-node-id"));
+        assert!(check_flags(false, true, None, false)
+            .unwrap_err()
+            .contains("--ha-join requires"));
+        assert!(check_flags(false, true, Some(4), true)
+            .unwrap_err()
+            .contains("--role slave"));
+    }
 
     #[test]
     fn production_raft_config_keeps_openraft_snapshot_defaults() {
