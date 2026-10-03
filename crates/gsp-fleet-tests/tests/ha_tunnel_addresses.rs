@@ -358,3 +358,133 @@ async fn import_happens_when_an_empty_node_leads() -> Result<()> {
     let c = Cluster::start(Some(dir), true).await?;
     assert_imported(&c, &c.bases[1], &given).await
 }
+
+/// Starts node `id` (a fresh directory) with `--ha-join` on a free port.
+fn spawn_joiner(dir: &std::path::Path, id: u64, port: u16) -> Result<Proc> {
+    let extra = [
+        "--ha-join",
+        "--ha-node-id",
+        &id.to_string(),
+        "--tunnel-network",
+        "10.60.0.0/24",
+    ]
+    .map(String::from);
+    spawn_controller_with(dir, &format!("127.0.0.1:{port}"), &extra)
+}
+
+impl Cluster {
+    /// `POST`/`PUT`/`DELETE` a membership change on `base`.
+    async fn member_change(
+        &self,
+        method: reqwest::Method,
+        base: &str,
+        path: &str,
+        body: Value,
+    ) -> Result<()> {
+        let r = self
+            .http
+            .request(method, format!("{base}{path}"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = r.status();
+        ensure!(status.is_success(), "{path}: {status} {}", r.text().await?);
+        Ok(())
+    }
+
+    /// Waits until `GET {base}/peers/{name}` answers 200.
+    async fn served(&self, base: &str, name: &str, what: &str) -> Result<()> {
+        let (http, url) = (self.http.clone(), format!("{base}/peers/{name}"));
+        wait_until(
+            || {
+                let (http, url) = (http.clone(), url.clone());
+                async move {
+                    Ok(http
+                        .get(url)
+                        .send()
+                        .await
+                        .is_ok_and(|r| r.status().is_success()))
+                }
+            },
+            Duration::from_secs(20),
+            what,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn a_fourth_node_joins_then_the_leader_is_removed() -> Result<()> {
+    let mut c = cluster().await?;
+    c.register(&c.bases[0], "o1").await?;
+
+    let port4 = free_port()?;
+    let dir4 = tempfile::tempdir()?;
+    let node4 = spawn_joiner(dir4.path(), 4, port4)?;
+    let base4 = format!("http://127.0.0.1:{port4}");
+    wait_http_up(&format!("{base4}/healthz"), Duration::from_secs(10)).await?;
+    // Asked of a node that may be a follower: it forwards to the leader.
+    c.member_change(
+        reqwest::Method::POST,
+        &c.bases[1],
+        "/admin/ha/members",
+        json!({"id": 4, "addr": format!("127.0.0.1:{port4}")}),
+    )
+    .await?;
+    c.served(&base4, "o1", "node 4 to serve the cluster's origin")
+        .await?;
+    let members: Value = c
+        .http
+        .get(format!("{}/admin/ha/members", c.bases[0]))
+        .send()
+        .await?
+        .json()
+        .await?;
+    ensure!(
+        members["voters"].as_array().map(Vec::len) == Some(4),
+        "{members}"
+    );
+
+    // Remove the leader, asked of another node.
+    let leader = c.leader().await?;
+    let slot = (leader - 1) as usize;
+    let other = c.bases[(slot + 1) % 3].clone();
+    c.member_change(
+        reqwest::Method::DELETE,
+        &other,
+        &format!("/admin/ha/members/{leader}"),
+        json!({}),
+    )
+    .await?;
+    c.procs[slot].take().unwrap().kill().await?;
+    let second = c.register(&other, "o2").await?;
+    ensure!(second["tunnel_address"].is_string(), "{second}");
+    drop(node4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn put_moves_a_member_to_a_new_port() -> Result<()> {
+    let mut c = cluster().await?;
+    c.register(&c.bases[0], "o1").await?;
+    // Never the leader's slot: node 3 is simply the one that moves.
+    c.procs[2].take().unwrap().kill().await?;
+    let new_port = free_port()?;
+    let _moved = spawn_joiner(c._dirs[2].path(), 3, new_port)?;
+    let new_base = format!("http://127.0.0.1:{new_port}");
+    wait_http_up(&format!("{new_base}/healthz"), Duration::from_secs(10)).await?;
+    c.member_change(
+        reqwest::Method::PUT,
+        &c.bases[0],
+        "/admin/ha/members/3",
+        json!({"addr": format!("127.0.0.1:{new_port}")}),
+    )
+    .await?;
+    c.register(&c.bases[0], "o2").await?;
+    c.served(
+        &new_base,
+        "o2",
+        "node 3 to receive registrations at its new port",
+    )
+    .await
+}

@@ -200,15 +200,8 @@ fn authorized(ha: &HaHandle, req: reqwest::RequestBuilder) -> reqwest::RequestBu
     }
 }
 
-pub(super) async fn whoami(ha: &HaHandle, addr: &str) -> Result<Whoami, String> {
-    let resp = authorized(ha, ha.forward.get(peer_url(addr, "/raft/whoami")))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("answered {}", resp.status()));
-    }
-    resp.json().await.map_err(|e| e.to_string())
+async fn whoami(ha: &HaHandle, addr: &str) -> Result<Whoami, String> {
+    super::members::fetch_whoami(&ha.forward, ha.ha_token.as_deref(), addr).await
 }
 
 /// The source's set-aside data: read locally when it is this node, fetched

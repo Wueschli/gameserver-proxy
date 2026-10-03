@@ -18,6 +18,9 @@ use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 
 use super::{HaHandle, NodeId};
 
+/// The largest body a `/raft/*` request may carry.
+const MAX_RAFT_BODY: usize = 32 * 1024 * 1024;
+
 pub fn router(ha: Arc<HaHandle>) -> Router {
     Router::new()
         .route("/raft/append", post(append))
@@ -25,6 +28,9 @@ pub fn router(ha: Arc<HaHandle>) -> Router {
         .route("/raft/snapshot", post(snapshot))
         .route("/raft/whoami", get(whoami))
         .route("/raft/pre-ha", get(pre_ha))
+        // A snapshot chunk or a pre-HA import is far past axum's 2 MB
+        // default; the routes are peer-token gated.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_RAFT_BODY))
         .route_layer(axum::middleware::from_fn_with_state(
             ha.clone(),
             require_bearer,
