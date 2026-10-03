@@ -59,9 +59,14 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
 `hostNetwork` DaemonSet). Both are reference only. CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
-job, blocking since 2026-10-02; first green run 2026-10-01). Known limitation: aggregator intent fan-out (drain etc.) cannot reach
-a `gsp` from these examples, because the `admin_url` it reports is derived from
-`settings.admin.listen` and no flag overrides it.
+job, blocking since 2026-10-02; first green run 2026-10-01). Aggregator intent fan-out (drain etc.) goes to the `admin_url`
+each `gsp` reports, by default `http(s)://<settings.admin.listen>`; when that
+address is not reachable from the aggregator (`0.0.0.0`, loopback, a container
+port mapping, a TLS terminator in front), set `gsp --aggregator-admin-url`. The
+k8s DaemonSet reports `http://<node IP>:9900`, and the aggregator presents
+`--instance-token` (the admin `auth_token`). The compose demo cannot use
+fan-out: its `gsp` admin API listens on the host's loopback only, which the
+bridge-networked aggregator cannot reach.
 
 ## Networking: a proxy that binds many, changing ports
 
