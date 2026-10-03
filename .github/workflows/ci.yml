@@ -52,7 +52,7 @@ jobs:
       fuzz: ${{ steps.f.outputs.fuzz }}
       release: ${{ steps.f.outputs.release }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Self-test the change detection and the report renderer
@@ -86,7 +86,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
@@ -111,7 +111,7 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-test
@@ -133,7 +133,7 @@ jobs:
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
@@ -147,7 +147,7 @@ jobs:
       # an exact cache hit. Compile them here so the shared snapshot holds both.
       - name: Warm the dependency set the plugins tests need
         run: cargo test -p gsp --release --locked --no-run
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-binaries
           path: |
@@ -164,7 +164,7 @@ jobs:
     if: needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
@@ -200,7 +200,7 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "plugins" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-plugins
@@ -220,8 +220,8 @@ jobs:
       run:
         working-directory: crates/gsp-ui/web
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -233,7 +233,7 @@ jobs:
         if: always()
         working-directory: .
         run: python3 .github/scripts/test_summary.py --title "ui (vitest)" crates/gsp-ui/web/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-ui
@@ -257,7 +257,7 @@ jobs:
     env:
       TUNNEL_BACKEND: ${{ matrix.backend }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
@@ -275,7 +275,7 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "tunnel (${{ matrix.backend }})" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-tunnel-${{ matrix.backend }}
@@ -295,10 +295,10 @@ jobs:
       # inside Docker, exercising the self-contained builder stage.
       BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Fetch the shared release binaries
         if: env.BIN_SOURCE == 'prebuilt'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-binaries
           path: deploy/prebuilt
@@ -313,7 +313,7 @@ jobs:
           for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
             docker save -o "$RUNNER_TEMP/images/$t.tar" "gsp-deploy/$t:local"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deploy-images
           path: ${{ runner.temp }}/images/
@@ -335,7 +335,7 @@ jobs:
   audit:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-audit@0.22.2
@@ -347,7 +347,7 @@ jobs:
         run: |
           python3 .github/scripts/audit_summary.py target/cargo-audit >> "$GITHUB_STEP_SUMMARY"
           python3 .github/scripts/audit_summary.py --annotations target/cargo-audit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cargo-audit
@@ -375,8 +375,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         continue-on-error: true   # missing images show up as "not scanned"
         with:
           name: deploy-images
@@ -395,7 +395,7 @@ jobs:
         run: |
           python3 .github/scripts/trivy_summary.py target/trivy >> "$GITHUB_STEP_SUMMARY"
           python3 .github/scripts/trivy_summary.py --annotations target/trivy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy-reports
@@ -408,7 +408,7 @@ jobs:
     if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -429,7 +429,7 @@ jobs:
           done
       - name: Upload crash inputs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: crates/gsp-config/fuzz/artifacts/**
