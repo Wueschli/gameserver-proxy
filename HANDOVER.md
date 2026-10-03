@@ -59,6 +59,14 @@ Open decisions for the owner:
    disk, a KVM VM, its own unprivileged user. Pending the VPS facts (virtualisation,
    OS, disk, what else runs on it). A self-hosted job just queues while the VPS is down
    — there is no fallback to hosted runners.
+   **Nightly CI is paused** (2026-10-03, owner's call): the `schedule` trigger in
+   `ci.yml` is commented out. A full nightly run bills ~50–55 runner-minutes (measured on
+   the 2026-10-02/03 scheduled runs, each job rounded up), ~1,600 a month — most of the
+   2,000 free minutes while the repo was private. The repo went public the same day, so
+   standard GitHub-hosted runners are now free and re-enabling the schedule costs nothing;
+   it stays paused until the owner decides. `workflow_dispatch` still runs everything by hand. Until it returns, nothing exercises the nightly-only paths: the
+   in-Docker `BIN_SOURCE=builder` deploy build, and `fuzz`/`deploy` as canaries for
+   commits that don't touch their paths. Bring it back together with the self-hosted runner.
 
 Never verified outside CI or the original dev sandbox:
 
@@ -694,7 +702,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   of `docker save` tarballs). `trivy` and `audit` are informational: `continue-on-error`,
   results on the run's summary page, as warning annotations and as artifacts
   (`trivy-reports`, `cargo-audit`). A workflow edit, a failed diff, the
-  **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
+  **nightly schedule (03:17 UTC; paused since 2026-10-03, see open decision 3)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
   also act as nightly canaries for code-driven breakage. Adding a job, or changing which packages a job
   builds, means updating `ROOTS` in `changes.py` *and* its test; a new crate or dependency
   edge needs no edit. A full run bills roughly 60–80
