@@ -36,7 +36,7 @@ use tokio_stream::{Stream, StreamExt};
 use tracing::Instrument;
 
 use crate::addresses::api::claim_error_response;
-use crate::addresses::{expand_backends, now_secs, AddressBook, Role};
+use crate::addresses::{expand_backends, now_secs, AddressBook, ClaimError, Rejection, Role};
 use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
@@ -307,7 +307,9 @@ async fn register<R: Registration>(
     if let Some(backends) = reg.backends_mut() {
         *backends = match expand_backends(backends, assignment.address) {
             Ok(b) => b,
-            Err(e) => return unprocessable(e),
+            Err(e) => {
+                return claim_error_response(&ClaimError::Rejected(Rejection::BackendHost(e)))
+            }
         };
     }
     reg.set_tunnel_address(assignment.address);
