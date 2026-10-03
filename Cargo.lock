@@ -1300,6 +1300,7 @@ dependencies = [
  "nix 0.29.0",
  "notify",
  "prost",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",

@@ -163,6 +163,18 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   deployment too small to bother with the registry — they converge to the
   same interface state a registered proxy would reach anyway, so there's no
   conflict between the two paths.
+- **Edge restarts: a per-process `boot_id` (built 2026-10-03).** A restarted
+  `gsp --tunnel-*` has a fresh interface but no endpoint for any origin
+  (origins may sit behind NAT), so only the origin can re-handshake — and with
+  kernel WireGuard the origin's session to the old process still looks valid,
+  so it used to wait for the 120 s rekey (~2.5 min outage). Every proxy
+  registration therefore carries a random `boot_id` (128-bit hex, new per
+  process start; the controller accepts 1–64 of `[A-Za-z0-9-]` and stores it
+  as-is). `gsp-agent` compares whole registrations, so a changed `boot_id`
+  re-sets the peer (remove + add), which drops the dead session; the re-added
+  peer's persistent keepalive starts a new handshake at once. Optional on the
+  wire in both directions: an older proxy sends none (no change from before),
+  an older controller drops it, an older agent ignores it.
 - **Key material stays out of the config-revision log.** A peer table is
   security-sensitive, high-churn (origins come and go), and has nothing to
   do with routing/pool structure — it belongs in its own resource on the
