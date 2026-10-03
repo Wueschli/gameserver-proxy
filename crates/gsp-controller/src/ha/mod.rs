@@ -22,13 +22,16 @@
 //!
 //! - [`log_store`] — `RaftLogStorage` + `RaftLogReader`, backed by two
 //!   `sled` trees (`log`, `meta`) so the Raft log itself survives a
-//!   restart, not just the state machine it replicates.
+//!   restart, not just the state machine it replicates; `openraft` purges
+//!   it up to each snapshot (keeping the last 1000 entries).
 //! - [`state_machine`] — `RaftStateMachine` + `RaftSnapshotBuilder`, wraps
 //!   the config and intent [`crate::api::AppState`]/
-//!   [`crate::intent::api::IntentState`] directly and calls their existing
-//!   `apply_revision` (the same bypass a `slave`'s relay already uses) —
-//!   applying a committed Raft entry is not a new code path, just a new
-//!   *source* for the exact write `submit()` already made when HA is off.
+//!   [`crate::intent::api::IntentState`] directly and calls their
+//!   index-aware `apply_entry` — applying a committed Raft entry is not a
+//!   new code path, just a new *source* for the exact write `submit()`
+//!   already made when HA is off. The log is purged per [`raft_config`]'s
+//!   snapshot policy, so snapshots (which replace both stores on install)
+//!   are how a lagging follower or a new learner catches up.
 //! - [`network`] — `RaftNetworkFactory` + `RaftNetwork` over `reqwest`,
 //!   posting to peers' `/raft/*` routes.
 //! - [`routes`] — the `axum` handlers for `/raft/append`, `/raft/vote`,
@@ -99,6 +102,31 @@ openraft::declare_raft_types!(
 
 pub type Raft = openraft::Raft<TypeConfig>;
 
+/// The log length (entries since the last snapshot) at which production
+/// builds a snapshot and lets `openraft` purge the log — `openraft`'s own
+/// default.
+pub const SNAPSHOT_AFTER: u64 = 5000;
+
+/// This tier's `openraft` config. Election timing is relaxed from the
+/// library defaults (150/300/50ms): this is a control-plane group on plain
+/// HTTP over `reqwest`, not a low-latency data-path link, so a wider
+/// election window trades a slightly slower failover for fewer spurious
+/// elections under ordinary scheduling/network jitter in a test or a
+/// loaded host. A snapshot is built every `snapshot_after` log entries
+/// ([`SNAPSHOT_AFTER`] in production; tests lower it to exercise the
+/// purge path), after which `openraft` purges the log and catches a lagging
+/// follower or learner up by snapshot. `max_in_snapshot_log_to_keep` and
+/// `replication_lag_threshold` stay at their defaults.
+pub fn raft_config(snapshot_after: u64) -> openraft::Config {
+    openraft::Config {
+        heartbeat_interval: 250,
+        election_timeout_min: 800,
+        election_timeout_max: 1500,
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(snapshot_after),
+        ..Default::default()
+    }
+}
+
 /// Shorthand aliases for `openraft`'s error types instantiated against this
 /// crate's [`NodeId`]/`BasicNode` — mirrors the `typ` module every
 /// `openraft` example defines, so call sites don't repeat the full
@@ -132,4 +160,33 @@ pub struct HaHandle {
     /// ([`client::forward_client`]): shared, and bounded by
     /// [`client::FORWARD_TIMEOUT`].
     pub forward: reqwest::Client,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_raft_config_keeps_openraft_snapshot_defaults() {
+        let config = raft_config(SNAPSHOT_AFTER).validate().unwrap();
+        let defaults = openraft::Config::default();
+        assert_eq!(config.snapshot_policy, defaults.snapshot_policy);
+        assert_eq!(
+            config.max_in_snapshot_log_to_keep,
+            defaults.max_in_snapshot_log_to_keep
+        );
+        assert_eq!(
+            config.replication_lag_threshold,
+            defaults.replication_lag_threshold
+        );
+    }
+
+    #[test]
+    fn a_lower_snapshot_threshold_is_honoured() {
+        let config = raft_config(10).validate().unwrap();
+        assert_eq!(
+            config.snapshot_policy,
+            openraft::SnapshotPolicy::LogsSinceLast(10)
+        );
+    }
 }
