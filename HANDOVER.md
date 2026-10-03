@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-03 (TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
+Last updated: 2026-10-03 (CI change detection from `cargo metadata`; TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
 
 ## Current state
 
@@ -84,14 +84,25 @@ Watch-list:
   PRs are in flight at once, GitHub's merge queue (needs an `on: merge_group` trigger;
   check availability for a personal private repo) would keep `main` green.
 
-Suggested order: pick from "Known follow-ups" — candidates the owner raised: precise CI
-change detection, the self-hosted runner (open decision 3), publishing the images (open
+Suggested order: pick from "Known follow-ups" — candidates the owner raised: the self-hosted runner (open decision 3), publishing the images (open
 decision 2), and the deferred pieces of the address authority. Whether a red
 `tunnel`/`deploy` also *blocks merging* depends on GitHub branch-protection required
 checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
+- CI change detection from `cargo metadata` (2026-10-03): `.github/scripts/changes.py`
+  (tested by `changes_test.py`) replaces `changes.sh`'s hand-written crate regexes. A changed
+  file belongs to the Cargo package whose directory holds it (across the root, `crates/plugins`
+  and `crates/gsp-config/fuzz` workspaces); a job runs when that package or one of its
+  path-dependency dependents is in the job's `ROOTS` (`plugins`: `gsp` + `crates/plugins/`;
+  `tunnel`: the five binaries + `gsp-fleet-tests`; `fuzz`: `gsp-config-fuzz`). On today's tree
+  that differs from the regexes in three ways: a `crates/gsp-config/fuzz/` change runs only
+  `fuzz`, the root `Cargo.lock` no longer runs `fuzz` (own lockfile), and `.config/nextest.toml`
+  now runs `plugins` + `tunnel` (it was missed). Fail-open: a workflow edit, the root
+  `Cargo.toml`, the toolchain file, `.cargo/`, an unowned path under `crates/` or a failed
+  `cargo metadata` (warning annotation) runs everything it could affect. The `changes` job uses
+  the runner image's preinstalled cargo (`RUSTUP_TOOLCHAIN=stable`, `--no-deps`: no download).
 - HA write-forwarding timeout (2026-10-03): `HaHandle::forward` is one shared client
   (`ha::client::forward_client`) bounded by `FORWARD_TIMEOUT` (10 s, response body
   included), so a half-open leader costs the caller a `504` saying the write may still
@@ -423,7 +434,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. CI never builds `gsp-http` with `--no-default-features` (a `cargo check -p gsp-agent` step would). Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
 | Trivy scan — follow-ups | (1) GitHub's Security tab ("code scanning") would show the SARIF natively, but this repo is private, so uploads need GitHub Code Security (paid); with it, add `github/codeql-action/upload-sarif` (permission `security-events: write`) over `target/trivy/*.sarif`. (2) For Rust crates Trivy sees GHSA advisories only (RustSec-only ones such as the 2026-10-01 rustls/wasmtime fixes are missed, and many crate advisories are MEDIUM) — `cargo audit` (the `audit` job) is the real check. (3) `cargo auditable` builds would let the image scan see the crates itself. (4) The vulnerability DB (~120 MB, `mirror.gcr.io` with a `ghcr.io` fallback) is fetched each run — cache it by day. (5) The pinned hash stops a later swap but can't prove 0.75.0 was clean when pinned; verifying the release's cosign/sigstore bundle would. (6) `package-lock.json` scanning includes build-only `dependencies` (tailwind, vite via `@tailwindcss/vite`), so a dev-server CVE there would be a false positive. (7) Cosmetic: `trivy convert --format table` in `scan-images.sh` logs "No enabled scanners found" and prints no table to the job log (seen on the first CI run, 2026-10-02); the run-summary table and the reports are unaffected — pass the scanners to `convert` or drop the log table. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. Owner (2026-10-02): images should be built "for both Docker and Kubernetes" — not yet specified whether that means publishing, multi-arch or k8s packaging (Helm/Kustomize); ask. Once images are published, per-image CI jobs make sense (each versioned, rebuilt and pushed only when its inputs change); before that they don't — see the CI-cost row. |
-| CI: precise change detection | `.github/scripts/changes.sh` maps paths to CI areas with hand-written regexes, which drift as crates gain dependencies. Deriving the affected binaries from `cargo metadata` (reverse deps of the changed crates) would let jobs run only for what changed — e.g. no release build when only `crates/gsp-ui/web/` changed. Discussed 2026-10-02 against per-container jobs: the five binaries share most of their compile (one `cargo build` links all five), image builds copy prebuilt binaries (seconds), the compose smoke test needs all five together, and per-image Trivy jobs would fetch the ~120 MB DB five times — so five parallel jobs per stage would cost more billed minutes, not fewer. Related: cache the Trivy DB by day (Trivy row). |
+| CI change detection — residuals (2026-10-03) | `changes.py` treats any root `Cargo.lock` change as touching every root-workspace member; diffing the lockfile and walking its reverse-dependency graph would skip jobs on bumps that only reach e.g. `gsp-bench`, but nearly every real bump reaches `gsp` anyway. `deploy` still runs only for its own paths and the lockfile, not for binary source changes (unchanged; nightly covers code-driven breakage). Cross-crate file reads (`include_bytes!`, fixtures) are invisible to `cargo metadata` — today only `gsp-fleet-tests` → `gsp-http`'s fixtures, already covered. Per-container jobs were discussed 2026-10-02 and rejected: the five binaries share most of their compile, the compose smoke needs all five, and per-image Trivy jobs would fetch the ~120 MB DB five times. Related: cache the Trivy DB by day (Trivy row). |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
 | HA-over-TLS cleanup-PR minors (found reviewing the cleanup PR, 2026-10-02) | `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
@@ -623,8 +634,8 @@ time). Needs `protoc` on `PATH`. Not part of `make check`:
 - `make ui-test` (vitest), `make deploy-lint` (daemon-free render checks of `deploy/`;
   needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` / `make deploy-scan` (need a
   Docker daemon; the scan also needs `trivy`);
-- the CI helper scripts: `sh .github/scripts/changes_test.sh` and
-  `python3 .github/scripts/test_summary_test.py` and `python3 .github/scripts/trivy_summary_test.py` (CI runs all three in the `changes` job).
+- the CI helper scripts: `python3 .github/scripts/changes_test.py` (needs `cargo`),
+  `test_summary_test.py`, `trivy_summary_test.py` and `audit_summary_test.py` (CI runs all four in the `changes` job).
 
 CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 "Infra / environment".
@@ -650,16 +661,18 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 - **`protoc` is a build requirement** (gRPC resolver codegen in
   `crates/gsp/build.rs`). CI installs `protobuf-compiler`.
 - CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
-  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.sh`, tested by
-  `changes_test.sh`, self-run in CI) decides which path-scoped jobs run: `ui`, `plugins`, `tunnel`,
+  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.py`, tested by
+  `changes_test.py`, self-run in CI) decides which path-scoped jobs run from `cargo metadata`
+  (a changed file's package plus its path-dependency dependents, against each job's `ROOTS`): `ui`, `plugins`, `tunnel`,
   `deploy`, `fuzz`; `test` and `audit` always run for non-docs pushes, and `trivy` follows
   `deploy` (it scans `deploy`'s images, handed over as the 1-day `deploy-images` artifact
   of `docker save` tarballs). `trivy` and `audit` are informational: `continue-on-error`,
   results on the run's summary page, as warning annotations and as artifacts
   (`trivy-reports`, `cargo-audit`). A workflow edit, a failed diff, the
   **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
-  also act as nightly canaries for code-driven breakage. Adding a job or moving files between
-  areas means updating `changes.sh` *and* its test. A full run bills roughly 60–80
+  also act as nightly canaries for code-driven breakage. Adding a job, or changing which packages a job
+  builds, means updating `ROOTS` in `changes.py` *and* its test; a new crate or dependency
+  edge needs no edit. A full run bills roughly 60–80
   runner-minutes (each job rounds up to the minute; cold caches cost more); the scan
   jobs add under a minute each.
   Cargo caching is `.github/actions/cargo-cache` (rolling: a new snapshot per `main` push,
@@ -693,7 +706,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   in-Docker build instead, so that path can't rot. These three jobs are pinned to
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
   built there might need a newer glibc than the distroless runtime's 2.41. (Since
-  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.sh`
+  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.py`
   emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
