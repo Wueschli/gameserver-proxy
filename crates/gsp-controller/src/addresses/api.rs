@@ -65,7 +65,8 @@ struct ErrorBody {
 }
 
 /// `409` address held / owner has a different one, `422` invalid address, no
-/// network configured or backends off the claimed address, `503` network
+/// network configured, backends off the claimed address or an unparsable
+/// replicated network, `503` network
 /// exhausted, book full or registries still initializing, `500` storage.
 pub fn claim_error_response(e: &ClaimError) -> Response {
     let status = match e {
@@ -74,7 +75,8 @@ pub fn claim_error_response(e: &ClaimError) -> Response {
             Rejection::OutsideNetwork { .. }
             | Rejection::NotHost(_)
             | Rejection::NoNetwork
-            | Rejection::BackendHost(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | Rejection::BackendHost(_)
+            | Rejection::InvalidNetwork(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Rejection::Exhausted { .. } | Rejection::Full { .. } | Rejection::NotInitialized => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -288,6 +290,10 @@ mod tests {
         );
         assert_eq!(
             status(Rejection::BackendHost("backend is elsewhere".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status(Rejection::InvalidNetwork("bad".into())),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(

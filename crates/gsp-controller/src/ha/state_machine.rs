@@ -9,12 +9,18 @@
 //! bookkeeping `openraft` needs on top: last-applied log id, membership,
 //! and snapshots.
 //!
+//! Registry entries (`RegisterOrigin`/`RegisterProxy`, `Release`, `Touch`)
+//! apply through [`super::apply_registry`] into the two registries and the
+//! shared address book, against the network recorded in
+//! [`ClusterState`] by `SetTunnelNetwork` — never the node's own flag.
+//!
 //! Snapshots are a main path, not a corner case: `openraft` purges the log
 //! per [`super::raft_config`]'s snapshot policy, and a follower or learner
 //! that lags behind the purge point is caught up by snapshot. A snapshot
-//! carries every config and intent revision *at its number* (with the
-//! config revision's stage and actor) and each store's `applied_index`;
-//! installing one **replaces** both stores. `get_snapshot_builder` copies
+//! carries every config, intent and registry revision *at its number* (with
+//! the config revision's stage and actor, and each registry's `current`
+//! map), the address book, the cluster state and each store's
+//! `applied_index`; installing one **replaces** all of them. `get_snapshot_builder` copies
 //! that state while serialized with `apply` (the builder then runs in
 //! parallel with later applies and never reads live state), and the last
 //! built or installed snapshot is persisted in the `raft_snapshot` tree so
@@ -30,9 +36,15 @@ use openraft::{
 use serde::{Deserialize, Serialize};
 use sled::transaction::{ConflictableTransactionError, TransactionError};
 
+use super::apply_registry;
+use super::cluster_state::{ClusterSnapshot, ClusterState};
 use super::{NodeId, TypeConfig, WriteRequest, WriteResponse};
+use crate::addresses::{AddressBook, BookSnapshot, Network, Rejection, Role};
 use crate::api::{AppState, Stage};
 use crate::intent::api::IntentState;
+use crate::peers::api::PeersState;
+use crate::proxy_peers::api::ProxyPeersState;
+use crate::registry::RegistrySnapshot;
 use crate::store::SiblingWrite;
 
 const SM_META_KEY: &[u8] = b"sm_meta";
@@ -58,15 +70,42 @@ pub struct RevisionSnap {
     pub actor: Option<String>,
 }
 
-/// The full snapshot content: every revision of both logs at its number,
-/// and each store's `applied_index` — enough to replace a replica's
-/// config and intent `Store`s exactly.
+/// The full snapshot content: every revision of every log at its number,
+/// the registries' `current` maps, the address book, the cluster state and
+/// each store's `applied_index` — enough to replace every database the
+/// state machine drives exactly. The registry, book and cluster fields
+/// default to empty so a snapshot persisted before they existed still
+/// installs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotContent {
     pub config: Vec<RevisionSnap>,
     pub intent: Vec<(u64, Vec<u8>)>,
     pub config_applied: Option<u64>,
     pub intent_applied: Option<u64>,
+    #[serde(default)]
+    pub peers: RegistrySnapshot,
+    #[serde(default)]
+    pub proxy_peers: RegistrySnapshot,
+    #[serde(default = "empty_book")]
+    pub book: BookSnapshot,
+    #[serde(default)]
+    pub cluster: ClusterSnapshot,
+}
+
+fn empty_book() -> BookSnapshot {
+    BookSnapshot {
+        entries: Vec::new(),
+        applied_index: None,
+        last_outcome: None,
+    }
+}
+
+/// The registries and the shared address book the state machine applies
+/// registry entries into.
+pub struct Registries {
+    pub peers: Arc<PeersState>,
+    pub proxy_peers: Arc<ProxyPeersState>,
+    pub book: Arc<AddressBook>,
 }
 
 /// An owned copy of everything a snapshot holds, taken by
@@ -89,6 +128,11 @@ pub struct SnapshotBuilder {
 pub struct StateMachineStore {
     config: Arc<AppState>,
     intent: Arc<IntentState>,
+    peers: Arc<PeersState>,
+    proxy_peers: Arc<ProxyPeersState>,
+    book: Arc<AddressBook>,
+    /// The replicated network registry entries are applied against.
+    cluster: Arc<ClusterState>,
     meta: sled::Tree,
     /// The last built or installed snapshot (`meta`, `data`).
     snapshots: sled::Tree,
@@ -99,13 +143,23 @@ impl StateMachineStore {
         db: &sled::Db,
         config: Arc<AppState>,
         intent: Arc<IntentState>,
+        registries: Registries,
     ) -> Result<Self, sled::Error> {
         Ok(StateMachineStore {
             config,
             intent,
+            peers: registries.peers,
+            proxy_peers: registries.proxy_peers,
+            book: registries.book,
+            cluster: Arc::new(ClusterState::open(db)?),
             meta: db.open_tree("raft_sm_meta")?,
             snapshots: db.open_tree("raft_snapshot")?,
         })
+    }
+
+    /// The replicated cluster state (the recorded tunnel network).
+    pub fn cluster(&self) -> &Arc<ClusterState> {
+        &self.cluster
     }
 
     // `StorageError` is `openraft`'s own type, sized by its own variants —
@@ -132,9 +186,9 @@ impl StateMachineStore {
         Ok(())
     }
 
-    /// Copies both stores (revisions, stage, actor, `applied_index`) and
-    /// the HA meta. Runs on the state-machine worker, so no apply
-    /// interleaves.
+    /// Copies every store (revisions, stage, actor, registries' `current`,
+    /// the address book, the cluster state, each `applied_index`) and the
+    /// HA meta. Runs on the state-machine worker, so no apply interleaves.
     #[allow(clippy::result_large_err)] // same as `read_meta` above
     fn copy(&self) -> Result<SnapshotCopy, StorageError<NodeId>> {
         let config_store = &self.config.store;
@@ -180,13 +234,49 @@ impl StateMachineStore {
                 intent_applied: intent_store
                     .applied_index()
                     .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                peers: self
+                    .peers
+                    .snapshot()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                proxy_peers: self
+                    .proxy_peers
+                    .snapshot()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                book: self
+                    .book
+                    .snapshot()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                cluster: self
+                    .cluster
+                    .snapshot()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
             },
             meta: self.read_meta()?,
         })
     }
 
-    /// Replaces the config store (with its stage and actor trees) and the
-    /// intent store by `content`, one transaction per database.
+    /// `SetTunnelNetwork` at `index`: records the cluster's network once.
+    /// An unparsable network is a deterministic rejection (every replica
+    /// parses the same string), never a storage error.
+    #[allow(clippy::result_large_err)] // same as `read_meta` above
+    fn set_tunnel_network(
+        &self,
+        network: Option<String>,
+        index: u64,
+    ) -> Result<WriteResponse, StorageError<NodeId>> {
+        let parsed = match network.as_deref().map(Network::parse).transpose() {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(WriteResponse::Rejected(Rejection::InvalidNetwork(e))),
+        };
+        self.cluster
+            .record(parsed, index)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        Ok(WriteResponse::Recorded)
+    }
+
+    /// Replaces the config store (with its stage and actor trees), the
+    /// intent store, both registries, the address book and the cluster
+    /// state by `content`, one transaction per database.
     #[allow(clippy::result_large_err)] // same as `read_meta` above
     fn replace_stores(&self, content: &SnapshotContent) -> Result<(), StorageError<NodeId>> {
         let config = &self.config;
@@ -226,6 +316,18 @@ impl StateMachineStore {
         self.intent
             .store
             .replace_all(&content.intent, content.intent_applied)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.peers
+            .replace(&content.peers)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.proxy_peers
+            .replace(&content.proxy_peers)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.book
+            .replace(&content.book)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.cluster
+            .replace(&content.cluster)
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
 
         // Wake live subscribers so they re-read from the replaced store.
@@ -332,7 +434,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
 
             let index = entry.log_id.index;
             let response = match entry.payload {
-                EntryPayload::Blank => WriteResponse { revision: None },
+                EntryPayload::Blank => WriteResponse::Revision(None),
                 EntryPayload::Normal(req) => {
                     // Each step is skipped when its database already
                     // absorbed `index` — openraft re-delivers entries
@@ -341,19 +443,21 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                     // as the revision so a replay writes nothing. A skipped
                     // step has no new revision to report; nobody awaits the
                     // response of a replayed entry.
-                    let revision = match req {
+                    match req {
                         WriteRequest::Config {
                             bytes,
                             stage,
                             actor,
-                        } => self
-                            .config
-                            .apply_entry(index, bytes, stage, actor.as_deref())
-                            .map_err(|e| StorageIOError::write_state_machine(&e))?,
-                        WriteRequest::Intent(bytes) => self
-                            .intent
-                            .apply_entry(index, bytes)
-                            .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        } => WriteResponse::Revision(
+                            self.config
+                                .apply_entry(index, bytes, stage, actor.as_deref())
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        ),
+                        WriteRequest::Intent(bytes) => WriteResponse::Revision(
+                            self.intent
+                                .apply_entry(index, bytes)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        ),
                         WriteRequest::Promote(revision) => {
                             // A promote of a revision this replica doesn't
                             // have (shouldn't happen — the promoted
@@ -365,15 +469,80 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                             self.config
                                 .promote_entry(index, revision)
                                 .map_err(|e| StorageIOError::write_state_machine(&e))?;
-                            Some(revision)
+                            WriteResponse::Revision(Some(revision))
                         }
-                    };
-                    WriteResponse { revision }
+                        // Registry entries read nothing node-local: `now`
+                        // comes from the entry, the network from the
+                        // replicated `ClusterState`.
+                        WriteRequest::RegisterOrigin { reg, now } => apply_registry::register(
+                            &self.peers,
+                            &self.book,
+                            &self.cluster,
+                            reg,
+                            now,
+                            index,
+                        )?,
+                        WriteRequest::RegisterProxy { reg, now } => apply_registry::register(
+                            &self.proxy_peers,
+                            &self.book,
+                            &self.cluster,
+                            reg,
+                            now,
+                            index,
+                        )?,
+                        WriteRequest::Release {
+                            role: Role::Origin,
+                            name,
+                        } => apply_registry::release(
+                            &self.peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            index,
+                        )?,
+                        WriteRequest::Release {
+                            role: Role::Proxy,
+                            name,
+                        } => apply_registry::release(
+                            &self.proxy_peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            index,
+                        )?,
+                        WriteRequest::Touch {
+                            role: Role::Origin,
+                            name,
+                            now,
+                        } => apply_registry::touch(
+                            &self.peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            now,
+                            index,
+                        )?,
+                        WriteRequest::Touch {
+                            role: Role::Proxy,
+                            name,
+                            now,
+                        } => apply_registry::touch(
+                            &self.proxy_peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            now,
+                            index,
+                        )?,
+                        WriteRequest::SetTunnelNetwork(network) => {
+                            self.set_tunnel_network(network, index)?
+                        }
+                    }
                 }
                 EntryPayload::Membership(ref membership) => {
                     meta.last_membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());
-                    WriteResponse { revision: None }
+                    WriteResponse::Revision(None)
                 }
             };
             out.push(response);
@@ -455,36 +624,69 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addresses::{
+        api::claim_error_response, expand_backends, AddressBook, ClaimError, Network, Outcome,
+        Rejection, Role as AddrRole,
+    };
+    use crate::peers::PeerRegistration;
+    use crate::proxy_peers::ProxyRegistration;
     use crate::role::{Role, RoleHandle};
     use crate::store::Store;
+    use axum::http::StatusCode;
     use openraft::{CommittedLeaderId, EntryPayload};
+    use std::net::IpAddr;
 
     struct TestDirs {
-        _config: tempfile::TempDir,
-        _intent: tempfile::TempDir,
+        _stores: tempfile::TempDir,
         ha: tempfile::TempDir,
     }
 
-    fn test_sm() -> (Arc<StateMachineStore>, TestDirs) {
-        let config_dir = tempfile::tempdir().unwrap();
-        let intent_dir = tempfile::tempdir().unwrap();
+    /// Every store the state machine drives, freshly opened under one
+    /// temporary directory. The address book is opened **without** a
+    /// network: HA claims must take theirs from the replicated cluster
+    /// state, never from the book.
+    fn open_sm(db: &sled::Db) -> (StateMachineStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = |sub: &str| Arc::new(Store::open(&dir.path().join(sub)).unwrap());
         let config = Arc::new(AppState::new(
-            Arc::new(Store::open(config_dir.path()).unwrap()),
+            store("config"),
             None,
             RoleHandle::new(Role::Standalone),
         ));
         let intent = Arc::new(IntentState::new(
-            Arc::new(Store::open(intent_dir.path()).unwrap()),
+            store("intent"),
             RoleHandle::new(Role::Standalone),
             None,
         ));
+        let book = Arc::new(AddressBook::open(&dir.path().join("addresses"), None).unwrap());
+        let peers = Arc::new(PeersState::new(store("peers"), None, book.clone()));
+        let proxy_peers = Arc::new(ProxyPeersState::new(
+            store("proxy-peers"),
+            None,
+            book.clone(),
+        ));
+        let sm = StateMachineStore::open(
+            db,
+            config,
+            intent,
+            Registries {
+                peers,
+                proxy_peers,
+                book,
+            },
+        )
+        .unwrap();
+        (sm, dir)
+    }
+
+    fn test_sm() -> (Arc<StateMachineStore>, TestDirs) {
         let ha_dir = tempfile::tempdir().unwrap();
         let db = sled::open(ha_dir.path()).unwrap();
+        let (sm, stores) = open_sm(&db);
         (
-            Arc::new(StateMachineStore::open(&db, config, intent).unwrap()),
+            Arc::new(sm),
             TestDirs {
-                _config: config_dir,
-                _intent: intent_dir,
+                _stores: stores,
                 ha: ha_dir,
             },
         )
@@ -516,7 +718,7 @@ mod tests {
             },
         )];
         let responses = sm.apply(entries).await.unwrap();
-        assert_eq!(responses[0].revision, Some(1));
+        assert_eq!(responses[0], WriteResponse::Revision(Some(1)));
 
         let (revision, bytes) = sm.config.store.current().unwrap().unwrap();
         assert_eq!(revision, 1);
@@ -540,7 +742,7 @@ mod tests {
     async fn a_blank_entry_updates_last_applied_but_writes_nothing() {
         let (mut sm, _dirs) = test_sm();
         let responses = sm.apply(vec![blank_entry(1)]).await.unwrap();
-        assert_eq!(responses[0].revision, None);
+        assert_eq!(responses[0], WriteResponse::Revision(None));
 
         let (last_applied, _) = sm.applied_state().await.unwrap();
         assert_eq!(last_applied.unwrap().index, 1);
@@ -553,23 +755,10 @@ mod tests {
         drop(sm);
 
         // Re-`open` the exact same `sled` db path a process restart would —
-        // the config/intent `Store`s are reopened fresh too, but that's
-        // fine here: this test is only checking the HA meta tree
-        // (`last_applied_log`), not the config/intent content.
-        let config_dir = tempfile::tempdir().unwrap();
-        let intent_dir = tempfile::tempdir().unwrap();
-        let config = Arc::new(AppState::new(
-            Arc::new(Store::open(config_dir.path()).unwrap()),
-            None,
-            RoleHandle::new(Role::Standalone),
-        ));
-        let intent = Arc::new(IntentState::new(
-            Arc::new(Store::open(intent_dir.path()).unwrap()),
-            RoleHandle::new(Role::Standalone),
-            None,
-        ));
-        let db = crate::store::reopen_when_unlocked(|| sled::open(dirs.ha.path()));
-        let mut reopened = Arc::new(StateMachineStore::open(&db, config, intent).unwrap());
+        // the other `Store`s are reopened fresh too, but that's fine here:
+        // this test is only checking the HA meta tree (`last_applied_log`),
+        // not the stores' content.
+        let (mut reopened, _r) = reopen_ha(&dirs);
 
         let (last_applied, _) = reopened.applied_state().await.unwrap();
         assert_eq!(last_applied.unwrap().index, 5);
@@ -728,11 +917,10 @@ mod tests {
 
     /// Reopens the state machine on `dirs`' HA db (config/intent stores
     /// fresh — only the HA trees matter to the callers).
-    fn reopen_ha(dirs: &TestDirs) -> (Arc<StateMachineStore>, TestDirs) {
-        let (fresh, fresh_dirs) = test_sm();
+    fn reopen_ha(dirs: &TestDirs) -> (Arc<StateMachineStore>, tempfile::TempDir) {
         let db = crate::store::reopen_when_unlocked(|| sled::open(dirs.ha.path()));
-        let sm = StateMachineStore::open(&db, fresh.config.clone(), fresh.intent.clone()).unwrap();
-        (Arc::new(sm), fresh_dirs)
+        let (sm, stores) = open_sm(&db);
+        (Arc::new(sm), stores)
     }
 
     #[tokio::test]
@@ -909,8 +1097,388 @@ mod tests {
             .apply(vec![normal_entry(1, WriteRequest::Promote(99))])
             .await
             .unwrap();
-        assert_eq!(responses[0].revision, Some(99));
+        assert_eq!(responses[0], WriteResponse::Revision(Some(99)));
         assert_eq!(sm.config.store.applied_index().unwrap(), Some(1));
         assert_eq!(sm.config.store.current_revision().unwrap(), None);
+    }
+
+    // ---- Registry entries (Task 5) ----
+
+    const NOW: u64 = 1_000;
+    const PUBKEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn origin(name: &str, address: Option<&str>, backends: &[&str]) -> PeerRegistration {
+        PeerRegistration {
+            name: name.into(),
+            pubkey: PUBKEY.into(),
+            endpoint: None,
+            backends: backends.iter().map(|b| b.to_string()).collect(),
+            tunnel_address: address.map(Into::into),
+        }
+    }
+
+    fn proxy(name: &str, address: Option<&str>) -> ProxyRegistration {
+        ProxyRegistration {
+            name: name.into(),
+            pubkey: PUBKEY.into(),
+            endpoint: "203.0.113.1:51820".into(),
+            tunnel_address: address.map(Into::into),
+            boot_id: None,
+        }
+    }
+
+    fn register_origin(reg: PeerRegistration, now: u64) -> WriteRequest {
+        WriteRequest::RegisterOrigin { reg, now }
+    }
+
+    async fn apply_one(
+        sm: &mut Arc<StateMachineStore>,
+        index: u64,
+        req: WriteRequest,
+    ) -> WriteResponse {
+        sm.apply(vec![normal_entry(index, req)])
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    /// A state machine whose cluster recorded `network` at index 1.
+    async fn sm_with_network(network: &str) -> (Arc<StateMachineStore>, TestDirs) {
+        let (mut sm, dirs) = test_sm();
+        let response = apply_one(
+            &mut sm,
+            1,
+            WriteRequest::SetTunnelNetwork(Some(network.into())),
+        )
+        .await;
+        assert_eq!(response, WriteResponse::Recorded);
+        (sm, dirs)
+    }
+
+    /// The mixed entries 2..=21 of `two_state_machines_fed_the_same_entries_agree`.
+    fn mixed_entries() -> Vec<Entry<TypeConfig>> {
+        (2u64..=21)
+            .map(|i| {
+                let now = NOW + i;
+                let req = match i % 4 {
+                    0 => register_origin(origin(&format!("o{}", i % 5), None, &[":25565"]), now),
+                    1 => WriteRequest::RegisterProxy {
+                        reg: proxy(&format!("p{}", i % 3), None),
+                        now,
+                    },
+                    2 => WriteRequest::Release {
+                        role: AddrRole::Origin,
+                        name: format!("o{}", (i + 1) % 5),
+                    },
+                    _ => WriteRequest::Touch {
+                        role: AddrRole::Proxy,
+                        name: format!("p{}", i % 3),
+                        now,
+                    },
+                };
+                normal_entry(i, req)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_state_machines_fed_the_same_entries_agree() {
+        let (mut a, _a) = sm_with_network("10.60.0.0/24").await;
+        let (mut b, _b) = sm_with_network("10.60.0.0/24").await;
+        let ra = a.apply(mixed_entries()).await.unwrap();
+        let rb = b.apply(mixed_entries()).await.unwrap();
+        assert_eq!(ra, rb);
+        assert!(ra
+            .iter()
+            .any(|r| matches!(r, WriteResponse::Registered { .. })));
+
+        assert_eq!(
+            a.peers.all_current().unwrap(),
+            b.peers.all_current().unwrap()
+        );
+        assert_eq!(
+            a.proxy_peers.all_current().unwrap(),
+            b.proxy_peers.all_current().unwrap()
+        );
+        assert!(!a.proxy_peers.all_current().unwrap().is_empty());
+        assert_eq!(a.book.entries().unwrap(), b.book.entries().unwrap());
+        assert!(!a.book.entries().unwrap().is_empty());
+        assert_eq!(
+            a.peers.store.all_revisions().unwrap(),
+            b.peers.store.all_revisions().unwrap()
+        );
+        assert_eq!(
+            a.proxy_peers.store.all_revisions().unwrap(),
+            b.proxy_peers.store.all_revisions().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn interleaved_registrations_never_share_an_address() {
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        let entries: Vec<_> = (0..64u64)
+            .map(|i| {
+                normal_entry(
+                    i + 2,
+                    register_origin(origin(&format!("o{i}"), None, &[]), NOW),
+                )
+            })
+            .collect();
+        let responses = sm.apply(entries).await.unwrap();
+        let addresses: std::collections::HashSet<IpAddr> = responses
+            .iter()
+            .map(|r| match r {
+                WriteResponse::Registered { address, .. } => *address,
+                other => panic!("expected a registration, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(addresses.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn rejections_match_the_non_ha_handler() {
+        let net = Network::parse("10.60.0.0/24").unwrap();
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        // The same claims through the non-HA path, on a book of its own.
+        let dir = tempfile::tempdir().unwrap();
+        let direct = AddressBook::open(dir.path(), Some(net)).unwrap();
+        let direct_claim = |reg: &PeerRegistration| -> Result<(), Rejection> {
+            let a = direct
+                .claim(AddrRole::Origin, &reg.name, reg.requested_address(), NOW)
+                .map_err(|e| match e {
+                    ClaimError::Rejected(r) => r,
+                    ClaimError::Storage(e) => panic!("storage: {e}"),
+                })?;
+            expand_backends(&reg.backends, a.address).map_err(Rejection::BackendHost)?;
+            Ok(())
+        };
+
+        let holder = origin("a", Some("10.60.0.5"), &[]);
+        direct_claim(&holder).unwrap();
+        assert!(matches!(
+            apply_one(&mut sm, 2, register_origin(holder, NOW)).await,
+            WriteResponse::Registered { .. }
+        ));
+
+        let cases = [
+            (origin("b", Some("10.60.0.5"), &[]), StatusCode::CONFLICT),
+            (origin("a", Some("10.60.0.6"), &[]), StatusCode::CONFLICT),
+            (
+                origin("c", Some("10.61.0.1"), &[]),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                origin("d", None, &["10.60.0.99:25565"]),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ];
+        for (i, (reg, status)) in cases.into_iter().enumerate() {
+            let want = direct_claim(&reg).unwrap_err();
+            let got = apply_one(&mut sm, 3 + i as u64, register_origin(reg, NOW)).await;
+            assert_eq!(got, WriteResponse::Rejected(want.clone()));
+            assert_eq!(
+                claim_error_response(&ClaimError::Rejected(want)).status(),
+                status
+            );
+        }
+        // The backend-host rejection keeps the claim, as the handler does.
+        assert!(sm.book.get(AddrRole::Origin, "d").unwrap().is_some());
+        assert_eq!(sm.peers.current_for("d").unwrap(), None);
+        assert_eq!(sm.peers.store.applied_index().unwrap(), Some(6));
+        assert_eq!(sm.book.applied_index().unwrap(), Some(6));
+    }
+
+    #[tokio::test]
+    async fn a_crash_between_book_and_registry_completes_from_last_outcome() {
+        let net = Network::parse("10.60.0.0/24").unwrap();
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        // The book step of entry 9 ran; the crash lost the registry step.
+        let granted = match sm
+            .book
+            .claim_at(AddrRole::Origin, "a", None, NOW, Some(net), 9)
+            .unwrap()
+        {
+            Outcome::Granted(a) => a,
+            other => panic!("expected a grant, got {other:?}"),
+        };
+        let book_before = sm.book.entries().unwrap();
+
+        let response = apply_one(
+            &mut sm,
+            9,
+            register_origin(origin("a", None, &[":25565"]), NOW),
+        )
+        .await;
+        assert_eq!(
+            response,
+            WriteResponse::Registered {
+                revision: 1,
+                address: granted.address
+            }
+        );
+        let stored = sm.peers.current_for("a").unwrap().unwrap();
+        assert_eq!(stored.requested_address(), Some(granted.address));
+        assert_eq!(stored.backends, vec![format!("{}:25565", granted.address)]);
+        assert_eq!(sm.book.entries().unwrap(), book_before);
+        assert_eq!(sm.peers.store.applied_index().unwrap(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_is_a_storage_error_not_a_rejection() {
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        // A corrupt `applied_index` makes every book step fail to read it.
+        sm.book
+            .meta_tree()
+            .insert(b"applied_index", b"bad".to_vec())
+            .unwrap();
+        let result = sm
+            .apply(vec![normal_entry(
+                2,
+                register_origin(origin("a", None, &[]), NOW),
+            )])
+            .await;
+        assert!(result.is_err(), "expected a StorageError, got {result:?}");
+        assert_eq!(sm.peers.store.applied_index().unwrap(), None);
+        assert_eq!(sm.peers.current_for("a").unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_register_then_a_touch_replays_cleanly() {
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        apply_one(
+            &mut sm,
+            2,
+            register_origin(origin("holder", Some("10.60.0.5"), &[]), NOW),
+        )
+        .await;
+        let entries = || {
+            vec![
+                normal_entry(
+                    10,
+                    register_origin(origin("other", Some("10.60.0.5"), &[]), NOW),
+                ),
+                normal_entry(
+                    11,
+                    WriteRequest::Touch {
+                        role: AddrRole::Origin,
+                        name: "holder".into(),
+                        now: NOW + 50,
+                    },
+                ),
+            ]
+        };
+        let responses = sm.apply(entries()).await.unwrap();
+        assert!(matches!(
+            responses[0],
+            WriteResponse::Rejected(Rejection::Held { .. })
+        ));
+        assert_eq!(responses[1], WriteResponse::Touched);
+
+        let revisions = sm.peers.store.all_revisions().unwrap();
+        let book = sm.book.entries().unwrap();
+        let outcome = sm.book.last_outcome().unwrap();
+        sm.apply(entries()).await.unwrap();
+        assert_eq!(sm.peers.store.all_revisions().unwrap(), revisions);
+        assert_eq!(sm.book.entries().unwrap(), book);
+        assert_eq!(sm.book.last_outcome().unwrap(), outcome);
+        assert_eq!(sm.peers.store.applied_index().unwrap(), Some(11));
+        assert_eq!(sm.book.applied_index().unwrap(), Some(11));
+    }
+
+    #[tokio::test]
+    async fn a_registry_entry_before_initialization_is_rejected_not_fatal() {
+        let (mut sm, _d) = test_sm();
+        let response = apply_one(&mut sm, 1, register_origin(origin("a", None, &[]), NOW)).await;
+        assert_eq!(response, WriteResponse::Rejected(Rejection::NotInitialized));
+        assert_eq!(sm.peers.store.applied_index().unwrap(), Some(1));
+        assert_eq!(sm.book.applied_index().unwrap(), Some(1));
+        assert!(sm.book.entries().unwrap().is_empty());
+        assert_eq!(sm.peers.store.current_revision().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn snapshot_round_trip_carries_registries_and_the_book() {
+        let (mut leader, _l) = sm_with_network("10.60.0.0/24").await;
+        let mut moved = origin("a", None, &[]);
+        moved.endpoint = Some("198.51.100.1:51820".into());
+        leader
+            .apply(vec![
+                normal_entry(2, register_origin(origin("a", None, &[]), NOW)),
+                normal_entry(3, register_origin(moved, NOW + 1)),
+                normal_entry(
+                    4,
+                    WriteRequest::RegisterProxy {
+                        reg: proxy("p", None),
+                        now: NOW,
+                    },
+                ),
+                normal_entry(
+                    5,
+                    WriteRequest::Release {
+                        role: AddrRole::Origin,
+                        name: "a".into(),
+                    },
+                ),
+                normal_entry(6, register_origin(origin("b", None, &[]), NOW + 2)),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(leader.peers.store.current_revision().unwrap(), Some(4));
+
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let (mut follower, _f) = test_sm();
+        follower
+            .install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        for (f, l) in [
+            (&follower.peers.store, &leader.peers.store),
+            (&follower.proxy_peers.store, &leader.proxy_peers.store),
+        ] {
+            assert_eq!(f.all_revisions().unwrap(), l.all_revisions().unwrap());
+            assert_eq!(f.applied_index().unwrap(), l.applied_index().unwrap());
+        }
+        // Origin entries advance the peers index only; the proxy registry
+        // last absorbed entry 4.
+        assert_eq!(follower.peers.store.applied_index().unwrap(), Some(6));
+        assert_eq!(follower.proxy_peers.store.applied_index().unwrap(), Some(4));
+        assert_eq!(
+            follower.peers.current_entry("b").unwrap(),
+            leader.peers.current_entry("b").unwrap()
+        );
+        assert_eq!(follower.peers.current_for("a").unwrap(), None);
+        assert_eq!(
+            follower.proxy_peers.all_current().unwrap(),
+            leader.proxy_peers.all_current().unwrap()
+        );
+        assert_eq!(
+            follower.book.entries().unwrap(),
+            leader.book.entries().unwrap()
+        );
+        assert_eq!(follower.book.applied_index().unwrap(), Some(6));
+        assert_eq!(
+            follower.book.last_outcome().unwrap(),
+            leader.book.last_outcome().unwrap()
+        );
+        assert_eq!(
+            follower.cluster().network().unwrap(),
+            Some(Some(Network::parse("10.60.0.0/24").unwrap()))
+        );
+
+        // Both continue identically: the next revision is 5 on each.
+        let next = || register_origin(origin("c", None, &[]), NOW + 3);
+        let on_leader = apply_one(&mut leader, 7, next()).await;
+        let on_follower = apply_one(&mut follower, 7, next()).await;
+        assert_eq!(on_leader, on_follower);
+        assert!(matches!(
+            on_follower,
+            WriteResponse::Registered { revision: 5, .. }
+        ));
     }
 }

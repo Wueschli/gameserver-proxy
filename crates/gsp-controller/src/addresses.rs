@@ -269,7 +269,7 @@ pub struct Assignment {
 }
 
 /// An owner and its assignment, as listed by [`AddressBook::entries`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub role: Role,
     pub name: String,
@@ -319,6 +319,10 @@ pub enum Rejection {
     /// is `expand_backends`'s).
     #[error("{0}")]
     BackendHost(String),
+    /// A replicated `SetTunnelNetwork` entry carried a network that does not
+    /// parse (the message is `Network::parse`'s).
+    #[error("invalid tunnel network: {0}")]
+    InvalidNetwork(String),
     /// The replicated registries have not been initialized yet.
     #[error("cluster is initializing its registries")]
     NotInitialized,
@@ -412,6 +416,15 @@ const LAST_OUTCOME: &[u8] = b"last_outcome";
 struct StoredOutcome {
     index: u64,
     outcome: Outcome,
+}
+
+/// The whole book as a Raft snapshot carries it ([`AddressBook::snapshot`],
+/// [`AddressBook::replace`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookSnapshot {
+    pub entries: Vec<Entry>,
+    pub applied_index: Option<u64>,
+    pub last_outcome: Option<(u64, Outcome)>,
 }
 
 /// One write of a book transaction.
@@ -746,6 +759,112 @@ impl AddressBook {
                     .map_err(failure)
             })
             .transpose()
+    }
+
+    /// Records `rejection` as the claim outcome at `index` without evaluating
+    /// anything — a register entry refused before the book was consulted (the
+    /// cluster has no recorded network yet). Writes `applied_index` and
+    /// `last_outcome` only; `AlreadyApplied` when `index` was already applied.
+    pub fn reject_at(&self, rejection: Rejection, index: u64) -> Result<Outcome, StorageFailure> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = Outcome::Rejected(rejection);
+        let bytes = serde_json::to_vec(&StoredOutcome {
+            index,
+            outcome: outcome.clone(),
+        })
+        .map_err(failure)?;
+        match self.commit(&[], Some((index, Some(bytes.as_slice()))))? {
+            Committed::Done => Ok(outcome),
+            Committed::AlreadyApplied => Ok(Outcome::AlreadyApplied),
+        }
+    }
+
+    /// Advances `applied_index` to `index` and writes nothing else — a
+    /// release or touch entry refused before the book was consulted.
+    /// `false` when `index` was already applied.
+    pub fn mark_applied(&self, index: u64) -> Result<bool, StorageFailure> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(self.commit(&[], Some((index, None)))? == Committed::Done)
+    }
+
+    /// An owned copy of the whole book (every entry, `applied_index` and
+    /// `last_outcome`), for a Raft snapshot.
+    pub fn snapshot(&self) -> Result<BookSnapshot, StorageFailure> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(BookSnapshot {
+            entries: self.entries().map_err(|e| StorageFailure(e.to_string()))?,
+            applied_index: self.applied_index()?,
+            last_outcome: self.last_outcome()?,
+        })
+    }
+
+    /// Replaces the whole book by `snapshot` in one transaction across its
+    /// three trees — a Raft snapshot install.
+    pub fn replace(&self, snapshot: &BookSnapshot) -> Result<(), StorageFailure> {
+        use sled::transaction::{ConflictableTransactionError, TransactionError};
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        // `sled` transactions cannot iterate: collect the stale keys first
+        // (the guard keeps every other writer out meanwhile).
+        let keys = |tree: &sled::Tree| {
+            tree.iter()
+                .keys()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)
+        };
+        let (stale_owners, stale_addresses) = (keys(&self.by_owner)?, keys(&self.by_address)?);
+        let mut owners = Vec::with_capacity(snapshot.entries.len());
+        for e in &snapshot.entries {
+            let okey = owner_key(e.role, &e.name);
+            let value = serde_json::to_vec(&e.assignment).map_err(failure)?;
+            owners.push((okey, value, addr_key(e.assignment.address)));
+        }
+        let outcome = snapshot
+            .last_outcome
+            .as_ref()
+            .map(|(index, outcome)| {
+                serde_json::to_vec(&StoredOutcome {
+                    index: *index,
+                    outcome: outcome.clone(),
+                })
+            })
+            .transpose()
+            .map_err(failure)?;
+        let result =
+            (&self.by_owner, &self.by_address, &self.meta).transaction(|(owner, addr, meta)| {
+                for k in &stale_owners {
+                    owner.remove(k)?;
+                }
+                for k in &stale_addresses {
+                    addr.remove(k)?;
+                }
+                for (okey, value, akey) in &owners {
+                    owner.insert(okey.as_slice(), value.as_slice())?;
+                    addr.insert(akey.as_slice(), okey.as_slice())?;
+                }
+                match snapshot.applied_index {
+                    Some(i) => meta.insert(APPLIED_INDEX, &i.to_be_bytes()[..])?,
+                    None => meta.remove(APPLIED_INDEX)?,
+                };
+                match &outcome {
+                    Some(bytes) => meta.insert(LAST_OUTCOME, bytes.as_slice())?,
+                    None => meta.remove(LAST_OUTCOME)?,
+                };
+                Ok::<_, ConflictableTransactionError<std::convert::Infallible>>(())
+            });
+        match result {
+            Ok(()) => {}
+            Err(TransactionError::Storage(e)) => return Err(failure(format!("{e:?}"))),
+            Err(TransactionError::Abort(never)) => match never {},
+        }
+        self.db.flush().map_err(failure)?;
+        Ok(())
+    }
+
+    /// The `meta` tree, for tests that corrupt it to provoke a storage
+    /// failure.
+    #[cfg(test)]
+    pub(crate) fn meta_tree(&self) -> &sled::Tree {
+        &self.meta
     }
 
     fn already_applied(&self, index: Option<u64>) -> Result<bool, StorageFailure> {
@@ -1920,5 +2039,75 @@ mod tests {
         assert_eq!(b.applied_index().unwrap(), Some(4));
         assert_eq!(b.last_outcome().unwrap(), None);
         assert_eq!(b.release_at(Role::Origin, "nobody", 4).unwrap(), None);
+    }
+
+    #[test]
+    fn reject_at_records_the_outcome_and_skips_a_replay() {
+        let (b, _d) = book(None);
+        assert_eq!(
+            b.reject_at(Rejection::NotInitialized, 3).unwrap(),
+            Outcome::Rejected(Rejection::NotInitialized)
+        );
+        assert_eq!(b.applied_index().unwrap(), Some(3));
+        assert_eq!(
+            b.last_outcome().unwrap(),
+            Some((3, Outcome::Rejected(Rejection::NotInitialized)))
+        );
+        assert_eq!(
+            b.reject_at(Rejection::NoNetwork, 3).unwrap(),
+            Outcome::AlreadyApplied
+        );
+        assert!(b.mark_applied(4).unwrap());
+        assert!(!b.mark_applied(4).unwrap());
+        assert_eq!(b.applied_index().unwrap(), Some(4));
+        assert!(b.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replace_installs_a_snapshot_over_a_non_empty_book() {
+        let net = Network::parse("10.60.0.0/24").unwrap();
+        let (src, _s) = book(None);
+        src.claim_at(Role::Origin, "a", None, 7, Some(net), 1)
+            .unwrap();
+        src.claim_at(Role::Proxy, "p", Some(ip("10.60.0.9")), 8, Some(net), 2)
+            .unwrap();
+        let snapshot = src.snapshot().unwrap();
+        assert_eq!(snapshot.entries.len(), 2);
+
+        let (dst, _d) = book(None);
+        dst.claim_at(
+            Role::Origin,
+            "stale",
+            Some(ip("10.60.0.50")),
+            1,
+            Some(net),
+            9,
+        )
+        .unwrap();
+        dst.replace(&snapshot).unwrap();
+        assert_eq!(dst.snapshot().unwrap(), snapshot);
+        assert_eq!(dst.get(Role::Origin, "stale").unwrap(), None);
+        // `by_address` was replaced too: the stale address is free again.
+        assert!(matches!(
+            dst.claim_at(Role::Origin, "x", Some(ip("10.60.0.50")), 1, Some(net), 3)
+                .unwrap(),
+            Outcome::Granted(_)
+        ));
+        assert!(matches!(
+            dst.claim_at(Role::Origin, "y", Some(ip("10.60.0.9")), 1, Some(net), 4)
+                .unwrap(),
+            Outcome::Rejected(Rejection::Held { .. })
+        ));
+
+        // An empty snapshot empties the book and forgets its index.
+        dst.replace(&BookSnapshot {
+            entries: vec![],
+            applied_index: None,
+            last_outcome: None,
+        })
+        .unwrap();
+        assert!(dst.entries().unwrap().is_empty());
+        assert_eq!(dst.applied_index().unwrap(), None);
+        assert_eq!(dst.last_outcome().unwrap(), None);
     }
 }

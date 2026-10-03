@@ -185,8 +185,13 @@ impl<R: Registration> RegistryState<R> {
             .map(|bytes| (revision, decode_registration(&bytes))))
     }
 
-    /// Every name's current registration, in no particular order.
-    fn all_current(&self) -> Result<Vec<R>, StoreError> {
+    /// Whether `name` has a current registration (not removed).
+    pub(crate) fn has_current(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(self.current.contains_key(name.as_bytes())?)
+    }
+
+    /// Every name's current registration, ordered by name.
+    pub(crate) fn all_current(&self) -> Result<Vec<R>, StoreError> {
         let mut out = Vec::new();
         for item in self.current.iter() {
             let (_, rev_bytes) = item?;
@@ -195,6 +200,61 @@ impl<R: Registration> RegistryState<R> {
             }
         }
         Ok(out)
+    }
+}
+
+/// One registry as a Raft snapshot carries it: every revision at its number,
+/// the `current` map and the store's `applied_index`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrySnapshot {
+    pub revisions: Vec<(u64, RevisionBytes)>,
+    /// `name -> latest revision`, ordered by name.
+    pub current: Vec<(String, u64)>,
+    pub applied_index: Option<u64>,
+}
+
+impl<R: Registration> RegistryState<R> {
+    /// An owned copy of the registry for a Raft snapshot. The caller must be
+    /// the only writer (the state-machine worker).
+    pub fn snapshot(&self) -> Result<RegistrySnapshot, StoreError> {
+        let mut current = Vec::new();
+        for item in self.current.iter() {
+            let (name, rev_bytes) = item?;
+            current.push((
+                String::from_utf8_lossy(&name).into_owned(),
+                decode_revision(&rev_bytes),
+            ));
+        }
+        Ok(RegistrySnapshot {
+            revisions: self.store.all_revisions()?,
+            current,
+            applied_index: self.store.applied_index()?,
+        })
+    }
+
+    /// Replaces the log, the `current` map and `applied_index` by `snapshot`
+    /// in one transaction (a Raft snapshot install), then wakes subscribers
+    /// so they re-read from the replaced store.
+    pub fn replace(&self, snapshot: &RegistrySnapshot) -> Result<(), StoreError> {
+        let siblings = snapshot
+            .current
+            .iter()
+            .map(|(name, revision)| SiblingWrite {
+                tree: &self.current,
+                key: name.as_bytes().to_vec(),
+                value: Some(revision.to_be_bytes().to_vec()),
+            })
+            .collect();
+        self.store.replace_all_with(
+            &snapshot.revisions,
+            snapshot.applied_index,
+            &[&self.current],
+            siblings,
+        )?;
+        if let Some((revision, _)) = snapshot.revisions.last() {
+            let _ = self.updates.send(*revision);
+        }
+        Ok(())
     }
 }
 
@@ -589,5 +649,28 @@ mod tests {
         );
         assert_eq!(state.store.applied_index().unwrap(), None);
         assert_eq!(state.current_entry("home").unwrap(), Some((2, reg("home"))));
+    }
+
+    #[test]
+    fn replace_installs_a_snapshot_with_its_revision_numbers() {
+        let (src, _s) = state();
+        src.register_applied(&reg("a"), Some(1)).unwrap();
+        src.register_applied(&reg("b"), Some(2)).unwrap();
+        src.remove_applied("a", Some(3)).unwrap();
+        let snapshot = src.snapshot().unwrap();
+        assert_eq!(snapshot.current, vec![("b".to_string(), 2)]);
+        assert_eq!(snapshot.applied_index, Some(3));
+
+        let (dst, _d) = state();
+        dst.register_applied(&reg("stale"), Some(9)).unwrap();
+        dst.replace(&snapshot).unwrap();
+        assert_eq!(dst.snapshot().unwrap(), snapshot);
+        assert_eq!(dst.current_for("stale").unwrap(), None);
+        assert_eq!(dst.current_entry("b").unwrap(), Some((2, reg("b"))));
+        // The next write continues the log after the installed revisions.
+        assert_eq!(
+            dst.register_applied(&reg("c"), Some(4)).unwrap(),
+            Applied::Written(4)
+        );
     }
 }

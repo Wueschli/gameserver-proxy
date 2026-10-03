@@ -288,6 +288,11 @@ async fn main() -> anyhow::Result<()> {
                 &db,
                 Arc::new(config_state.clone()),
                 Arc::new(intent_state_val.clone()),
+                ha::state_machine::Registries {
+                    peers: Arc::new(peers_state.clone()),
+                    proxy_peers: Arc::new(proxy_peers_state.clone()),
+                    book: book.clone(),
+                },
             )
             .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?,
         );

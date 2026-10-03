@@ -55,7 +55,12 @@ pub async fn propose_write(
 ) -> Response {
     match ha.raft.client_write(req).await {
         Ok(resp) => {
-            let revision = resp.response().revision;
+            // Config, intent and promote entries always answer `Revision`;
+            // registry entries get their own write path (Task 6).
+            let revision = match resp.response() {
+                super::WriteResponse::Revision(r) => *r,
+                _ => None,
+            };
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({ "revision": revision })),
