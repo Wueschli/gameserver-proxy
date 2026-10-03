@@ -18,7 +18,7 @@
 //!
 //! **Removal**: an origin's deletion arrives as a controller tombstone
 //! (`removed`) and removes the matching WireGuard peer; silence alone never
-//! does ("last known good"). Each origin is routed as one `/32` host route to
+//! does ("last known good"). Each origin is routed as one `/32` (or IPv6 `/128`) host route to
 //! its controller-assigned tunnel address. `endpoint` is only ever set when the origin's registration
 //! carries one (i.e. this proxy could dial out); the common case — an
 //! origin behind a home NAT — leaves the peer endpoint-less, and this
@@ -153,7 +153,7 @@ struct PeerRegistration {
 }
 
 /// Builds the WireGuard peer this registration implies: a **host route to the
-/// origin's own tunnel address** (`/32`) — the controller guarantees it is
+/// origin's own tunnel address** (`/32` or `/128`) — the controller guarantees it is
 /// unique and that every backend lives on it — and `endpoint` only when the
 /// registration carries one (the common-case-absent field, not a bug).
 fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
@@ -165,14 +165,15 @@ fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
             reg.name
         )
     })?;
-    let ip: std::net::Ipv4Addr = addr.parse().map_err(|e| {
+    let ip: std::net::IpAddr = addr.parse().map_err(|e| {
         anyhow::anyhow!(
             "origin {:?} tunnel_address {addr:?} is invalid: {e}",
             reg.name
         )
     })?;
     let mut peer = Peer::new(key);
-    peer.set_allowed_ips(vec![IpAddrMask::host(std::net::IpAddr::V4(ip))]);
+    // `/32` for IPv4, `/128` for IPv6.
+    peer.set_allowed_ips(vec![IpAddrMask::host(ip)]);
     if let Some(endpoint) = &reg.endpoint {
         peer.set_endpoint(endpoint).map_err(|e| {
             anyhow::anyhow!(
@@ -457,6 +458,24 @@ mod tests {
         assert_eq!(peer.allowed_ips.len(), 1);
         assert_eq!(peer.allowed_ips[0].cidr, 32);
         assert_eq!(peer.allowed_ips[0].address.to_string(), "10.60.0.5");
+    }
+
+    #[test]
+    fn an_ipv6_origin_is_routed_as_a_slash_128() {
+        let peer = to_wg_peer(&reg(Some("fd49::2"))).unwrap();
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.allowed_ips[0].cidr, 128);
+        assert_eq!(peer.allowed_ips[0].address.to_string(), "fd49::2");
+    }
+
+    #[test]
+    fn an_ipv6_origin_endpoint_is_accepted() {
+        let mut r = reg(Some("fd49::2"));
+        r.endpoint = Some("[2001:db8::7]:51820".into());
+        assert_eq!(
+            to_wg_peer(&r).unwrap().endpoint,
+            Some("[2001:db8::7]:51820".parse().unwrap())
+        );
     }
 
     #[test]

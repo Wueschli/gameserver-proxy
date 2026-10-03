@@ -16,6 +16,24 @@ pub fn ip_of(cidr: &str) -> &str {
     cidr.split_once('/').map(|(ip, _)| ip).unwrap_or(cidr)
 }
 
+/// Parses a bare tunnel IP, IPv4 or IPv6. IPv4-mapped (`::ffff:a.b.c.d`) and
+/// IPv4-compatible (`::a.b.c.d`) IPv6 are refused, as the controller does:
+/// they would make one host two addresses.
+pub fn tunnel_ip(s: &str) -> Result<std::net::IpAddr, String> {
+    let ip: std::net::IpAddr = s
+        .parse()
+        .map_err(|e| format!("{s:?} is not an IP address: {e}"))?;
+    if let std::net::IpAddr::V6(a) = ip {
+        let seg = a.segments();
+        if seg[..5] == [0; 5] && (seg[5] == 0xffff || (seg[5] == 0 && seg[6] != 0)) {
+            return Err(format!(
+                "{s:?} is an IPv4 address written as IPv6: use the IPv4 form"
+            ));
+        }
+    }
+    Ok(ip)
+}
+
 /// The interface address: the assigned IP with the *network's* prefix, or — in
 /// pin-only mode, when the controller reports no network — with the prefix of
 /// the operator's pinned `--address`.
@@ -110,6 +128,27 @@ pub fn resolve_startup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ipv6_interface_address_round_trips_through_the_saved_file() {
+        let cidr = interface_cidr("fd49::5", Some("fd49::/64"), None).unwrap();
+        assert_eq!(cidr, "fd49::5/64");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        save(&path, &cidr).unwrap();
+        assert_eq!(load(&path).as_deref(), Some("fd49::5/64"));
+        let mask: defguard_wireguard_rs::net::IpAddrMask = cidr.parse().unwrap();
+        assert_eq!(mask.cidr, 64);
+    }
+
+    #[test]
+    fn tunnel_ip_accepts_both_families_but_not_ipv4_written_as_ipv6() {
+        assert_eq!(tunnel_ip("10.60.0.5").unwrap().to_string(), "10.60.0.5");
+        assert_eq!(tunnel_ip("fd49:0::5").unwrap().to_string(), "fd49::5");
+        assert!(tunnel_ip("::ffff:10.60.0.5").is_err());
+        assert!(tunnel_ip("::10.60.0.5").is_err());
+        assert!(tunnel_ip("nonsense").is_err());
+    }
 
     fn unreachable() -> Result<Registered, RegisterError> {
         Err(RegisterError::Transient(anyhow::anyhow!(
