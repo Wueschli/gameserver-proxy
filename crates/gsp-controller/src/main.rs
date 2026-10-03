@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
             raft,
             node_id,
             ha_token,
+            forward: ha::client::forward_client(ha::client::FORWARD_TIMEOUT),
         });
         config_state = config_state.with_ha(Some(handle.clone()));
         intent_state_val = intent_state_val.with_ha(Some(handle.clone()));

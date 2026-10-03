@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-03 (TLS handshake flood limits; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
+Last updated: 2026-10-03 (TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
 
 ## Current state
 
@@ -92,6 +92,12 @@ checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
+- HA write-forwarding timeout (2026-10-03): `HaHandle::forward` is one shared client
+  (`ha::client::forward_client`) bounded by `FORWARD_TIMEOUT` (10 s, response body
+  included), so a half-open leader costs the caller a `504` saying the write may still
+  have been applied, instead of hanging the follower's write handler; other forward
+  failures stay `503`. Pinned by `a_hung_leader_times_out_the_forward_instead_of_hanging_the_handler`.
+  `ha/network.rs` now says its client relies on openraft's outer RPC timeouts.
 - `cargo audit` in CI (2026-10-02, owner's request, ADR 28; informational): the `audit` job
   runs on every push/PR and nightly — RustSec advisories for the root, plugins and fuzz
   `Cargo.lock`s, no build needed. `cargo-audit` 0.22.2 comes prebuilt via the pinned
@@ -420,7 +426,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | CI: precise change detection | `.github/scripts/changes.sh` maps paths to CI areas with hand-written regexes, which drift as crates gain dependencies. Deriving the affected binaries from `cargo metadata` (reverse deps of the changed crates) would let jobs run only for what changed — e.g. no release build when only `crates/gsp-ui/web/` changed. Discussed 2026-10-02 against per-container jobs: the five binaries share most of their compile (one `cargo build` links all five), image builds copy prebuilt binaries (seconds), the compose smoke test needs all five together, and per-image Trivy jobs would fetch the ~120 MB DB five times — so five parallel jobs per stage would cost more billed minutes, not fewer. Related: cache the Trivy DB by day (Trivy row). |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
-| HA write forwarding has no timeout (pre-existing; found reviewing the cleanup PR, 2026-10-02) | `ha::client::forward_to_leader` builds a client per forwarded write and sets no request timeout; unlike Raft RPCs (openraft wraps each in heartbeat/vote/snapshot timeouts, so a stuck pooled connection costs one RPC), nothing bounds it, so a half-open leader can hang a follower's write handler indefinitely. Fix: a shared client with `.timeout(..)`. Cleanup-PR minors: say in `ha/network.rs` that the shared client relies on openraft's outer timeouts; `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
+| HA-over-TLS cleanup-PR minors (found reviewing the cleanup PR, 2026-10-02) | `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
 | `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |

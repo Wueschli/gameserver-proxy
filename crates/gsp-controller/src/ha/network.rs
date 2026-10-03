@@ -24,7 +24,9 @@ pub struct Network {
     pub ha_token: Option<std::sync::Arc<str>>,
     /// One client for every peer, so its pool keeps each peer's connection
     /// open between RPCs; a client per RPC would redo the TCP (and, for
-    /// `https://` peers, TLS) handshake on every 250 ms heartbeat.
+    /// `https://` peers, TLS) handshake on every 250 ms heartbeat. It sets
+    /// no timeout of its own: openraft bounds every RPC (heartbeat, vote,
+    /// snapshot) from outside, so a stuck pooled connection costs one RPC.
     client: reqwest::Client,
 }
 
