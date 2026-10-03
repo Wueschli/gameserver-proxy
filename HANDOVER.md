@@ -48,15 +48,14 @@ Open decisions for the owner:
    Kubernetes" (2026-10-02) — the same OCI images already serve both, so this means
    publishing, multi-arch or k8s packaging; which one is still to be clarified.
 3. **Self-hosted CI runner:** decided (2026-10-03): the owner runs CI on his VPS (6 cores,
-   12 GB RAM) after the free 2,000 minutes ran out on 2026-10-03. The workflow is
-   switchable: repository variable `CI_RUNNER` (runner label, e.g. `gsp-ci`) moves every
-   job except `deploy`/`trivy` to the VPS, `CI_RUNNER_TUNNEL` overrides `tunnel` alone, `CI_RUNNER_LIGHT` the light jobs
-   (`changes`, `audit`, `ui`),
-   unset means GitHub-hosted. `deploy`/`trivy` stay hosted (deploy-smoke's fixed compose
-   project, ports and image tags collide on a shared Docker daemon). Setup, sizing (two
-   runner instances, `CARGO_BUILD_JOBS=3`) and security notes:
-   `.github/self-hosted-runner.md`. Not yet verified on the VPS; the 2026-10-01
-   experiment's failing `tunnel (userspace)` leg (see watch-list) is the thing to watch.
+   12 GB RAM) after the free 2,000 minutes ran out on 2026-10-03. Runner per job class
+   comes from repository variables: `CI_RUNNER` (build jobs), `CI_RUNNER_LIGHT`
+   (`changes`, `audit`, `ui`), `CI_RUNNER_DOCKER` (`deploy`/`trivy`, exactly one
+   instance: deploy-smoke's fixed compose project, ports and image tags collide on a
+   shared Docker daemon), `CI_RUNNER_TUNNEL` (`tunnel` override); unset means
+   GitHub-hosted. Setup, sizing and security notes: `.github/self-hosted-runner.md`.
+   Not yet verified on the VPS; the 2026-10-01 experiment's failing `tunnel (userspace)`
+   leg (see watch-list) is the thing to watch.
 
 Never verified outside CI or the original dev sandbox:
 

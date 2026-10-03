@@ -1,14 +1,19 @@
 # Self-hosted CI runner (owner's VPS)
 
-CI runs on GitHub-hosted `ubuntu-24.04` runners unless the repository variable
-`CI_RUNNER` is set (Settings → Secrets and variables → Actions → Variables). Set
-it to the label of the self-hosted runners (`gsp-ci` below) and every job except
-`deploy`/`trivy` runs there; delete it to fall back to hosted runners, e.g. while
-the VPS is down (a self-hosted job otherwise just queues). `CI_RUNNER_TUNNEL`
-overrides the runner for the `tunnel` job alone: `ubuntu-24.04` keeps it hosted.
-`CI_RUNNER_LIGHT` does the same for the light jobs (`changes`, `audit`, `ui`: no
-Rust build).
-Why `deploy`/`trivy` always stay hosted: see the comment above `jobs:` in
+CI runs on GitHub-hosted `ubuntu-24.04` runners unless repository variables say
+otherwise (Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Jobs | Set to |
+|---|---|---|
+| `CI_RUNNER` | build jobs: `test`, `build-release`, `plugins`, `tunnel`, `fuzz` (and the rest, unless overridden) | `gsp-ci` |
+| `CI_RUNNER_LIGHT` | `changes`, `audit`, `ui` (no Rust build) | `gsp-ci-light` |
+| `CI_RUNNER_DOCKER` | `deploy`, `trivy` (need Docker) | `gsp-ci-docker`, a label on exactly **one** instance |
+| `CI_RUNNER_TUNNEL` | `tunnel` only | unset, or `ubuntu-24.04` to keep it hosted |
+
+Unset or `ubuntu-24.04` means GitHub-hosted, which bills minutes. Once the free
+quota is used up, hosted jobs fail without a runner. A self-hosted job just queues
+while the VPS is down; delete the variables to fall back to hosted runners.
+Why `CI_RUNNER_DOCKER` must be one instance: see the comment above `jobs:` in
 `workflows/ci.yml`.
 
 ## Sizing
@@ -22,10 +27,15 @@ a free instance). Add a third build instance only if `free -h` during a full run
 shows headroom.
 
 Light jobs: `changes` gates every other job, so it shouldn't wait behind a build.
-Register one extra instance labelled `gsp-ci-light` (it needs little CPU or RAM)
-and set `CI_RUNNER_LIGHT=gsp-ci-light`. Or set `CI_RUNNER_LIGHT=ubuntu-24.04` to
-keep the light jobs GitHub-hosted: about 1-2 billed minutes per run, well inside
-the free 2,000.
+Register one instance labelled `gsp-ci-light` (little CPU or RAM).
+
+Docker jobs: one instance labelled `gsp-ci-docker`, whose user is in the `docker`
+group. With prebuilt binaries `deploy` only packages images and runs the compose
+smoke test (ports 9900-9903 on 127.0.0.1, `gsp` on the host network), so it is
+light too.
+
+So: four runner users on the VPS, two `gsp-ci`, one `gsp-ci-light`, one
+`gsp-ci-docker`. Idle runners cost nothing.
 
 ## 1. Check the VPS (as root)
 
@@ -43,7 +53,9 @@ The runner users get no sudo, so everything CI would `sudo` is done here.
 
 ```sh
 apt-get update
-apt-get install -y build-essential pkg-config protobuf-compiler python3 git curl make iproute2 util-linux
+apt-get install -y build-essential pkg-config protobuf-compiler python3 git curl make iproute2 util-linux ruby
+# Docker Engine + compose plugin for the gsp-ci-docker instance: https://docs.docker.com/engine/install/
+# then, weekly, drop old image layers: echo '0 4 * * 0 root docker system prune -af' > /etc/cron.d/gsp-ci-docker
 echo wireguard > /etc/modules-load.d/wireguard.conf && modprobe wireguard
 # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor; the tunnel e2e needs them.
 echo 'kernel.apparmor_restrict_unprivileged_userns = 0' > /etc/sysctl.d/60-gsp-ci-userns.conf
@@ -55,7 +67,7 @@ Then check as an unprivileged user: `unshare -Urnm true && echo userns ok`.
 ## 3. Register the runners
 
 GitHub: Settings → Actions → Runners → New self-hosted runner (Linux x64) shows
-the current runner download URL and a registration token. Per instance `N` (1, 2; use `--labels gsp-ci-light` for the light instance):
+the current runner download URL and a registration token. Per instance `N` (1-4; labels `gsp-ci`, `gsp-ci`, `gsp-ci-light`, `gsp-ci-docker`):
 
 ```sh
 useradd -m -s /bin/bash ghaN          # one unprivileged user per instance: own ~/.cargo, ~/.rustup
@@ -66,6 +78,7 @@ mkdir actions-runner && cd actions-runner
   --token <TOKEN> --name vps-N --labels gsp-ci
 echo 'CARGO_BUILD_JOBS=3' >> .env
 exit
+# docker instance only, as root: usermod -aG docker gha4
 cd ~ghaN/actions-runner && ./svc.sh install ghaN && ./svc.sh start   # as root
 ```
 
@@ -74,9 +87,10 @@ A runner left over from the 2026-10-01 experiment can be reused by adding the
 
 ## 4. Switch CI over
 
-Set the repository variable `CI_RUNNER=gsp-ci` (plus `CI_RUNNER_LIGHT`, see
-Sizing), then re-run a workflow. If only
-`tunnel` misbehaves on the VPS, set `CI_RUNNER_TUNNEL=ubuntu-24.04` to keep it hosted.
+Set `CI_RUNNER=gsp-ci`, `CI_RUNNER_LIGHT=gsp-ci-light` and
+`CI_RUNNER_DOCKER=gsp-ci-docker`, then re-run a workflow. If only `tunnel`
+misbehaves on the VPS, set `CI_RUNNER_TUNNEL=ubuntu-24.04` to keep it hosted
+(that needs hosted minutes).
 
 ## Security
 
@@ -85,7 +99,9 @@ Sizing), then re-run a workflow. If only
   ever making the repository public.
 - Every branch's CI code runs as the `ghaN` users, with network access and
   whatever those users can read. Keep production services and secrets off this VPS.
-- No sudo and no `docker` group for the runner users (`docker` is root-equivalent).
+- No sudo for any runner user, and the `docker` group (root-equivalent) only for
+  the one `gsp-ci-docker` user. Any job that lands there is effectively root on
+  the VPS, which is one more reason to keep production off it.
   The workflow's `sudo` steps are skipped (`protoc` already installed) or tolerate
   failing (`sudo -n ... || true`).
 - The runner updates itself; keep the OS patched (`unattended-upgrades`).

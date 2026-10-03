@@ -35,16 +35,19 @@ env:
 # caches stay on one image. Move them together when upgrading.
 #
 # Self-hosted runner (owner's VPS; setup: .github/self-hosted-runner.md): the
-# repository variable CI_RUNNER moves every job but deploy/trivy onto the runners
-# carrying that label (e.g. `gsp-ci`); unset, everything stays GitHub-hosted.
-# CI_RUNNER_TUNNEL overrides it for `tunnel` alone (`ubuntu-24.04` keeps it hosted);
-# CI_RUNNER_LIGHT for the light jobs (changes, audit, ui: no Rust build), so they
-# don't queue behind builds on the heavy runners (`ubuntu-24.04` keeps them hosted,
-# ~1-2 billed minutes per run).
-# deploy/trivy always stay hosted: deploy-smoke uses a fixed compose project,
-# fixed host ports and fixed image tags, so two runs sharing one Docker daemon
-# would tear down each other's stack. The VPS must run glibc <= 2.41 (Ubuntu 24.04
-# or Debian 13), for the same reason build-release is pinned.
+# repository variable CI_RUNNER moves the build jobs onto the runners carrying that
+# label (e.g. `gsp-ci`); unset, everything stays GitHub-hosted. Overrides, each
+# falling back to hosted `ubuntu-24.04` when unset or set to it:
+# - CI_RUNNER_TUNNEL: `tunnel` alone (falls back to CI_RUNNER first).
+# - CI_RUNNER_LIGHT: the light jobs (changes, audit, ui: no Rust build), so they
+#   don't queue behind builds (falls back to CI_RUNNER first).
+# - CI_RUNNER_DOCKER: deploy/trivy. Point it at exactly ONE runner instance:
+#   deploy-smoke uses a fixed compose project, fixed host ports and fixed image
+#   tags, so two deploy jobs on one Docker daemon would tear down each other's
+#   stack; a single instance runs them one at a time. No CI_RUNNER fallback, so
+#   the build runners never need Docker.
+# The VPS must run glibc <= 2.41 (Ubuntu 24.04 or Debian 13), for the same reason
+# build-release is pinned.
 jobs:
   # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
   # Schedule / manual runs, a workflow edit, or a failed diff run everything.
@@ -295,7 +298,7 @@ jobs:
     # 2026-10-02, after green runs on the pinned runners.
     needs: [changes, build-release]
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-24.04   # always GitHub-hosted: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER_DOCKER || 'ubuntu-24.04' }}   # Docker job: see the comment above `jobs:`
     env:
       # Push/PR: images copy the shared release build (fast). Nightly: compile
       # inside Docker, exercising the self-contained builder stage.
@@ -379,7 +382,7 @@ jobs:
     needs: [changes, deploy]
     # Also when deploy failed later on (e.g. the smoke test): the images exist.
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
-    runs-on: ubuntu-24.04   # always GitHub-hosted: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER_DOCKER || 'ubuntu-24.04' }}   # Docker job: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
