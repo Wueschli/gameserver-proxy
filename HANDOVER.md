@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-03 (CI change detection from `cargo metadata`; TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
+Last updated: 2026-10-03 (CI change detection from `cargo metadata`; proxy registrations carry a `boot_id`, so an edge restart no longer leaves the tunnel down ~2.5 min — `docs/11` "Edge restarts"; `gsp --aggregator-admin-url` and a `gsp-agent`-alone CI check; TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
 
 ## Current state
 
@@ -103,6 +103,32 @@ Most recent landings (newest first; full history in `git log`):
   `Cargo.toml`, the toolchain file, `.cargo/`, an unowned path under `crates/` or a failed
   `cargo metadata` (warning annotation) runs everything it could affect. The `changes` job uses
   the runner image's preinstalled cargo (`RUSTUP_TOOLCHAIN=stable`, `--no-deps`: no download).
+- Aggregator admin URL override (2026-10-03): `gsp --aggregator-admin-url <url>`
+  (requires `--aggregator`) replaces the reported `admin_url`
+  (`http(s)://<settings.admin.listen>`), so fan-out reaches a `gsp` behind a
+  container port mapping, NAT or TLS terminator. An `http`/`https` URL, optionally
+  with a path prefix; trailing slashes are trimmed (fan-out appends absolute paths);
+  a bad value fails startup and `--check`. The k8s DaemonSet now reports
+  `http://$(NODE_IP):9900` and the aggregator presents `--instance-token`
+  (secret key `admin-token`, equal to the admin `auth_token`), so fan-out works there;
+  the compose demo still can't fan out (`gsp`'s admin API is on the host loopback).
+  E2E: `aggregator_admin_url.rs` (fan-out goes through a TLS terminator on another
+  port). CI's `test` job also runs `cargo check -p gsp-agent --locked`, the one build
+  of `gsp-http` without its `server` feature.
+- Address authority review minors (2026-10-03): `parse_duration` uses `checked_mul`
+  (an overflowing `--tunnel-stale-after` is an error, not a panic); `--tunnel-network`
+  is capped at a `/16` (`addresses::MIN_PREFIX`) because allocation scans the pool
+  under the book's mutex; `408`/`429` on registration are transient (retried, then the
+  saved-address fallback) on both `gsp-agent` and `gsp --tunnel-*`; the fallback logs
+  the last error and warns when a pinned `--address`/`--tunnel-address` differs from the
+  saved address it loses to; `warn_stale` logs a storage error instead of staying silent.
+- gsp-ui tunnel addresses page (2026-10-03): `gsp-ui` proxies the controller's
+  `GET /tunnel/addresses` as `GET /api/tunnel/addresses` (viewer role, the same
+  `--controller-url`/`--controller-token` as the config API) and the frontend shows it
+  on a read-only Tunnel addresses page: network and usage, one row per owner with
+  address, role, first/last seen and a stale badge, plus how to free a stale address.
+  Tests: `controller_proxy` `tunnel_addresses_proxies_to_the_controller_with_the_token`,
+  the `header_contract` table, `TunnelAddressesPage.test.tsx`.
 - HA write-forwarding timeout (2026-10-03): `HaHandle::forward` is one shared client
   (`ha::client::forward_client`) bounded by `FORWARD_TIMEOUT` (10 s, response body
   included), so a half-open leader costs the caller a `504` saying the write may still
@@ -410,8 +436,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   **12 scenarios** (namespace helpers, TCP/UDP round trip, stays-up-across-re-registrations,
   a proxy added later, **two proxies sharing one origin**, a pinned-key mismatch, a pinned
   address collision, an edge restart keeping its address, an edge restarting with the
-  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (the
-  kernel edge-restart scenario alone waits up to 200 s). Run it with
+  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (measured
+  before the 2026-10-03 boot id fix removed the kernel edge-restart scenario's 200 s
+  wait; expect that leg to be ~2.5 min shorter now). Run it with
   `TUNNEL_BACKEND=kernel|userspace make tunnel-e2e` (plain `cargo test`) or
   `make tunnel-e2e-ci` (nextest + JUnit; needs `cargo install cargo-nextest --locked`). Needs `unshare`, `ip`,
   `nsenter`; the userspace backend also needs `/run/wireguard`
@@ -428,10 +455,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 
 | Item | Notes |
 |------|-------|
-| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
-| Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
-| Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
-| Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. CI never builds `gsp-http` with `--no-default-features` (a `cargo check -p gsp-agent` step would). Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
+| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); releasing an address **from gsp-ui** (its Tunnel addresses page is read-only; release is the registry `DELETE`); **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
+| Address authority — deferred review minors (the rest were fixed 2026-10-03) | `check_pin` treats an unparseable holder as free; stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
+| Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
 | Trivy scan — follow-ups | (1) GitHub's Security tab ("code scanning") would show the SARIF natively, but this repo is private, so uploads need GitHub Code Security (paid); with it, add `github/codeql-action/upload-sarif` (permission `security-events: write`) over `target/trivy/*.sarif`. (2) For Rust crates Trivy sees GHSA advisories only (RustSec-only ones such as the 2026-10-01 rustls/wasmtime fixes are missed, and many crate advisories are MEDIUM) — `cargo audit` (the `audit` job) is the real check. (3) `cargo auditable` builds would let the image scan see the crates itself. (4) The vulnerability DB (~120 MB, `mirror.gcr.io` with a `ghcr.io` fallback) is fetched each run — cache it by day. (5) The pinned hash stops a later swap but can't prove 0.75.0 was clean when pinned; verifying the release's cosign/sigstore bundle would. (6) `package-lock.json` scanning includes build-only `dependencies` (tailwind, vite via `@tailwindcss/vite`), so a dev-server CVE there would be a false positive. (7) Cosmetic: `trivy convert --format table` in `scan-images.sh` logs "No enabled scanners found" and prints no table to the job log (seen on the first CI run, 2026-10-02); the run-summary table and the reports are unaffected — pass the scanners to `convert` or drop the log table. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. Owner (2026-10-02): images should be built "for both Docker and Kubernetes" — not yet specified whether that means publishing, multi-arch or k8s packaging (Helm/Kustomize); ask. Once images are published, per-image CI jobs make sense (each versioned, rebuilt and pushed only when its inputs change); before that they don't — see the CI-cost row. |
 | CI change detection — residuals (2026-10-03) | `changes.py` treats any root `Cargo.lock` change as touching every root-workspace member; diffing the lockfile and walking its reverse-dependency graph would skip jobs on bumps that only reach e.g. `gsp-bench`, but nearly every real bump reaches `gsp` anyway. `deploy` still runs only for its own paths and the lockfile, not for binary source changes (unchanged; nightly covers code-driven breakage). Cross-crate file reads (`include_bytes!`, fixtures) are invisible to `cargo metadata` — today only `gsp-fleet-tests` → `gsp-http`'s fixtures, already covered. Per-container jobs were discussed 2026-10-02 and rejected: the five binaries share most of their compile, the compose smoke needs all five, and per-image Trivy jobs would fetch the ~120 MB DB five times. Related: cache the Trivy DB by day (Trivy row). |
@@ -439,7 +465,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
 | HA-over-TLS cleanup-PR minors (found reviewing the cleanup PR, 2026-10-02) | `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
 | `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
-| `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |

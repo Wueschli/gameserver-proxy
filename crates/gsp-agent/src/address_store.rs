@@ -54,7 +54,13 @@ pub fn save(path: &Path, cidr: &str) -> anyhow::Result<()> {
 #[derive(Debug)]
 pub enum Source {
     Controller,
-    Saved,
+    /// The controller could not be reached; `cause` is the last transient
+    /// error, and `pin_ignored` says so when a pinned `--address` differs from the
+    /// saved address it lost to.
+    Saved {
+        cause: String,
+        pin_ignored: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -82,13 +88,55 @@ pub fn resolve_startup(
         }
         Err(e) => match saved {
             Some(cidr) => Ok(StartupAddress {
+                source: Source::Saved {
+                    cause: format!("{e:#}"),
+                    pin_ignored: pinned_cidr.filter(|p| ip_of(p) != ip_of(&cidr)).map(|p| {
+                        format!(
+                            "--address {p} differs from the saved tunnel address {cidr}; \
+                                 keeping {cidr} — restart once the controller is reachable to apply the pin"
+                        )
+                    }),
+                },
                 cidr,
-                source: Source::Saved,
             }),
             None => Err(anyhow::Error::new(e).context(
                 "could not register with the controller and there is no saved tunnel address \
                  to fall back on",
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unreachable() -> Result<Registered, RegisterError> {
+        Err(RegisterError::Transient(anyhow::anyhow!(
+            "connection refused"
+        )))
+    }
+
+    #[test]
+    fn a_fallback_carries_the_last_error_and_reports_an_overridden_pin() {
+        let s = resolve_startup(unreachable(), None, Some("10.60.0.5/16".into())).unwrap();
+        let Source::Saved { cause, pin_ignored } = s.source else {
+            panic!("expected Saved");
+        };
+        assert!(cause.contains("connection refused"), "{cause}");
+        assert_eq!(pin_ignored, None);
+
+        let s = resolve_startup(
+            unreachable(),
+            Some("10.60.0.7/16"),
+            Some("10.60.0.5/16".into()),
+        )
+        .unwrap();
+        assert_eq!(s.cidr, "10.60.0.5/16");
+        let Source::Saved { pin_ignored, .. } = s.source else {
+            panic!("expected Saved");
+        };
+        let msg = pin_ignored.expect("a changed pin must be reported");
+        assert!(msg.contains("--address 10.60.0.7/16"), "{msg}");
     }
 }

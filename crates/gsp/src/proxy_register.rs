@@ -21,6 +21,7 @@ struct ProxyRegistration<'a> {
     endpoint: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tunnel_address: Option<&'a str>,
+    boot_id: &'a str,
 }
 
 /// What the controller answers to a successful `POST /proxy-peers`.
@@ -41,6 +42,19 @@ pub struct Registration {
     pub endpoint: String,
     /// A pinned tunnel address (bare IP); `None` asks the controller to allocate.
     pub address: Option<String>,
+    /// [`new_boot_id`], once per process: lets every origin's `gsp-agent`
+    /// tell a restart from a routine re-registration.
+    pub boot_id: String,
+}
+
+/// A fresh random id for this process start (128 bits, hex). A restarted
+/// proxy has a new WireGuard interface but no endpoint for any origin, so it
+/// cannot re-handshake by itself, and an agent whose kernel still holds the
+/// old session would wait for the 120 s rekey. A changed boot id is what
+/// makes the agent re-set the peer instead (`gsp-agent`'s `proxy_subscribe`).
+pub fn new_boot_id() -> String {
+    let bytes: [u8; 16] = rand::random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn body(reg: &Registration) -> ProxyRegistration<'_> {
@@ -49,12 +63,14 @@ fn body(reg: &Registration) -> ProxyRegistration<'_> {
         pubkey: &reg.pubkey,
         endpoint: &reg.endpoint,
         tunnel_address: reg.address.as_deref(),
+        boot_id: &reg.boot_id,
     }
 }
 
 #[derive(Debug)]
 pub enum RegisterError {
-    /// The controller understood and refused (4xx): retrying cannot help.
+    /// The controller understood and refused (4xx other than 408/429):
+    /// retrying cannot help.
     Rejected(String),
     /// Transport trouble or a 5xx: worth retrying.
     Transient(anyhow::Error),
@@ -109,7 +125,10 @@ pub async fn register_once(
     }
     let text = resp.text().await.unwrap_or_default();
     let msg = format!("controller rejected proxy registration ({status}): {text}");
-    if status.is_client_error() {
+    // 408 and 429 are "not now", not "never": retry them like a 5xx.
+    let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    if status.is_client_error() && !retryable {
         Err(RegisterError::Rejected(msg))
     } else {
         Err(RegisterError::Transient(anyhow::anyhow!(msg)))
@@ -117,7 +136,7 @@ pub async fn register_once(
 }
 
 /// Retries transient failures with backoff until `budget` runs out; a
-/// rejection (4xx) returns immediately.
+/// rejection (4xx other than 408/429) returns immediately.
 pub async fn register_with_retry(
     client: &reqwest::Client,
     controller_url: &str,
@@ -201,7 +220,26 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
             address: None,
+            boot_id: "0123456789abcdef0123456789abcdef".into(),
         }
+    }
+
+    #[test]
+    fn the_boot_id_is_sent_with_every_registration() {
+        let json = serde_json::to_string(&body(&reg())).unwrap();
+        assert!(
+            json.contains("\"boot_id\":\"0123456789abcdef0123456789abcdef\""),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn each_process_start_gets_a_fresh_boot_id() {
+        let a = new_boot_id();
+        let b = new_boot_id();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
     }
 
     #[test]
@@ -286,6 +324,19 @@ mod tests {
             register_once(&reqwest::Client::new(), "http://127.0.0.1:1", None, &reg()).await,
             Err(RegisterError::Transient(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_408_or_429_is_transient_not_a_rejection() {
+        for status in ["408 Request Timeout", "429 Too Many Requests"] {
+            let url = canned(status, r#"{"error":"slow down"}"#).await;
+            match register_once(&reqwest::Client::new(), &url, None, &reg()).await {
+                Err(RegisterError::Transient(e)) => {
+                    assert!(format!("{e:#}").contains("slow down"), "{e:#}")
+                }
+                other => panic!("{status}: expected Transient, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

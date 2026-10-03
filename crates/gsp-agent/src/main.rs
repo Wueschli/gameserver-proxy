@@ -184,10 +184,19 @@ async fn main() -> anyhow::Result<()> {
         address_store::resolve_startup(outcome, pinned_cidr, address_store::load(&addr_path))?;
     match start.source {
         address_store::Source::Controller => address_store::save(&addr_path, &start.cidr)?,
-        address_store::Source::Saved => tracing::warn!(
-            address = %start.cidr,
-            "controller unreachable; starting with the last saved tunnel address"
-        ),
+        address_store::Source::Saved {
+            ref cause,
+            ref pin_ignored,
+        } => {
+            tracing::warn!(
+                address = %start.cidr,
+                error = %cause,
+                "controller unreachable; starting with the last saved tunnel address"
+            );
+            if let Some(msg) = pin_ignored {
+                tracing::warn!("{msg}");
+            }
+        }
     }
     tracing::info!(address = %start.cidr, "tunnel address ready");
     let address: IpAddrMask = start.cidr.parse().map_err(|e| {

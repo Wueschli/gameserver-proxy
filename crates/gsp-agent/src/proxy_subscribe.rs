@@ -44,6 +44,15 @@ struct ProxyRegistration {
     endpoint: String,
     #[serde(default)]
     tunnel_address: Option<String>,
+    /// Changes on every proxy restart. Part of the equality [`plan`] checks,
+    /// so a restarted proxy is reconciled (peer removed and re-added) even
+    /// when nothing else about it changed: that drops the WireGuard session
+    /// the restarted proxy no longer has, and the re-added peer's persistent
+    /// keepalive starts a fresh handshake at once. Without it the kernel
+    /// backend kept the dead session until its 120 s rekey (~2.5 min outage).
+    /// `None` from a proxy or controller that predates it.
+    #[serde(default)]
+    boot_id: Option<String>,
 }
 
 /// Builds the WireGuard peer this registration implies: a **host route to the
@@ -279,6 +288,38 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
             tunnel_address: addr.map(str::to_string),
+            boot_id: Some("boot-1".into()),
+        }
+    }
+
+    #[test]
+    fn a_restarted_proxy_is_reconciled_even_when_nothing_else_changed() {
+        // Kernel WireGuard keeps the old session to a restarted edge, which
+        // has no endpoint for this origin and so cannot re-handshake itself:
+        // a new boot id must re-set the peer (dropping that session).
+        let mut applied = HashMap::new();
+        let before = reg(Some("10.60.0.3"));
+        applied.insert(before.name.clone(), before.clone());
+        let mut after = before.clone();
+        after.boot_id = Some("boot-2".into());
+        assert_eq!(
+            plan(&applied, &Event::Registered(after.clone())),
+            Action::Reconcile(&after)
+        );
+    }
+
+    #[test]
+    fn a_registration_without_a_boot_id_still_parses() {
+        // From a controller or an edge that predates boot ids.
+        let event = r#"data: {"revision":1,"registration":{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820","tunnel_address":"10.60.0.3"}}"#;
+        match parse_sse_event(event).unwrap() {
+            Event::Registered(r) => assert_eq!(r.boot_id, None),
+            other => panic!("{other:?}"),
+        }
+        let with = r#"data: {"revision":2,"registration":{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820","tunnel_address":"10.60.0.3","boot_id":"abc"}}"#;
+        match parse_sse_event(with).unwrap() {
+            Event::Registered(r) => assert_eq!(r.boot_id.as_deref(), Some("abc")),
+            other => panic!("{other:?}"),
         }
     }
 

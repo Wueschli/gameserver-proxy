@@ -340,7 +340,12 @@ async fn a_pinned_address_collision_is_refused() -> Result<()> {
 }
 
 /// Scenario 7 — an edge that restarts keeps its tunnel address (the
-/// controller's allocation is sticky) and traffic recovers.
+/// controller's allocation is sticky) and traffic recovers within the
+/// backend's normal deadline. The restarted edge has no endpoint for the
+/// origin, so only the agent can re-handshake; its kernel session to the old
+/// edge still looked valid, so recovery used to wait for WireGuard's 120 s
+/// rekey (~150 s measured). The edge's new boot id now makes the agent re-set
+/// the peer, which drops that session and handshakes at once.
 #[tokio::test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
 async fn an_edge_restart_keeps_its_address() -> Result<()> {
@@ -352,7 +357,7 @@ async fn an_edge_restart_keeps_its_address() -> Result<()> {
     let before = t.proxy_address("edge-1").await?;
 
     t.restart_edge(edge).await?;
-    t.wait_roundtrip_after_restart(edge).await?;
+    t.wait_roundtrip(edge).await?;
     assert_eq!(t.proxy_address("edge-1").await?, before);
     t.pass();
     Ok(())

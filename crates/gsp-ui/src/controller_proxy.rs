@@ -1,5 +1,6 @@
 //! Proxies `gsp-controller`'s config API — `GET`/`POST /config`, revision
-//! history/diff, rollback, promote — to the browser, via
+//! history/diff, rollback, promote — and its read-only tunnel address table
+//! (`GET /tunnel/addresses`, `docs/11` "Address authority") to the browser, via
 //! `--controller-url`/`--controller-token`. Same shape as
 //! `crate::aggregator_proxy`: thin, stateless, the browser's session cookie
 //! never becomes a bearer token, `gsp-ui` holds the controller's own
@@ -33,6 +34,7 @@ pub fn viewer_router() -> Router<AppState> {
         .route("/api/config/revisions", get(list_revisions))
         .route("/api/config/revisions/{revision}", get(get_revision))
         .route("/api/config/revisions/{revision}/diff", get(diff_revision))
+        .route("/api/tunnel/addresses", get(tunnel_addresses))
 }
 
 /// Config-changing writes — `Role::Admin`.
@@ -45,6 +47,17 @@ pub fn admin_router() -> Router<AppState> {
 
 async fn get_config(State(state): State<AppState>) -> Response {
     proxy(&state, Method::GET, "/config".to_string(), None, None).await
+}
+
+async fn tunnel_addresses(State(state): State<AppState>) -> Response {
+    proxy(
+        &state,
+        Method::GET,
+        "/tunnel/addresses".to_string(),
+        None,
+        None,
+    )
+    .await
 }
 
 async fn submit_config(
@@ -319,6 +332,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tunnel_addresses_proxies_to_the_controller_with_the_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = Router::new().route(
+            "/tunnel/addresses",
+            get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(
+                    headers.get(axum::http::header::AUTHORIZATION).unwrap(),
+                    "Bearer ctl-token"
+                );
+                r#"{"network":"10.200.0.0/24","allocated":0,"capacity":254,"entries":[]}"#
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let app = app_with_controller(format!("http://{addr}"), Some("ctl-token".into()));
+        let resp = app
+            .oneshot(
+                Request::get("/api/tunnel/addresses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("10.200.0.0/24"));
     }
 
     #[tokio::test]

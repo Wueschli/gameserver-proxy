@@ -50,7 +50,17 @@ pub struct ProxyRegistration {
     /// be allocated one, or give one to claim it); always set once stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_address: Option<String>,
+    /// A fresh random id per proxy process start. Stored and re-broadcast
+    /// as-is: a changed value tells every `gsp-agent` the proxy restarted,
+    /// so it re-sets the peer and drops a WireGuard session the restarted
+    /// proxy no longer has (see `gsp-agent`'s `proxy_subscribe`). Optional so
+    /// proxies and log entries from before it existed still work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
 }
+
+/// Upper bound on a `boot_id`'s length — an opaque token, never a payload.
+const BOOT_ID_MAX: usize = 64;
 
 impl ProxyRegistration {
     /// The address this registration asks for, if it names one.
@@ -78,6 +88,16 @@ impl ProxyRegistration {
                 return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
             }
         }
+        if let Some(b) = &self.boot_id {
+            let well_formed = !b.is_empty()
+                && b.len() <= BOOT_ID_MAX
+                && b.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+            if !well_formed {
+                return Err(format!(
+                    "boot_id must be 1-{BOOT_ID_MAX} ASCII letters, digits or '-'"
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -92,6 +112,28 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
             tunnel_address: None,
+            boot_id: None,
+        }
+    }
+
+    #[test]
+    fn a_boot_id_round_trips_and_is_omitted_when_absent() {
+        let json = serde_json::to_string(&valid()).unwrap();
+        assert!(!json.contains("boot_id"), "{json}");
+        let mut reg = valid();
+        reg.boot_id = Some("0123456789abcdef0123456789abcdef".into());
+        assert!(reg.validate().is_ok());
+        let back: ProxyRegistration =
+            serde_json::from_str(&serde_json::to_string(&reg).unwrap()).unwrap();
+        assert_eq!(back, reg);
+    }
+
+    #[test]
+    fn a_malformed_boot_id_fails_validation() {
+        let mut reg = valid();
+        for bad in ["", "has space", &"a".repeat(65)] {
+            reg.boot_id = Some(bad.to_string());
+            assert!(reg.validate().is_err(), "{bad:?} must be refused");
         }
     }
 
@@ -117,6 +159,7 @@ mod tests {
         let old = r#"{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820"}"#;
         let reg: ProxyRegistration = serde_json::from_str(old).unwrap();
         assert_eq!(reg.tunnel_address, None);
+        assert_eq!(reg.boot_id, None);
     }
 
     #[test]
