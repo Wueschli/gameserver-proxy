@@ -6,6 +6,8 @@ it to the label of the self-hosted runners (`gsp-ci` below) and every job except
 `deploy`/`trivy` runs there; delete it to fall back to hosted runners, e.g. while
 the VPS is down (a self-hosted job otherwise just queues). `CI_RUNNER_TUNNEL`
 overrides the runner for the `tunnel` job alone: `ubuntu-24.04` keeps it hosted.
+`CI_RUNNER_LIGHT` does the same for the light jobs (`changes`, `audit`, `ui`: no
+Rust build).
 Why `deploy`/`trivy` always stay hosted: see the comment above `jobs:` in
 `workflows/ci.yml`.
 
@@ -16,8 +18,14 @@ One runner instance runs one job at a time. A hosted runner for a private repo i
 12 GB VPS, start with **two instances** and `CARGO_BUILD_JOBS=3` each, plus a few
 GB of swap: two release-profile Rust builds side by side is what fits in 12 GB.
 Expect a PR run to take longer end to end than on hosted runners (jobs queue for
-a free instance). Add a third instance only if `free -h` during a full run shows
-headroom.
+a free instance). Add a third build instance only if `free -h` during a full run
+shows headroom.
+
+Light jobs: `changes` gates every other job, so it shouldn't wait behind a build.
+Register one extra instance labelled `gsp-ci-light` (it needs little CPU or RAM)
+and set `CI_RUNNER_LIGHT=gsp-ci-light`. Or set `CI_RUNNER_LIGHT=ubuntu-24.04` to
+keep the light jobs GitHub-hosted: about 1-2 billed minutes per run, well inside
+the free 2,000.
 
 ## 1. Check the VPS (as root)
 
@@ -47,7 +55,7 @@ Then check as an unprivileged user: `unshare -Urnm true && echo userns ok`.
 ## 3. Register the runners
 
 GitHub: Settings → Actions → Runners → New self-hosted runner (Linux x64) shows
-the current runner download URL and a registration token. Per instance `N` (1, 2):
+the current runner download URL and a registration token. Per instance `N` (1, 2; use `--labels gsp-ci-light` for the light instance):
 
 ```sh
 useradd -m -s /bin/bash ghaN          # one unprivileged user per instance: own ~/.cargo, ~/.rustup
@@ -66,7 +74,8 @@ A runner left over from the 2026-10-01 experiment can be reused by adding the
 
 ## 4. Switch CI over
 
-Set the repository variable `CI_RUNNER=gsp-ci`, then re-run a workflow. If only
+Set the repository variable `CI_RUNNER=gsp-ci` (plus `CI_RUNNER_LIGHT`, see
+Sizing), then re-run a workflow. If only
 `tunnel` misbehaves on the VPS, set `CI_RUNNER_TUNNEL=ubuntu-24.04` to keep it hosted.
 
 ## Security

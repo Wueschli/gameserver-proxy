@@ -50,7 +50,8 @@ Open decisions for the owner:
 3. **Self-hosted CI runner:** decided (2026-10-03): the owner runs CI on his VPS (6 cores,
    12 GB RAM) after the free 2,000 minutes ran out on 2026-10-03. The workflow is
    switchable: repository variable `CI_RUNNER` (runner label, e.g. `gsp-ci`) moves every
-   job except `deploy`/`trivy` to the VPS, `CI_RUNNER_TUNNEL` overrides `tunnel` alone,
+   job except `deploy`/`trivy` to the VPS, `CI_RUNNER_TUNNEL` overrides `tunnel` alone, `CI_RUNNER_LIGHT` the light jobs
+   (`changes`, `audit`, `ui`),
    unset means GitHub-hosted. `deploy`/`trivy` stay hosted (deploy-smoke's fixed compose
    project, ports and image tags collide on a shared Docker daemon). Setup, sizing (two
    runner instances, `CARGO_BUILD_JOBS=3`) and security notes:
