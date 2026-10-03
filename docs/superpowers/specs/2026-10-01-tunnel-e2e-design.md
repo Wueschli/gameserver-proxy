@@ -1,6 +1,6 @@
 # Phase 14 tunnel end-to-end test (rootless, network namespaces)
 
-Status: **design — awaiting review.** Part 1 of the post-CI-stabilization
+Status: **implemented** (plan: `docs/superpowers/plans/2026-10-01-tunnel-e2e.md`, all steps done; run with `make tunnel-e2e`). Part 1 of the post-CI-stabilization
 "phase 14 hardening" work; parts 2–4 (deployment packaging, controller-behind-TLS
 docs, tunnel address authority) get their own specs.
 
