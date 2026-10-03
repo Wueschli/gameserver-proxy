@@ -196,7 +196,7 @@ client from `crates/gsp/proto/resolver.proto`.
 6. **All metric names go in `crates/gsp-core/src/metrics_defs.rs`** as `pub const`,
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
-7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_yaml` +
+7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_norway` +
    `thiserror`.
    `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`

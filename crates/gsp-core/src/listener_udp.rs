@@ -173,6 +173,9 @@ pub async fn run_udp_listener(
     let mut wheel = IdleWheel::new();
     let mut wheel_tick = interval(WHEEL_TICK);
     wheel_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Resolve the per-batch counter once: a registry lookup plus a `String`
+    // clone per received batch is pure overhead on the hot path.
+    let packets_c2s = metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s");
 
     // Once set (by the shutdown signal), no new sessions are opened; the task
     // keeps pumping existing sessions until they idle out, then returns. The
@@ -210,8 +213,7 @@ pub async fn run_udp_listener(
                     }
                 };
                 if count > 0 {
-                    metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s")
-                        .increment(count as u64);
+                    packets_c2s.increment(count as u64);
                 }
                 // One `recvmmsg` (Linux) pulled up to `RECV_BATCH` datagrams;
                 // route / forward each. `continue` skips to the next datagram.
@@ -905,6 +907,9 @@ fn spawn_reply(
     tokio::spawn(async move {
         let out = reply_sock.as_deref().unwrap_or(down.as_ref());
         let mut buf = vec![0u8; MAX_DATAGRAM];
+        // Once per session, not per reply packet.
+        let packets_s2c =
+            metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c");
         loop {
             match up.recv(&mut buf).await {
                 Ok(n) => {
@@ -918,8 +923,7 @@ fn spawn_reply(
                         tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
                         return;
                     }
-                    metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c")
-                        .increment(1);
+                    packets_s2c.increment(1);
                 }
                 Err(e) => {
                     note_port_unreachable(&listener, &health, &e);

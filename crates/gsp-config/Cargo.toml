@@ -7,5 +7,5 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_yaml.workspace = true
+serde_norway.workspace = true
 thiserror.workspace = true

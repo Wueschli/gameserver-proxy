@@ -25,7 +25,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     #[error("failed to parse YAML: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] serde_norway::Error),
     #[error("invalid configuration: {0}")]
     Invalid(String),
 }
@@ -320,7 +320,7 @@ fn default_source_refresh_sec() -> u64 {
 
 /// Minimal standard-alphabet base64 decoder, just enough to validate a
 /// WireGuard key (32 bytes, i.e. exactly 44 chars with one trailing `=`).
-/// `gsp-config` may only depend on `serde`/`serde_yaml`/`thiserror` (see
+/// `gsp-config` may only depend on `serde`/`serde_norway`/`thiserror` (see
 /// AGENTS.md's crate-boundary rule), so this doesn't pull in a `base64` crate
 /// for one validation check. `pub` (not just used by this crate's own
 /// `validate()`) so `gsp-controller`'s phase 14 backend-peers registry
@@ -1578,7 +1578,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
 /// Parse and validate a config from a YAML string.
 pub fn parse_str(text: &str) -> Result<Config, ConfigError> {
-    let raw: RawConfig = serde_yaml::from_str(text)?;
+    let raw: RawConfig = serde_norway::from_str(text)?;
     validate(raw)
 }
 
