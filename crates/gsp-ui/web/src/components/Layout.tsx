@@ -6,6 +6,7 @@ const NAV = [
   { to: "/settings", label: "Settings" },
   { to: "/plugins", label: "Plugins" },
   { to: "/config-history", label: "Config history" },
+  { to: "/tunnel", label: "Tunnel addresses" },
 ];
 
 export function Layout({ onLoggedOut }: { onLoggedOut: () => void }) {

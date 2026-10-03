@@ -213,10 +213,12 @@ mis-chooses) one. Design and decisions:
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
   (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
+  `gsp-ui` shows the same table, read-only, on its Tunnel addresses page
+  (`GET /api/tunnel/addresses`, proxied with `--controller-url`/`--controller-token`).
 - **Limits.** `--tunnel-network` is not combinable with `--ha-peers`. Pin-only mode
   (no network) is allowed under `--ha-peers`, but each controller node keeps its own
   unreplicated address book, so pin uniqueness is enforced per node only (the controller
-  logs a startup warning); point all origins and proxies at one node. IPv6, lease expiry, a UI view and
+  logs a startup warning); point all origins and proxies at one node. IPv6, lease expiry and
   live address changes are future work (HANDOVER "Known follow-ups").
 
 ## Open questions

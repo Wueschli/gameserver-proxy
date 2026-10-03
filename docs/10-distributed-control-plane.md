@@ -935,7 +935,8 @@ in `IngestPayload`, unrelated to the Tier-1/Tier-2 hierarchy above), a
 schema-driven settings form over the same submitted YAML text (a raw-YAML
 panel stays underneath so every field — including ones the form has no
 control for yet — is always reachable), and a Plugins page for managing
-sniffer modules. Plugin management needed new backend surface: `gsp` gained
+sniffer modules. (Later, 2026-10-03: a read-only Tunnel addresses page over
+the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Plugin management needed new backend surface: `gsp` gained
 `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into
 `settings.sniffers.dir`, then reuses the existing live rescan-on-reload
 mechanism — no new hot-reload path), fanned out fleet-wide via
