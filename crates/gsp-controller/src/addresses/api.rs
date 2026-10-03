@@ -13,7 +13,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::{is_stale, now_secs, AddressBook, ClaimError, Rejection};
+use super::{is_stale, now_secs, AddressBook, ClaimError, Network, Rejection};
+use crate::ha::cluster_state::ClusterState;
 
 #[derive(Clone)]
 pub struct AddressesState {
@@ -21,6 +22,9 @@ pub struct AddressesState {
     /// Same posture as the registries: `None` leaves the API open.
     auth_token: Option<Arc<str>>,
     stale_after: Duration,
+    /// Under HA the network is the one the cluster recorded, not the book's
+    /// (the state machine hands the book the network with each entry).
+    cluster: Option<Arc<ClusterState>>,
 }
 
 impl AddressesState {
@@ -29,6 +33,20 @@ impl AddressesState {
             book,
             auth_token: auth_token.map(Arc::from),
             stale_after,
+            cluster: None,
+        }
+    }
+
+    /// Reports the cluster's recorded network instead of the book's own.
+    pub fn with_cluster(mut self, cluster: Arc<ClusterState>) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+
+    fn network(&self) -> Option<Network> {
+        match &self.cluster {
+            Some(cluster) => cluster.network().ok().flatten().flatten(),
+            None => self.book.network(),
         }
     }
 }
@@ -65,7 +83,8 @@ struct ErrorBody {
 }
 
 /// `409` address held / owner has a different one, `422` invalid address, no
-/// network configured or backends off the claimed address, `503` network
+/// network configured, backends off the claimed address or an unparsable
+/// replicated network, `503` network
 /// exhausted, book full or registries still initializing, `500` storage.
 pub fn claim_error_response(e: &ClaimError) -> Response {
     let status = match e {
@@ -74,7 +93,8 @@ pub fn claim_error_response(e: &ClaimError) -> Response {
             Rejection::OutsideNetwork { .. }
             | Rejection::NotHost(_)
             | Rejection::NoNetwork
-            | Rejection::BackendHost(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | Rejection::BackendHost(_)
+            | Rejection::InvalidNetwork(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Rejection::Exhausted { .. } | Rejection::Full { .. } | Rejection::NotInitialized => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -114,10 +134,11 @@ async fn list(State(state): State<AddressesState>) -> Response {
         Err(e) => return claim_error_response(&e),
     };
     let now = now_secs();
+    let network = state.network();
     let out = ListOut {
-        network: state.book.network().map(|n| n.to_string()),
+        network: network.map(|n| n.to_string()),
         allocated: entries.len(),
-        capacity: state.book.network().map(|n| n.capacity()),
+        capacity: network.map(|n| n.capacity()),
         entries: entries
             .into_iter()
             .map(|e| EntryOut {
@@ -133,41 +154,74 @@ async fn list(State(state): State<AddressesState>) -> Response {
     Json(out).into_response()
 }
 
-/// Logs one `WARN` naming up to ten stale owners; returns how many there are.
-pub fn warn_stale(book: &AddressBook, stale_after: Duration, now: u64) -> usize {
+/// The `role/name (address)` of every owner not re-registered for over
+/// `stale_after`.
+fn stale_owners(book: &AddressBook, stale_after: Duration, now: u64) -> Vec<String> {
     let entries = match book.entries() {
         Ok(entries) => entries,
         Err(e) => {
             tracing::warn!(error = %e, "could not read the tunnel address book to check for stale owners");
-            return 0;
+            return Vec::new();
         }
     };
-    let stale: Vec<String> = entries
+    entries
         .iter()
         .filter(|e| is_stale(&e.assignment, now, stale_after))
         .map(|e| format!("{}/{} ({})", e.role, e.name, e.assignment.address))
-        .collect();
+        .collect()
+}
+
+fn stale_message(stale: &[String], stale_after: Duration) -> String {
+    format!(
+        "{} tunnel address(es) not re-registered for over {:?}; DELETE the registration to \
+         free one: {:?}",
+        stale.len(),
+        stale_after,
+        stale.iter().take(10).collect::<Vec<_>>()
+    )
+}
+
+/// Logs one `WARN` naming up to ten stale owners; returns how many there are.
+pub fn warn_stale(book: &AddressBook, stale_after: Duration, now: u64) -> usize {
+    let stale = stale_owners(book, stale_after, now);
     if !stale.is_empty() {
-        tracing::warn!(
-            count = stale.len(),
-            owners = ?stale.iter().take(10).collect::<Vec<_>>(),
-            "tunnel addresses not re-registered for over {:?}; DELETE the registration to free one",
-            stale_after
-        );
+        tracing::warn!("{}", stale_message(&stale, stale_after));
     }
     stale.len()
 }
 
-/// Logs the stale warning now and then every 24 h. Does nothing when
-/// `stale_after` is zero.
-pub async fn stale_warning_loop(book: Arc<AddressBook>, stale_after: Duration) {
+/// The stale warning, if one is due: only the HA leader warns (every replica
+/// holds the same book, so one `WARN` per cluster is enough), and only when
+/// some owner is stale.
+pub fn stale_warning_due(
+    is_leader: bool,
+    book: &AddressBook,
+    stale_after: Duration,
+    now: u64,
+) -> Option<String> {
+    if !is_leader {
+        return None;
+    }
+    let stale = stale_owners(book, stale_after, now);
+    (!stale.is_empty()).then(|| stale_message(&stale, stale_after))
+}
+
+/// Logs the stale warning now and then every 24 h while `is_leader` says so
+/// (always `true` without HA). Does nothing when `stale_after` is zero.
+pub async fn stale_warning_loop(
+    book: Arc<AddressBook>,
+    stale_after: Duration,
+    is_leader: impl Fn() -> bool,
+) {
     if stale_after.is_zero() {
         return;
     }
     let mut tick = tokio::time::interval(Duration::from_secs(24 * 3600));
     loop {
         tick.tick().await; // the first tick is immediate
-        warn_stale(&book, stale_after, now_secs());
+        if let Some(message) = stale_warning_due(is_leader(), &book, stale_after, now_secs()) {
+            tracing::warn!("{message}");
+        }
     }
 }
 
@@ -291,6 +345,10 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
+            status(Rejection::InvalidNetwork("bad".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
             status(Rejection::NotInitialized),
             StatusCode::SERVICE_UNAVAILABLE
         );
@@ -307,5 +365,20 @@ mod tests {
         book.claim(Role::Origin, "old", None, 1).unwrap();
         assert_eq!(warn_stale(&book, Duration::from_secs(86400), 100_000), 1);
         assert_eq!(warn_stale(&book, Duration::ZERO, 100_000), 0);
+    }
+
+    #[test]
+    fn the_stale_warning_is_leader_only() {
+        let (_s, book, _d) = state(None);
+        book.claim(Role::Origin, "old", None, 1).unwrap();
+        let stale_after = Duration::from_secs(86400);
+        assert_eq!(stale_warning_due(false, &book, stale_after, 100_000), None);
+        let due = stale_warning_due(true, &book, stale_after, 100_000).unwrap();
+        assert!(due.contains("origin/old"), "{due}");
+        // A leader with nothing stale has nothing to say.
+        assert_eq!(
+            stale_warning_due(true, &book, Duration::ZERO, 100_000),
+            None
+        );
     }
 }

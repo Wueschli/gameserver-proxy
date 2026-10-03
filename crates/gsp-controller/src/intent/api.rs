@@ -169,6 +169,7 @@ async fn submit_intent(State(state): State<IntentState>, body: String) -> Respon
             "/intent",
             body,
             None, // intent has no audit-trail actor in this slice — config only
+            crate::ha::client::revision_response,
         )
         .await;
     }

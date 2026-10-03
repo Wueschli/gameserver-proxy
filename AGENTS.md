@@ -90,6 +90,7 @@ crates/
     addresses/api.rs        `GET /tunnel/addresses` and the release plumbing over the address book
     proxy_peers.rs           proxy-peers registry (phase 14 slice 7, `docs/11`) — the mirror image of `peers.rs`: proxies register here, origins' `gsp-agent`s subscribe
     registry.rs             the registry core both `peers.rs` and `proxy_peers.rs` run on: `Registration` trait, `RegistryState` (log + `current` tree in one transaction, Raft-index-idempotent `register_applied`/`remove_applied`), handlers, subscribe/catch-up
+    registry/ha.rs          the registries' write path under HA: the unchanged check (`normalize`/`is_unchanged`, background `Touch`), `Register*`/`Release` through `ha::client::propose_write`, the network-mismatch and not-initialized `503`s
   gsp-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no gsp-core/gsp-config dependency, stays decoupled from the data-plane crates
     ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts, self-reported `admin_url`)
     api.rs                  POST /ingest, GET /fleet/pools|sessions|healthz|subscribe (SSE)

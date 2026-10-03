@@ -32,6 +32,11 @@
 //!   already made when HA is off. The log is purged per [`raft_config`]'s
 //!   snapshot policy, so snapshots (which replace both stores on install)
 //!   are how a lagging follower or a new learner catches up.
+//! - [`apply_registry`] — how the state machine applies the registry
+//!   entries (register, release, touch) into the two registries and the
+//!   shared address book, deterministically and crash-idempotently.
+//! - [`cluster_state`] — the replicated tunnel network registry entries are
+//!   applied against, recorded once by `SetTunnelNetwork`.
 //! - [`network`] — `RaftNetworkFactory` + `RaftNetwork` over `reqwest`,
 //!   posting to peers' `/raft/*` routes.
 //! - [`routes`] — the `axum` handlers for `/raft/append`, `/raft/vote`,
@@ -43,16 +48,25 @@
 //!   no client of this API (`gsp`, `gsp-ui`, `curl`) ever needs to know HA
 //!   exists.
 
+pub mod apply_registry;
 pub mod client;
+pub mod cluster_state;
+pub mod init;
 pub mod log_store;
+pub mod members;
 pub mod network;
 pub mod peers;
 pub mod routes;
 pub mod state_machine;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::addresses::{Rejection, Role};
+use crate::peers::PeerRegistration;
+use crate::proxy_peers::ProxyRegistration;
 
 pub type NodeId = u64;
 
@@ -79,14 +93,64 @@ pub enum WriteRequest {
     /// to `true` in place — the same operation `AppState::promote_revision`
     /// does directly when HA is off.
     Promote(u64),
+    /// An origin's registration as received (address optional), with the
+    /// proposing leader's clock — so `first_seen`/`last_seen` are identical
+    /// on every replica.
+    RegisterOrigin {
+        reg: PeerRegistration,
+        now: u64,
+    },
+    /// A proxy's registration, as [`WriteRequest::RegisterOrigin`].
+    RegisterProxy {
+        reg: ProxyRegistration,
+        now: u64,
+    },
+    /// Tombstones `name` in `role`'s registry and frees its address.
+    Release {
+        role: Role,
+        name: String,
+    },
+    /// Sets `last_seen = now` in the address book; no registry revision.
+    Touch {
+        role: Role,
+        name: String,
+        now: u64,
+    },
+    /// Records the cluster's tunnel network (CIDR string; `None` =
+    /// pin-only) once, before the first registry write.
+    SetTunnelNetwork(Option<String>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteResponse {
-    /// `None` only for a Raft-internal entry (blank leader no-op,
-    /// membership change) that never came from `client_write` — a real
-    /// [`WriteRequest`] always produces `Some`.
-    pub revision: Option<u64>,
+/// What applying one entry did — the HTTP layer maps it back to the status
+/// codes and bodies the non-HA handlers give.
+///
+/// A replayed entry (every step it would take already absorbed after a
+/// crash) answers `Revision(None)`: openraft only routes responses of
+/// entries proposed in the live term, so nobody receives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteResponse {
+    /// Config, intent and promote entries. `None` only for a Raft-internal
+    /// entry (blank leader no-op, membership change) that never came from
+    /// `client_write`, or a replay.
+    Revision(Option<u64>),
+    /// A registration was stored at `revision` with tunnel `address`.
+    Registered { revision: u64, address: IpAddr },
+    /// A registration's tombstone was stored at `revision`; `address` is
+    /// the tunnel address freed, if it held one.
+    Released {
+        revision: u64,
+        address: Option<IpAddr>,
+    },
+    /// A deterministic refusal (`409` / `422` / `503` as
+    /// `crate::addresses::api::claim_error_response` maps it).
+    Rejected(Rejection),
+    /// A release or touch of a name unknown to the registry and the book.
+    NotFound,
+    /// A touch refreshed the owner's `last_seen`.
+    Touched,
+    /// `SetTunnelNetwork` was applied: the network is recorded (now, or by
+    /// an earlier entry — it is recorded once).
+    Recorded,
 }
 
 openraft::declare_raft_types!(
