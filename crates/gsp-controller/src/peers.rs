@@ -36,6 +36,9 @@ use std::net::IpAddr;
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
 
+use crate::addresses::Role;
+use crate::registry::Registration;
+
 /// One origin's current registration — the whole of what `gsp-agent` submits
 /// and what a `tunnel` `BackendSource` (phase 14 slice 5) will read back.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,6 +96,30 @@ impl PeerRegistration {
             }
         }
         Ok(())
+    }
+}
+
+impl Registration for PeerRegistration {
+    const ROLE: Role = Role::Origin;
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn requested_address(&self) -> Option<IpAddr> {
+        PeerRegistration::requested_address(self)
+    }
+
+    fn backends_mut(&mut self) -> Option<&mut Vec<String>> {
+        Some(&mut self.backends)
+    }
+
+    fn set_tunnel_address(&mut self, a: IpAddr) {
+        self.tunnel_address = Some(a.to_string());
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        PeerRegistration::validate(self)
     }
 }
 

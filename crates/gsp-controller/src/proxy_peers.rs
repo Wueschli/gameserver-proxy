@@ -18,10 +18,9 @@
 //!
 //! Shape: identical to [`crate::peers`] — per-name latest-write-wins state
 //! on top of [`crate::store::Store`]'s append-only log + a sibling `current`
-//! tree — deliberately its own module and its own `sled` database rather
-//! than a generalized "registry" abstraction shared with `peers`, matching
-//! how `config`/`intent`/`peers` are each already their own module wrapping
-//! the same `Store` primitive independently.
+//! tree, in its own `sled` database. Both registries run on the shared core
+//! in [`crate::registry`]; this module supplies only the registration type
+//! (a [`Registration`] with no backends) and `api` the route prefix.
 //!
 //! One real difference from [`crate::peers::PeerRegistration`]: `endpoint`
 //! is required here, not optional. `docs/11`'s whole premise is that only
@@ -35,6 +34,9 @@ use std::net::IpAddr;
 
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
+
+use crate::addresses::Role;
+use crate::registry::Registration;
 
 /// One proxy instance's current registration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +101,30 @@ impl ProxyRegistration {
             }
         }
         Ok(())
+    }
+}
+
+impl Registration for ProxyRegistration {
+    const ROLE: Role = Role::Proxy;
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn requested_address(&self) -> Option<IpAddr> {
+        ProxyRegistration::requested_address(self)
+    }
+
+    fn backends_mut(&mut self) -> Option<&mut Vec<String>> {
+        None
+    }
+
+    fn set_tunnel_address(&mut self, a: IpAddr) {
+        self.tunnel_address = Some(a.to_string());
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        ProxyRegistration::validate(self)
     }
 }
 

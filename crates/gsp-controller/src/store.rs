@@ -144,10 +144,7 @@ impl Store {
     /// Callers (the slice-2 submit API) run `gsp_config::validate` *before*
     /// calling this — the store itself does not parse or validate `bytes`.
     pub fn put(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
-        let next = match self.current_revision()? {
-            Some(rev) => rev.checked_add(1).ok_or(StoreError::CounterOverflow)?,
-            None => 1,
-        };
+        let next = self.next_revision()?;
 
         (&self.revisions, &self.meta)
             .transaction(|(revisions, meta)| {
@@ -162,6 +159,21 @@ impl Store {
 
         self.revisions.flush()?;
         self.meta.flush()?;
+        Ok(next)
+    }
+
+    /// [`Store::put`] plus sibling-tree writes in the same transaction,
+    /// without recording an `applied_index` — the non-HA write path of a
+    /// registry whose `current` tree must move with its log. `siblings`
+    /// receives the revision number being written; the trees must come from
+    /// this store's own [`Store::db`] (see [`SiblingWrite`]).
+    pub fn put_with<'a>(
+        &self,
+        bytes: RevisionBytes,
+        siblings: &dyn Fn(u64) -> Vec<SiblingWrite<'a>>,
+    ) -> Result<u64, StoreError> {
+        let next = self.next_revision()?;
+        self.apply_at(None, Some((next, bytes)), siblings(next))?;
         Ok(next)
     }
 
@@ -189,15 +201,14 @@ impl Store {
         index: u64,
         siblings: &dyn Fn(u64) -> Vec<SiblingWrite<'a>>,
     ) -> Result<Applied, StoreError> {
-        let next = match self.current_revision()? {
-            Some(rev) => rev.checked_add(1).ok_or(StoreError::CounterOverflow)?,
-            None => 1,
-        };
+        let next = self.next_revision()?;
         let writes = siblings(next);
-        Ok(match self.apply_at(index, Some((next, bytes)), writes)? {
-            true => Applied::Written(next),
-            false => Applied::AlreadyApplied,
-        })
+        Ok(
+            match self.apply_at(Some(index), Some((next, bytes)), writes)? {
+                true => Applied::Written(next),
+                false => Applied::AlreadyApplied,
+            },
+        )
     }
 
     /// Advances `applied_index` to `index` for a step that writes no
@@ -215,22 +226,30 @@ impl Store {
         index: u64,
         siblings: Vec<SiblingWrite<'_>>,
     ) -> Result<bool, StoreError> {
-        self.apply_at(index, None, siblings)
+        self.apply_at(Some(index), None, siblings)
+    }
+
+    fn next_revision(&self) -> Result<u64, StoreError> {
+        match self.current_revision()? {
+            Some(rev) => rev.checked_add(1).ok_or(StoreError::CounterOverflow),
+            None => Ok(1),
+        }
     }
 
     /// The shared transaction: skip if already applied, else write the
     /// optional revision, the `applied_index` and the sibling writes.
-    /// `true` = written, `false` = skipped.
+    /// `true` = written, `false` = skipped. `index: None` (a non-Raft
+    /// write) never skips and leaves `applied_index` untouched.
     fn apply_at(
         &self,
-        index: u64,
+        index: Option<u64>,
         revision: Option<(u64, RevisionBytes)>,
         siblings: Vec<SiblingWrite<'_>>,
     ) -> Result<bool, StoreError> {
         let (trees, slots) = self.transaction_trees(&siblings);
         let outcome = trees[..].transaction(|views| {
             let (revisions, meta) = (&views[0], &views[1]);
-            if let Some(done) = meta.get(APPLIED_INDEX_KEY)? {
+            if let (Some(index), Some(done)) = (index, meta.get(APPLIED_INDEX_KEY)?) {
                 if decode_rev(&done) >= index {
                     return Ok::<_, TxError>(false);
                 }
@@ -243,7 +262,9 @@ impl Store {
                 revisions.insert(&encode_rev(*next), bytes.as_slice())?;
                 meta.insert(CURRENT_KEY, &encode_rev(*next))?;
             }
-            meta.insert(APPLIED_INDEX_KEY, &encode_rev(index))?;
+            if let Some(index) = index {
+                meta.insert(APPLIED_INDEX_KEY, &encode_rev(index))?;
+            }
             for (w, slot) in siblings.iter().zip(&slots) {
                 match &w.value {
                     Some(v) => views[*slot].insert(w.key.as_slice(), v.as_slice())?,
@@ -562,6 +583,29 @@ mod tests {
             .unwrap();
         assert!(matches!(applied, Applied::AlreadyApplied));
         assert!(side.get(1u64.to_be_bytes()).unwrap().is_some());
+    }
+
+    #[test]
+    fn put_with_writes_siblings_but_records_no_applied_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let side = store.db().open_tree("side").unwrap();
+        let siblings = |rev: u64| {
+            vec![SiblingWrite {
+                tree: &side,
+                key: b"k".to_vec(),
+                value: Some(rev.to_be_bytes().to_vec()),
+            }]
+        };
+
+        assert_eq!(store.put_with(b"one".to_vec(), &siblings).unwrap(), 1);
+        assert_eq!(store.put_with(b"two".to_vec(), &siblings).unwrap(), 2);
+        assert_eq!(store.current_revision().unwrap(), Some(2));
+        assert_eq!(
+            side.get(b"k").unwrap().unwrap().as_ref(),
+            2u64.to_be_bytes()
+        );
+        assert_eq!(store.applied_index().unwrap(), None);
     }
 
     #[test]
