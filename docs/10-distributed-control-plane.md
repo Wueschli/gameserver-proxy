@@ -578,7 +578,9 @@ what order," which a stateless replica set cannot give.
   to the current leader over HTTP, or HTTPS for `https://` peers (`openraft` tracks the current
   leader; the follower proxies the request body byte-for-byte, same
   `forwardable_headers` pattern `gsp-ui`'s proxies already use) and relays
-  the leader's response back verbatim. **Rejected**: an HTTP redirect
+  the leader's response back verbatim. The forward is bounded (10 s, then
+  `504`: the write may still have been applied), so a half-open leader never
+  hangs the follower's handler. **Rejected**: an HTTP redirect
   (`307` + `Location`) — every existing client of this API (`gsp`,
   `gsp-ui`, a human with `curl`) would need new leader-following logic; a
   transparent forward means literally nothing downstream of this ADR needs
