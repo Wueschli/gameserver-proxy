@@ -95,7 +95,10 @@ status codes and bodies:
   them today, including the backend-host `422` (and its "the claim is kept" behaviour).
   `Rejection` holds only the **deterministic** outcomes: address held, owner has a
   different address, outside the network, not a host address, no network (pin-only),
-  network exhausted, backend host mismatch. `ClaimError::Storage` is never a
+  network exhausted, backend host mismatch, and `NotInitialized` (a registry entry
+  applied before the cluster recorded its network; `503` "cluster is initializing its
+  registries"; deterministic, so it cannot crash-loop every node the way a
+  `StorageError` would). `ClaimError::Storage` is never a
   `Rejection`: in apply a storage failure is returned as openraft's `StorageError`, which
   stops that node, because turning one replica's disk error into a response would let
   replicas silently diverge.
@@ -124,9 +127,10 @@ matters now.
 Fix: every `sled` database the state machine writes (config, intent, peers, proxy-peers,
 tunnel-addresses) records an `applied_index` key **in the same transaction** as the step
 it belongs to, and a step whose database's `applied_index` is already at or past the
-entry's log index is **skipped entirely**: neither evaluated nor written. A step that
-rejects or decides "no change" still advances its database's `applied_index` (in a
-transaction of its own), so a replayed rejection is never re-evaluated against later
+entry's log index is **skipped entirely**: neither evaluated nor written. Every entry
+advances the `applied_index` of **every database it could touch**, whatever the outcome:
+a step that rejects, is skipped because an earlier step rejected, or decides "no change"
+still advances its database's index (in a transaction of its own), so a replayed rejection is never re-evaluated against later
 state, where it might succeed. Concretely:
 
 - `Store::put` gets an applied-index variant (`put_applied(bytes, index)`) that writes the
@@ -218,6 +222,15 @@ path. This spec makes snapshots first-class, in build slice 1:
   renumbers from 1, which gives a non-empty lagging follower duplicate revisions.
 - `get_current_snapshot` returns the last built snapshot, persisted next to the HA meta
   tree, instead of `None`.
+- openraft spawns `build_snapshot` in parallel with `apply` (`core/sm/worker.rs`, "the
+  builder must hold a consistent view"). Today's builder is the live `Arc` and reads the
+  stores while later entries apply, so a snapshot could carry an `applied_index` newer
+  than its content, and a follower installing it would skip an entry for good.
+  `get_snapshot_builder` (which runs on the state-machine worker, serialized with
+  `apply`) therefore copies everything into an owned value first: every store's
+  revisions, the `current` maps, the address book, every `applied_index`, the cluster
+  state and the HA meta (`last_applied_log`, membership). `build_snapshot` only
+  serializes that copy.
 - The misleading comments in `ha/state_machine.rs` and the "log grows unbounded" note in
   `docs/10` are corrected.
 
@@ -344,7 +357,9 @@ logged at `info` with their `X-Actor`:
   Served locally by any node.
 - `POST /admin/ha/members {id, addr}` → identity check (below), `add_learner(id, addr,
   blocking = true)` (waits until the learner has caught up, by log entries or by snapshot once
-  the log has been purged), then `change_membership(AddVoterIds{id})`. `409` if `id` is
+  the log has been purged), then `change_membership(AddVoterIds{id})`. A large catch-up
+  can outlast the 10 s write-forward timeout, so a forwarded `POST` uses its own longer
+  bound (`MEMBER_ADD_TIMEOUT`, 5 min) instead of `FORWARD_TIMEOUT`. `409` if `id` is
   already a voter.
 - `DELETE /admin/ha/members/{id}` → `change_membership(RemoveVoters{id}, retain =
   false)`, which removes the node entirely. `422` when it would remove the last voter; `404`

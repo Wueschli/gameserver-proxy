@@ -13,8 +13,9 @@
 ## Global Constraints
 
 - Apply must be deterministic: no `now_secs()`, no read of a node-local flag, no randomness inside `RaftStateMachine::apply`. `now` and the network come from entries / replicated state.
-- A storage failure inside apply is an openraft `StorageError`, never a `Rejected` response (spec: "`ClaimError::Storage` is never a `Rejection`").
-- A step whose database's `applied_index >= entry index` is skipped entirely, rejections included; rejections still advance `applied_index`.
+- A storage failure inside apply is an openraft `StorageError`, never a `Rejected` response (spec: "`ClaimError::Storage` is never a `Rejection`"). Every *deterministic* failure, including a registry entry applied before initialization (`Rejection::NotInitialized` → `503`), is a `Rejected`.
+- A step whose database's `applied_index >= entry index` is skipped entirely, rejections included. Every entry advances the `applied_index` of every database it could touch, whatever the outcome (`Store::mark_applied` / the book's equivalent when nothing is written).
+- The snapshot builder never reads live state: `get_snapshot_builder` copies everything (serialized with `apply`), `build_snapshot` serializes the copy (openraft runs it in parallel with apply).
 - Every comparison of addresses, backends and networks uses parsed values (`IpAddr`, `SocketAddr`, `Network`), never strings.
 - "Unchanged" = the normalized incoming registration equals the stored one field for field (whole struct; covers `boot_id`).
 - HTTP status codes and bodies for `/peers` and `/proxy-peers` stay exactly as today for every path.
@@ -69,14 +70,16 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 **Interfaces:**
 - Produces: `Store::replace_all(&self, revisions: &[(u64, RevisionBytes)], applied_index: Option<u64>) -> Result<(), StoreError>` (clear + write at given numbers, one transaction); `Store::all_revisions(&self) -> Result<Vec<(u64, RevisionBytes)>, StoreError>`.
 - Produces: `SnapshotContent { config: Vec<RevisionSnap>, intent: Vec<(u64, Vec<u8>)>, config_applied: Option<u64>, intent_applied: Option<u64> }` with `RevisionSnap { revision: u64, bytes: Vec<u8>, stage: Stage, actor: Option<String> }` — Task 5 adds registry and address-book fields to this struct.
+- Produces: `pub struct SnapshotCopy` (owned: `SnapshotContent` + `SmMeta`) and `get_snapshot_builder` returning a builder that owns a `SnapshotCopy` taken at call time; `build_snapshot` only serializes it and persists the result. Task 5 extends `SnapshotCopy` with the registries, book and cluster state.
 - Produces: `pub fn raft_config(snapshot_after: u64) -> openraft::Config` in `crates/gsp-controller/src/ha/mod.rs` (production passes `5000`, which equals today's default).
 
 - [ ] **Step 1: Write the failing tests** in `ha/state_machine.rs` `tests`:
   - `install_replaces_a_non_empty_store`: follower sm has config revisions 1..3 (`b"a"`,`b"b"`,`b"stale"`); leader sm has 1..2 (`b"a"`,`b"b"`); install leader snapshot → follower `all_revisions()` equals leader's exactly (2 entries).
   - `install_keeps_revision_numbers_and_metadata`: leader revision 1 with stage `promoted: false` and actor `"bob"` → same on follower after install.
   - `current_snapshot_is_the_last_built_one`: after `build_snapshot`, `get_current_snapshot()` returns `Some` with the same `meta.snapshot_id`, also after reopening the HA db.
+  - `a_builder_is_not_affected_by_later_applies`: apply entries 1..3, take `get_snapshot_builder()`, apply entries 4..6, then `build_snapshot()` → `meta.last_log_id.index == 3`, content has exactly the 3 revisions, and `config_applied == Some(3)`. Install it into a fresh sm and apply 4..6 → equals the leader.
 - [ ] **Step 2: Run** `cargo test -p gsp-controller state_machine` → FAIL.
-- [ ] **Step 3: Implement** the snapshot content, replacing install, persisting the last built snapshot (tree `raft_snapshot`, keys `meta` and `data`), `raft_config`; rewrite the comments that say the log is never purged.
+- [ ] **Step 3: Implement** the snapshot content, the copying `get_snapshot_builder`, replacing install, persisting the last built snapshot (tree `raft_snapshot`, keys `meta` and `data`), `raft_config`; rewrite the comments that say the log is never purged.
 - [ ] **Step 4: Write the failing fleet test** `crates/gsp-fleet-tests/tests/ha_snapshots.rs::a_node_that_joins_after_a_purge_catches_up_by_snapshot` — skip-able until Task 9 adds `--ha-join`; write it now with `#[ignore = "needs --ha-join (Task 9)"]`, un-ignore in Task 9. It needs a hidden test flag `--ha-snapshot-after <n>` (clap `hide = true`) feeding `raft_config`.
 - [ ] **Step 5: Run** `cargo test -p gsp-controller` → PASS; `make check` green.
 - [ ] **Step 6: Commit** `fix(controller): snapshots replace stores and survive log purges`.
@@ -109,7 +112,7 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 - Modify: `crates/gsp-controller/src/addresses.rs`
 
 **Interfaces:**
-- Produces: `pub enum Rejection { Held{..}, OwnerHasDifferent{..}, OutsideNetwork{..}, NotHost(..), NoNetwork, Exhausted{..}, BackendHost(String) }` (`Serialize`/`Deserialize`, same messages as today's `ClaimError` variants); `ClaimError` becomes `enum ClaimError { Rejected(Rejection), Storage(String) }`, and `claim_error_response` maps `Rejected(r)` exactly as before.
+- Produces: `pub enum Rejection { Held{..}, OwnerHasDifferent{..}, OutsideNetwork{..}, NotHost(..), NoNetwork, Exhausted{..}, BackendHost(String), NotInitialized }` (`NotInitialized` → `503` "cluster is initializing its registries") (`Serialize`/`Deserialize`, same messages as today's `ClaimError` variants); `ClaimError` becomes `enum ClaimError { Rejected(Rejection), Storage(String) }`, and `claim_error_response` maps `Rejected(r)` exactly as before.
 - Produces: `AddressBook::claim_at(&self, role, name, requested: Option<IpAddr>, now: u64, network: Option<Network>, index: u64) -> Result<Outcome, StorageFailure>` where `enum Outcome { Granted(Assignment), Rejected(Rejection), AlreadyApplied }`; `release_at(role, name, index) -> Result<Option<Option<IpAddr>>, StorageFailure>` (`None` = already applied); `touch_at(role, name, now, index)`; `last_outcome(&self) -> Result<Option<(u64, Outcome)>, StorageFailure>`; `applied_index()`.
 - `Assignment::address` and entry formats carry `IpAddr` in JSON (strings), so the IPv6 spec only changes `Network` and the `by_address` key.
 - The non-HA `claim` keeps its signature and calls the same core with `index: None`.
@@ -147,8 +150,8 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
       Rejected(Rejection), NotFound, Touched, Recorded }
   ```
 - Produces: `ClusterState::network(&self) -> Option<Option<Network>>` (outer `None` = not initialized), `ClusterState::record(&self, network: Option<Network>, index: u64)`.
-- Apply order for `Register*`: book `claim_at` → (if granted) `expand_backends` against the granted address (a mismatch is `Rejected(BackendHost)` and the claim is kept, as today) → `register_applied`. On a replay where the book is `AlreadyApplied`, use `last_outcome()` for this index.
-- Handlers never propose a registry write before the cluster is initialized (Task 6). If one is applied anyway, apply returns a `StorageError` saying so (a bug, not a client error).
+- Apply order for `Register*`: book `claim_at` → (if granted) `expand_backends` against the granted address (a mismatch is `Rejected(BackendHost)` and the claim is kept, as today) → `register_applied`. When the outcome is a rejection, the registry step calls `Store::mark_applied(index)` instead of writing. On a replay where the book is `AlreadyApplied`, use `last_outcome()` for this index. `Release` and `Touch` likewise advance both the book and the registry index whatever the outcome.
+- A registry entry applied while `ClusterState::network()` is `None` is `Rejected(NotInitialized)` (both the book and the registry still advance their index). Handlers normally don't propose one before initialization (Task 6), but a leader change can race it.
 
 - [ ] **Step 1: Write the failing tests** in `ha/state_machine.rs` `tests` (helper `sm_with_network("10.60.0.0/24")` applies `SetTunnelNetwork` at index 1):
   - `two_state_machines_fed_the_same_entries_agree`: 20 mixed `RegisterOrigin`/`RegisterProxy`/`Release`/`Touch` entries into two fresh sms → identical `all_current()`, `entries()`, revision numbers.
@@ -156,9 +159,11 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
   - `rejections_match_the_non_ha_handler`: for held / owner-has-different / outside network / backend host → the same `Rejection` the HTTP `claim_error_response` maps to `409`/`409`/`422`/`422`.
   - `a_crash_between_book_and_registry_completes_from_last_outcome`: run book step only for index 9, then `apply` entry 9 → registry has the registration at the granted address, book unchanged.
   - `a_storage_failure_is_a_storage_error_not_a_rejection`: book db closed/dropped tree → `apply` returns `Err(StorageError)`.
+  - `a_rejected_register_then_a_touch_replays_cleanly`: entry 10 `RegisterOrigin` rejected (`Held`), entry 11 `Touch` for the holder; replay 10 and 11 → no change, and both registry and book report `applied_index == Some(11)`.
+  - `a_registry_entry_before_initialization_is_rejected_not_fatal`: fresh sm without `SetTunnelNetwork`, apply `RegisterOrigin` → `Ok` with `Rejected(NotInitialized)`.
   - `snapshot_round_trip_carries_registries_and_the_book`: revision numbers above 1 survive.
 - [ ] **Step 2: Run** `cargo test -p gsp-controller state_machine` → FAIL.
-- [ ] **Step 3: Implement** the entries, responses, `cluster_state.rs`, and snapshot fields (`peers`, `proxy_peers`: revisions + current + applied; `book`: entries + applied + last_outcome; `cluster`: initialized + network).
+- [ ] **Step 3: Implement** the entries, responses, `cluster_state.rs`, and snapshot fields (all copied in `get_snapshot_builder`, per Task 2) (`peers`, `proxy_peers`: revisions + current + applied; `book`: entries + applied + last_outcome; `cluster`: initialized + network).
 - [ ] **Step 4: Run** `cargo test -p gsp-controller` → PASS.
 - [ ] **Step 5: Commit** `feat(controller): replicate registries and the address book through Raft`.
 
@@ -203,7 +208,7 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 - The pin-only HA startup warning (`main.rs:147-150`) is removed.
 - `GET /admin/ha/members` (read-only, served locally) lands here so the fleet tests can find the leader; the write routes come in Task 9. Its handler lives in `ha/members.rs` (created here).
 - A node whose `--tunnel-network` mismatches the recorded network logs one `ERROR` naming both when it first sees the recorded value.
-- The daily stale `WARN` runs only while this node is leader.
+- The daily stale `WARN` runs only while this node is leader: factor its loop body into `fn stale_warning_due(is_leader: bool, ..) -> Option<String>` and test `the_stale_warning_is_leader_only` (follower → `None`, leader with a stale entry → `Some`).
 - If the IPv6 spec's `--tunnel-readdress` exists by now, refuse it with `--ha-peers` / `--ha-join` at startup (test `tunnel_readdress_with_ha_is_refused`).
 
 - [ ] **Step 1: Write the failing fleet test** `crates/gsp-fleet-tests/tests/ha_tunnel_addresses.rs` (reuse `ha_tls.rs`'s cluster setup, plain `http://` peers, plus `--tunnel-network 10.60.0.0/24` on all three):
@@ -251,6 +256,7 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 **Interfaces:**
 - Produces: routes (behind `--auth-token`, writes forwarded to the leader with `X-Actor`): `GET /admin/ha/members` → `{ "leader": Option<u64>, "voters": [{id, addr}], "learners": [{id, addr}] }`; `POST /admin/ha/members` body `{ "id": u64, "addr": String }`; `DELETE /admin/ha/members/{id}`; `PUT /admin/ha/members/{id}` body `{ "addr": String }`.
 - Produces: `async fn verify_identity(client: &reqwest::Client, addr: &str, id: NodeId, ha_token: Option<&str>, for_add: bool) -> Result<(), MemberError>` (calls `/raft/whoami`; add requires `log_empty` or already a learner).
+- `pub const MEMBER_ADD_TIMEOUT: Duration = Duration::from_secs(300);`: a forwarded `POST /admin/ha/members` uses a client with this bound instead of `FORWARD_TIMEOUT` (test `a_forwarded_member_add_uses_the_long_timeout` asserts the forward path picks it).
 - Status codes: `409` already a voter; `422` identity mismatch / last voter / non-empty foreign log; `404` unknown id; `503` target unreachable or no leader.
 
 - [ ] **Step 1: Write the failing tests** in `members.rs` (single-node Raft + a stub whoami server):
