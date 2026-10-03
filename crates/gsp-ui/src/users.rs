@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
@@ -72,6 +73,16 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
         .is_ok()
 }
 
+/// Runs the same Argon2 verification [`verify_password`] does, against a
+/// fixed dummy hash, and discards the result. Login calls this for an unknown
+/// username so it costs as much as a known one: without it, an unknown user
+/// is rejected instantly and a known one only after Argon2, which lets anyone
+/// enumerate usernames from response timing.
+pub fn verify_against_dummy(password: &str) {
+    static DUMMY: LazyLock<String> = LazyLock::new(|| hash_password("gsp-ui-dummy-password"));
+    let _ = verify_password(&DUMMY, password);
+}
+
 /// Hashes `password` for a `password_hash` entry — what `gsp-ui
 /// --hash-password` prints. `hash_password` generates its own large random
 /// salt internally (no separate `SaltString` to plumb through).
@@ -91,6 +102,13 @@ mod tests {
         let hash = hash_password("correct horse battery staple");
         assert!(verify_password(&hash, "correct horse battery staple"));
         assert!(!verify_password(&hash, "wrong"));
+    }
+
+    #[test]
+    fn the_dummy_verification_runs_a_real_argon2_check() {
+        // Must not panic, and must parse as a real hash so Argon2 actually runs.
+        verify_against_dummy("anything");
+        assert!(PasswordHash::new(&hash_password("gsp-ui-dummy-password")).is_ok());
     }
 
     #[test]

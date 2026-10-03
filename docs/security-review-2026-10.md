@@ -14,12 +14,14 @@ operator choice, valid credentials); **Low** = hardening / defence in depth.
 
 | # | Severity | Finding | Where |
 |---|----------|---------|-------|
-| F1 | High | Bearer tokens and the UI password were compared with `==`, which returns at the first mismatching byte. An attacker who can reach any authenticated API can, in principle, recover the token byte by byte from response timing. All ten sites now use `gsp_http::token_eq`, a length-checked constant-time comparison (unit-tested). | `crates/gsp/src/admin.rs:86`, `crates/gsp-controller/src/{auth.rs:34, intent/api.rs:100, peers/api.rs:150, proxy_peers/api.rs:142, addresses/api.rs:57, adopt.rs:80, ha/routes.rs:42}`, `crates/gsp-aggregator/src/auth.rs:35`, `crates/gsp-ui/src/api.rs:217`; helper in `crates/gsp-http/src/lib.rs` |
+| F1 | Medium | Bearer tokens and the UI password were compared with `==`, which returns at the first mismatching byte. An attacker who can reach any authenticated API can, in principle, recover the token byte by byte from response timing. All ten sites now use `gsp_http::token_eq`, a length-checked constant-time comparison (unit-tested). | `crates/gsp/src/admin.rs:86`, `crates/gsp-controller/src/{auth.rs:34, intent/api.rs:100, peers/api.rs:150, proxy_peers/api.rs:142, addresses/api.rs:57, adopt.rs:80, ha/routes.rs:42}`, `crates/gsp-aggregator/src/auth.rs:35`, `crates/gsp-ui/src/api.rs:217`; helper in `crates/gsp-http/src/lib.rs` |
 | F2 | Medium | The CI workflow had no `permissions:` block, so every job got the repository's default `GITHUB_TOKEN` scope. No job writes anything, so the workflow now declares `permissions: contents: read` at the top level. (Fork PRs already get a read-only token; this mainly protects `push`/`schedule`/`workflow_dispatch` runs from a compromised action or dependency.) | `.github/workflows/ci.yml:36` |
+| F3 | Medium | `gsp-ui --users-file` login rejected an unknown username instantly but ran Argon2 for a known one, so response timing enumerated usernames. An unknown user now verifies against a dummy Argon2 hash first. | `crates/gsp-ui/src/api.rs:201`, `crates/gsp-ui/src/users.rs` (`verify_against_dummy`) |
 
 Timing attacks over a network are noisy and need many samples, so F1 is
-"High" on impact (full admin takeover) rather than on ease. It is cheap to
-fix and every auth path shared the same pattern.
+Medium by this scale (it needs network position and many samples), though
+the impact is full admin takeover. It is cheap to fix and every auth path
+shared the same pattern.
 
 ## Open findings (not fixed here)
 
@@ -30,7 +32,7 @@ fix and every auth path shared the same pattern.
 | O3 | Medium | No rate limit on `POST /ui/login`. With `--users-file` each attempt runs Argon2 (CPU-heavy), so login is both a brute-force target and a cheap CPU DoS. | `crates/gsp-ui/src/api.rs:196`, `crates/gsp-ui/src/users.rs:66` | Per-IP token bucket on the login route (the data plane already has `ratelimit.rs` to borrow from); bound concurrent Argon2 verifications with a semaphore. |
 | O4 | Medium | Gossip datagrams are HMAC-authenticated but carry **no freshness** (timestamp/nonce), so an on-path attacker can replay a captured health broadcast. LWW versioning limits the effect to re-asserting already-seen states, but a replayed "down" can briefly flap a backend. | `crates/gsp-core/src/gossip.rs:362-380` | Include a sender timestamp in the MAC'd payload and drop datagrams older than a window. |
 | O5 | Low | The SSE config-subscribe clients buffer until `\n\n` with no size cap, so a malicious or broken controller can grow memory without bound. The controller is a trusted peer (pinned URL, optional TLS + `--ca-file`), hence Low. | `crates/gsp/src/controller_client.rs:149-168`, similar in `crates/gsp-agent/src/proxy_subscribe.rs` | Cap the buffer (e.g. 16 MiB) and reconnect when exceeded. |
-| O6 | Low | Third-party actions are referenced by mutable tag (`dtolnay/rust-toolchain@stable/@nightly`, `Swatinem/rust-cache@v2`, `actions/*@v4/v5`). `taiki-e/install-action` and the Trivy image are already pinned by SHA/digest. With F2 the blast radius is read-only, but a hijacked tag could still exfiltrate cache contents. | `.github/workflows/ci.yml` (see `uses:` lines) | Pin to commit SHAs with a version comment; let Dependabot bump them. |
+| O6 | Low | Most third-party actions are referenced by a mutable tag or branch rather than a commit SHA (only `taiki-e/install-action` and the Trivy image are pinned). With F2 the blast radius is read-only, but a hijacked tag could still exfiltrate cache contents. | `.github/workflows/ci.yml` (see `uses:` lines) | Pin to commit SHAs with a version comment; let Dependabot bump them. |
 | O7 | Low | A short or guessable token is accepted as-is; there is no minimum length or entropy check on `--auth-token`, `--ha-token`, `settings.admin.auth_token`, or the gossip PSK. | CLI args in each `main.rs`, `crates/gsp-config/src/lib.rs:201` | Reject (or warn on) tokens/PSKs shorter than ~32 chars at startup. |
 
 ## Checked and fine
