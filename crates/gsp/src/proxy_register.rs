@@ -54,7 +54,8 @@ fn body(reg: &Registration) -> ProxyRegistration<'_> {
 
 #[derive(Debug)]
 pub enum RegisterError {
-    /// The controller understood and refused (4xx): retrying cannot help.
+    /// The controller understood and refused (4xx other than 408/429):
+    /// retrying cannot help.
     Rejected(String),
     /// Transport trouble or a 5xx: worth retrying.
     Transient(anyhow::Error),
@@ -109,7 +110,10 @@ pub async fn register_once(
     }
     let text = resp.text().await.unwrap_or_default();
     let msg = format!("controller rejected proxy registration ({status}): {text}");
-    if status.is_client_error() {
+    // 408 and 429 are "not now", not "never": retry them like a 5xx.
+    let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    if status.is_client_error() && !retryable {
         Err(RegisterError::Rejected(msg))
     } else {
         Err(RegisterError::Transient(anyhow::anyhow!(msg)))
@@ -117,7 +121,7 @@ pub async fn register_once(
 }
 
 /// Retries transient failures with backoff until `budget` runs out; a
-/// rejection (4xx) returns immediately.
+/// rejection (4xx other than 408/429) returns immediately.
 pub async fn register_with_retry(
     client: &reqwest::Client,
     controller_url: &str,
@@ -286,6 +290,19 @@ mod tests {
             register_once(&reqwest::Client::new(), "http://127.0.0.1:1", None, &reg()).await,
             Err(RegisterError::Transient(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_408_or_429_is_transient_not_a_rejection() {
+        for status in ["408 Request Timeout", "429 Too Many Requests"] {
+            let url = canned(status, r#"{"error":"slow down"}"#).await;
+            match register_once(&reqwest::Client::new(), &url, None, &reg()).await {
+                Err(RegisterError::Transient(e)) => {
+                    assert!(format!("{e:#}").contains("slow down"), "{e:#}")
+                }
+                other => panic!("{status}: expected Transient, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

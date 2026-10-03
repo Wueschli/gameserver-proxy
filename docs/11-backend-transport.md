@@ -191,7 +191,7 @@ mis-chooses) one. Design and decisions:
 [`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
 
 - **Allocation.** Start the controller with `--tunnel-network 10.60.0.0/16` (IPv4,
-  `/30` or shorter). A registration that omits its address is allocated the lowest
+  `/16` to `/30`; larger networks are refused because allocation scans the pool). A registration that omits its address is allocated the lowest
   free host address; the allocation is sticky per `(role, name)`. A registration may
   instead **pin** an address, which is granted only if free (`409` otherwise). One
   global address space is shared by origins and proxies. Without `--tunnel-network`
@@ -200,7 +200,10 @@ mis-chooses) one. Design and decisions:
   interface up (the answer is its address), persist the answer next to their key, and
   can start from it while the controller is down. For `gsp --tunnel-*` that fallback
   is not instant: with the controller down it first spends its ~30 s registration
-  budget, then falls back to the saved address (`<tunnel-key-file>.address`). A later,
+  budget, then falls back to the saved address (`<tunnel-key-file>.address`), logging
+  the last error and, if a pinned address differs from the saved one, that the pin
+  needs a restart once the controller is back. `408`/`429` count as "controller unavailable", any other
+  `4xx` refuses startup. A later,
   different answer is logged as an error and not applied until a restart.
 - **Routing.** Every peer is a `/32`: origins route each proxy's tunnel address
   (this fixed the earlier `AllowedIPs 0.0.0.0/0` bug where a second proxy stole the
