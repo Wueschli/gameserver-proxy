@@ -34,10 +34,16 @@ env:
 # (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
 # caches stay on one image. Move them together when upgrading.
 jobs:
-  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
-  # Schedule / manual runs, a workflow edit, or a failed diff run everything.
+  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.py):
+  # the Cargo packages a change touches, plus their dependents per `cargo
+  # metadata`, against the packages each job builds. Schedule / manual runs, a
+  # workflow edit, a failed diff or a failed `cargo metadata` run everything.
   changes:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    env:
+      # The runner image's preinstalled stable cargo is enough for `cargo
+      # metadata --no-deps`; skip rust-toolchain.toml's component installs.
+      RUSTUP_TOOLCHAIN: stable
     outputs:
       ui: ${{ steps.f.outputs.ui }}
       plugins: ${{ steps.f.outputs.plugins }}
@@ -51,7 +57,7 @@ jobs:
           fetch-depth: 0
       - name: Self-test the change detection and the report renderer
         run: |
-          sh .github/scripts/changes_test.sh
+          python3 .github/scripts/changes_test.py
           python3 .github/scripts/test_summary_test.py
           python3 .github/scripts/trivy_summary_test.py
           python3 .github/scripts/audit_summary_test.py
@@ -75,7 +81,7 @@ jobs:
               fi ;;
             *) flag=--all ;;
           esac
-          printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "$files" | python3 .github/scripts/changes.py $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
