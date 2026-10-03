@@ -245,6 +245,21 @@ impl std::fmt::Display for Network {
     }
 }
 
+/// A network serializes as its `ip/prefix` string (the `u128` inside is an
+/// implementation detail JSON should not carry).
+impl Serialize for Network {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Network {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Network::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One owner's address and when it was first/last seen (unix seconds).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {
@@ -261,8 +276,12 @@ pub struct Entry {
     pub assignment: Assignment,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ClaimError {
+/// Why a claim was refused. Every variant is a deterministic function of the
+/// book's contents and the claim's arguments, so replicas applying the same
+/// log agree on it; it is serialized into the book's `last_outcome`. A storage
+/// failure is never a `Rejection`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+pub enum Rejection {
     #[error("address {address} is already held by {role} {name:?}")]
     Held {
         address: IpAddr,
@@ -296,12 +315,58 @@ pub enum ClaimError {
     },
     #[error("the address book is full ({allocated} entries): DELETE unused registrations first")]
     Full { allocated: usize },
+    /// A registration's backends are not on the claimed address (the message
+    /// is `expand_backends`'s).
+    #[error("{0}")]
+    BackendHost(String),
+    /// The replicated registries have not been initialized yet.
+    #[error("cluster is initializing its registries")]
+    NotInitialized,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ClaimError {
+    #[error(transparent)]
+    Rejected(Rejection),
     #[error("tunnel address storage error: {0}")]
     Storage(String),
 }
 
+/// The book's storage (sled or serialization) failed. Distinct from a
+/// [`Rejection`]: it says nothing about the claim and must not be recorded as
+/// its outcome.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("tunnel address storage error: {0}")]
+pub struct StorageFailure(pub String);
+
+impl From<StorageFailure> for ClaimError {
+    fn from(f: StorageFailure) -> Self {
+        ClaimError::Storage(f.0)
+    }
+}
+
+impl From<Rejection> for ClaimError {
+    fn from(r: Rejection) -> Self {
+        ClaimError::Rejected(r)
+    }
+}
+
+/// What one indexed claim did. `Granted` and `Rejected` are recorded as the
+/// book's `last_outcome`; `AlreadyApplied` (the step's index is not beyond the
+/// book's `applied_index`) is never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    Granted(Assignment),
+    Rejected(Rejection),
+    AlreadyApplied,
+}
+
 fn storage<E: std::fmt::Display>(e: E) -> ClaimError {
     ClaimError::Storage(e.to_string())
+}
+
+fn failure<E: std::fmt::Display>(e: E) -> StorageFailure {
+    StorageFailure(e.to_string())
 }
 
 /// The `by_address` key: the address's raw octets, 4 bytes for IPv4 and 16
@@ -328,11 +393,54 @@ pub struct AddressBook {
     network: Option<Network>,
     by_owner: sled::Tree,
     by_address: sled::Tree,
+    /// `applied_index` and `last_outcome`, written in the same transaction as
+    /// an indexed step's other writes.
+    meta: sled::Tree,
     write: Mutex<()>,
     /// `--tunnel-readdress`: move owners outside the network on their next claim.
     readdress: bool,
     // Held so the database stays open for the trees' lifetime.
     db: sled::Db,
+}
+
+const APPLIED_INDEX: &[u8] = b"applied_index";
+const LAST_OUTCOME: &[u8] = b"last_outcome";
+
+/// `last_outcome` as stored: the outcome and the index of the claim it is for
+/// (`applied_index` also advances on release and touch, so it can be newer).
+#[derive(Serialize, Deserialize)]
+struct StoredOutcome {
+    index: u64,
+    outcome: Outcome,
+}
+
+/// One write of a book transaction.
+enum Op {
+    OwnerPut(Vec<u8>, Vec<u8>),
+    OwnerRemove(Vec<u8>),
+    AddrPut(Vec<u8>, Vec<u8>),
+    AddrRemove(Vec<u8>),
+}
+
+/// Why a transaction aborted instead of committing.
+enum Abort {
+    /// The book had already applied this index.
+    Skip,
+    Corrupt(String),
+}
+
+/// What [`AddressBook::commit`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Committed {
+    Done,
+    AlreadyApplied,
+}
+
+fn decode_index(bytes: &[u8]) -> Result<u64, String> {
+    let raw: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| format!("applied_index is {} bytes, not 8", bytes.len()))?;
+    Ok(u64::from_be_bytes(raw))
 }
 
 impl AddressBook {
@@ -342,10 +450,12 @@ impl AddressBook {
         let db = sled::open(dir)?;
         let by_owner = db.open_tree("by_owner")?;
         let by_address = db.open_tree("by_address")?;
+        let meta = db.open_tree("meta")?;
         Ok(AddressBook {
             network,
             by_owner,
             by_address,
+            meta,
             write: Mutex::new(()),
             readdress: false,
             db,
@@ -390,16 +500,111 @@ impl AddressBook {
         requested: Option<IpAddr>,
         now: u64,
     ) -> Result<Assignment, ClaimError> {
+        match self.claim_core(
+            role,
+            name,
+            requested,
+            now,
+            self.network,
+            self.readdress,
+            None,
+        )? {
+            Outcome::Granted(a) => Ok(a),
+            Outcome::Rejected(r) => Err(ClaimError::Rejected(r)),
+            Outcome::AlreadyApplied => unreachable!("a claim without an index never skips"),
+        }
+    }
+
+    /// The deterministic claim a replicated log applies at `index`. It reads
+    /// nothing node-local: the caller gives `now` and `network`, and
+    /// `--tunnel-readdress` is not honoured. A step whose `index` is not
+    /// beyond [`applied_index`](Self::applied_index) is skipped entirely
+    /// (`AlreadyApplied`); otherwise the index and the outcome are recorded
+    /// with the claim's writes, and a rejection writes only those.
+    pub fn claim_at(
+        &self,
+        role: Role,
+        name: &str,
+        requested: Option<IpAddr>,
+        now: u64,
+        network: Option<Network>,
+        index: u64,
+    ) -> Result<Outcome, StorageFailure> {
+        self.claim_core(role, name, requested, now, network, false, Some(index))
+    }
+
+    /// The one claim implementation. `index` of `None` is the non-replicated
+    /// path: nothing is written to `meta`.
+    #[allow(clippy::too_many_arguments)] // one core shared by claim and claim_at
+    fn claim_core(
+        &self,
+        role: Role,
+        name: &str,
+        requested: Option<IpAddr>,
+        now: u64,
+        network: Option<Network>,
+        readdress: bool,
+        index: Option<u64>,
+    ) -> Result<Outcome, StorageFailure> {
         let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = index {
+            if self
+                .applied_index()?
+                .is_some_and(|applied| applied >= index)
+            {
+                return Ok(Outcome::AlreadyApplied);
+            }
+        }
         let okey = owner_key(role, name);
-        let mut existing = self.read_owner(&okey)?;
+        let decided = self.decide(&okey, role, name, requested, now, network, readdress);
+        let (outcome, ops, readdressed_from) = match decided {
+            Ok((assignment, ops, from)) => (Outcome::Granted(assignment), ops, from),
+            Err(ClaimError::Rejected(r)) => (Outcome::Rejected(r), Vec::new(), None),
+            Err(ClaimError::Storage(e)) => return Err(StorageFailure(e)),
+        };
+        let recorded = index
+            .map(|index| {
+                serde_json::to_vec(&StoredOutcome {
+                    index,
+                    outcome: outcome.clone(),
+                })
+                .map_err(failure)
+                .map(|bytes| (index, bytes))
+            })
+            .transpose()?;
+        let meta = recorded.as_ref().map(|(i, b)| (*i, Some(b.as_slice())));
+        match self.commit(&ops, meta)? {
+            Committed::Done => {}
+            Committed::AlreadyApplied => return Ok(Outcome::AlreadyApplied),
+        }
+        if let (Outcome::Granted(a), Some(old)) = (&outcome, readdressed_from) {
+            tracing::info!(%role, name, %old, new = %a.address, "re-addressed into the new tunnel network");
+        }
+        Ok(outcome)
+    }
+
+    /// Evaluates a claim against the book: the assignment, the writes that
+    /// record it and the address it was moved off by `--tunnel-readdress`, or
+    /// why it is refused. Writes nothing.
+    #[allow(clippy::too_many_arguments)] // mirrors claim_core
+    fn decide(
+        &self,
+        okey: &[u8],
+        role: Role,
+        name: &str,
+        requested: Option<IpAddr>,
+        now: u64,
+        network: Option<Network>,
+        readdress: bool,
+    ) -> Result<(Assignment, Vec<Op>, Option<IpAddr>), ClaimError> {
+        let mut existing = self.read_owner(okey)?;
         // `--tunnel-readdress`: an owner left outside a changed network is
         // claimed as a new owner, and its old address freed in the same
         // transaction.
         let mut old_key = None;
-        if let (Some(a), Some(net)) = (&existing, self.network) {
-            if self.readdress && !net.is_host(a.address) {
-                old_key = Some((addr_key(a.address), a.address));
+        if let (Some(a), Some(net)) = (&existing, network) {
+            if readdress && !net.is_host(a.address) {
+                old_key = Some(a.address);
                 existing = None;
             }
         }
@@ -408,25 +613,26 @@ impl AddressBook {
             (Some(a), None) => a.address,
             (Some(a), Some(req)) if a.address == req => a.address,
             (Some(a), Some(req)) => {
-                return Err(ClaimError::OwnerHasDifferent {
+                return Err(Rejection::OwnerHasDifferent {
                     role,
                     name: name.to_string(),
                     have: a.address,
                     requested: req,
-                })
+                }
+                .into())
             }
             (None, Some(req)) => {
                 if old_key.is_none() {
-                    self.check_room()?;
+                    self.check_room(network)?;
                 }
-                self.check_pin(req)?;
+                self.check_pin(network, req)?;
                 req
             }
             (None, None) => {
                 if old_key.is_none() {
-                    self.check_room()?;
+                    self.check_room(network)?;
                 }
-                self.allocate()?
+                self.allocate(network)?
             }
         };
 
@@ -436,45 +642,172 @@ impl AddressBook {
             last_seen: now,
         };
         let value = serde_json::to_vec(&assignment).map_err(storage)?;
-        let addr_key = addr_key(address);
-        (&self.by_owner, &self.by_address)
-            .transaction(|(owner, addr)| {
-                if let Some((old, _)) = &old_key {
-                    addr.remove(old.as_slice())?;
-                }
-                owner.insert(okey.as_slice(), value.as_slice())?;
-                addr.insert(&addr_key[..], okey.as_slice())?;
-                Ok::<(), sled::transaction::ConflictableTransactionError<()>>(())
-            })
-            .map_err(|e| ClaimError::Storage(format!("{e:?}")))?;
-        self.db.flush().map_err(storage)?;
-        if let Some((_, old)) = old_key {
-            tracing::info!(%role, name, %old, new = %address, "re-addressed into the new tunnel network");
+        let mut ops = Vec::new();
+        if let Some(old) = old_key {
+            ops.push(Op::AddrRemove(addr_key(old)));
         }
-        Ok(assignment)
+        ops.push(Op::OwnerPut(okey.to_vec(), value));
+        ops.push(Op::AddrPut(addr_key(address), okey.to_vec()));
+        Ok((assignment, ops, old_key))
     }
 
     /// Frees `(role, name)`'s address. `Ok(None)` if it held none.
     pub fn release(&self, role: Role, name: &str) -> Result<Option<IpAddr>, ClaimError> {
         let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
-        let okey = owner_key(role, name);
-        let Some(existing) = self.read_owner(&okey)? else {
+        Ok(self.release_locked(role, name, None)?.flatten())
+    }
+
+    /// [`release`](Self::release) as the replicated log applies it at `index`.
+    /// `None` means the step was already applied; otherwise the freed address
+    /// (itself `None` if the owner held none). `applied_index` advances either
+    /// way; `last_outcome` is left alone (it records claims only).
+    pub fn release_at(
+        &self,
+        role: Role,
+        name: &str,
+        index: u64,
+    ) -> Result<Option<Option<IpAddr>>, StorageFailure> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        self.release_locked(role, name, Some(index))
+    }
+
+    fn release_locked(
+        &self,
+        role: Role,
+        name: &str,
+        index: Option<u64>,
+    ) -> Result<Option<Option<IpAddr>>, StorageFailure> {
+        if self.already_applied(index)? {
             return Ok(None);
-        };
-        let addr_key = addr_key(existing.address);
-        (&self.by_owner, &self.by_address)
-            .transaction(|(owner, addr)| {
-                owner.remove(okey.as_slice())?;
-                addr.remove(&addr_key[..])?;
-                Ok::<(), sled::transaction::ConflictableTransactionError<()>>(())
+        }
+        let okey = owner_key(role, name);
+        let existing = self.read_owner(&okey)?;
+        let ops: Vec<Op> = existing
+            .iter()
+            .flat_map(|a| {
+                [
+                    Op::OwnerRemove(okey.clone()),
+                    Op::AddrRemove(addr_key(a.address)),
+                ]
             })
-            .map_err(|e| ClaimError::Storage(format!("{e:?}")))?;
-        self.db.flush().map_err(storage)?;
-        Ok(Some(existing.address))
+            .collect();
+        match self.commit(&ops, index.map(|i| (i, None)))? {
+            Committed::Done => Ok(Some(existing.map(|a| a.address))),
+            Committed::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// Refreshes `last_seen` of `(role, name)` at `index` and nothing else
+    /// (the address and `first_seen` stay). `None` means the step was already
+    /// applied; `Some(false)` that the owner is unknown, which still advances
+    /// `applied_index`. `last_outcome` is left alone (it records claims only).
+    pub fn touch_at(
+        &self,
+        role: Role,
+        name: &str,
+        now: u64,
+        index: u64,
+    ) -> Result<Option<bool>, StorageFailure> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        if self.already_applied(Some(index))? {
+            return Ok(None);
+        }
+        let okey = owner_key(role, name);
+        let touched = self.read_owner(&okey)?;
+        let mut ops = Vec::new();
+        if let Some(mut a) = touched.clone() {
+            a.last_seen = now;
+            ops.push(Op::OwnerPut(okey, serde_json::to_vec(&a).map_err(failure)?));
+        }
+        match self.commit(&ops, Some((index, None)))? {
+            Committed::Done => Ok(Some(touched.is_some())),
+            Committed::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// The highest index this book has applied; `None` for a book that has
+    /// only ever served the non-replicated path.
+    pub fn applied_index(&self) -> Result<Option<u64>, StorageFailure> {
+        self.meta
+            .get(APPLIED_INDEX)
+            .map_err(failure)?
+            .map(|b| decode_index(&b).map_err(StorageFailure))
+            .transpose()
+    }
+
+    /// The most recent claim's index and outcome (`Granted` or `Rejected`).
+    pub fn last_outcome(&self) -> Result<Option<(u64, Outcome)>, StorageFailure> {
+        self.meta
+            .get(LAST_OUTCOME)
+            .map_err(failure)?
+            .map(|b| {
+                serde_json::from_slice::<StoredOutcome>(&b)
+                    .map(|s| (s.index, s.outcome))
+                    .map_err(failure)
+            })
+            .transpose()
+    }
+
+    fn already_applied(&self, index: Option<u64>) -> Result<bool, StorageFailure> {
+        Ok(match index {
+            Some(index) => self
+                .applied_index()?
+                .is_some_and(|applied| applied >= index),
+            None => false,
+        })
+    }
+
+    /// Applies `ops` in one transaction across the three trees, together with
+    /// `meta` (`applied_index`, and `last_outcome` when given). The applied
+    /// index is checked again inside the transaction, so a step can never be
+    /// committed twice. With no `meta` nothing is written to the `meta` tree.
+    fn commit(
+        &self,
+        ops: &[Op],
+        meta: Option<(u64, Option<&[u8]>)>,
+    ) -> Result<Committed, StorageFailure> {
+        use sled::transaction::{ConflictableTransactionError, TransactionError};
+        // Nothing to write (a non-indexed no-op): no transaction, no flush.
+        if ops.is_empty() && meta.is_none() {
+            return Ok(Committed::Done);
+        }
+        let result =
+            (&self.by_owner, &self.by_address, &self.meta).transaction(|(owner, addr, metat)| {
+                if let Some((index, outcome)) = meta {
+                    if let Some(bytes) = metat.get(APPLIED_INDEX)? {
+                        let applied = decode_index(&bytes)
+                            .map_err(|e| ConflictableTransactionError::Abort(Abort::Corrupt(e)))?;
+                        if applied >= index {
+                            return Err(ConflictableTransactionError::Abort(Abort::Skip));
+                        }
+                    }
+                    metat.insert(APPLIED_INDEX, &index.to_be_bytes()[..])?;
+                    if let Some(outcome) = outcome {
+                        metat.insert(LAST_OUTCOME, outcome)?;
+                    }
+                }
+                for op in ops {
+                    match op {
+                        Op::OwnerPut(k, v) => owner.insert(k.as_slice(), v.as_slice())?,
+                        Op::OwnerRemove(k) => owner.remove(k.as_slice())?,
+                        Op::AddrPut(k, v) => addr.insert(k.as_slice(), v.as_slice())?,
+                        Op::AddrRemove(k) => addr.remove(k.as_slice())?,
+                    };
+                }
+                Ok(())
+            });
+        match result {
+            Ok(()) => {}
+            Err(TransactionError::Abort(Abort::Skip)) => return Ok(Committed::AlreadyApplied),
+            Err(TransactionError::Abort(Abort::Corrupt(e))) => return Err(StorageFailure(e)),
+            Err(TransactionError::Storage(e)) => return Err(failure(format!("{e:?}"))),
+        }
+        self.db.flush().map_err(failure)?;
+        Ok(Committed::Done)
     }
 
     pub fn get(&self, role: Role, name: &str) -> Result<Option<Assignment>, ClaimError> {
-        self.read_owner(&owner_key(role, name))
+        Ok(self.read_owner(&owner_key(role, name))?)
     }
 
     /// Every owner, ordered by key (role then name).
@@ -499,24 +832,25 @@ impl AddressBook {
         self.by_owner.len()
     }
 
-    fn read_owner(&self, okey: &[u8]) -> Result<Option<Assignment>, ClaimError> {
-        match self.by_owner.get(okey).map_err(storage)? {
-            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes).map_err(storage)?)),
+    fn read_owner(&self, okey: &[u8]) -> Result<Option<Assignment>, StorageFailure> {
+        match self.by_owner.get(okey).map_err(failure)? {
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes).map_err(failure)?)),
             None => Ok(None),
         }
     }
 
-    fn check_pin(&self, req: IpAddr) -> Result<(), ClaimError> {
-        match self.network {
+    fn check_pin(&self, network: Option<Network>, req: IpAddr) -> Result<(), ClaimError> {
+        match network {
             Some(net) => {
                 if !net.contains(req) {
-                    return Err(ClaimError::OutsideNetwork {
+                    return Err(Rejection::OutsideNetwork {
                         address: req,
                         network: net,
-                    });
+                    }
+                    .into());
                 }
                 if !net.is_host(req) {
-                    return Err(ClaimError::NotHost(req));
+                    return Err(Rejection::NotHost(req).into());
                 }
             }
             None => {
@@ -526,27 +860,28 @@ impl AddressBook {
                     IpAddr::V6(a) => a.segments()[0] & 0xffc0 == 0xfe80,
                 };
                 if unusable || req.is_unspecified() || req.is_multicast() || req.is_loopback() {
-                    return Err(ClaimError::NotHost(req));
+                    return Err(Rejection::NotHost(req).into());
                 }
             }
         }
         if is_ipv4_in_ipv6(req) {
-            return Err(ClaimError::NotHost(req));
+            return Err(Rejection::NotHost(req).into());
         }
         if let Some(holder) = self.by_address.get(addr_key(req)).map_err(storage)? {
             if let Some((role, name)) = parse_owner_key(&holder) {
-                return Err(ClaimError::Held {
+                return Err(Rejection::Held {
                     address: req,
                     role,
                     name,
-                });
+                }
+                .into());
             }
         }
         Ok(())
     }
 
-    fn allocate(&self) -> Result<IpAddr, ClaimError> {
-        let net = self.network.ok_or(ClaimError::NoNetwork)?;
+    fn allocate(&self, network: Option<Network>) -> Result<IpAddr, ClaimError> {
+        let net = network.ok_or(Rejection::NoNetwork)?;
         // Fewer than `capacity` entries means one of the first `capacity`
         // hosts is free, so the scan never has to go further.
         for n in 1..=net.capacity() {
@@ -559,27 +894,29 @@ impl AddressBook {
                 return Ok(ip);
             }
         }
-        Err(ClaimError::Exhausted {
+        Err(Rejection::Exhausted {
             network: net,
             allocated: self.by_owner.len(),
             capacity: net.capacity(),
-        })
+        }
+        .into())
     }
 
     /// A new owner is refused once the book holds `capacity` entries
     /// ([`MAX_ENTRIES`] in pin-only mode), pins included.
-    fn check_room(&self) -> Result<(), ClaimError> {
-        let capacity = self.network.map_or(MAX_ENTRIES, |n| n.capacity());
+    fn check_room(&self, network: Option<Network>) -> Result<(), ClaimError> {
+        let capacity = network.map_or(MAX_ENTRIES, |n| n.capacity());
         let allocated = self.by_owner.len();
         if allocated as u64 >= capacity {
-            return Err(match self.network {
-                Some(network) => ClaimError::Exhausted {
+            return Err(match network {
+                Some(network) => Rejection::Exhausted {
                     network,
                     allocated,
                     capacity,
                 },
-                None => ClaimError::Full { allocated },
-            });
+                None => Rejection::Full { allocated },
+            }
+            .into());
         }
         Ok(())
     }
@@ -829,11 +1166,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            ClaimError::Held {
+            ClaimError::Rejected(Rejection::Held {
                 address: ip("10.60.0.9"),
                 role: Role::Origin,
                 name: "o1".into()
-            }
+            })
         );
         assert!(err.to_string().contains("origin \"o1\""));
     }
@@ -843,15 +1180,15 @@ mod tests {
         let (b, _d) = book(Some("10.60.0.0/24"));
         assert!(matches!(
             b.claim(Role::Origin, "o", Some(ip("10.61.0.1")), 1),
-            Err(ClaimError::OutsideNetwork { .. })
+            Err(ClaimError::Rejected(Rejection::OutsideNetwork { .. }))
         ));
         assert_eq!(
             b.claim(Role::Origin, "o", Some(ip("10.60.0.0")), 1),
-            Err(ClaimError::NotHost(ip("10.60.0.0")))
+            Err(ClaimError::Rejected(Rejection::NotHost(ip("10.60.0.0"))))
         );
         assert_eq!(
             b.claim(Role::Origin, "o", Some(ip("10.60.0.255")), 1),
-            Err(ClaimError::NotHost(ip("10.60.0.255")))
+            Err(ClaimError::Rejected(Rejection::NotHost(ip("10.60.0.255"))))
         );
     }
 
@@ -862,7 +1199,10 @@ mod tests {
         let err = b
             .claim(Role::Origin, "o1", Some(ip("10.60.0.50")), 2)
             .unwrap_err();
-        assert!(matches!(err, ClaimError::OwnerHasDifferent { .. }));
+        assert!(matches!(
+            err,
+            ClaimError::Rejected(Rejection::OwnerHasDifferent { .. })
+        ));
         // Asking for the address it already has is fine.
         assert!(b
             .claim(Role::Origin, "o1", Some(ip("10.60.0.1")), 3)
@@ -894,11 +1234,11 @@ mod tests {
         b.claim(Role::Origin, "a", None, 1).unwrap();
         b.claim(Role::Origin, "b", None, 1).unwrap();
         match b.claim(Role::Origin, "c", None, 1).unwrap_err() {
-            ClaimError::Exhausted {
+            ClaimError::Rejected(Rejection::Exhausted {
                 allocated,
                 capacity,
                 ..
-            } => assert_eq!((allocated, capacity), (2, 2)),
+            }) => assert_eq!((allocated, capacity), (2, 2)),
             other => panic!("expected Exhausted, got {other:?}"),
         }
     }
@@ -908,17 +1248,17 @@ mod tests {
         let (b, _d) = book(None);
         assert_eq!(
             b.claim(Role::Origin, "o", None, 1),
-            Err(ClaimError::NoNetwork)
+            Err(ClaimError::Rejected(Rejection::NoNetwork))
         );
         b.claim(Role::Origin, "o", Some(ip("10.60.0.2")), 1)
             .unwrap();
         assert!(matches!(
             b.claim(Role::Proxy, "p", Some(ip("10.60.0.2")), 1),
-            Err(ClaimError::Held { .. })
+            Err(ClaimError::Rejected(Rejection::Held { .. }))
         ));
         assert_eq!(
             b.claim(Role::Proxy, "p", Some(ip("127.0.0.1")), 1),
-            Err(ClaimError::NotHost(ip("127.0.0.1")))
+            Err(ClaimError::Rejected(Rejection::NotHost(ip("127.0.0.1"))))
         );
     }
 
@@ -947,7 +1287,7 @@ mod tests {
         // And the reverse index survived too: the address is still taken.
         assert!(matches!(
             b.claim(Role::Proxy, "p", Some(ip("10.60.0.1")), 8),
-            Err(ClaimError::Held { .. })
+            Err(ClaimError::Rejected(Rejection::Held { .. }))
         ));
     }
 
@@ -1080,7 +1420,10 @@ mod tests {
         }
         assert!(matches!(
             b.claim(Role::Origin, "late", None, 1),
-            Err(ClaimError::Exhausted { capacity: 254, .. })
+            Err(ClaimError::Rejected(Rejection::Exhausted {
+                capacity: 254,
+                ..
+            }))
         ));
     }
 
@@ -1089,13 +1432,13 @@ mod tests {
         let (b, _d) = book(Some("fd49::/64"));
         assert!(matches!(
             b.claim(Role::Origin, "o", Some(ip("10.60.0.1")), 1),
-            Err(ClaimError::OutsideNetwork { .. })
+            Err(ClaimError::Rejected(Rejection::OutsideNetwork { .. }))
         ));
         b.claim(Role::Origin, "o", Some(ip("fd49::9")), 1).unwrap();
         let (b, _d) = book(Some("10.60.0.0/24"));
         assert!(matches!(
             b.claim(Role::Origin, "o", Some(ip("fd49::9")), 1),
-            Err(ClaimError::OutsideNetwork { .. })
+            Err(ClaimError::Rejected(Rejection::OutsideNetwork { .. }))
         ));
     }
 
@@ -1108,7 +1451,7 @@ mod tests {
         b.claim(Role::Origin, "o", Some(ip("fd49::5")), 2).unwrap();
         assert!(matches!(
             b.claim(Role::Proxy, "p", Some(ip("fd49:0::5")), 1),
-            Err(ClaimError::Held { .. })
+            Err(ClaimError::Rejected(Rejection::Held { .. }))
         ));
     }
 
@@ -1121,7 +1464,7 @@ mod tests {
         for bad in ["::", "::1", "ff02::1", "fe80::1", "febf::1"] {
             assert_eq!(
                 b.claim(Role::Proxy, "p", Some(ip(bad)), 1),
-                Err(ClaimError::NotHost(ip(bad))),
+                Err(ClaimError::Rejected(Rejection::NotHost(ip(bad)))),
                 "{bad}"
             );
         }
@@ -1151,7 +1494,7 @@ mod tests {
         assert_eq!((a.first_seen, a.last_seen), (3, 4));
         assert!(matches!(
             b.claim(Role::Proxy, "p", Some(ip("10.60.0.1")), 5),
-            Err(ClaimError::Held { .. })
+            Err(ClaimError::Rejected(Rejection::Held { .. }))
         ));
         assert_eq!(
             b.claim(Role::Proxy, "p", None, 5).unwrap().address,
@@ -1209,7 +1552,7 @@ mod tests {
         for bad in ["::ffff:10.60.0.5", "::10.60.0.5"] {
             assert_eq!(
                 b.claim(Role::Origin, "o", Some(ip(bad)), 1),
-                Err(ClaimError::NotHost(ip(bad))),
+                Err(ClaimError::Rejected(Rejection::NotHost(ip(bad)))),
                 "{bad}"
             );
         }
@@ -1265,7 +1608,7 @@ mod tests {
         // A stale pin of the old network is refused, not silently granted.
         assert!(matches!(
             b.claim(Role::Proxy, "p", Some(ip("10.60.0.2")), 6),
-            Err(ClaimError::OutsideNetwork { .. })
+            Err(ClaimError::Rejected(Rejection::OutsideNetwork { .. }))
         ));
         // Re-registering keeps the new address.
         assert_eq!(
@@ -1366,5 +1709,216 @@ mod tests {
         assert!(err.contains("--ha-peers"), "{err}");
         // Pin-only mode (no network) with HA is allowed: nothing is allocated.
         assert!(resolve_flags(None, "14d", true, false).is_ok());
+    }
+
+    fn net24() -> Network {
+        Network::parse("10.60.0.0/24").unwrap()
+    }
+
+    #[test]
+    fn a_rejection_advances_the_applied_index() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        b.claim_at(
+            Role::Origin,
+            "a",
+            Some(ip("10.60.0.2")),
+            1,
+            Some(net24()),
+            4,
+        )
+        .unwrap();
+        let out = b
+            .claim_at(
+                Role::Origin,
+                "b",
+                Some(ip("10.60.0.2")),
+                2,
+                Some(net24()),
+                5,
+            )
+            .unwrap();
+        let held = Rejection::Held {
+            address: ip("10.60.0.2"),
+            role: Role::Origin,
+            name: "a".into(),
+        };
+        assert_eq!(out, Outcome::Rejected(held.clone()));
+        assert_eq!(b.applied_index().unwrap(), Some(5));
+        assert_eq!(
+            b.last_outcome().unwrap(),
+            Some((5, Outcome::Rejected(held)))
+        );
+        // The rejection wrote nothing else.
+        assert_eq!(b.get(Role::Origin, "b").unwrap(), None);
+        assert_eq!(b.allocated(), 1);
+    }
+
+    #[test]
+    fn a_replayed_rejection_is_not_re_evaluated() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        b.claim_at(
+            Role::Origin,
+            "a",
+            Some(ip("10.60.0.2")),
+            1,
+            Some(net24()),
+            4,
+        )
+        .unwrap();
+        b.claim_at(
+            Role::Origin,
+            "b",
+            Some(ip("10.60.0.2")),
+            2,
+            Some(net24()),
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            b.release_at(Role::Origin, "a", 6).unwrap(),
+            Some(Some(ip("10.60.0.2")))
+        );
+        // Replaying index 5 must not now grant `.2` to b.
+        let replay = b
+            .claim_at(
+                Role::Origin,
+                "b",
+                Some(ip("10.60.0.2")),
+                2,
+                Some(net24()),
+                5,
+            )
+            .unwrap();
+        assert_eq!(replay, Outcome::AlreadyApplied);
+        assert_eq!(b.get(Role::Origin, "b").unwrap(), None);
+        assert_eq!(b.release_at(Role::Origin, "a", 6).unwrap(), None);
+        assert_eq!(b.applied_index().unwrap(), Some(6));
+        // last_outcome still describes the last claim, with its own index.
+        assert_eq!(b.last_outcome().unwrap().unwrap().0, 5);
+    }
+
+    #[test]
+    fn claim_uses_the_given_network_not_the_opened_one() {
+        let (b, _d) = book(None);
+        let out = b
+            .claim_at(Role::Origin, "a", None, 7, Some(net24()), 1)
+            .unwrap();
+        assert_eq!(
+            out,
+            Outcome::Granted(Assignment {
+                address: ip("10.60.0.1"),
+                first_seen: 7,
+                last_seen: 7
+            })
+        );
+        // And the other way: given no network, an allocation is refused even
+        // though the book was opened with one.
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        assert_eq!(
+            b.claim_at(Role::Origin, "a", None, 7, None, 1).unwrap(),
+            Outcome::Rejected(Rejection::NoNetwork)
+        );
+    }
+
+    #[test]
+    fn claim_at_ignores_the_readdress_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Network::parse("10.50.0.0/24").unwrap();
+        let b = AddressBook::open(dir.path(), Some(old))
+            .unwrap()
+            .with_readdress(true);
+        b.claim_at(Role::Origin, "a", None, 1, Some(old), 1)
+            .unwrap();
+        // The owner sits outside the new network; claim_at keeps its address.
+        let out = b
+            .claim_at(Role::Origin, "a", None, 2, Some(net24()), 2)
+            .unwrap();
+        let Outcome::Granted(a) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(a.address, ip("10.50.0.1"));
+    }
+
+    #[test]
+    fn touch_changes_last_seen_only() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        b.claim_at(Role::Proxy, "p", None, 10, Some(net24()), 1)
+            .unwrap();
+        let before = b.last_outcome().unwrap();
+        assert_eq!(b.touch_at(Role::Proxy, "p", 99, 2).unwrap(), Some(true));
+        assert_eq!(
+            b.get(Role::Proxy, "p").unwrap(),
+            Some(Assignment {
+                address: ip("10.60.0.1"),
+                first_seen: 10,
+                last_seen: 99
+            })
+        );
+        assert_eq!(b.applied_index().unwrap(), Some(2));
+        assert_eq!(b.last_outcome().unwrap(), before);
+        assert_eq!(b.touch_at(Role::Proxy, "p", 123, 2).unwrap(), None);
+        assert_eq!(b.get(Role::Proxy, "p").unwrap().unwrap().last_seen, 99);
+        // An unknown owner advances the index and nothing else.
+        assert_eq!(b.touch_at(Role::Proxy, "x", 5, 3).unwrap(), Some(false));
+        assert_eq!(b.applied_index().unwrap(), Some(3));
+        assert_eq!(b.allocated(), 1);
+    }
+
+    #[test]
+    fn the_applied_index_and_outcome_survive_a_reopen() {
+        let (b, d) = book(Some("10.60.0.0/24"));
+        b.claim_at(Role::Origin, "a", None, 1, Some(net24()), 9)
+            .unwrap();
+        drop(b);
+        let b = reopen(d.path(), Some("10.60.0.0/24"));
+        assert_eq!(b.applied_index().unwrap(), Some(9));
+        assert!(matches!(
+            b.last_outcome().unwrap(),
+            Some((9, Outcome::Granted(_)))
+        ));
+    }
+
+    #[test]
+    fn the_non_indexed_paths_write_nothing_to_meta() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        b.claim(Role::Origin, "a", None, 1).unwrap();
+        assert!(b
+            .claim(Role::Origin, "b", Some(ip("10.60.0.1")), 1)
+            .is_err());
+        b.release(Role::Origin, "a").unwrap();
+        assert_eq!(b.applied_index().unwrap(), None);
+        assert_eq!(b.last_outcome().unwrap(), None);
+    }
+
+    #[test]
+    fn json_formats_carry_addresses_as_strings() {
+        let a = Assignment {
+            address: ip("fd49::5"),
+            first_seen: 1,
+            last_seen: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            r#"{"address":"fd49::5","first_seen":1,"last_seen":2}"#
+        );
+        let r = Rejection::OutsideNetwork {
+            address: ip("10.61.0.1"),
+            network: Network::parse("fd49:89c1:4b5e:60::/64").unwrap(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains(r#""network":"fd49:89c1:4b5e:60::/64""#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Rejection>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn release_at_of_an_unknown_owner_advances_the_applied_index() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        assert_eq!(b.release_at(Role::Origin, "nobody", 4).unwrap(), Some(None));
+        assert_eq!(b.applied_index().unwrap(), Some(4));
+        assert_eq!(b.last_outcome().unwrap(), None);
+        assert_eq!(b.release_at(Role::Origin, "nobody", 4).unwrap(), None);
     }
 }

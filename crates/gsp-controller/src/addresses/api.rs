@@ -13,7 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::{is_stale, now_secs, AddressBook, ClaimError};
+use super::{is_stale, now_secs, AddressBook, ClaimError, Rejection};
 
 #[derive(Clone)]
 pub struct AddressesState {
@@ -64,15 +64,21 @@ struct ErrorBody {
     error: String,
 }
 
-/// `409` address held / owner has a different one, `422` invalid address or no
-/// network configured, `503` network exhausted or book full, `500` storage.
+/// `409` address held / owner has a different one, `422` invalid address, no
+/// network configured or backends off the claimed address, `503` network
+/// exhausted, book full or registries still initializing, `500` storage.
 pub fn claim_error_response(e: &ClaimError) -> Response {
     let status = match e {
-        ClaimError::Held { .. } | ClaimError::OwnerHasDifferent { .. } => StatusCode::CONFLICT,
-        ClaimError::OutsideNetwork { .. } | ClaimError::NotHost(_) | ClaimError::NoNetwork => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        ClaimError::Exhausted { .. } | ClaimError::Full { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        ClaimError::Rejected(r) => match r {
+            Rejection::Held { .. } | Rejection::OwnerHasDifferent { .. } => StatusCode::CONFLICT,
+            Rejection::OutsideNetwork { .. }
+            | Rejection::NotHost(_)
+            | Rejection::NoNetwork
+            | Rejection::BackendHost(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Rejection::Exhausted { .. } | Rejection::Full { .. } | Rejection::NotInitialized => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        },
         ClaimError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
@@ -235,9 +241,9 @@ mod tests {
         use std::net::IpAddr;
         let a: IpAddr = "10.60.0.1".parse().unwrap();
         let net = Network::parse("10.60.0.0/24").unwrap();
-        let status = |e: ClaimError| claim_error_response(&e).status();
+        let status = |r: Rejection| claim_error_response(&ClaimError::Rejected(r)).status();
         assert_eq!(
-            status(ClaimError::Held {
+            status(Rejection::Held {
                 address: a,
                 role: Role::Origin,
                 name: "x".into()
@@ -245,7 +251,7 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            status(ClaimError::OwnerHasDifferent {
+            status(Rejection::OwnerHasDifferent {
                 role: Role::Origin,
                 name: "x".into(),
                 have: a,
@@ -254,22 +260,22 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            status(ClaimError::OutsideNetwork {
+            status(Rejection::OutsideNetwork {
                 address: a,
                 network: net
             }),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::NotHost(a)),
+            status(Rejection::NotHost(a)),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::NoNetwork),
+            status(Rejection::NoNetwork),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::Exhausted {
+            status(Rejection::Exhausted {
                 network: net,
                 allocated: 254,
                 capacity: 254
@@ -277,7 +283,19 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(ClaimError::Storage("x".into())),
+            status(Rejection::Full { allocated: 3 }),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Rejection::BackendHost("backend is elsewhere".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status(Rejection::NotInitialized),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            claim_error_response(&ClaimError::Storage("x".into())).status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
