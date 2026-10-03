@@ -21,4 +21,4 @@ the document was written.
 | Tunnel address authority (`gsp-controller` allocates tunnel addresses) | [spec](specs/2026-10-02-tunnel-address-authority-design.md) | [plan](plans/2026-10-02-tunnel-address-authority.md) | Built |
 | TLS handshake flood limits | [spec](specs/2026-10-03-tls-handshake-limits-design.md) | none | Built |
 | CI change detection from `cargo metadata` | [spec](specs/2026-10-03-ci-change-detection-design.md) | none | Built |
-| HA-replicated tunnel address allocation and live HA membership | [spec](specs/2026-10-03-ha-replicated-address-allocation-design.md) | pending | Designed; not built |
+| HA-replicated tunnel address allocation and live HA membership | [spec](specs/2026-10-03-ha-replicated-address-allocation-design.md) | [plan](plans/2026-10-03-ha-replicated-address-allocation.md) | Planned; not built |
