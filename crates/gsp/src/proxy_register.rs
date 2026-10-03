@@ -21,6 +21,7 @@ struct ProxyRegistration<'a> {
     endpoint: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tunnel_address: Option<&'a str>,
+    boot_id: &'a str,
 }
 
 /// What the controller answers to a successful `POST /proxy-peers`.
@@ -41,6 +42,19 @@ pub struct Registration {
     pub endpoint: String,
     /// A pinned tunnel address (bare IP); `None` asks the controller to allocate.
     pub address: Option<String>,
+    /// [`new_boot_id`], once per process: lets every origin's `gsp-agent`
+    /// tell a restart from a routine re-registration.
+    pub boot_id: String,
+}
+
+/// A fresh random id for this process start (128 bits, hex). A restarted
+/// proxy has a new WireGuard interface but no endpoint for any origin, so it
+/// cannot re-handshake by itself, and an agent whose kernel still holds the
+/// old session would wait for the 120 s rekey. A changed boot id is what
+/// makes the agent re-set the peer instead (`gsp-agent`'s `proxy_subscribe`).
+pub fn new_boot_id() -> String {
+    let bytes: [u8; 16] = rand::random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn body(reg: &Registration) -> ProxyRegistration<'_> {
@@ -49,6 +63,7 @@ fn body(reg: &Registration) -> ProxyRegistration<'_> {
         pubkey: &reg.pubkey,
         endpoint: &reg.endpoint,
         tunnel_address: reg.address.as_deref(),
+        boot_id: &reg.boot_id,
     }
 }
 
@@ -205,7 +220,26 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
             address: None,
+            boot_id: "0123456789abcdef0123456789abcdef".into(),
         }
+    }
+
+    #[test]
+    fn the_boot_id_is_sent_with_every_registration() {
+        let json = serde_json::to_string(&body(&reg())).unwrap();
+        assert!(
+            json.contains("\"boot_id\":\"0123456789abcdef0123456789abcdef\""),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn each_process_start_gets_a_fresh_boot_id() {
+        let a = new_boot_id();
+        let b = new_boot_id();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
     }
 
     #[test]

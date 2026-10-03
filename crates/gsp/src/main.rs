@@ -444,6 +444,7 @@ async fn run(
                 address: pinned_cidr
                     .as_deref()
                     .map(|c| tunnel_address::ip_of(c).to_string()),
+                boot_id: proxy_register::new_boot_id(),
             };
             let client = proxy_register::http_client();
             let addr_path = {
