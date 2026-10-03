@@ -199,6 +199,9 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> 
             return bad_credentials();
         };
         let Some(user) = users.get(username) else {
+            // Same Argon2 cost as a known user, so timing doesn't reveal
+            // which usernames exist.
+            crate::users::verify_against_dummy(&req.password);
             return bad_credentials();
         };
         if !crate::users::verify_password(&user.password_hash, &req.password) {
@@ -214,7 +217,7 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> 
     }
 
     match state.ui_password.as_deref() {
-        Some(expected) if req.password != expected => bad_credentials(),
+        Some(expected) if !gsp_http::token_eq(&req.password, expected) => bad_credentials(),
         _ => issue_session(
             &state,
             Session {

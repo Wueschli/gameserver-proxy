@@ -86,6 +86,12 @@ struct Args {
     #[arg(long)]
     ha_token: Option<String>,
 
+    /// Build a Raft snapshot (and let the log be purged) every this many
+    /// log entries. Test-only: fleet tests lower it to exercise catch-up by
+    /// snapshot.
+    #[arg(long, hide = true, default_value_t = ha::SNAPSHOT_AFTER)]
+    ha_snapshot_after: u64,
+
     /// Network tunnel addresses are allocated from: IPv6 `/64` to `/120`, e.g.
     /// `fd49:89c1:4b5e:60::/64`, or IPv4 `/16` to `/30`, e.g. `10.60.0.0/16`.
     /// Omit for pin-only mode: requested addresses are checked for uniqueness
@@ -287,20 +293,10 @@ async fn main() -> anyhow::Result<()> {
         );
 
         let network = ha::network::Network::new(ha_token.clone());
-        // Relaxed from the library defaults (150/300/50ms) — this is a
-        // control-plane group on plain HTTP over `reqwest`, not a
-        // low-latency data-path link; a wider election window trades a
-        // slightly slower failover for fewer spurious elections under
-        // ordinary scheduling/network jitter in a test or a loaded host.
         let raft_config = Arc::new(
-            openraft::Config {
-                heartbeat_interval: 250,
-                election_timeout_min: 800,
-                election_timeout_max: 1500,
-                ..Default::default()
-            }
-            .validate()
-            .map_err(|e| anyhow::anyhow!("invalid raft config: {e}"))?,
+            ha::raft_config(args.ha_snapshot_after)
+                .validate()
+                .map_err(|e| anyhow::anyhow!("invalid raft config: {e}"))?,
         );
         let raft = openraft::Raft::new(node_id, raft_config, network, log_store, state_machine)
             .await

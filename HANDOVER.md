@@ -49,8 +49,6 @@ Watch-list:
   `ubuntu-latest` → Ubuntu 26 switch changes nothing. Moving to 26 later is a deliberate
   edit of all jobs together: re-check `tunnel` (AppArmor userns sysctl, `wireguard`
   module) and the release jobs' glibc vs. the distroless runtime (2.41).
-- `actions/cache@v4` prints a Node 20 deprecation warning (it still works); bump when a
-  Node 24 major exists.
 - **Trivy pinning:** CI runs the official `aquasec/trivy` image pinned by digest, not
   `trivy-action`/`setup-trivy`, whose tags were hijacked in March 2026. Re-check the
   binary against the release checksum when bumping the digest.

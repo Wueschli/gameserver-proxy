@@ -58,7 +58,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::role::{Role, RoleHandle};
-use crate::store::{RevisionBytes, Store, StoreError};
+use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
 /// Capacity of the update-notification broadcast: how many accepted
 /// submissions can land between two ticks of a subscriber's tail loop before
@@ -107,6 +107,10 @@ impl Stage {
 
 fn encode_rev(rev: u64) -> [u8; 8] {
     rev.to_be_bytes()
+}
+
+fn stage_bytes(stage: &Stage) -> Vec<u8> {
+    serde_json::to_vec(stage).expect("Stage always serializes")
 }
 
 #[derive(Clone)]
@@ -210,6 +214,69 @@ impl AppState {
         Ok(revision)
     }
 
+    /// The Raft-apply form of [`Self::apply_revision_with_stage_and_actor`]:
+    /// revision, `applied_index`, stage and actor all land in one `sled`
+    /// transaction, and a step whose `index` this database has already
+    /// absorbed (a replay after a crash lost `last_applied_log`) writes
+    /// nothing. `Ok(None)` = already applied.
+    pub fn apply_entry(
+        &self,
+        index: u64,
+        bytes: RevisionBytes,
+        stage: Stage,
+        actor: Option<&str>,
+    ) -> Result<Option<u64>, StoreError> {
+        let stage_bytes = stage_bytes(&stage);
+        let applied = self.store.put_applied_with(bytes, index, &|revision| {
+            let mut writes = vec![SiblingWrite {
+                tree: &self.stage,
+                key: encode_rev(revision).to_vec(),
+                value: Some(stage_bytes.clone()),
+            }];
+            if let Some(actor) = actor {
+                writes.push(SiblingWrite {
+                    tree: &self.actors,
+                    key: encode_rev(revision).to_vec(),
+                    value: Some(actor.as_bytes().to_vec()),
+                });
+            }
+            writes
+        })?;
+        match applied {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// The Raft-apply form of [`Self::promote_revision`] for the entry at
+    /// log `index`: the stage flip and the `applied_index` share one
+    /// transaction. `Ok(None)` = already applied (skipped); otherwise
+    /// `Some(found)`, and `applied_index` advances even when the revision
+    /// does not exist.
+    pub fn promote_entry(&self, index: u64, revision: u64) -> Result<Option<bool>, StoreError> {
+        let found = self.store.get(revision)?.is_some();
+        let mut writes = Vec::new();
+        if found {
+            let mut stage = self.stage_of(revision);
+            stage.promoted = true;
+            writes.push(SiblingWrite {
+                tree: &self.stage,
+                key: encode_rev(revision).to_vec(),
+                value: Some(stage_bytes(&stage)),
+            });
+        }
+        if !self.store.mark_applied_with(index, writes)? {
+            return Ok(None);
+        }
+        if found {
+            let _ = self.updates.send(revision);
+        }
+        Ok(Some(found))
+    }
+
     /// Flips an existing revision's `promoted` to `true` in place — the one
     /// deliberate exception to "every change is a new revision" (see the
     /// module doc). `Ok(false)` if `revision` doesn't exist (the caller
@@ -239,8 +306,8 @@ impl AppState {
     }
 
     fn set_stage(&self, revision: u64, stage: &Stage) -> Result<(), StoreError> {
-        let bytes = serde_json::to_vec(stage).expect("Stage always serializes");
-        self.stage.insert(encode_rev(revision), bytes)?;
+        self.stage
+            .insert(encode_rev(revision), stage_bytes(stage))?;
         self.stage.flush()?;
         Ok(())
     }

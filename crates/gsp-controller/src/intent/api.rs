@@ -26,7 +26,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::IntentOp;
 use crate::role::{Role, RoleHandle};
-use crate::store::{RevisionBytes, Store, StoreError};
+use crate::store::{Applied, RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
 
@@ -71,6 +71,20 @@ impl IntentState {
         let _ = self.updates.send(revision);
         Ok(revision)
     }
+
+    /// The Raft-apply form of [`Self::apply_revision`]: the revision and
+    /// the store's `applied_index` land in one transaction, and a replay of
+    /// an already-absorbed log `index` writes nothing. `Ok(None)` = already
+    /// applied.
+    pub fn apply_entry(&self, index: u64, bytes: RevisionBytes) -> Result<Option<u64>, StoreError> {
+        match self.store.put_applied(bytes, index)? {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
 }
 
 pub fn router(state: IntentState) -> Router {
@@ -97,7 +111,7 @@ async fn require_bearer(State(state): State<IntentState>, req: Request, next: Ne
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match presented {
-        Some(token) if token == expected => next.run(req).await,
+        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
         _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
     }
 }
