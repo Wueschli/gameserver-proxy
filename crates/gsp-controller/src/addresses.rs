@@ -126,6 +126,17 @@ impl Network {
                 "{addr:?} is an IPv4 address written as IPv6: use the IPv4 form"
             ));
         }
+        if let IpAddr::V6(v6) = ip {
+            let seg = v6.segments();
+            // ::/80 holds loopback, unspecified and the IPv4-in-IPv6 ranges;
+            // multicast and link-local are not unicast pools either.
+            if seg[..5] == [0; 5] || v6.is_multicast() || seg[0] & 0xffc0 == 0xfe80 {
+                return Err(format!(
+                    "{addr:?} is not a usable unicast network: use a ULA such as \
+                     fd49:89c1:4b5e:60::/64"
+                ));
+            }
+        }
         let prefix: u8 = prefix
             .parse()
             .map_err(|_| format!("{prefix:?} is not a prefix length"))?;
@@ -1188,6 +1199,9 @@ mod tests {
 
     #[test]
     fn ipv4_written_as_ipv6_is_refused_for_networks_and_pins() {
+        for bad in ["::/112", "::/64", "::1:0/112", "ff02::/64", "fe80::/64"] {
+            assert!(Network::parse(bad).is_err(), "{bad}");
+        }
         let err = Network::parse("::ffff:10.60.0.0/120").unwrap_err();
         assert!(err.contains("IPv4"), "{err}");
         assert!(Network::parse("::10.60.0.0/120").is_err());
