@@ -82,6 +82,15 @@ struct Args {
     #[arg(long)]
     aggregator_token: Option<String>,
 
+    /// Base URL the aggregator should use to reach this instance's admin API
+    /// for intent fan-out (drain, backend edits, route hints), e.g.
+    /// `http://10.1.2.3:9900` or `https://gsp-1.example`. Defaults to
+    /// `http(s)://<settings.admin.listen>`, which is unreachable from another
+    /// host or container when the admin API binds `0.0.0.0` or loopback, or
+    /// sits behind a NAT, port mapping or TLS terminator.
+    #[arg(long, requires = "aggregator")]
+    aggregator_admin_url: Option<String>,
+
     /// Enables phase 14's WireGuard backend transport (`docs/11`):
     /// brings up a local interface with this name and reconciles its peer
     /// list from `--tunnel-controller-url`'s backend-peers registry.
@@ -280,6 +289,12 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         None => None,
     };
 
+    let admin_url = aggregator_admin_url(
+        args.aggregator_admin_url.as_deref(),
+        admin_tls.is_some(),
+        cfg.admin_listen,
+    )?;
+
     if args.check {
         println!(
             "config OK: {} listener(s), {} pool(s){}{}{}",
@@ -310,11 +325,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             instance: args
                 .aggregator_instance
                 .unwrap_or_else(|| cfg.admin_listen.to_string()),
-            admin_url: format!(
-                "{}://{}",
-                if admin_tls.is_some() { "https" } else { "http" },
-                cfg.admin_listen
-            ),
+            admin_url,
             interval: Duration::from_secs(args.aggregator_interval_sec),
             token: args.aggregator_token,
         });
@@ -458,10 +469,19 @@ async fn run(
                 tunnel_address::Source::Controller => {
                     tunnel_address::save(&addr_path, &start.cidr)?
                 }
-                tunnel_address::Source::Saved => tracing::warn!(
-                    address = %start.cidr,
-                    "controller unreachable; starting with the last saved tunnel address"
-                ),
+                tunnel_address::Source::Saved {
+                    ref cause,
+                    ref pin_ignored,
+                } => {
+                    tracing::warn!(
+                        address = %start.cidr,
+                        error = %cause,
+                        "controller unreachable; starting with the last saved tunnel address"
+                    );
+                    if let Some(msg) = pin_ignored {
+                        tracing::warn!("{msg}");
+                    }
+                }
             }
             let address: defguard_wireguard_rs::net::IpAddrMask = start
                 .cidr
@@ -632,6 +652,33 @@ async fn run(
     Ok(())
 }
 
+/// The admin URL to report in aggregator pushes: `--aggregator-admin-url` if
+/// given (an `http`/`https` base URL, optionally with a path prefix; trailing
+/// slashes are trimmed because the fan-out appends absolute paths), else this
+/// instance's own admin listener.
+fn aggregator_admin_url(
+    override_url: Option<&str>,
+    admin_tls: bool,
+    admin_listen: impl std::fmt::Display,
+) -> anyhow::Result<String> {
+    let Some(raw) = override_url else {
+        let scheme = if admin_tls { "https" } else { "http" };
+        return Ok(format!("{scheme}://{admin_listen}"));
+    };
+    let bad = |why: &str| anyhow::anyhow!("--aggregator-admin-url {raw:?}: {why}");
+    let url = reqwest::Url::parse(raw).map_err(|e| bad(&e.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(bad("the scheme must be http or https"));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(bad("missing host"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(bad("must not have a query or fragment"));
+    }
+    Ok(raw.trim_end_matches('/').to_string())
+}
+
 #[cfg(unix)]
 async fn wait_for_shutdown() {
     use tokio::signal::unix::{signal, SignalKind};
@@ -646,4 +693,62 @@ async fn wait_for_shutdown() {
 #[cfg(not(unix))]
 async fn wait_for_shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aggregator_admin_url;
+
+    #[test]
+    fn defaults_to_the_admin_listen_address() {
+        let listen = "127.0.0.1:9900";
+        assert_eq!(
+            aggregator_admin_url(None, false, listen).unwrap(),
+            "http://127.0.0.1:9900"
+        );
+        assert_eq!(
+            aggregator_admin_url(None, true, listen).unwrap(),
+            "https://127.0.0.1:9900"
+        );
+    }
+
+    #[test]
+    fn an_override_replaces_it_whatever_the_admin_tls() {
+        for tls in [false, true] {
+            assert_eq!(
+                aggregator_admin_url(Some("http://10.1.2.3:9900"), tls, "0.0.0.0:9900").unwrap(),
+                "http://10.1.2.3:9900"
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_keeps_a_path_prefix_and_loses_trailing_slashes() {
+        assert_eq!(
+            aggregator_admin_url(Some("https://edge.example/gsp-1//"), false, "0.0.0.0:9900")
+                .unwrap(),
+            "https://edge.example/gsp-1"
+        );
+        assert_eq!(
+            aggregator_admin_url(Some("https://edge.example/"), false, "0.0.0.0:9900").unwrap(),
+            "https://edge.example"
+        );
+    }
+
+    #[test]
+    fn a_bad_override_is_an_error_naming_the_flag() {
+        for bad in [
+            "10.1.2.3:9900",
+            "ftp://10.1.2.3",
+            "http://",
+            "http://host/?x=1",
+            "http://host/#frag",
+            "not a url",
+        ] {
+            let err = aggregator_admin_url(Some(bad), false, "0.0.0.0:9900")
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("--aggregator-admin-url"), "{bad}: {err}");
+        }
+    }
 }

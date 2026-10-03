@@ -7,6 +7,7 @@ import { FleetPage } from "./pages/FleetPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { PluginsPage } from "./pages/PluginsPage";
 import { ConfigHistoryPage } from "./pages/ConfigHistoryPage";
+import { TunnelAddressesPage } from "./pages/TunnelAddressesPage";
 
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -32,6 +33,7 @@ export function App() {
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/plugins" element={<PluginsPage />} />
         <Route path="/config-history" element={<ConfigHistoryPage />} />
+        <Route path="/tunnel" element={<TunnelAddressesPage />} />
         <Route path="*" element={<Navigate to="/fleet" replace />} />
       </Route>
     </Routes>

@@ -86,7 +86,8 @@ struct Args {
     #[arg(long)]
     ha_token: Option<String>,
 
-    /// IPv4 network tunnel addresses are allocated from, e.g. `10.60.0.0/16`.
+    /// IPv4 network tunnel addresses are allocated from, e.g. `10.60.0.0/16`
+    /// (between `/16` and `/30`).
     /// Omit for pin-only mode: requested addresses are checked for uniqueness
     /// but nothing is allocated. Cannot be combined with `--ha-peers`.
     #[arg(long)]
