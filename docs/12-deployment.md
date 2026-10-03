@@ -191,8 +191,13 @@ gsp-controller --listen 0.0.0.0:8443 \
 - Clients use `https://` URLs; with a private CA they add `--ca-file`. HA replicas can
   each serve native TLS and name their peers `--ha-peers 1=https://ctl-1:8443,…`
   (plus `--ca-file`), with no terminator at all.
-- TLS handshakes run in their own tasks with a 10 s timeout, so a client that connects
-  and stalls cannot hold up others. No client certificates (mTLS).
+- TLS handshakes run in their own tasks, so a client that connects and stalls cannot
+  hold up others. A client must send its ClientHello within 3 s and finish the
+  handshake within 10 s. At most 16 handshakes may be pending per source (an IPv4
+  address or an IPv6 /64); more are closed at once. At 512 pending handshakes in total a
+  new connection is still accepted and the oldest pending handshake is dropped, so a
+  flood of idle connects cannot lock real clients out. A limit being hit logs a warning
+  (at most once a minute). No client certificates (mTLS).
 - **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
   push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
   goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
