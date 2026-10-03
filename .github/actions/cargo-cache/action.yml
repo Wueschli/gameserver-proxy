@@ -20,7 +20,7 @@ runs:
       run: |
         echo "rustc=$(rustc -V | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
         echo "lock=$(cat Cargo.lock crates/plugins/Cargo.lock 2>/dev/null | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry/index
