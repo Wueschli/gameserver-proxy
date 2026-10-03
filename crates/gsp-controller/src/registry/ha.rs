@@ -717,4 +717,48 @@ mod tests {
         h.settle().await;
         assert_eq!(h.proposals(), 0);
     }
+
+    #[tokio::test]
+    async fn the_leader_records_its_network_once_and_registrations_follow() {
+        use crate::ha::init::{initialize_registries, ImportPolicy};
+        let h = ha_app_with(None, Some("10.60.0.0/24")).await;
+        let local = h.ha.local_network;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            initialize_registries(
+                h.ha.handle.clone(),
+                h.ha.cluster.clone(),
+                local,
+                ImportPolicy::Never,
+            ),
+        )
+        .await
+        .expect("initialization ends once the network is recorded");
+        assert_eq!(h.ha.cluster.network().unwrap(), Some(local));
+        let (status, body) = call(&h.app, "POST", "/peers", peer("o1", &[":25565"])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["tunnel_address"], "10.60.0.1");
+    }
+
+    #[tokio::test]
+    async fn a_node_whose_flag_differs_from_the_recorded_network_ends_initialization() {
+        use crate::ha::init::{initialize_registries, ImportPolicy};
+        let h = ha_app_with(Some(Some("10.60.0.0/24")), Some("10.61.0.0/24")).await;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            initialize_registries(
+                h.ha.handle.clone(),
+                h.ha.cluster.clone(),
+                h.ha.local_network,
+                ImportPolicy::Never,
+            ),
+        )
+        .await
+        .expect("a recorded network ends initialization even on a mismatch");
+        // The recorded value is never overwritten by the mismatching flag.
+        assert_eq!(
+            h.ha.cluster.network().unwrap(),
+            Some(Some(Network::parse("10.60.0.0/24").unwrap()))
+        );
+    }
 }

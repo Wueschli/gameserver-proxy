@@ -1139,8 +1139,10 @@ pub fn summarize(entries: &[Entry]) -> String {
 }
 
 /// Validates the controller's `--tunnel-*` flags together: parses the network
-/// and the stale threshold, and refuses a network combined with HA (the
-/// allocator is correct only with a single writer — see the module doc).
+/// and the stale threshold, and refuses `--tunnel-readdress` without a network
+/// or together with HA (re-addressing is one writer's decision; the replicated
+/// registries have no such writer). A network together with HA is fine: the
+/// cluster records one network and every node's flag is checked against it.
 pub fn resolve_flags(
     network: Option<&str>,
     stale_after: &str,
@@ -1149,8 +1151,9 @@ pub fn resolve_flags(
 ) -> Result<(Option<Network>, Duration), String> {
     if readdress && ha_enabled {
         return Err(
-            "--tunnel-readdress cannot be combined with --ha-peers: re-addressing must \
-                    run as one writer's decision, and the registries are not replicated"
+            "--tunnel-readdress cannot be combined with --ha-peers or --ha-join: \
+             re-addressing must run as one writer's decision, and the cluster records its \
+             tunnel network once"
                 .into(),
         );
     }
@@ -1159,17 +1162,7 @@ pub fn resolve_flags(
     }
     let stale = parse_duration(stale_after).map_err(|e| format!("--tunnel-stale-after: {e}"))?;
     let net = match network {
-        Some(n) => {
-            if ha_enabled {
-                return Err(
-                    "--tunnel-network cannot be combined with --ha-peers: the address allocator \
-                     needs a single writer and the registries are not replicated \
-                     (see docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md)"
-                        .into(),
-                );
-            }
-            Some(Network::parse(n).map_err(|e| format!("--tunnel-network: {e}"))?)
-        }
+        Some(n) => Some(Network::parse(n).map_err(|e| format!("--tunnel-network: {e}"))?),
         None => None,
     };
     Ok((net, stale))
@@ -1768,12 +1761,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_flags_refuses_readdress_without_a_network_or_under_ha() {
+    fn resolve_flags_refuses_readdress_without_a_network() {
         let e = resolve_flags(None, "14d", false, true).unwrap_err();
         assert!(e.contains("--tunnel-readdress"), "{e}");
-        let e = resolve_flags(None, "14d", true, true).unwrap_err();
-        assert!(e.contains("--tunnel-readdress"), "{e}");
         assert!(resolve_flags(Some("fd49::/64"), "14d", false, true).is_ok());
+    }
+
+    #[test]
+    fn tunnel_readdress_with_ha_is_refused() {
+        let e = resolve_flags(Some("fd49::/64"), "14d", true, true).unwrap_err();
+        assert!(
+            e.contains("--tunnel-readdress") && e.contains("--ha-peers"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1821,12 +1821,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_flags_rejects_a_bad_network_a_bad_duration_and_ha() {
+    fn resolve_flags_rejects_a_bad_network_and_a_bad_duration() {
         assert!(resolve_flags(Some("nonsense"), "14d", false, false).is_err());
         assert!(resolve_flags(None, "soon", false, false).is_err());
-        let err = resolve_flags(Some("10.60.0.0/16"), "14d", true, false).unwrap_err();
-        assert!(err.contains("--ha-peers"), "{err}");
-        // Pin-only mode (no network) with HA is allowed: nothing is allocated.
+    }
+
+    #[test]
+    fn resolve_flags_accepts_a_network_under_ha() {
+        let (net, _) = resolve_flags(Some("10.60.0.0/16"), "14d", true, false).unwrap();
+        assert_eq!(net, Some(Network::parse("10.60.0.0/16").unwrap()));
         assert!(resolve_flags(None, "14d", true, false).is_ok());
     }
 

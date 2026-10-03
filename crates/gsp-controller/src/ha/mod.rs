@@ -51,7 +51,9 @@
 pub mod apply_registry;
 pub mod client;
 pub mod cluster_state;
+pub mod init;
 pub mod log_store;
+pub mod members;
 pub mod network;
 pub mod peers;
 pub mod routes;

@@ -115,7 +115,7 @@ async fn an_ipv6_tunnel_network_allocates_ipv6_addresses_and_bracketed_backends(
 }
 
 #[tokio::test]
-async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
+async fn tunnel_readdress_together_with_ha_is_refused_at_startup() -> Result<()> {
     build_fleet_bins()?;
     let dir = tempfile::tempdir()?;
     let port = free_port()?;
@@ -125,6 +125,7 @@ async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
         &[
             "--tunnel-network".into(),
             "10.60.0.0/16".into(),
+            "--tunnel-readdress".into(),
             "--ha-node-id".into(),
             "1".into(),
             "--ha-peers".into(),
@@ -141,7 +142,7 @@ async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
     )
     .await?;
     assert!(
-        ctl.log().contains("--tunnel-network"),
+        ctl.log().contains("--tunnel-readdress"),
         "the error should name the flag, got: {}",
         ctl.log()
     );
