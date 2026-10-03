@@ -229,8 +229,9 @@ client from `crates/gsp/proto/resolver.proto`.
   findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
 - **CI runs are slow** (the repo is public, so hosted minutes are free, but a full run
   takes ~10 min warm and ~22 min cold). Batch pushes, remember that docs-only pushes
-  skip CI (`paths-ignore`), put `[skip ci]` in the tip commit message when a code push needs no run, and update `ROOTS` in
-  `.github/scripts/changes.py` when adding a job. Never push without being asked (rule 8).
+  skip CI (`paths-ignore`), put `[skip ci]` in the tip commit message when a code push
+  needs no run, and update `ROOTS` in `.github/scripts/changes.py` when adding a job.
+  Never push without being asked (rule 8).
 - Keep comments at the density of the surrounding code. Module-level `//!` docs should
   say what the module is for and note deliberate simplifications.
 
