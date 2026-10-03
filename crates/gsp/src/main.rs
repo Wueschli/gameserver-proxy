@@ -468,10 +468,19 @@ async fn run(
                 tunnel_address::Source::Controller => {
                     tunnel_address::save(&addr_path, &start.cidr)?
                 }
-                tunnel_address::Source::Saved => tracing::warn!(
-                    address = %start.cidr,
-                    "controller unreachable; starting with the last saved tunnel address"
-                ),
+                tunnel_address::Source::Saved {
+                    ref cause,
+                    ref pin_ignored,
+                } => {
+                    tracing::warn!(
+                        address = %start.cidr,
+                        error = %cause,
+                        "controller unreachable; starting with the last saved tunnel address"
+                    );
+                    if let Some(msg) = pin_ignored {
+                        tracing::warn!("{msg}");
+                    }
+                }
             }
             let address: defguard_wireguard_rs::net::IpAddrMask = start
                 .cidr

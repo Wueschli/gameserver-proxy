@@ -69,9 +69,15 @@ fn mask(prefix: u8) -> u32 {
     }
 }
 
+/// The shortest `--tunnel-network` prefix accepted. Allocation scans the
+/// network linearly under the book's mutex, and the counts come from sled's
+/// O(n) `Tree::len()`, so the pool is capped at a `/16` (65 534 addresses).
+pub const MIN_PREFIX: u8 = 16;
+
 impl Network {
     /// Parses `a.b.c.d/prefix`. IPv4 only; the prefix must leave at least two
-    /// usable host addresses (`/30` or shorter). Host bits are masked off.
+    /// usable host addresses (`/30` or shorter) and be at most a `/16`
+    /// ([`MIN_PREFIX`]). Host bits are masked off.
     pub fn parse(s: &str) -> Result<Self, String> {
         let (addr, prefix) = s
             .split_once('/')
@@ -85,6 +91,13 @@ impl Network {
         let prefix: u8 = prefix
             .parse()
             .map_err(|_| format!("{prefix:?} is not a prefix length"))?;
+        if prefix < MIN_PREFIX {
+            return Err(format!(
+                "prefix /{prefix} is too short: a tunnel network can be at most a \
+                 /{MIN_PREFIX} ({} host addresses)",
+                (1u64 << (32 - u32::from(MIN_PREFIX))) - 2
+            ));
+        }
         if prefix > 30 {
             return Err(format!(
                 "prefix /{prefix} is too long: the network needs at least two usable host \
@@ -438,13 +451,16 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let n: u64 = num
         .parse()
         .map_err(|_| format!("{s:?} is not a duration like 30s, 10m, 12h or 14d"))?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
+    let per_unit: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
         _ => return Err(format!("{s:?} is not a duration like 30s, 10m, 12h or 14d")),
     };
+    let secs = n
+        .checked_mul(per_unit)
+        .ok_or_else(|| format!("{s:?} is too large"))?;
     Ok(Duration::from_secs(secs))
 }
 
@@ -510,6 +526,15 @@ mod tests {
         assert_eq!(n.to_string(), "10.60.0.0/16");
         assert_eq!(n.prefix(), 16);
         assert_eq!(n.capacity(), 65534);
+    }
+
+    #[test]
+    fn network_parse_caps_the_network_at_a_slash_16() {
+        assert_eq!(Network::parse("10.60.0.0/16").unwrap().capacity(), 65534);
+        let err = Network::parse("10.0.0.0/15").unwrap_err();
+        assert!(err.contains("/16"), "{err}");
+        assert!(Network::parse("10.0.0.0/8").is_err());
+        assert!(Network::parse("0.0.0.0/0").is_err());
     }
 
     #[test]
@@ -773,6 +798,15 @@ mod tests {
         assert!(parse_duration("14").is_err());
         assert!(parse_duration("d").is_err());
         assert!(parse_duration("14w").is_err());
+    }
+
+    #[test]
+    fn parse_duration_refuses_an_overflowing_value_instead_of_panicking() {
+        // u64::MAX / 86400 ≈ 2.1e14, so this many days does not fit in seconds.
+        let err = parse_duration("300000000000000d").unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        assert!(parse_duration("6000000000000000h").is_err());
+        assert!(parse_duration("400000000000000000m").is_err());
     }
 
     #[test]
