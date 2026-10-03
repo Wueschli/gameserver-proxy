@@ -999,3 +999,214 @@ fn sendmsg_pktinfo(
     .map_err(io::Error::from)?;
     Ok(n)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drain::{Proto, SessionMeta};
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// A minimal live session for wheel tests: no pool slot, no limits.
+    async fn session(client: SocketAddr, last_ms: u64, idle_ms: u64) -> Session {
+        session_tracked(&ConnTracker::new(), client, last_ms, idle_ms).await
+    }
+
+    async fn session_tracked(
+        tracker: &Arc<ConnTracker>,
+        client: SocketAddr,
+        last_ms: u64,
+        idle_ms: u64,
+    ) -> Session {
+        let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let limits = GlobalLimits::new(&Default::default());
+        let src = SourceLimiter::new(None);
+        Session {
+            upstream,
+            last_ms: Arc::new(AtomicU64::new(last_ms)),
+            backend: addr("127.0.0.1:9"),
+            idle_ms,
+            _guard: None,
+            health: None,
+            _conn_guard: tracker.track(SessionMeta {
+                proto: Proto::Udp,
+                listener: "t".into(),
+                peer: client,
+                local: addr("127.0.0.1:1"),
+            }),
+            _limit_guard: limits.acquire_udp().unwrap(),
+            _src_guard: src.acquire(client.ip()).unwrap(),
+            _reply_sock: None,
+            reply_task: tokio::spawn(async {}),
+        }
+    }
+
+    fn slot_of(w: &IdleWheel, key: &SessionKey) -> Option<usize> {
+        w.slots.iter().position(|s| s.contains(key))
+    }
+
+    #[test]
+    fn sticky_key_is_none_without_affinity() {
+        assert!(sticky_key(None, addr("10.0.0.1:5000"), None).is_none());
+    }
+
+    #[test]
+    fn sticky_key_src_ip_ignores_port_but_not_dst() {
+        let a = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), None).unwrap();
+        let b = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:6000"), None).unwrap();
+        assert!(a == b, "src_ip affinity must not depend on the client port");
+
+        let d1 = Some(addr("192.0.2.1:27015"));
+        let d2 = Some(addr("192.0.2.2:27015"));
+        let c = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), d1).unwrap();
+        let d = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), d2).unwrap();
+        assert!(c != d, "prefix mode keys stickiness per destination");
+    }
+
+    #[test]
+    fn sticky_key_src_ip_port_distinguishes_ports() {
+        let a = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:5000"), None).unwrap();
+        let b = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:6000"), None).unwrap();
+        let a2 = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:5000"), None).unwrap();
+        assert!(a != b);
+        assert!(a == a2);
+    }
+
+    #[test]
+    fn sockaddr_to_std_round_trips_v4_and_v6() {
+        use nix::sys::socket::{SockaddrIn, SockaddrIn6, SockaddrLike, SockaddrStorage};
+        let v4 = addr("192.0.2.7:4242");
+        let SocketAddr::V4(v4s) = v4 else {
+            unreachable!()
+        };
+        let s = SockaddrIn::from(v4s);
+        let st = unsafe { SockaddrStorage::from_raw(s.as_ptr(), Some(s.len())) }.unwrap();
+        assert_eq!(sockaddr_to_std(st), Some(v4));
+
+        let v6 = addr("[2001:db8::7]:4242");
+        let SocketAddr::V6(v6s) = v6 else {
+            unreachable!()
+        };
+        let s = SockaddrIn6::from(v6s);
+        let st = unsafe { SockaddrStorage::from_raw(s.as_ptr(), Some(s.len())) }.unwrap();
+        assert_eq!(sockaddr_to_std(st), Some(v6));
+    }
+
+    #[test]
+    fn schedule_files_at_least_one_slot_ahead() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        // Deadline already passed: must still not land on the current hand.
+        w.schedule(k, 1_000, 5_000);
+        assert_eq!(slot_of(&w, &k), Some(1));
+    }
+
+    #[test]
+    fn schedule_rounds_down_to_whole_seconds() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        w.schedule(k, 10_000 + 3_999, 10_000);
+        assert_eq!(slot_of(&w, &k), Some(3));
+    }
+
+    #[test]
+    fn schedule_clamps_long_deadlines_inside_the_wheel() {
+        let mut w = IdleWheel::new();
+        w.hand = WHEEL_SLOTS - 2;
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        // Far beyond the wheel span: clamped to WHEEL_SLOTS - 1, wrapping round.
+        w.schedule(k, 10_000_000, 0);
+        let expect = (WHEEL_SLOTS - 2 + WHEEL_SLOTS - 1) % WHEEL_SLOTS;
+        assert_eq!(slot_of(&w, &k), Some(expect));
+        assert_ne!(expect, w.hand, "clamped entry must not alias the hand");
+    }
+
+    #[test]
+    fn tick_skips_sessions_already_gone() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        w.schedule(k, 1_000, 0);
+        let mut sessions = HashMap::new();
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 0);
+        assert!(w.slots.iter().all(|s| s.is_empty()), "stale key dropped");
+    }
+
+    #[tokio::test]
+    async fn tick_evicts_idle_session_and_releases_its_guards() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let tracker = ConnTracker::new();
+        let s = session_tracked(&tracker, client, 0, 1_000).await;
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, 1_000, 0);
+        assert_eq!(tracker.active(), 1);
+        assert_eq!(w.tick("t", 999, &mut sessions), 0, "not idle yet: re-filed");
+        assert_eq!(tracker.active(), 1);
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 1);
+        assert!(sessions.is_empty());
+        assert_eq!(tracker.active(), 0, "drain guard released on eviction");
+        assert!(w.slots.iter().all(|s| s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn tick_refiles_a_refreshed_session_instead_of_evicting() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let s = session(client, 0, 2_000).await;
+        let last = s.last_ms.clone();
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, 2_000, 0);
+
+        // A datagram at t=1.5s pushes the deadline to 3.5s.
+        last.store(1_500, Ordering::Relaxed);
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 0); // hand -> 1
+        assert_eq!(w.tick("t", 2_000, &mut sessions), 0); // hand -> 2: due, refiled
+        assert!(sessions.contains_key(&k));
+        assert_eq!(slot_of(&w, &k), Some(3), "re-filed at its new deadline");
+
+        assert_eq!(w.tick("t", 3_500, &mut sessions), 1); // hand -> 3: evicted
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_rechecks_sessions_whose_idle_outruns_the_wheel() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let span_ms = WHEEL_SLOTS as u64 * 1_000;
+        let s = session(client, 0, span_ms * 2).await;
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, span_ms * 2, 0);
+
+        let mut now = 0;
+        let mut evicted = 0;
+        // One full revolution: the entry comes due early and must be re-filed.
+        for _ in 0..WHEEL_SLOTS {
+            now += 1_000;
+            evicted += w.tick("t", now, &mut sessions);
+        }
+        assert_eq!(evicted, 0);
+        assert!(sessions.contains_key(&k));
+        assert_eq!(
+            w.slots.iter().map(Vec::len).sum::<usize>(),
+            1,
+            "exactly one entry"
+        );
+
+        // Keep ticking until the real deadline: evicted exactly then.
+        while sessions.contains_key(&k) {
+            now += 1_000;
+            evicted += w.tick("t", now, &mut sessions);
+            assert!(now <= span_ms * 2 + 1_000, "evicted late at {now}");
+        }
+        assert_eq!(evicted, 1);
+        assert!(now >= span_ms * 2, "evicted early at {now}");
+    }
+}
