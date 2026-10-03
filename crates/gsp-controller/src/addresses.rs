@@ -55,7 +55,7 @@ impl std::fmt::Display for Role {
 }
 
 /// The address family of a tunnel [`Network`]. One family per controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     V4,
     V6,
@@ -767,6 +767,10 @@ impl AddressBook {
         meta: Option<(u64, Option<&[u8]>)>,
     ) -> Result<Committed, StorageFailure> {
         use sled::transaction::{ConflictableTransactionError, TransactionError};
+        // Nothing to write (a non-indexed no-op): no transaction, no flush.
+        if ops.is_empty() && meta.is_none() {
+            return Ok(Committed::Done);
+        }
         let result =
             (&self.by_owner, &self.by_address, &self.meta).transaction(|(owner, addr, metat)| {
                 if let Some((index, outcome)) = meta {
@@ -1907,5 +1911,14 @@ mod tests {
             "{json}"
         );
         assert_eq!(serde_json::from_str::<Rejection>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn release_at_of_an_unknown_owner_advances_the_applied_index() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        assert_eq!(b.release_at(Role::Origin, "nobody", 4).unwrap(), Some(None));
+        assert_eq!(b.applied_index().unwrap(), Some(4));
+        assert_eq!(b.last_outcome().unwrap(), None);
+        assert_eq!(b.release_at(Role::Origin, "nobody", 4).unwrap(), None);
     }
 }
