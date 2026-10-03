@@ -33,11 +33,20 @@ env:
 # the rest so a runner-image migration is a deliberate edit, not a surprise red run
 # (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
 # caches stay on one image. Move them together when upgrading.
+#
+# Self-hosted runner (owner's VPS; setup: .github/self-hosted-runner.md): the
+# repository variable CI_RUNNER moves every job but deploy/trivy onto the runners
+# carrying that label (e.g. `gsp-ci`); unset, everything stays GitHub-hosted.
+# CI_RUNNER_TUNNEL overrides it for `tunnel` alone (`ubuntu-24.04` keeps it hosted).
+# deploy/trivy always stay hosted: deploy-smoke uses a fixed compose project,
+# fixed host ports and fixed image tags, so two runs sharing one Docker daemon
+# would tear down each other's stack. The VPS must run glibc <= 2.41 (Ubuntu 24.04
+# or Debian 13), for the same reason build-release is pinned.
 jobs:
   # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
   # Schedule / manual runs, a workflow edit, or a failed diff run everything.
   changes:
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     outputs:
       ui: ${{ steps.f.outputs.ui }}
       plugins: ${{ steps.f.outputs.plugins }}
@@ -78,11 +87,11 @@ jobs:
           printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: command -v protoc >/dev/null || { sudo apt-get update && sudo apt-get install -y protobuf-compiler; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -125,11 +134,11 @@ jobs:
   build-release:
     needs: changes
     if: needs.changes.outputs.release == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: command -v protoc >/dev/null || { sudo apt-get update && sudo apt-get install -y protobuf-compiler; }
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/cargo-cache
         with: { name: release }
@@ -156,11 +165,11 @@ jobs:
   plugins:
     needs: [changes, build-release]
     if: needs.changes.outputs.plugins == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: command -v protoc >/dev/null || { sudo apt-get update && sudo apt-get install -y protobuf-compiler; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -209,7 +218,7 @@ jobs:
     # gets its own job rather than riding on `make check`.
     needs: changes
     if: needs.changes.outputs.ui == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     defaults:
       run:
         working-directory: crates/gsp-ui/web
@@ -243,7 +252,7 @@ jobs:
     # 2026-10-02, after green runs on both backends on the pinned runners.
     needs: changes
     if: needs.changes.outputs.tunnel == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER_TUNNEL || vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     strategy:
       fail-fast: false
       matrix:
@@ -253,14 +262,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: command -v protoc >/dev/null || { sudo apt-get update && sudo apt-get install -y protobuf-compiler; }
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/cargo-cache
         with: { name: tunnel }
       - name: Allow unprivileged user namespaces (Ubuntu AppArmor)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        run: sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Load the wireguard kernel module
-        run: sudo modprobe wireguard || true
+        run: sudo -n modprobe wireguard || true
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
@@ -283,7 +292,7 @@ jobs:
     # 2026-10-02, after green runs on the pinned runners.
     needs: [changes, build-release]
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    runs-on: ubuntu-24.04   # always GitHub-hosted: see the comment above `jobs:`
     env:
       # Push/PR: images copy the shared release build (fast). Nightly: compile
       # inside Docker, exercising the self-contained builder stage.
@@ -327,7 +336,7 @@ jobs:
   # JSON is in the cargo-audit artifact. Accepted advisories:
   # .cargo/audit.toml ([advisories] ignore = [...], each with a reason).
   audit:
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
@@ -367,7 +376,7 @@ jobs:
     needs: [changes, deploy]
     # Also when deploy failed later on (e.g. the smoke test): the images exist.
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ubuntu-24.04   # always GitHub-hosted: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -400,7 +409,7 @@ jobs:
   fuzz:
     needs: changes
     if: needs.changes.outputs.fuzz == 'true'
-    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}   # see the comment above `jobs:`
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly

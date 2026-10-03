@@ -47,18 +47,15 @@ Open decisions for the owner:
    tags and a registry login. The owner also wants images built "for both Docker and
    Kubernetes" (2026-10-02) — the same OCI images already serve both, so this means
    publishing, multi-arch or k8s packaging; which one is still to be clarified.
-3. **Self-hosted CI runner?** The owner has a spare VPS (6 cores, 12 GB RAM) and burned
-   ~1,100 Actions minutes on 2026-10-02 (a heavy day: five full-pipeline PRs, several
-   workflow edits that run every job, cold caches). Proposed (not done): a *hybrid* —
-   one runner instance on the VPS (12 GB fits one Rust release build at a time) for
-   `test`, `build-release`, `plugins`, with its persistent `target/` replacing the
-   Actions cache; `tunnel` stays GitHub-hosted (it reconfigures netns/WireGuard on the
-   host, and the 2026-10-01 self-hosted experiment below had a failing `tunnel` leg);
-   `deploy`/`trivy` only if the VPS gets Docker for the runner user. Requirements:
-   Ubuntu 24.04 / Debian 13 (glibc ≤ 2.41 for the release binaries), 60–80 GB free
-   disk, a KVM VM, its own unprivileged user. Pending the VPS facts (virtualisation,
-   OS, disk, what else runs on it). A self-hosted job just queues while the VPS is down
-   — there is no fallback to hosted runners.
+3. **Self-hosted CI runner:** decided (2026-10-03): the owner runs CI on his VPS (6 cores,
+   12 GB RAM) after the free 2,000 minutes ran out on 2026-10-03. The workflow is
+   switchable: repository variable `CI_RUNNER` (runner label, e.g. `gsp-ci`) moves every
+   job except `deploy`/`trivy` to the VPS, `CI_RUNNER_TUNNEL` overrides `tunnel` alone,
+   unset means GitHub-hosted. `deploy`/`trivy` stay hosted (deploy-smoke's fixed compose
+   project, ports and image tags collide on a shared Docker daemon). Setup, sizing (two
+   runner instances, `CARGO_BUILD_JOBS=3`) and security notes:
+   `.github/self-hosted-runner.md`. Not yet verified on the VPS; the 2026-10-01
+   experiment's failing `tunnel (userspace)` leg (see watch-list) is the thing to watch.
 
 Never verified outside CI or the original dev sandbox:
 
