@@ -318,6 +318,8 @@ pub struct AddressBook {
     by_owner: sled::Tree,
     by_address: sled::Tree,
     write: Mutex<()>,
+    /// `--tunnel-readdress`: move owners outside the network on their next claim.
+    readdress: bool,
     // Held so the database stays open for the trees' lifetime.
     db: sled::Db,
 }
@@ -334,12 +336,34 @@ impl AddressBook {
             by_owner,
             by_address,
             write: Mutex::new(()),
+            readdress: false,
             db,
         })
     }
 
     pub fn network(&self) -> Option<Network> {
         self.network
+    }
+
+    /// Turns on `--tunnel-readdress`: an existing owner whose address is not
+    /// a host of the configured network gets a new one on its next claim.
+    pub fn with_readdress(mut self, on: bool) -> Self {
+        self.readdress = on;
+        self
+    }
+
+    /// Entries whose address is not a host of the configured network (other
+    /// family, outside the prefix, or now its network/all-ones address).
+    /// Always empty in pin-only mode.
+    pub fn outside_network(&self) -> Result<Vec<Entry>, ClaimError> {
+        let Some(net) = self.network else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .entries()?
+            .into_iter()
+            .filter(|e| !net.is_host(e.assignment.address))
+            .collect())
     }
 
     /// Registers `(role, name)`'s address and returns it, applying the
@@ -357,7 +381,17 @@ impl AddressBook {
     ) -> Result<Assignment, ClaimError> {
         let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let okey = owner_key(role, name);
-        let existing = self.read_owner(&okey)?;
+        let mut existing = self.read_owner(&okey)?;
+        // `--tunnel-readdress`: an owner left outside a changed network is
+        // claimed as a new owner, and its old address freed in the same
+        // transaction.
+        let mut old_key = None;
+        if let (Some(a), Some(net)) = (&existing, self.network) {
+            if self.readdress && !net.is_host(a.address) {
+                old_key = Some((addr_key(a.address), a.address));
+                existing = None;
+            }
+        }
 
         let address = match (&existing, requested) {
             (Some(a), None) => a.address,
@@ -371,12 +405,16 @@ impl AddressBook {
                 })
             }
             (None, Some(req)) => {
-                self.check_room()?;
+                if old_key.is_none() {
+                    self.check_room()?;
+                }
                 self.check_pin(req)?;
                 req
             }
             (None, None) => {
-                self.check_room()?;
+                if old_key.is_none() {
+                    self.check_room()?;
+                }
                 self.allocate()?
             }
         };
@@ -390,12 +428,18 @@ impl AddressBook {
         let addr_key = addr_key(address);
         (&self.by_owner, &self.by_address)
             .transaction(|(owner, addr)| {
+                if let Some((old, _)) = &old_key {
+                    addr.remove(old.as_slice())?;
+                }
                 owner.insert(okey.as_slice(), value.as_slice())?;
                 addr.insert(&addr_key[..], okey.as_slice())?;
                 Ok::<(), sled::transaction::ConflictableTransactionError<()>>(())
             })
             .map_err(|e| ClaimError::Storage(format!("{e:?}")))?;
         self.db.flush().map_err(storage)?;
+        if let Some((_, old)) = old_key {
+            tracing::info!(%role, name, %old, new = %address, "re-addressed into the new tunnel network");
+        }
         Ok(assignment)
     }
 
@@ -595,6 +639,38 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
+/// The startup check for a changed `--tunnel-network`: `Err` naming the
+/// network, the count and up to ten `role name address` entries when stored
+/// addresses fall outside it and `readdress` is off; otherwise the entries
+/// that will be re-addressed (empty when nothing changed).
+pub fn check_network_change(book: &AddressBook, readdress: bool) -> Result<Vec<Entry>, String> {
+    let outside = book.outside_network().map_err(|e| e.to_string())?;
+    if outside.is_empty() || readdress {
+        return Ok(outside);
+    }
+    let network = book.network().map(|n| n.to_string()).unwrap_or_default();
+    Err(format!(
+        "--tunnel-network {network} does not contain {} stored tunnel address(es); restore the \
+         previous --tunnel-network, or pass --tunnel-readdress to move these peers to the new \
+         network at their next registration\n{}",
+        outside.len(),
+        summarize(&outside)
+    ))
+}
+
+/// Up to ten `role name address` lines, plus a count of the rest.
+pub fn summarize(entries: &[Entry]) -> String {
+    let mut lines: Vec<String> = entries
+        .iter()
+        .take(10)
+        .map(|e| format!("  {} {} {}", e.role, e.name, e.assignment.address))
+        .collect();
+    if entries.len() > 10 {
+        lines.push(format!("  … and {} more", entries.len() - 10));
+    }
+    lines.join("\n")
+}
+
 /// Validates the controller's `--tunnel-*` flags together: parses the network
 /// and the stale threshold, and refuses a network combined with HA (the
 /// allocator is correct only with a single writer — see the module doc).
@@ -602,7 +678,18 @@ pub fn resolve_flags(
     network: Option<&str>,
     stale_after: &str,
     ha_enabled: bool,
+    readdress: bool,
 ) -> Result<(Option<Network>, Duration), String> {
+    if readdress && ha_enabled {
+        return Err(
+            "--tunnel-readdress cannot be combined with --ha-peers: re-addressing must \
+                    run as one writer's decision, and the registries are not replicated"
+                .into(),
+        );
+    }
+    if readdress && network.is_none() {
+        return Err("--tunnel-readdress needs a --tunnel-network to re-address into".into());
+    }
     let stale = parse_duration(stale_after).map_err(|e| format!("--tunnel-stale-after: {e}"))?;
     let net = match network {
         Some(n) => {
@@ -1116,9 +1203,106 @@ mod tests {
         assert!(!is_ipv4_in_ipv6(ip("fd49::5")));
     }
 
+    /// A /16 book with origin "a" at 10.60.0.1 and proxy "p" at 10.60.0.2,
+    /// reopened on `network` with readdress `on`.
+    fn moved(network: &str, on: bool) -> (AddressBook, tempfile::TempDir) {
+        let (b, d) = book(Some("10.60.0.0/16"));
+        b.claim(Role::Origin, "a", None, 1).unwrap();
+        b.claim(Role::Proxy, "p", None, 1).unwrap();
+        drop(b);
+        (reopen(d.path(), Some(network)).with_readdress(on), d)
+    }
+
+    #[test]
+    fn entries_outside_a_changed_network_refuse_startup_unless_readdress() {
+        let (b, _d) = moved("fd49::/64", false);
+        let e = check_network_change(&b, false).unwrap_err();
+        assert!(
+            e.starts_with("--tunnel-network fd49::/64 does not contain 2 stored"),
+            "{e}"
+        );
+        assert!(e.contains("--tunnel-readdress"), "{e}");
+        assert!(e.contains("origin a 10.60.0.1"), "{e}");
+        assert!(e.contains("proxy p 10.60.0.2"), "{e}");
+        assert_eq!(check_network_change(&b, true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_unchanged_network_or_pin_only_mode_passes_the_check() {
+        let (b, d) = book(Some("10.60.0.0/16"));
+        b.claim(Role::Origin, "a", None, 1).unwrap();
+        assert!(check_network_change(&b, false).unwrap().is_empty());
+        drop(b);
+        let b = reopen(d.path(), None);
+        assert!(check_network_change(&b, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_readdressed_owner_gets_a_fresh_address_and_frees_the_old_one() {
+        let (b, _d) = moved("fd49::/64", true);
+        let a = b.claim(Role::Origin, "a", None, 5).unwrap();
+        assert_eq!(a.address, ip("fd49::1"));
+        assert_eq!(a.first_seen, 5);
+        assert!(b.by_address.contains_key(addr_key(ip("fd49::1"))).unwrap());
+        assert!(!b
+            .by_address
+            .contains_key(addr_key(ip("10.60.0.1")))
+            .unwrap());
+        // A stale pin of the old network is refused, not silently granted.
+        assert!(matches!(
+            b.claim(Role::Proxy, "p", Some(ip("10.60.0.2")), 6),
+            Err(ClaimError::OutsideNetwork { .. })
+        ));
+        // Re-registering keeps the new address.
+        assert_eq!(
+            b.claim(Role::Origin, "a", None, 7).unwrap().address,
+            ip("fd49::1")
+        );
+        assert_eq!(b.outside_network().unwrap().len(), 1, "only p is left");
+    }
+
+    #[test]
+    fn without_readdress_an_out_of_network_owner_stays_sticky() {
+        let (b, _d) = moved("fd49::/64", false);
+        assert_eq!(
+            b.claim(Role::Origin, "a", None, 5).unwrap().address,
+            ip("10.60.0.1")
+        );
+    }
+
+    #[test]
+    fn shrinking_the_network_readdresses_only_entries_outside_it() {
+        let (b, d) = book(Some("10.60.0.0/16"));
+        b.claim(Role::Origin, "in", None, 1).unwrap();
+        b.claim(Role::Origin, "out", Some(ip("10.60.1.5")), 1)
+            .unwrap();
+        drop(b);
+        let b = reopen(d.path(), Some("10.60.0.0/24")).with_readdress(true);
+        let out = b.outside_network().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "out");
+        assert_eq!(
+            b.claim(Role::Origin, "in", None, 2).unwrap().address,
+            ip("10.60.0.1")
+        );
+        assert_eq!(
+            b.claim(Role::Origin, "out", None, 2).unwrap().address,
+            ip("10.60.0.2")
+        );
+    }
+
+    #[test]
+    fn resolve_flags_refuses_readdress_without_a_network_or_under_ha() {
+        let e = resolve_flags(None, "14d", false, true).unwrap_err();
+        assert!(e.contains("--tunnel-readdress"), "{e}");
+        let e = resolve_flags(None, "14d", true, true).unwrap_err();
+        assert!(e.contains("--tunnel-readdress"), "{e}");
+        assert!(resolve_flags(Some("fd49::/64"), "14d", false, true).is_ok());
+    }
+
     #[test]
     fn resolve_flags_accepts_an_ipv6_network() {
-        let (net, _) = resolve_flags(Some("fd49:89c1:4b5e:60::/64"), "14d", false).unwrap();
+        let (net, _) = resolve_flags(Some("fd49:89c1:4b5e:60::/64"), "14d", false, false).unwrap();
         assert_eq!(net.unwrap().to_string(), "fd49:89c1:4b5e:60::/64");
     }
 
@@ -1148,25 +1332,25 @@ mod tests {
 
     #[test]
     fn resolve_flags_defaults_to_pin_only_and_fourteen_days() {
-        let (net, stale) = resolve_flags(None, "14d", false).unwrap();
+        let (net, stale) = resolve_flags(None, "14d", false, false).unwrap();
         assert!(net.is_none());
         assert_eq!(stale, Duration::from_secs(14 * 86400));
     }
 
     #[test]
     fn resolve_flags_parses_the_network_and_the_duration() {
-        let (net, stale) = resolve_flags(Some("10.60.0.0/16"), "0", false).unwrap();
+        let (net, stale) = resolve_flags(Some("10.60.0.0/16"), "0", false, false).unwrap();
         assert_eq!(net.unwrap().to_string(), "10.60.0.0/16");
         assert!(stale.is_zero());
     }
 
     #[test]
     fn resolve_flags_rejects_a_bad_network_a_bad_duration_and_ha() {
-        assert!(resolve_flags(Some("nonsense"), "14d", false).is_err());
-        assert!(resolve_flags(None, "soon", false).is_err());
-        let err = resolve_flags(Some("10.60.0.0/16"), "14d", true).unwrap_err();
+        assert!(resolve_flags(Some("nonsense"), "14d", false, false).is_err());
+        assert!(resolve_flags(None, "soon", false, false).is_err());
+        let err = resolve_flags(Some("10.60.0.0/16"), "14d", true, false).unwrap_err();
         assert!(err.contains("--ha-peers"), "{err}");
         // Pin-only mode (no network) with HA is allowed: nothing is allocated.
-        assert!(resolve_flags(None, "14d", true).is_ok());
+        assert!(resolve_flags(None, "14d", true, false).is_ok());
     }
 }
