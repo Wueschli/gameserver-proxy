@@ -229,8 +229,8 @@ IPv6 (built 2026-10-03):
   peer logs the change and keeps its old address until it restarts, so its traffic is
   interrupted until then. Peers that are offline keep their old entry until they
   register again; `DELETE` the ones that will not come back. `--tunnel-readdress` is
-  refused without a network and together with `--ha-peers`, and is harmless when
-  nothing is outside the network.
+  refused without a network and together with `--ha-peers` or `--ha-join`, and is
+  harmless when nothing is outside the network.
 - **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
   interface up (the answer is its address), persist the answer next to their key, and
   can start from it while the controller is down. For `gsp --tunnel-*` that fallback
@@ -251,10 +251,20 @@ IPv6 (built 2026-10-03):
   (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
   `gsp-ui` shows the same table, read-only, on its Tunnel addresses page
   (`GET /api/tunnel/addresses`, proxied with `--controller-url`/`--controller-token`).
-- **Limits.** `--tunnel-network` is not combinable with `--ha-peers`. Pin-only mode
-  (no network) is allowed under `--ha-peers`, but each controller node keeps its own
-  unreplicated address book, so pin uniqueness is enforced per node only (the controller
-  logs a startup warning); point all origins and proxies at one node. Transparent mode
+- **High availability (built 2026-10-03).** `--tunnel-network` works with `--ha-peers`:
+  both registries and the address book are replicated through Raft, so every node
+  serves the same registrations and addresses, and a registration or `DELETE` made on
+  any node (a follower forwards it to the leader) is allocated once, cluster-wide.
+  The leader records its `--tunnel-network` when the cluster first initializes and
+  that recorded network applies from then on. Give every node the same
+  `--tunnel-network`: a node whose flag differs logs an `ERROR` naming both networks
+  and answers registry writes `503`, though an unchanged re-registration is still
+  answered `200`. Until the network is recorded (the first seconds of a cluster, or
+  while an upgrade waits for a node, docs/12) registry writes answer `503`
+  ("cluster is initializing its registries"). An unchanged re-registration proposes
+  nothing; an hourly `last_seen` refresh is the only periodic write. Pin-only mode
+  works the same way. Upgrade and membership notes: docs/12.
+- **Limits.** Transparent mode
   (`transparent: true`) does not apply to tunnel backends whose family differs from the
   client's: the proxy logs a warning and connects without the client's source address.
   Dual-stack tunnels, lease expiry and live address changes are future work (HANDOVER

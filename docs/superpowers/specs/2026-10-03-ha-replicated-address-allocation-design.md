@@ -1,6 +1,6 @@
 # HA-replicated tunnel address allocation and live HA membership
 
-Date: 2026-10-03 · Status: designed (not built); revised after the first spec review on PR #25 · Follows the
+Date: 2026-10-03 · Status: built (2026-10-03); revised after the first spec review on PR #25 · Follows the
 [tunnel address authority](2026-10-02-tunnel-address-authority-design.md) spec, whose
 "HA-replicated allocation" non-goal this resolves, and closes the HANDOVER row "Change a
 live HA member's address".

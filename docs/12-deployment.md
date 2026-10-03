@@ -336,9 +336,72 @@ one with `--ca-file`, and never elect a leader without it.
 
 **Only at bootstrap.** `--ha-peers` is read when the cluster is first initialised;
 after that each member's address lives in the replicated Raft membership. Changing
-`--ha-peers` on an existing cluster does **not** change the addresses replicas use, so
-an existing plain-HTTP cluster cannot be moved to `https://` by editing the flag — that
-needs a membership change, which is not built yet.
+`--ha-peers` on an existing cluster does **not** change the addresses replicas use. To
+move a running cluster to `https://` peers, change each member's address with a `PUT`
+(see "HA membership" below).
+
+### HA membership
+
+Members are changed on a running cluster with the admin routes, gated by
+`--auth-token` (pass it as a bearer token) and answered by any node, which forwards a
+change to the leader. `X-Actor` is logged.
+
+```sh
+# A new or replacement node always starts empty with --ha-join (never --ha-peers: a
+# node with --ha-peers calls initialize and could split the cluster).
+gsp-controller --listen 0.0.0.0:7070 --ha-node-id 4 --ha-token "$HA_TOKEN" \
+  --tunnel-network 10.60.0.0/24 --ha-join
+
+curl -H "Authorization: Bearer $TOKEN" http://ctl-1:7070/admin/ha/members            # voters, learners, leader
+curl -H "Authorization: Bearer $TOKEN" -d '{"id":4,"addr":"ctl-4:7070"}' \
+  http://ctl-1:7070/admin/ha/members                                                # add (waits for catch-up)
+curl -H "Authorization: Bearer $TOKEN" -X DELETE http://ctl-1:7070/admin/ha/members/2  # remove
+curl -H "Authorization: Bearer $TOKEN" -X PUT -d '{"addr":"https://ctl-3.internal:8443"}' \
+  http://ctl-1:7070/admin/ha/members/3                                              # change an address
+```
+
+An add answers once the new node has caught up, by log or, after the log was purged,
+by snapshot; a large catch-up can take minutes (a forwarded add waits up to five).
+Before an add or a `PUT` the leader asks the node at the given address who it is
+(`/raft/whoami`, behind `--ha-token`) and refuses (`422`) unless it answers with that
+node id, and an add also unless the node's log is empty (or it is already a learner of
+this cluster): this keeps a node id from being pointed at another node's address, which
+`openraft` warns can produce two leaders. Other answers: `409` the node is already a
+voter, `404` unknown id, `422` removing the last voter, `503` the node is unreachable or
+there is no leader. Removing the current leader is allowed. A joined node restarts with
+`--ha-join` again. `--ha-join` and `--ha-peers` together, and `--tunnel-readdress` with
+either, are refused at startup. Verified by `gsp-fleet-tests` `ha_tunnel_addresses.rs`
+(join, remove the leader, move a node to a new port) and `ha_snapshots.rs` (catch-up by
+snapshot after a purge).
+
+### Upgrading a single controller to HA
+
+A controller that already holds registrations (origins, proxies, addresses) from before
+HA can become the first node of an HA cluster. Restart it with `--ha-node-id` and the
+`--ha-peers` of the new cluster next to the other, empty nodes. Every node sets aside
+pre-HA data it finds as `peers.pre-ha/`, `proxy-peers.pre-ha/` and
+`tunnel-addresses.pre-ha/` under `--data-dir` (it never deletes them), and the cluster's
+leader imports exactly one node's copy, whichever node wins the first election.
+
+- The leader asks every voter what it holds (`/raft/whoami`) before initializing, so
+  registry writes answer `503` until every voter has answered; a voter that is down
+  delays the upgrade. `--ha-import-source <node-id>` (the same value on every node)
+  waits only for that node; `none` imports nothing.
+- When **more than one** node has pre-HA data (for example a pin-only `--ha-peers`
+  deployment where each node kept its own registries) nothing is initialized: the leader
+  logs an `ERROR` naming the nodes and their counts, and registry writes stay `503`
+  until you restart the nodes with `--ha-import-source <node-id>`. The other nodes'
+  set-aside data stays untouched (one `WARN` each).
+- Imported registrations are re-written as new revisions that continue after the source's
+  last revision number, so every edge's `since` cursor from the single-node days stays
+  valid. A tombstone the old node wrote that a subscribed edge had not received yet is
+  not carried over: that edge keeps the removed peer until it restarts. A registry with
+  no live registration at import time starts its log at 1.
+- Clients' pinned addresses that used to collide across nodes now get `409`: uniqueness
+  is cluster-wide, where it was per node before.
+- Snapshots persisted by a build older than this feature (before 2026-10-03) install as
+  empty registries and an empty book: take the upgrade on a cluster whose nodes all run
+  this version, or let the cluster re-initialize as above.
 
 ### Limits (read these before relying on it)
 
@@ -346,8 +409,10 @@ needs a membership change, which is not built yet.
   into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`) plus `--ca-file`, **not**
   the OS store or `SSL_CERT_FILE`. For a private or internal CA — or a self-signed
   certificate — pass it with `--ca-file`. No client certificates (mTLS).
-- **HA over TLS needs a fresh cluster** (native TLS on each replica, or a terminator
-  per replica; see "HA replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
+- **HA over TLS** (native TLS on each replica, or a terminator per replica; see "HA
+  replicas over TLS"): bootstrap with `https://` peers, or move a running cluster with
+  one `PUT /admin/ha/members/{id}` per member (see "HA membership"). With `host:port`
+  peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
 - **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
   SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
