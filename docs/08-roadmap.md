@@ -40,7 +40,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   amplification guard (no reply without an established session).
 - **Result**: covers the majority of real-time game servers.
 
-## Phase 3 – Routing intelligence (week 8–10) ✅
+## Phase 3 – Routing intelligence ✅
 - ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
@@ -77,7 +77,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   range within one listener's routes) is what actually splits pools by port
   within the range — the bind range just makes the sockets exist.
 
-## Phase 4 – External routing logic (week 11–12) ✅ (sticky_key deferred)
+## Phase 4 – External routing logic ✅ (sticky_key deferred)
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
   `Resolver` trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest)
   in `gsp`; `pool` results; `on_error: reject | fallback_route`.
@@ -105,7 +105,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   a `SourceFactory` (`DiscoveryFactory`) that rebuilds the concrete adapter.
 - **Result**: matchmaker integration, token→instance routing.
 
-## Phase 5 – Operations & zero-downtime (week 13–14) ✅
+## Phase 5 – Operations & zero-downtime ✅
 - ✅ Hot reload (SIGHUP + file watch), atomic snapshot swap. *(phase 1)*
 - ✅ **Slice 1**: `enabled` / `draining` / `disabled` backend states —
   `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
@@ -134,7 +134,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.
 
-## Phase 6 – Client-IP preservation (week 15–16)
+## Phase 6 – Client-IP preservation ✅
 - ✅ **Slice 1**: PROXY protocol v1/v2 (TCP) — per-pool `proxy_protocol:
   none | v1 | v2`; one header prepended to the upstream connection before any
   client bytes (`gsp_core::proxy_protocol`), `gsp_proxy_protocol_headers_total`.
@@ -153,7 +153,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: backends see the real client IP (PROXY protocol or fully
   transparent, TCP + UDP).
 
-## Phase 7 – Security & hardening (week 17–18)
+## Phase 7 – Security & hardening ✅
 - ✅ **Slice 1**: CIDR allow/deny filter chain — per-listener `allow` / `deny`
   CIDR lists, checked on the client source IP before routing (TCP accept + UDP
   first datagram). `deny` wins; a non-empty `allow` is default-deny. Blocked =
@@ -219,7 +219,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: hardened against common L4/7 abuse; per-connection overhead
   measurable via `make bench`.
 
-## Phase 8 – Discovery & scaling (week 19–20) ✅
+## Phase 8 – Discovery & scaling ✅
 - ✅ `BackendSource` seam in `gsp-core` (`discovery.rs`: trait + `Discovery`
   last-known-good cache + `refresh_loop`), concrete adapters in the `gsp` binary
   (`discovery.rs`: `DnsSrvSource` via `hickory-resolver`, `ConsulSource` /
@@ -247,12 +247,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ `backend_sources:` live reload (`SourceManager`) — landed in the
   data-plane-completion pass; see Phase 4's post-phase note.
 
-## Phase 9 – Sniffer plugin loader
+## Phase 9 – Sniffer plugin loader ✅
 
 Game-protocol sniffers load into a running proxy from disk, sandboxed, never
 compiled in and never a fork. A `sniffer:` route resolves its name against the
-loaded set (today that always misses — `gsp_core::sniff::sniffer` returns `None`
-for every real name).
+loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) live in
+[`crates/plugins/`](../crates/plugins/README.md).
 
 ### Locked decisions
 - **Sandbox: `wasmtime`, core module, no WASI.** A narrow ABI — the guest
@@ -1102,7 +1102,8 @@ slice 1.
 - **Phase 14 follow-ups** — the multi-proxy `AllowedIPs` fix and the controller-allocated
   tunnel address authority landed 2026-10-02 (`docs/11` "Address authority"); the
   CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Remaining pieces
-  (IPv6, lease expiry, HA-replicated allocation, a UI view) are in HANDOVER "Known follow-ups".
+  (IPv6, lease expiry, HA-replicated allocation, releasing from the UI) are in HANDOVER
+  "Known follow-ups"; the read-only UI view landed 2026-10-03.
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).

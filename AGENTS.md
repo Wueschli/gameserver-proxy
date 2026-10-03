@@ -147,7 +147,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the five images (OS packages, secrets) and `Cargo.lock` / the UI's `package-lock.json`, HIGH/CRITICAL with a fix; exits 1 on findings, reports in `target/trivy/`. In CI it is the separate, **informational** `trivy` job after `deploy` (non-blocking; scans `deploy`'s images from a `docker save` artifact; run summary + warnings + `trivy-reports` artifact; the official `aquasec/trivy` image pinned by digest, not `trivy-action`). Rust coverage is GHSA only — `cargo audit` (the `audit` CI job, `make audit`) covers RustSec. Accepted findings: `.trivyignore` |
 | Deploy smoke | `make deploy-smoke` (needs Docker; compose demo + `deploy/smoke.sh`; also the `deploy` CI job) |
 | Tunnel e2e (nextest) | `make tunnel-e2e-ci` (needs `cargo install cargo-nextest --locked`; writes `target/nextest/ci/junit.xml`; what the CI `tunnel` job runs) |
-| Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, plugins and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly while the schedule is on — paused since 2026-10-03; run summary + warnings + `cargo-audit` artifact). Accepted advisories: `.cargo/audit.toml` |
+| Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, plugins and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
@@ -227,10 +227,11 @@ client from `crates/gsp/proto/resolver.proto`.
   task + spec/quality review + a final whole-branch review). Specs and plans are committed;
   `.superpowers/` is git-ignored scratch (ledgers, briefs, review packages). Reviewer
   findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
-- **CI costs money** (private repo; a full run bills roughly 60–80 runner-minutes, a cold one more).
-  Batch pushes, remember that docs-only pushes skip CI (`paths-ignore`), put `[skip ci]` in
-  the tip commit message when a code push needs no run, and update `ROOTS` in
-  `.github/scripts/changes.py` when adding a job. Never push without being asked (rule 8).
+- **CI runs are slow** (the repo is public, so hosted minutes are free, but a full run
+  takes ~10 min warm and ~22 min cold). Batch pushes, remember that docs-only pushes
+  skip CI (`paths-ignore`), put `[skip ci]` in the tip commit message when a code push
+  needs no run, and update `ROOTS` in `.github/scripts/changes.py` when adding a job.
+  Never push without being asked (rule 8).
 - Keep comments at the density of the surrounding code. Module-level `//!` docs should
   say what the module is for and note deliberate simplifications.
 
