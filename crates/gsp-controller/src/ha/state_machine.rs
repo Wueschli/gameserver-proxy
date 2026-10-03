@@ -28,6 +28,7 @@ use openraft::{
     StoredMembership,
 };
 use serde::{Deserialize, Serialize};
+use sled::transaction::{ConflictableTransactionError, TransactionError};
 
 use super::{NodeId, TypeConfig, WriteRequest, WriteResponse};
 use crate::api::{AppState, Stage};
@@ -238,28 +239,40 @@ impl StateMachineStore {
     }
 }
 
-/// Persists `meta` + `data` as the current snapshot, in one transaction.
+/// Persists `meta` + `data` as the current snapshot, in one transaction,
+/// unless the stored one already reaches as far (`last_log_id` >= the new
+/// one's). `build_snapshot` runs in a task of its own, concurrently with
+/// `install_snapshot`, so a build taken before an install can finish after
+/// it; the stored snapshot must never go backwards behind the purge point.
 #[allow(clippy::result_large_err)] // `StorageError` is openraft's, see `read_meta`
 fn save_snapshot(
     tree: &sled::Tree,
     meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
     data: &[u8],
 ) -> Result<(), StorageError<NodeId>> {
-    let meta_bytes = serde_json::to_vec(meta)
-        .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
-    tree.transaction(|t| {
+    let sig = || Some(meta.signature());
+    let meta_bytes =
+        serde_json::to_vec(meta).map_err(|e| StorageIOError::write_snapshot(sig(), &e))?;
+    let outcome = tree.transaction(|t| {
+        if let Some(stored) = t.get(SNAPSHOT_META_KEY)? {
+            let stored: SnapshotMeta<NodeId, openraft::BasicNode> =
+                serde_json::from_slice(&stored).map_err(ConflictableTransactionError::Abort)?;
+            if stored.last_log_id >= meta.last_log_id {
+                return Ok(false);
+            }
+        }
         t.insert(SNAPSHOT_META_KEY, meta_bytes.as_slice())?;
         t.insert(SNAPSHOT_DATA_KEY, data)?;
-        Ok::<_, sled::transaction::ConflictableTransactionError<std::convert::Infallible>>(())
-    })
-    .map_err(|e| match e {
-        sled::transaction::TransactionError::Storage(e) => {
-            StorageIOError::write_snapshot(Some(meta.signature()), &e)
-        }
-        sled::transaction::TransactionError::Abort(never) => match never {},
+        Ok(true)
+    });
+    let written = outcome.map_err(|e| match e {
+        TransactionError::Storage(e) => StorageIOError::write_snapshot(sig(), &e),
+        TransactionError::Abort(e) => StorageIOError::write_snapshot(sig(), &e),
     })?;
-    tree.flush()
-        .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
+    if written {
+        tree.flush()
+            .map_err(|e| StorageIOError::write_snapshot(sig(), &e))?;
+    }
     Ok(())
 }
 
@@ -411,18 +424,23 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        let Some(meta) = self
+        // Both keys in one transaction, so a concurrent `save_snapshot`
+        // can never pair one snapshot's meta with another's data.
+        let stored = self
             .snapshots
-            .get(SNAPSHOT_META_KEY)
-            .map_err(|e| StorageIOError::read_snapshot(None, &e))?
-        else {
-            return Ok(None);
-        };
-        let Some(data) = self
-            .snapshots
-            .get(SNAPSHOT_DATA_KEY)
-            .map_err(|e| StorageIOError::read_snapshot(None, &e))?
-        else {
+            .transaction(|t| {
+                Ok::<_, ConflictableTransactionError<std::convert::Infallible>>(
+                    match (t.get(SNAPSHOT_META_KEY)?, t.get(SNAPSHOT_DATA_KEY)?) {
+                        (Some(meta), Some(data)) => Some((meta, data)),
+                        _ => None,
+                    },
+                )
+            })
+            .map_err(|e| match e {
+                TransactionError::Storage(e) => StorageIOError::read_snapshot(None, &e),
+                TransactionError::Abort(never) => match never {},
+            })?;
+        let Some((meta, data)) = stored else {
             return Ok(None);
         };
         let meta: SnapshotMeta<NodeId, openraft::BasicNode> =
@@ -810,6 +828,44 @@ mod tests {
         assert_eq!(current.meta.snapshot_id, built.meta.snapshot_id);
         assert_eq!(current.meta.last_log_id, built.meta.last_log_id);
         assert_eq!(current.snapshot.get_ref(), built.snapshot.get_ref());
+    }
+
+    #[tokio::test]
+    async fn a_late_build_never_replaces_a_newer_installed_snapshot() {
+        // openraft runs `build_snapshot` in a spawned task, concurrently
+        // with `install_snapshot` on the state-machine worker.
+        let (mut sm, dirs) = test_sm();
+        sm.apply((1..=3).map(|i| config_entry(i, format!("c{i}").as_bytes())))
+            .await
+            .unwrap();
+        let mut late_builder = sm.get_snapshot_builder().await;
+
+        let (mut leader, _l) = test_sm();
+        leader
+            .apply((1..=5).map(|i| config_entry(i, format!("c{i}").as_bytes())))
+            .await
+            .unwrap();
+        let newer = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        sm.install_snapshot(&newer.meta, newer.snapshot)
+            .await
+            .unwrap();
+
+        let late = late_builder.build_snapshot().await.unwrap();
+        assert_eq!(late.meta.last_log_id.unwrap().index, 3);
+
+        let current = sm.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, newer.meta.snapshot_id);
+        assert_eq!(current.meta.last_log_id.unwrap().index, 5);
+        drop((sm, late_builder));
+
+        let (mut reopened, _r) = reopen_ha(&dirs);
+        let current = reopened.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.last_log_id.unwrap().index, 5);
     }
 
     #[tokio::test]
