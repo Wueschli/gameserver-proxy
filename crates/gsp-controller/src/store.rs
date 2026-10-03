@@ -136,6 +136,37 @@ fn decode_rev(bytes: &[u8]) -> u64 {
     u64::from_be_bytes(buf)
 }
 
+/// Runs `open` until it stops failing on `sled`'s exclusive file lock, for
+/// tests that drop a database and reopen the same path in-process.
+///
+/// Dropping the last `sled::Db` handle does not release the lock
+/// synchronously: the locked `File` sits behind an `Arc` that `sled` 0.34's
+/// own threadpool jobs (async log writes, segment truncation) and
+/// epoch-deferred buffer drops also hold, so it is closed whenever the last
+/// of those finishes. An immediate reopen loses that race under load with
+/// `WouldBlock` ("could not acquire lock"). Only that error is retried, and
+/// only for a bounded time; any other error fails the test at once.
+#[cfg(test)]
+pub(crate) fn reopen_when_unlocked<T, E: std::fmt::Display>(
+    mut open: impl FnMut() -> Result<T, E>,
+) -> T {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match open() {
+            Ok(v) => return v,
+            Err(e) if e.to_string().contains("could not acquire lock") => {
+                if Instant::now() >= deadline {
+                    panic!("sled never released its file lock: {e}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("reopen failed: {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +240,7 @@ mod tests {
             store.put(b"config: second".to_vec()).unwrap()
         };
 
-        let reopened = Store::open(dir.path()).unwrap();
+        let reopened = reopen_when_unlocked(|| Store::open(dir.path()));
         assert_eq!(reopened.current_revision().unwrap(), Some(rev));
         assert_eq!(reopened.get(rev).unwrap().unwrap(), b"config: second");
     }
