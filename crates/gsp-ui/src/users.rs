@@ -46,7 +46,7 @@ struct UsersFile {
 pub fn load(path: &Path) -> anyhow::Result<HashMap<String, UserRecord>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading users file {}: {e}", path.display()))?;
-    let parsed: UsersFile = serde_yaml::from_str(&text)
+    let parsed: UsersFile = serde_norway::from_str(&text)
         .map_err(|e| anyhow::anyhow!("parsing users file {}: {e}", path.display()))?;
     if parsed.users.is_empty() {
         anyhow::bail!("users file {} declares no users", path.display());

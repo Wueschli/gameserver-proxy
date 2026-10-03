@@ -27,7 +27,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 rand.workspace = true
 tower-http = { version = "0.6", features = ["fs"] }
-serde_yaml.workspace = true
+serde_norway.workspace = true
 argon2 = "0.6.0"
 
 [dev-dependencies]

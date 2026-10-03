@@ -22,6 +22,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 tonic.workspace = true
 prost.workspace = true
+tonic-prost.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -39,7 +40,7 @@ defguard_wireguard_rs.workspace = true
 rand.workspace = true
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

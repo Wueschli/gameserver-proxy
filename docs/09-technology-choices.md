@@ -56,7 +56,7 @@ dependency not worth it. Still-open v2 choices are marked as such.
   likewise a plain weighted round-robin over the cumulative-weight line (one
   atomic tick per selection, no smooth-WRR per-backend state) — blocky ordering
   is fine at this backend-set size.
-- **Config**: `serde` + `serde_yaml`, `notify` for file watch. No env-var
+- **Config**: `serde` + `serde_norway`, `notify` for file watch. No env-var
   overlay exists (the `figment` idea from the original plan was dropped —
   the YAML file + `SIGHUP`/watch reload covers the actual need).
 - **Snapshot swap**: `arc-swap`.
