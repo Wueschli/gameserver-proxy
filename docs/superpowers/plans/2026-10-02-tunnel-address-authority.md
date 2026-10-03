@@ -4603,7 +4603,7 @@ Expected: `deploy lint: ok` twice.
 
 `gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
 mis-chooses) one. Design and decisions:
-[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](../specs/2026-10-02-tunnel-address-authority-design.md).
+[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
 
 - **Allocation.** Start the controller with `--tunnel-network 10.60.0.0/16` (IPv4,
   `/30` or shorter). A registration that omits its address is allocated the lowest
