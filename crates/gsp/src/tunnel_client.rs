@@ -90,6 +90,13 @@ pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
     Ok(key)
 }
 
+/// The tunnel interface MTU, set explicitly for both backends: the kernel
+/// module defaults to 1420, but boringtun's TUN device comes up at 1500
+/// (seen in the IPv6-underlay e2e), which leaves no room for WireGuard's
+/// 80-byte overhead over an IPv6 underlay. 1420 also stays above IPv6's
+/// 1280 minimum.
+pub const TUNNEL_MTU: u32 = 1420;
+
 /// Brings up this proxy's shared WireGuard interface — the same
 /// kernel-primary, boringtun-fallback shape `gsp-agent::interface` uses.
 pub fn bring_up(
@@ -105,7 +112,7 @@ pub fn bring_up(
         addresses: vec![address],
         port: listen_port,
         peers: Vec::new(),
-        mtu: None,
+        mtu: Some(TUNNEL_MTU),
         fwmark: None,
     };
 
