@@ -131,7 +131,7 @@ network/all-ones address):
   error and keeps running; its restart applies the new address. A pinned owner whose pin
   is now outside the network gets `422` until its pin is changed.
 - `claim` treats an out-of-network existing assignment as absent **only while the flag is
-  set**; without it, `claim` keeps today's sticky behaviour (and the startup check means
+  set and a network is configured**; without it, `claim` keeps today's sticky behaviour (and the startup check means
   such entries cannot exist then).
 - The flag is harmless when nothing is outside the network, so it can be left on during a
   migration and removed afterwards. An owner that never re-registers while it is set (it
@@ -190,7 +190,8 @@ This also resolves the HANDOVER minor "stored addresses are not re-validated if
   (`netlink.rs:251`) has no hook for address flags, so it would mean our own netlink call.
 - **MTU.** Both binaries leave the MTU at the backend default (1420), which already leaves
   room for WireGuard's 80-byte overhead over an IPv6 underlay and is above IPv6's 1280
-  minimum. Confirm boringtun's default matches.
+  minimum. Confirm boringtun's default matches; if it does not, both binaries set
+  `mtu: Some(1420)` explicitly.
 - **boringtun's listening socket** accepts IPv6 peers (an IPv6 underlay scenario on the
   boringtun backend proves it).
 - **Containers.** Docker can start containers with `net.ipv6.conf.all.disable_ipv6=1` when
