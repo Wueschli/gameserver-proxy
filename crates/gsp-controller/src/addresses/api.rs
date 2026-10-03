@@ -129,8 +129,12 @@ async fn list(State(state): State<AddressesState>) -> Response {
 
 /// Logs one `WARN` naming up to ten stale owners; returns how many there are.
 pub fn warn_stale(book: &AddressBook, stale_after: Duration, now: u64) -> usize {
-    let Ok(entries) = book.entries() else {
-        return 0;
+    let entries = match book.entries() {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the tunnel address book to check for stale owners");
+            return 0;
+        }
     };
     let stale: Vec<String> = entries
         .iter()
