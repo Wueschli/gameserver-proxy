@@ -1076,22 +1076,10 @@ mod tests {
 
     #[test]
     fn sockaddr_to_std_round_trips_v4_and_v6() {
-        use nix::sys::socket::{SockaddrIn, SockaddrIn6, SockaddrLike, SockaddrStorage};
-        let v4 = addr("192.0.2.7:4242");
-        let SocketAddr::V4(v4s) = v4 else {
-            unreachable!()
-        };
-        let s = SockaddrIn::from(v4s);
-        let st = unsafe { SockaddrStorage::from_raw(s.as_ptr(), Some(s.len())) }.unwrap();
-        assert_eq!(sockaddr_to_std(st), Some(v4));
-
-        let v6 = addr("[2001:db8::7]:4242");
-        let SocketAddr::V6(v6s) = v6 else {
-            unreachable!()
-        };
-        let s = SockaddrIn6::from(v6s);
-        let st = unsafe { SockaddrStorage::from_raw(s.as_ptr(), Some(s.len())) }.unwrap();
-        assert_eq!(sockaddr_to_std(st), Some(v6));
+        use nix::sys::socket::SockaddrStorage;
+        for a in [addr("192.0.2.7:4242"), addr("[2001:db8::7]:4242")] {
+            assert_eq!(sockaddr_to_std(SockaddrStorage::from(a)), Some(a));
+        }
     }
 
     #[test]
