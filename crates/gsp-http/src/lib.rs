@@ -111,3 +111,37 @@ pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     }
     out
 }
+
+/// Compares a presented bearer token / password against the expected one in
+/// time that does not depend on *where* the two first differ, so a network
+/// attacker cannot recover a secret byte by byte from response timing (which
+/// `==` on `str` allows: it returns at the first mismatching byte). Only the
+/// length can leak, which says nothing useful about a random token.
+pub fn token_eq(presented: &str, expected: &str) -> bool {
+    let (a, b) = (presented.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(diff) == 0
+}
+
+#[cfg(test)]
+mod token_eq_tests {
+    use super::token_eq;
+
+    #[test]
+    fn equal_tokens_match() {
+        assert!(token_eq("secret-token", "secret-token"));
+        assert!(token_eq("", ""));
+    }
+
+    #[test]
+    fn different_tokens_do_not_match() {
+        assert!(!token_eq("secret-tokeN", "secret-token"));
+        assert!(!token_eq("Xecret-token", "secret-token"));
+        assert!(!token_eq("secret", "secret-token"));
+        assert!(!token_eq("secret-token-longer", "secret-token"));
+        assert!(!token_eq("", "secret-token"));
+    }
+}

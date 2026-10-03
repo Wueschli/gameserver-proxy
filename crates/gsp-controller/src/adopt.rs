@@ -77,7 +77,7 @@ async fn require_bearer(State(state): State<AdoptState>, req: Request, next: Nex
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match presented {
-        Some(token) if token == expected => next.run(req).await,
+        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
         _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
     }
 }

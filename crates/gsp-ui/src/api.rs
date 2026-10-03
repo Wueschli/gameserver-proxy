@@ -214,7 +214,7 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> 
     }
 
     match state.ui_password.as_deref() {
-        Some(expected) if req.password != expected => bad_credentials(),
+        Some(expected) if !gsp_http::token_eq(&req.password, expected) => bad_credentials(),
         _ => issue_session(
             &state,
             Session {
