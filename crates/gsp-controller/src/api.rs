@@ -502,6 +502,7 @@ async fn submit(
             forward_path,
             text,
             actor.as_deref(),
+            crate::ha::client::revision_response,
         )
         .await;
     }
@@ -536,6 +537,7 @@ async fn promote(
             &format!("/config/promote/{revision}"),
             String::new(),
             actor.as_deref(),
+            crate::ha::client::revision_response,
         )
         .await;
     }

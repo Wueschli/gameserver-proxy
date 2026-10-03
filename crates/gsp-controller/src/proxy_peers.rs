@@ -126,6 +126,14 @@ impl Registration for ProxyRegistration {
     fn validate(&self) -> Result<(), String> {
         ProxyRegistration::validate(self)
     }
+
+    fn endpoint_mut(&mut self) -> Option<&mut String> {
+        Some(&mut self.endpoint)
+    }
+
+    fn register_request(self, now: u64) -> crate::ha::WriteRequest {
+        crate::ha::WriteRequest::RegisterProxy { reg: self, now }
+    }
 }
 
 #[cfg(test)]

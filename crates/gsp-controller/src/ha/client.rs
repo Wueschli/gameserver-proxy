@@ -1,8 +1,9 @@
-//! [`propose_write`] — the one function `api::submit` and
-//! `intent::api::submit_intent` call instead of `apply_revision` directly
-//! when HA is on. Proposes a Raft write on this replica; if this replica
-//! isn't the leader, **transparently forwards the original request to the
-//! current leader** (over HTTP or HTTPS, per its `--ha-peers` entry) rather than returning a redirect — see
+//! [`propose_write`] — the one function `api::submit`,
+//! `intent::api::submit_intent` and the registries' write handlers call
+//! instead of writing their stores directly when HA is on. Proposes a Raft
+//! write on this replica; if this replica isn't the leader, **transparently
+//! forwards the original request to the current leader** (over HTTP or
+//! HTTPS, per its `--ha-peers` entry) rather than returning a redirect — see
 //! `docs/10` "Intra-tier HA (design)" for why: every existing client of
 //! this API (`gsp`, `gsp-ui`, `curl`) stays completely unaware HA exists.
 //! The forward is bounded by [`FORWARD_TIMEOUT`], so a half-open leader costs
@@ -12,9 +13,10 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use reqwest::Method;
 use serde::Serialize;
 
-use super::{typ, HaHandle, WriteRequest};
+use super::{typ, HaHandle, WriteRequest, WriteResponse};
 
 /// How long a follower waits for the leader to answer a forwarded write,
 /// response body included. A healthy leader commits in milliseconds (a
@@ -38,42 +40,67 @@ struct ErrorBody {
     error: String,
 }
 
-/// Proposes `req` via Raft. `path` is this write's own route (`/config` or
-/// `/intent`) — used only to forward `body` to the leader's copy of the same
-/// route if this replica isn't it; `actor` (phase 12 slice 8's `X-Actor`, if
+/// Proposes `req` via Raft and answers with `map` applied to the committed
+/// entry's [`WriteResponse`], so each route keeps its own response shape.
+/// `path` is this write's own route (`/config`, `/intent`, `/peers`, …) —
+/// used only to forward `body` to the leader's copy of the same route (as a
+/// `POST`) if this replica isn't it; `actor` (phase 12 slice 8's `X-Actor`, if
 /// any) rides along on that forward so the leader's own handler — which
 /// re-parses it independently, exactly as if the browser/`gsp`/`curl` had
 /// called the leader directly — attributes the write to the same actor.
-/// Returns the committed revision on success (always `Some` for a real
-/// `WriteRequest`).
-pub async fn propose_write(
+pub async fn propose_write<F>(
     ha: &HaHandle,
     req: WriteRequest,
     path: &str,
     body: String,
     actor: Option<&str>,
-) -> Response {
+    map: F,
+) -> Response
+where
+    F: FnOnce(WriteResponse) -> Response,
+{
+    propose_write_as(ha, req, Method::POST, path, body, actor, map).await
+}
+
+/// [`propose_write`] for a route whose forward to the leader uses `method`
+/// (a registry's `DELETE {base}/{name}`).
+pub async fn propose_write_as<F>(
+    ha: &HaHandle,
+    req: WriteRequest,
+    method: Method,
+    path: &str,
+    body: String,
+    actor: Option<&str>,
+    map: F,
+) -> Response
+where
+    F: FnOnce(WriteResponse) -> Response,
+{
     match ha.raft.client_write(req).await {
-        Ok(resp) => {
-            // Config, intent and promote entries always answer `Revision`;
-            // registry entries get their own write path (Task 6).
-            let revision = match resp.response() {
-                super::WriteResponse::Revision(r) => *r,
-                _ => None,
-            };
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "revision": revision })),
-            )
-                .into_response()
-        }
-        Err(e) => handle_write_error(ha, e, path, body, actor).await,
+        Ok(resp) => map(resp.data),
+        Err(e) => handle_write_error(ha, e, method, path, body, actor).await,
     }
+}
+
+/// The `{revision}` answer config, intent and promote writes give — the
+/// mapper their [`propose_write`] calls pass.
+pub fn revision_response(resp: WriteResponse) -> Response {
+    // Config, intent and promote entries always answer `Revision`.
+    let revision = match resp {
+        WriteResponse::Revision(r) => r,
+        _ => None,
+    };
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "revision": revision })),
+    )
+        .into_response()
 }
 
 async fn handle_write_error(
     ha: &HaHandle,
     err: typ::RaftError<typ::ClientWriteError>,
+    method: Method,
     path: &str,
     body: String,
     actor: Option<&str>,
@@ -88,7 +115,7 @@ async fn handle_write_error(
     };
 
     match forward_target(leader_id, leader_node, ha.node_id) {
-        Ok(leader) => forward_to_leader(&ha.forward, &leader.addr, path, body, actor).await,
+        Ok(leader) => forward_to_leader(&ha.forward, &leader.addr, method, path, body, actor).await,
         Err(msg) => service_unavailable(msg),
     }
 }
@@ -111,12 +138,13 @@ fn forward_target(
 async fn forward_to_leader(
     client: &reqwest::Client,
     leader_addr: &str,
+    method: Method,
     path: &str,
     body: String,
     actor: Option<&str>,
 ) -> Response {
     let url = super::peers::peer_url(leader_addr, path);
-    let mut req = client.post(&url).body(body);
+    let mut req = client.request(method, &url).body(body);
     if let Some(actor) = actor {
         req = req.header("X-Actor", actor);
     }
@@ -200,7 +228,14 @@ mod tests {
         let client = forward_client(Duration::from_millis(200));
         let resp = tokio::time::timeout(
             Duration::from_secs(5),
-            forward_to_leader(&client, &addr.to_string(), "/config", "{}".into(), None),
+            forward_to_leader(
+                &client,
+                &addr.to_string(),
+                Method::POST,
+                "/config",
+                "{}".into(),
+                None,
+            ),
         )
         .await
         .expect("the forward must give up on its own, not hang");

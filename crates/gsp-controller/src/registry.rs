@@ -12,6 +12,10 @@
 //! replayed apply step is a no-op ("Crash-idempotent apply",
 //! `docs/superpowers/specs/2026-10-03-ha-replicated-address-allocation-design.md`).
 //!
+//! Under HA ([`RegistryState::with_ha`]) the write handlers never write
+//! either store: they propose through Raft and the state machine applies
+//! (see [`ha`]); reads are served from the local replica either way.
+//!
 //! The two registries differ only in their registration type (the
 //! [`Registration`] trait), their address-book [`Role`] and their route
 //! prefix, which `crate::peers::api` / `crate::proxy_peers::api` supply.
@@ -21,7 +25,7 @@ use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{OriginalUri, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -39,6 +43,10 @@ use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, now_secs, AddressBook, ClaimError, Rejection, Role};
 use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
+
+mod ha;
+
+pub use ha::{canonical_addr, is_unchanged, normalize, RegistryHa, TOUCH_AFTER};
 
 const UPDATES_CAPACITY: usize = 64;
 
@@ -60,6 +68,15 @@ pub trait Registration:
     fn set_tunnel_address(&mut self, a: IpAddr);
     /// Rejects a malformed submission before it reaches the store.
     fn validate(&self) -> Result<(), String>;
+    /// The registrant's own dial-out endpoint, stored as given — `None` for
+    /// a type (or a registration) without one. The unchanged check compares
+    /// it as a parsed address when it parses.
+    fn endpoint_mut(&mut self) -> Option<&mut String> {
+        None
+    }
+    /// The Raft entry that registers `self`, stamped with the proposing
+    /// leader's clock.
+    fn register_request(self, now: u64) -> crate::ha::WriteRequest;
 }
 
 /// The words one registry's responses and logs use.
@@ -106,6 +123,12 @@ pub struct RegistryState<R: Registration> {
     /// a live registration whose address the book freed. Never held across an
     /// `.await`.
     write_lock: Arc<std::sync::Mutex<()>>,
+    /// `Some` under HA: writes go through Raft ([`ha::RegistryHa`]); `None`
+    /// keeps today's direct claim-and-register path.
+    ha: Option<ha::RegistryHa>,
+    /// The clock (unix seconds) a write proposed here is stamped with —
+    /// [`now_secs`] outside tests.
+    now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
     registration: PhantomData<R>,
 }
 
@@ -123,8 +146,24 @@ impl<R: Registration> RegistryState<R> {
             auth_token: auth_token.map(Arc::from),
             book,
             write_lock: Arc::new(std::sync::Mutex::new(())),
+            ha: None,
+            now_fn: Arc::new(now_secs),
             registration: PhantomData,
         }
+    }
+
+    /// Routes this registry's writes through Raft (`Some`), or keeps them on
+    /// the direct non-HA path (`None`). The state machine's own copy never
+    /// gets one: it is the writer HA writes end up at.
+    pub fn with_ha(mut self, ha: Option<ha::RegistryHa>) -> Self {
+        self.ha = ha;
+        self
+    }
+
+    /// Replaces the clock writes are stamped with (tests age `last_seen`).
+    pub fn with_now_fn(mut self, now_fn: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.now_fn = now_fn;
+        self
     }
 
     /// Logs `reg` as a new revision and points `current[reg.name()]` at it,
@@ -342,6 +381,7 @@ fn not_registered(noun: &str, name: &str) -> Response {
 /// reaches the store, same posture as `crate::intent::api::submit_intent`.
 async fn register<R: Registration>(
     State(state): State<RegistryState<R>>,
+    OriginalUri(uri): OriginalUri,
     body: String,
 ) -> Response {
     let words = wording(R::ROLE);
@@ -351,6 +391,9 @@ async fn register<R: Registration>(
     };
     if let Err(e) = reg.validate() {
         return unprocessable(e);
+    }
+    if let Some(ha) = &state.ha {
+        return ha::register(&state, ha, reg, uri.path(), body).await;
     }
 
     let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,8 +477,12 @@ struct DeleteResponse {
 /// retry after a crash still completes.
 async fn delete_one<R: Registration>(
     State(state): State<RegistryState<R>>,
+    OriginalUri(uri): OriginalUri,
     Path(name): Path<String>,
 ) -> Response {
+    if let Some(ha) = &state.ha {
+        return ha::release::<R>(ha, name, uri.path()).await;
+    }
     let words = wording(R::ROLE);
     let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
     let has_current = match state.current.contains_key(name.as_bytes()) {

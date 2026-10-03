@@ -121,6 +121,14 @@ impl Registration for PeerRegistration {
     fn validate(&self) -> Result<(), String> {
         PeerRegistration::validate(self)
     }
+
+    fn endpoint_mut(&mut self) -> Option<&mut String> {
+        self.endpoint.as_mut()
+    }
+
+    fn register_request(self, now: u64) -> crate::ha::WriteRequest {
+        crate::ha::WriteRequest::RegisterOrigin { reg: self, now }
+    }
 }
 
 /// Log payload for a deleted registration. Deliberately not a
