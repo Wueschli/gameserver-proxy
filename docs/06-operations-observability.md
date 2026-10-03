@@ -418,7 +418,9 @@ Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
 that couldn't be reached; a broadcast never fails or blocks on one bad
 instance. A `gsp` instance opts in with `--aggregator <url>` (+
 `--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
-default 10s) — independent of `--controller`, pushing state and pulling
+default 10s, and `--aggregator-admin-url`, the base URL the aggregator should
+fan out to when `http(s)://<settings.admin.listen>` is not reachable from it,
+e.g. in a container, behind NAT or a TLS terminator) — independent of `--controller`, pushing state and pulling
 config are unrelated axes.
 
 ### `gsp-ui` — the operator dashboard's BFF

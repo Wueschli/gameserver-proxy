@@ -614,6 +614,7 @@ mod tests {
                     pubkey: KEY.into(),
                     endpoint: "203.0.113.9:51820".into(),
                     tunnel_address: None,
+                    boot_id: None,
                 })
                 .unwrap(),
             )
@@ -633,6 +634,7 @@ mod tests {
                     pubkey: KEY.into(),
                     endpoint: "203.0.113.9:51821".into(),
                     tunnel_address: None,
+                    boot_id: None,
                 })
                 .unwrap(),
             )
@@ -700,6 +702,35 @@ mod tests {
             .unwrap();
         let reg: ProxyRegistration = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(reg.tunnel_address.as_deref(), Some("10.60.0.1"));
+    }
+
+    #[tokio::test]
+    async fn the_boot_id_is_stored_as_submitted_and_a_bad_one_is_a_422() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let mut v: serde_json::Value = serde_json::from_str(&body_with("edge-1", None)).unwrap();
+        v["boot_id"] = serde_json::json!("0123456789abcdef");
+        assert_eq!(post(&app, v.to_string()).await.0, StatusCode::OK);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/proxy-peers/edge-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reg: ProxyRegistration = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reg.boot_id.as_deref(), Some("0123456789abcdef"));
+
+        v["boot_id"] = serde_json::json!("not valid!");
+        assert_eq!(
+            post(&app, v.to_string()).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     async fn delete(app: &Router, name: &str) -> (StatusCode, serde_json::Value) {

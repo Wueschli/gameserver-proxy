@@ -477,23 +477,6 @@ impl TunnelLab {
         .await
     }
 
-    /// Like [`TunnelLab::wait_roundtrip`] with a 200 s deadline on both
-    /// backends. The restarted edge has no endpoint for the origin, so only
-    /// the agent can re-handshake, and its old session still looks valid to
-    /// it: keepalives alone don't re-key, so unless the origin happens to have
-    /// data in flight (15 s rule) recovery waits for WireGuard's 120 s
-    /// `REKEY_AFTER_TIME` plus up to one 25 s keepalive — measured ~150 s
-    /// after the restart, three runs out of three (kernel, 2026-10-02).
-    pub async fn wait_roundtrip_after_restart(&self, edge: usize) -> Result<()> {
-        let addr = self.public_addr(edge);
-        wait_until(
-            || async move { Ok(tcp_roundtrip(addr, b"ping").await.is_ok()) },
-            Duration::from_secs(200),
-            "a TCP round trip through the tunnel after the restart",
-        )
-        .await
-    }
-
     /// Start a second agent that pins `address_cidr` and expect the controller
     /// to refuse it: returns the agent's log once it has exited non-zero.
     pub async fn agent_refused(&mut self, name: &str, address_cidr: &str) -> Result<String> {

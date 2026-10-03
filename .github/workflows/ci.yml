@@ -15,9 +15,9 @@ on:
       - "docs/**"
       - "LICENSE-*"
   workflow_dispatch:   # run everything by hand from the Actions tab
-  # Nightly schedule paused 2026-10-03: a full run bills ~50-55 hosted runner-minutes,
-  # ~1,600/month of the private repo's 2,000 free. Restore it (or point it at a
-  # self-hosted runner on the owner's VPS) to bring back the nightly canaries.
+  # Nightly schedule paused 2026-10-03 (owner's call; a full run is ~50-55
+  # runner-minutes). The repo is public, so hosted minutes are free: uncomment
+  # to bring back the nightly canaries (fuzz, deploy's in-Docker build).
   # schedule:
   #   - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
 
@@ -37,10 +37,16 @@ env:
 # (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
 # caches stay on one image. Move them together when upgrading.
 jobs:
-  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
-  # Schedule / manual runs, a workflow edit, or a failed diff run everything.
+  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.py):
+  # the Cargo packages a change touches, plus their dependents per `cargo
+  # metadata`, against the packages each job builds. Schedule / manual runs, a
+  # workflow edit, a failed diff or a failed `cargo metadata` run everything.
   changes:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    env:
+      # The runner image's preinstalled stable cargo is enough for `cargo
+      # metadata --no-deps`; skip rust-toolchain.toml's component installs.
+      RUSTUP_TOOLCHAIN: stable
     outputs:
       ui: ${{ steps.f.outputs.ui }}
       plugins: ${{ steps.f.outputs.plugins }}
@@ -54,7 +60,7 @@ jobs:
           fetch-depth: 0
       - name: Self-test the change detection and the report renderer
         run: |
-          sh .github/scripts/changes_test.sh
+          python3 .github/scripts/changes_test.py
           python3 .github/scripts/test_summary_test.py
           python3 .github/scripts/trivy_summary_test.py
           python3 .github/scripts/audit_summary_test.py
@@ -78,7 +84,7 @@ jobs:
               fi ;;
             *) flag=--all ;;
           esac
-          printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "$files" | python3 .github/scripts/changes.py $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
@@ -95,6 +101,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+      # Alone, gsp-agent pulls gsp-http without its default `server` feature;
+      # every other build here unifies it on, so this is the only one that
+      # proves the client-only build still compiles.
+      - name: Check gsp-agent (gsp-http without `server`)
+        run: cargo check -p gsp-agent --locked
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest

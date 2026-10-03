@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-03 (TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
+Last updated: 2026-10-03 (CI change detection from `cargo metadata`; proxy registrations carry a `boot_id`, so an edge restart no longer leaves the tunnel down ~2.5 min — `docs/11` "Edge restarts"; `gsp --aggregator-admin-url` and a `gsp-agent`-alone CI check; TLS handshake flood limits and bounded HA write forwarding; before that `--ca-file`, HA-over-TLS, native TLS on every server, security scanning in CI; see "Resume here").
 
 ## Current state
 
@@ -60,10 +60,11 @@ Open decisions for the owner:
    OS, disk, what else runs on it). A self-hosted job just queues while the VPS is down
    — there is no fallback to hosted runners.
    **Nightly CI is paused** (2026-10-03, owner's call): the `schedule` trigger in
-   `ci.yml` is commented out because the repo is private and a full nightly run bills
-   ~50–55 hosted runner-minutes (measured on the 2026-10-02/03 scheduled runs, each job
-   rounded up) — ~1,600 of the 2,000 free minutes a month. `workflow_dispatch` still runs
-   everything by hand. Until it returns, nothing exercises the nightly-only paths: the
+   `ci.yml` is commented out. A full nightly run bills ~50–55 runner-minutes (measured on
+   the 2026-10-02/03 scheduled runs, each job rounded up), ~1,600 a month — most of the
+   2,000 free minutes while the repo was private. The repo went public the same day, so
+   standard GitHub-hosted runners are now free and re-enabling the schedule costs nothing;
+   it stays paused until the owner decides. `workflow_dispatch` still runs everything by hand. Until it returns, nothing exercises the nightly-only paths: the
    in-Docker `BIN_SOURCE=builder` deploy build, and `fuzz`/`deploy` as canaries for
    commits that don't touch their paths. Bring it back together with the self-hosted runner.
 
@@ -91,14 +92,37 @@ Watch-list:
   PRs are in flight at once, GitHub's merge queue (needs an `on: merge_group` trigger;
   check availability for a personal private repo) would keep `main` green.
 
-Suggested order: pick from "Known follow-ups" — candidates the owner raised: precise CI
-change detection, the self-hosted runner (open decision 3), publishing the images (open
+Suggested order: pick from "Known follow-ups" — candidates the owner raised: the self-hosted runner (open decision 3), publishing the images (open
 decision 2), and the deferred pieces of the address authority. Whether a red
 `tunnel`/`deploy` also *blocks merging* depends on GitHub branch-protection required
 checks, a repo setting outside this tree.
 
 Most recent landings (newest first; full history in `git log`):
 
+- CI change detection from `cargo metadata` (2026-10-03): `.github/scripts/changes.py`
+  (tested by `changes_test.py`) replaces `changes.sh`'s hand-written crate regexes. A changed
+  file belongs to the Cargo package whose directory holds it (across the root, `crates/plugins`
+  and `crates/gsp-config/fuzz` workspaces); a job runs when that package or one of its
+  path-dependency dependents is in the job's `ROOTS` (`plugins`: `gsp` + `crates/plugins/`;
+  `tunnel`: the five binaries + `gsp-fleet-tests`; `fuzz`: `gsp-config-fuzz`). On today's tree
+  that differs from the regexes in three ways: a `crates/gsp-config/fuzz/` change runs only
+  `fuzz`, the root `Cargo.lock` no longer runs `fuzz` (own lockfile), and `.config/nextest.toml`
+  now runs `plugins` + `tunnel` (it was missed). Fail-open: a workflow edit, the root
+  `Cargo.toml`, the toolchain file, `.cargo/`, an unowned path under `crates/` or a failed
+  `cargo metadata` (warning annotation) runs everything it could affect. The `changes` job uses
+  the runner image's preinstalled cargo (`RUSTUP_TOOLCHAIN=stable`, `--no-deps`: no download).
+- Aggregator admin URL override (2026-10-03): `gsp --aggregator-admin-url <url>`
+  (requires `--aggregator`) replaces the reported `admin_url`
+  (`http(s)://<settings.admin.listen>`), so fan-out reaches a `gsp` behind a
+  container port mapping, NAT or TLS terminator. An `http`/`https` URL, optionally
+  with a path prefix; trailing slashes are trimmed (fan-out appends absolute paths);
+  a bad value fails startup and `--check`. The k8s DaemonSet now reports
+  `http://$(NODE_IP):9900` and the aggregator presents `--instance-token`
+  (secret key `admin-token`, equal to the admin `auth_token`), so fan-out works there;
+  the compose demo still can't fan out (`gsp`'s admin API is on the host loopback).
+  E2E: `aggregator_admin_url.rs` (fan-out goes through a TLS terminator on another
+  port). CI's `test` job also runs `cargo check -p gsp-agent --locked`, the one build
+  of `gsp-http` without its `server` feature.
 - Address authority review minors (2026-10-03): `parse_duration` uses `checked_mul`
   (an overflowing `--tunnel-stale-after` is an error, not a panic); `--tunnel-network`
   is capped at a `/16` (`addresses::MIN_PREFIX`) because allocation scans the pool
@@ -420,8 +444,9 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   **12 scenarios** (namespace helpers, TCP/UDP round trip, stays-up-across-re-registrations,
   a proxy added later, **two proxies sharing one origin**, a pinned-key mismatch, a pinned
   address collision, an edge restart keeping its address, an edge restarting with the
-  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (the
-  kernel edge-restart scenario alone waits up to 200 s). Run it with
+  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (measured
+  before the 2026-10-03 boot id fix removed the kernel edge-restart scenario's 200 s
+  wait; expect that leg to be ~2.5 min shorter now). Run it with
   `TUNNEL_BACKEND=kernel|userspace make tunnel-e2e` (plain `cargo test`) or
   `make tunnel-e2e-ci` (nextest + JUnit; needs `cargo install cargo-nextest --locked`). Needs `unshare`, `ip`,
   `nsenter`; the userspace backend also needs `/run/wireguard`
@@ -439,17 +464,15 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | Item | Notes |
 |------|-------|
 | Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); releasing an address **from gsp-ui** (its Tunnel addresses page is read-only; release is the registry `DELETE`); **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
-| Address authority — deferred review minors (the rest were fixed 2026-10-03) | `check_pin` treats an unparseable holder as free; stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
-| Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
-| Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. CI never builds `gsp-http` with `--no-default-features` (a `cargo check -p gsp-agent` step would). Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
+| Address authority — deferred review minors (the rest were fixed 2026-10-03) | `check_pin` treats an unparseable holder as free; stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
+| Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
 | Trivy scan — follow-ups | (1) GitHub's Security tab ("code scanning") would show the SARIF natively, but this repo is private, so uploads need GitHub Code Security (paid); with it, add `github/codeql-action/upload-sarif` (permission `security-events: write`) over `target/trivy/*.sarif`. (2) For Rust crates Trivy sees GHSA advisories only (RustSec-only ones such as the 2026-10-01 rustls/wasmtime fixes are missed, and many crate advisories are MEDIUM) — `cargo audit` (the `audit` job) is the real check. (3) `cargo auditable` builds would let the image scan see the crates itself. (4) The vulnerability DB (~120 MB, `mirror.gcr.io` with a `ghcr.io` fallback) is fetched each run — cache it by day. (5) The pinned hash stops a later swap but can't prove 0.75.0 was clean when pinned; verifying the release's cosign/sigstore bundle would. (6) `package-lock.json` scanning includes build-only `dependencies` (tailwind, vite via `@tailwindcss/vite`), so a dev-server CVE there would be a false positive. (7) Cosmetic: `trivy convert --format table` in `scan-images.sh` logs "No enabled scanners found" and prints no table to the job log (seen on the first CI run, 2026-10-02); the run-summary table and the reports are unaffected — pass the scanners to `convert` or drop the log table. |
 | Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. Owner (2026-10-02): images should be built "for both Docker and Kubernetes" — not yet specified whether that means publishing, multi-arch or k8s packaging (Helm/Kustomize); ask. Once images are published, per-image CI jobs make sense (each versioned, rebuilt and pushed only when its inputs change); before that they don't — see the CI-cost row. |
-| CI: precise change detection | `.github/scripts/changes.sh` maps paths to CI areas with hand-written regexes, which drift as crates gain dependencies. Deriving the affected binaries from `cargo metadata` (reverse deps of the changed crates) would let jobs run only for what changed — e.g. no release build when only `crates/gsp-ui/web/` changed. Discussed 2026-10-02 against per-container jobs: the five binaries share most of their compile (one `cargo build` links all five), image builds copy prebuilt binaries (seconds), the compose smoke test needs all five together, and per-image Trivy jobs would fetch the ~120 MB DB five times — so five parallel jobs per stage would cost more billed minutes, not fewer. Related: cache the Trivy DB by day (Trivy row). |
+| CI change detection — residuals (2026-10-03) | `changes.py` treats any root `Cargo.lock` change as touching every root-workspace member; diffing the lockfile and walking its reverse-dependency graph would skip jobs on bumps that only reach e.g. `gsp-bench`, but nearly every real bump reaches `gsp` anyway. `deploy` still runs only for its own paths and the lockfile, not for binary source changes (unchanged; nightly covers code-driven breakage). Cross-crate file reads (`include_bytes!`, fixtures) are invisible to `cargo metadata` — today only `gsp-fleet-tests` → `gsp-http`'s fixtures, already covered. Per-container jobs were discussed 2026-10-02 and rejected: the five binaries share most of their compile, the compose smoke needs all five, and per-image Trivy jobs would fetch the ~120 MB DB five times. Related: cache the Trivy DB by day (Trivy row). |
 | Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
 | HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
 | HA-over-TLS cleanup-PR minors (found reviewing the cleanup PR, 2026-10-02) | `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
 | `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
-| `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
 | k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |
@@ -644,8 +667,8 @@ time). Needs `protoc` on `PATH`. Not part of `make check`:
 - `make ui-test` (vitest), `make deploy-lint` (daemon-free render checks of `deploy/`;
   needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` / `make deploy-scan` (need a
   Docker daemon; the scan also needs `trivy`);
-- the CI helper scripts: `sh .github/scripts/changes_test.sh` and
-  `python3 .github/scripts/test_summary_test.py` and `python3 .github/scripts/trivy_summary_test.py` (CI runs all three in the `changes` job).
+- the CI helper scripts: `python3 .github/scripts/changes_test.py` (needs `cargo`),
+  `test_summary_test.py`, `trivy_summary_test.py` and `audit_summary_test.py` (CI runs all four in the `changes` job).
 
 CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 "Infra / environment".
@@ -671,16 +694,18 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 - **`protoc` is a build requirement** (gRPC resolver codegen in
   `crates/gsp/build.rs`). CI installs `protobuf-compiler`.
 - CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
-  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.sh`, tested by
-  `changes_test.sh`, self-run in CI) decides which path-scoped jobs run: `ui`, `plugins`, `tunnel`,
+  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.py`, tested by
+  `changes_test.py`, self-run in CI) decides which path-scoped jobs run from `cargo metadata`
+  (a changed file's package plus its path-dependency dependents, against each job's `ROOTS`): `ui`, `plugins`, `tunnel`,
   `deploy`, `fuzz`; `test` and `audit` always run for non-docs pushes, and `trivy` follows
   `deploy` (it scans `deploy`'s images, handed over as the 1-day `deploy-images` artifact
   of `docker save` tarballs). `trivy` and `audit` are informational: `continue-on-error`,
   results on the run's summary page, as warning annotations and as artifacts
   (`trivy-reports`, `cargo-audit`). A workflow edit, a failed diff, the
   **nightly schedule (03:17 UTC; paused since 2026-10-03, see open decision 3)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
-  also act as nightly canaries for code-driven breakage. Adding a job or moving files between
-  areas means updating `changes.sh` *and* its test. A full run bills roughly 60–80
+  also act as nightly canaries for code-driven breakage. Adding a job, or changing which packages a job
+  builds, means updating `ROOTS` in `changes.py` *and* its test; a new crate or dependency
+  edge needs no edit. A full run bills roughly 60–80
   runner-minutes (each job rounds up to the minute; cold caches cost more); the scan
   jobs add under a minute each.
   Cargo caching is `.github/actions/cargo-cache` (rolling: a new snapshot per `main` push,
@@ -714,7 +739,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   in-Docker build instead, so that path can't rot. These three jobs are pinned to
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
   built there might need a newer glibc than the distroless runtime's 2.41. (Since
-  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.sh`
+  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.py`
   emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
