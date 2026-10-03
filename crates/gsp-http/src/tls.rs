@@ -4,27 +4,29 @@
 //! the PEM files when they change, so a renewed certificate (certbot,
 //! cert-manager) is picked up without a restart; a broken or half-written
 //! replacement keeps the current one. [`TlsListener`] is an `axum::serve::Listener`
-//! that runs each handshake in its own task, so a slow client never blocks accepts.
+//! that runs each handshake in its own task, so a slow client never blocks accepts,
+//! and bounds the handshakes in flight per source and in total ([`HandshakeLimits`]).
 //! [`serve`] picks HTTPS or plain HTTP for a binary's `--listen`.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::{ClientHello, ResolvesServerCert};
 use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::server::TlsStream;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::LazyConfigAcceptor;
 
 /// The certificate (PEM chain, leaf first) and private key (PEM) files, plus the
 /// names errors call them by: `--tls-cert`/`--tls-key` unless [`TlsFiles::named`].
@@ -239,12 +241,182 @@ impl ResolvesServerCert for ReloadingCert {
 /// How long a client gets to finish the TLS handshake before it is dropped.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a client gets to send its ClientHello (part of [`HANDSHAKE_TIMEOUT`]).
+pub const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Finished handshakes waiting for `axum::serve` to pick them up.
 const READY_BACKLOG: usize = 64;
 
+/// At most one "handshake limit reached" warning per this long.
+const LIMIT_WARN_EVERY: Duration = Duration::from_secs(60);
+
+/// Bounds on handshakes in flight (accepted, not yet finished), so a flood of
+/// connects that never finish cannot use up the process's fds.
+///
+/// Over `max_pending_per_source` (a source is an IPv4 address or an IPv6 /64) a
+/// new connection is closed at once. At `max_pending` a new connection is still
+/// admitted and the *oldest* pending handshake is dropped instead: refusing at a
+/// global cap would let ~cap idle connects lock every client out, while evicting
+/// only hurts a real client if the cap's worth of connects arrive within its one
+/// RTT of handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandshakeLimits {
+    pub client_hello_timeout: Duration,
+    pub handshake_timeout: Duration,
+    pub max_pending: usize,
+    pub max_pending_per_source: usize,
+}
+
+impl Default for HandshakeLimits {
+    fn default() -> Self {
+        Self {
+            client_hello_timeout: CLIENT_HELLO_TIMEOUT,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            max_pending: 512,
+            max_pending_per_source: 16,
+        }
+    }
+}
+
+/// What the per-source cap counts by: an IPv4 address, or an IPv6 /64 (anyone
+/// with IPv6 has a whole /64). An IPv4-mapped IPv6 peer is its IPv4 address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SourceKey {
+    V4(Ipv4Addr),
+    V6(u64),
+}
+
+fn source_key(ip: IpAddr) -> SourceKey {
+    match ip {
+        IpAddr::V4(v4) => SourceKey::V4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => SourceKey::V4(v4),
+            None => SourceKey::V6((u128::from(v6) >> 64) as u64),
+        },
+    }
+}
+
+/// The pending-handshake bookkeeping (see [`HandshakeLimits`]): ids in admission
+/// order, so the oldest is the first.
+struct Pending {
+    max_pending: usize,
+    max_pending_per_source: usize,
+    order: BTreeMap<u64, SourceKey>,
+    per_source: HashMap<SourceKey, usize>,
+    next_id: u64,
+}
+
+impl Pending {
+    fn new(limits: &HandshakeLimits) -> Self {
+        Self {
+            // A cap of 0 would evict every handshake as it is admitted.
+            max_pending: limits.max_pending.max(1),
+            max_pending_per_source: limits.max_pending_per_source.max(1),
+            order: BTreeMap::new(),
+            per_source: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Admit a handshake from `key`: its id and the id of the handshake evicted
+    /// to make room, or `None` when `key` is at its cap.
+    fn admit(&mut self, key: SourceKey) -> Option<(u64, Option<u64>)> {
+        if self.per_source.get(&key).copied().unwrap_or(0) >= self.max_pending_per_source {
+            return None;
+        }
+        let evicted = if self.order.len() >= self.max_pending {
+            self.order.first_key_value().map(|(&id, _)| id)
+        } else {
+            None
+        };
+        if let Some(id) = evicted {
+            self.release(id);
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.order.insert(id, key);
+        *self.per_source.entry(key).or_insert(0) += 1;
+        Some((id, evicted))
+    }
+
+    /// Free `id`'s slot; a no-op for an id already released or evicted.
+    fn release(&mut self, id: u64) {
+        let Some(key) = self.order.remove(&id) else {
+            return;
+        };
+        if let Some(n) = self.per_source.get_mut(&key) {
+            *n -= 1;
+            if *n == 0 {
+                self.per_source.remove(&key);
+            }
+        }
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.order.contains_key(&id)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+}
+
+/// [`Pending`] plus what eviction needs: each pending handshake's task.
+struct Handshakes {
+    pending: Pending,
+    tasks: HashMap<u64, AbortHandle>,
+    last_warn: Option<Instant>,
+}
+
+impl Handshakes {
+    /// Remember `id`'s task for eviction, unless it already ended (or was
+    /// evicted) between its spawn and now.
+    fn register(&mut self, id: u64, task: AbortHandle) {
+        if self.pending.contains(id) {
+            self.tasks.insert(id, task);
+        }
+    }
+
+    fn release(&mut self, id: u64) {
+        self.pending.release(id);
+        self.tasks.remove(&id);
+    }
+
+    fn warn_throttled(&mut self, what: &str) {
+        let now = Instant::now();
+        if self
+            .last_warn
+            .is_none_or(|t| now.duration_since(t) >= LIMIT_WARN_EVERY)
+        {
+            self.last_warn = Some(now);
+            tracing::warn!(
+                "TLS handshake limit reached ({what}); a client may be flooding this \
+                 port (repeats are logged at debug for a minute)"
+            );
+        }
+    }
+}
+
+/// Frees a handshake's slot when its task ends, however it ends (finished,
+/// failed, timed out, or aborted by an eviction).
+struct Slot {
+    id: u64,
+    handshakes: Arc<Mutex<Handshakes>>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut h) = self.handshakes.lock() {
+            h.release(self.id);
+        }
+    }
+}
+
 /// An `axum::serve::Listener` serving TLS with a [`ReloadingCert`]. A background
 /// task accepts TCP connections and runs each handshake in its own task, so a
-/// client that connects and stalls costs one task, never the accept loop.
+/// client that connects and stalls costs one task, never the accept loop; the
+/// handshakes in flight are bounded by [`HandshakeLimits`].
 pub struct TlsListener {
     ready: mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
     local: SocketAddr,
@@ -260,10 +432,16 @@ impl Drop for AbortOnDrop {
 }
 
 impl TlsListener {
-    /// No cap on handshakes in flight, on purpose: a global cap lets ~cap idle
-    /// connects lock every client out. A stalled client costs one task and one
-    /// fd until [`HANDSHAKE_TIMEOUT`], the same bound as plain `axum::serve`.
+    /// [`bind_with`](Self::bind_with) the default [`HandshakeLimits`].
     pub async fn bind(addr: SocketAddr, cert: Arc<ReloadingCert>) -> io::Result<Self> {
+        Self::bind_with(addr, cert, HandshakeLimits::default()).await
+    }
+
+    pub async fn bind_with(
+        addr: SocketAddr,
+        cert: Arc<ReloadingCert>,
+        limits: HandshakeLimits,
+    ) -> io::Result<Self> {
         let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -272,11 +450,16 @@ impl TlsListener {
         .with_no_client_auth()
         .with_cert_resolver(cert);
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let config = Arc::new(config);
 
         let tcp = TcpListener::bind(addr).await?;
         let local = tcp.local_addr()?;
         let (tx, ready) = mpsc::channel(READY_BACKLOG);
+        let handshakes = Arc::new(Mutex::new(Handshakes {
+            pending: Pending::new(&limits),
+            tasks: HashMap::new(),
+            last_warn: None,
+        }));
         let accept = tokio::spawn(async move {
             loop {
                 let (stream, peer) = match tcp.accept().await {
@@ -288,16 +471,51 @@ impl TlsListener {
                         continue;
                     }
                 };
-                let (acceptor, tx) = (acceptor.clone(), tx.clone());
-                tokio::spawn(async move {
-                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
-                        Ok(Ok(tls)) => {
+                // The lock is never held across a spawn, an abort or an `.await`:
+                // either can drop a task's future (and its `Slot`) inline.
+                let admitted = {
+                    let mut h = handshakes.lock().expect("handshake lock poisoned");
+                    match h.pending.admit(source_key(peer.ip())) {
+                        None => {
+                            h.warn_throttled("per source");
+                            None
+                        }
+                        Some((id, evicted)) => {
+                            let evicted = evicted.and_then(|old| h.tasks.remove(&old));
+                            if evicted.is_some() {
+                                h.warn_throttled("global, dropping the oldest");
+                            }
+                            Some((id, evicted))
+                        }
+                    }
+                };
+                let Some((id, evicted)) = admitted else {
+                    tracing::debug!(%peer, "too many TLS handshakes from this source; closed");
+                    continue; // drops `stream`
+                };
+                if let Some(task) = evicted {
+                    tracing::debug!(%peer, "TLS handshakes at the cap; dropped the oldest");
+                    task.abort();
+                }
+                let slot = Slot {
+                    id,
+                    handshakes: handshakes.clone(),
+                };
+                let (config, tx) = (config.clone(), tx.clone());
+                let task = tokio::spawn(async move {
+                    let result = handshake(stream, config, &limits).await;
+                    drop(slot); // no longer pending, even while `ready` is full
+                    match result {
+                        Ok(tls) => {
                             let _ = tx.send((tls, peer)).await;
                         }
-                        Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
-                        Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
+                        Err(e) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
                     }
                 });
+                handshakes
+                    .lock()
+                    .expect("handshake lock poisoned")
+                    .register(id, task.abort_handle());
             }
         });
         Ok(Self {
@@ -306,6 +524,26 @@ impl TlsListener {
             _accept: AbortOnDrop(accept),
         })
     }
+}
+
+/// The ClientHello within `client_hello_timeout`, the whole handshake within
+/// `handshake_timeout`.
+async fn handshake(
+    stream: TcpStream,
+    config: Arc<rustls::ServerConfig>,
+    limits: &HandshakeLimits,
+) -> io::Result<TlsStream<TcpStream>> {
+    let deadline = tokio::time::Instant::now() + limits.handshake_timeout;
+    let hello = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+    let start = tokio::time::timeout(
+        limits.client_hello_timeout.min(limits.handshake_timeout),
+        hello,
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no ClientHello in time"))??;
+    tokio::time::timeout_at(deadline, start.into_stream(config))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
 }
 
 impl axum::serve::Listener for TlsListener {
@@ -406,5 +644,89 @@ pub async fn serve(
             tracing::info!(listen = %addr, "{name} listening");
             axum::serve(listener, app).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_source_is_an_ipv4_address_or_an_ipv6_slash_64() {
+        assert_eq!(source_key(ip("192.0.2.1")), source_key(ip("192.0.2.1")));
+        assert_ne!(source_key(ip("192.0.2.1")), source_key(ip("192.0.2.2")));
+        assert_eq!(
+            source_key(ip("2001:db8:1:2::1")),
+            source_key(ip("2001:db8:1:2:ffff::9"))
+        );
+        assert_ne!(
+            source_key(ip("2001:db8:1:2::1")),
+            source_key(ip("2001:db8:1:3::1"))
+        );
+        // An IPv4-mapped peer (dual-stack listener) is its IPv4 address, not a /64
+        // shared by the whole IPv4 internet.
+        assert_eq!(
+            source_key(ip("::ffff:192.0.2.1")),
+            source_key(ip("192.0.2.1"))
+        );
+        assert_ne!(
+            source_key(ip("::ffff:192.0.2.1")),
+            source_key(ip("::ffff:192.0.2.2"))
+        );
+    }
+
+    fn pending(max_pending: usize, max_pending_per_source: usize) -> Pending {
+        Pending::new(&HandshakeLimits {
+            max_pending,
+            max_pending_per_source,
+            ..HandshakeLimits::default()
+        })
+    }
+
+    #[test]
+    fn a_source_at_its_cap_is_refused_until_one_is_released() {
+        let mut p = pending(64, 2);
+        let a = source_key(ip("192.0.2.1"));
+        let b = source_key(ip("192.0.2.2"));
+        let (first, _) = p.admit(a).unwrap();
+        p.admit(a).unwrap();
+        assert!(p.admit(a).is_none());
+        p.admit(b)
+            .expect("another source is not limited by this one");
+        p.release(first);
+        p.admit(a).expect("a released slot is free again");
+    }
+
+    #[test]
+    fn at_the_global_cap_the_oldest_is_evicted() {
+        let mut p = pending(2, 16);
+        let a = source_key(ip("192.0.2.1"));
+        let (oldest, evicted) = p.admit(a).unwrap();
+        assert!(evicted.is_none());
+        let (middle, evicted) = p.admit(a).unwrap();
+        assert!(evicted.is_none());
+        let (_, evicted) = p.admit(a).unwrap();
+        assert_eq!(evicted, Some(oldest));
+        // The evicted handshake's own release later is a no-op …
+        p.release(oldest);
+        assert_eq!(p.len(), 2);
+        // … and the next eviction takes the next oldest.
+        let (_, evicted) = p.admit(a).unwrap();
+        assert_eq!(evicted, Some(middle));
+    }
+
+    #[test]
+    fn eviction_frees_the_evicted_source_slot() {
+        let mut p = pending(1, 1);
+        let a = source_key(ip("192.0.2.1"));
+        let b = source_key(ip("192.0.2.2"));
+        p.admit(a).unwrap();
+        p.admit(b).unwrap(); // evicts a's
+        p.admit(a)
+            .expect("a's evicted handshake no longer counts against a");
     }
 }
