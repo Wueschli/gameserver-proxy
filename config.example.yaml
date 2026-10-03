@@ -1,4 +1,4 @@
-# gsp — reduced v0 schema (roadmap phase 2).
+# gsp — annotated example config (`make run` starts the proxy with it).
 # The full target schema is documented in docs/05-configuration.md.
 
 settings:
