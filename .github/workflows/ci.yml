@@ -15,8 +15,11 @@ on:
       - "docs/**"
       - "LICENSE-*"
   workflow_dispatch:   # run everything by hand from the Actions tab
-  schedule:
-    - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
+  # Nightly schedule paused 2026-10-03: a full run bills ~50-55 hosted runner-minutes,
+  # ~1,600/month of the private repo's 2,000 free. Restore it (or point it at a
+  # self-hosted runner on the owner's VPS) to bring back the nightly canaries.
+  # schedule:
+  #   - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
 
 # A newer push to the same ref supersedes an older, still-running one.
 concurrency:
@@ -281,7 +284,8 @@ jobs:
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     env:
       # Push/PR: images copy the shared release build (fast). Nightly: compile
-      # inside Docker, exercising the self-contained builder stage.
+      # inside Docker, exercising the self-contained builder stage. (The nightly
+      # schedule is paused, so nothing takes this path until it returns.)
       BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
       - uses: actions/checkout@v5
