@@ -373,7 +373,7 @@ mod tests {
             RoleHandle::new(Role::Standalone),
             None,
         ));
-        let db = sled::open(dirs.ha.path()).unwrap();
+        let db = crate::store::reopen_when_unlocked(|| sled::open(dirs.ha.path()));
         let mut reopened = Arc::new(StateMachineStore::open(&db, config, intent).unwrap());
 
         let (last_applied, _) = reopened.applied_state().await.unwrap();
