@@ -33,6 +33,11 @@ env:
 # the rest so a runner-image migration is a deliberate edit, not a surprise red run
 # (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
 # caches stay on one image. Move them together when upgrading.
+# Read-only GITHUB_TOKEN for every job: nothing here pushes, comments or
+# releases, so a compromised step or action cannot write to the repo.
+permissions:
+  contents: read
+
 jobs:
   # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.py):
   # the Cargo packages a change touches, plus their dependents per `cargo

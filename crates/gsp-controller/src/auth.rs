@@ -31,7 +31,7 @@ pub async fn require_bearer(State(state): State<AppState>, req: Request, next: N
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match presented {
-        Some(token) if token == expected => next.run(req).await,
+        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
         _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
     }
 }
