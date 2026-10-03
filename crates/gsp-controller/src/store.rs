@@ -8,7 +8,11 @@
 //! Two `sled` trees: `revisions` maps a big-endian `u64` revision number to
 //! the raw config bytes accepted at that revision (whatever `gsp_config`
 //! would parse, byte-for-byte — this crate never interprets them); `meta`
-//! holds a single `current` pointer at the latest revision number.
+//! holds the `current` pointer at the latest revision number and, for a
+//! store driven by the Raft state machine, an `applied_index` — the highest
+//! Raft log index whose effect this store has absorbed, written in the same
+//! transaction as the revision so a replayed entry can be recognised and
+//! skipped (see [`Store::put_applied`]).
 
 use std::path::Path;
 
@@ -25,9 +29,40 @@ pub enum StoreError {
     Sled(#[from] sled::Error),
     #[error("revision counter exhausted u64")]
     CounterOverflow,
+    #[error("revision counter moved during a Raft apply (concurrent writer)")]
+    ConcurrentWrite,
 }
 
 const CURRENT_KEY: &[u8] = b"current";
+const APPLIED_INDEX_KEY: &[u8] = b"applied_index";
+
+/// Outcome of [`Store::put_applied`] / [`Store::put_applied_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// The revision was written; this is its number.
+    Written(u64),
+    /// The store had already absorbed this log index (a replay) — nothing
+    /// was written.
+    AlreadyApplied,
+}
+
+/// One write to a sibling tree of the same database (e.g. the per-revision
+/// stage or actor trees) that joins a [`Store::put_applied_with`]
+/// transaction. `value: None` removes the key.
+pub struct SiblingWrite<'a> {
+    pub tree: &'a sled::Tree,
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+}
+
+type TxError = sled::transaction::ConflictableTransactionError<TxAbort>;
+
+/// Why a transaction body aborted itself (as opposed to a storage failure).
+enum TxAbort {
+    /// The `current` pointer moved between computing the next revision
+    /// number and the transaction running — a concurrent non-Raft writer.
+    RevisionRaced,
+}
 
 pub struct Store {
     db: sled::Db,
@@ -123,6 +158,119 @@ impl Store {
         self.revisions.flush()?;
         self.meta.flush()?;
         Ok(next)
+    }
+
+    /// The highest Raft log index this store has absorbed, or `None` if it
+    /// has never been driven by the state machine.
+    pub fn applied_index(&self) -> Result<Option<u64>, StoreError> {
+        Ok(self.meta.get(APPLIED_INDEX_KEY)?.map(|v| decode_rev(&v)))
+    }
+
+    /// [`Store::put`] for a Raft apply step at log `index`: the revision
+    /// and the `applied_index` land in one transaction, so a crash can
+    /// never leave one without the other. Returns
+    /// [`Applied::AlreadyApplied`], writing nothing, when the stored
+    /// `applied_index` is already `>= index`.
+    pub fn put_applied(&self, bytes: RevisionBytes, index: u64) -> Result<Applied, StoreError> {
+        self.put_applied_with(bytes, index, &|_| Vec::new())
+    }
+
+    /// [`Store::put_applied`] plus writes to sibling trees of this same
+    /// database, which join the transaction. `siblings` receives the
+    /// revision number being written (stage/actor entries are keyed by it).
+    pub fn put_applied_with<'a>(
+        &self,
+        bytes: RevisionBytes,
+        index: u64,
+        siblings: &dyn Fn(u64) -> Vec<SiblingWrite<'a>>,
+    ) -> Result<Applied, StoreError> {
+        let next = match self.current_revision()? {
+            Some(rev) => rev.checked_add(1).ok_or(StoreError::CounterOverflow)?,
+            None => 1,
+        };
+        let writes = siblings(next);
+        Ok(match self.apply_at(index, Some((next, bytes)), writes)? {
+            true => Applied::Written(next),
+            false => Applied::AlreadyApplied,
+        })
+    }
+
+    /// Advances `applied_index` to `index` for a step that writes no
+    /// revision (every entry advances every database it could touch,
+    /// whatever its outcome). Never moves the index backwards.
+    pub fn mark_applied(&self, index: u64) -> Result<(), StoreError> {
+        self.mark_applied_with(index, Vec::new()).map(|_| ())
+    }
+
+    /// [`Store::mark_applied`] plus sibling-tree writes in the same
+    /// transaction (a stage flip, say). `Ok(false)` when `index` was already
+    /// applied and nothing — siblings included — was written.
+    pub fn mark_applied_with(
+        &self,
+        index: u64,
+        siblings: Vec<SiblingWrite<'_>>,
+    ) -> Result<bool, StoreError> {
+        self.apply_at(index, None, siblings)
+    }
+
+    /// The shared transaction: skip if already applied, else write the
+    /// optional revision, the `applied_index` and the sibling writes.
+    /// `true` = written, `false` = skipped.
+    fn apply_at(
+        &self,
+        index: u64,
+        revision: Option<(u64, RevisionBytes)>,
+        siblings: Vec<SiblingWrite<'_>>,
+    ) -> Result<bool, StoreError> {
+        // Trees 0 and 1 are `revisions` and `meta`; each distinct sibling
+        // tree follows, `slots[i]` naming the position of `siblings[i]`'s.
+        let mut trees: Vec<&sled::Tree> = vec![&self.revisions, &self.meta];
+        let mut slots = Vec::with_capacity(siblings.len());
+        for w in &siblings {
+            let slot = match trees.iter().position(|t| t.name() == w.tree.name()) {
+                Some(slot) => slot,
+                None => {
+                    trees.push(w.tree);
+                    trees.len() - 1
+                }
+            };
+            slots.push(slot);
+        }
+
+        let outcome = trees[..].transaction(|views| {
+            let (revisions, meta) = (&views[0], &views[1]);
+            if let Some(done) = meta.get(APPLIED_INDEX_KEY)? {
+                if decode_rev(&done) >= index {
+                    return Ok::<_, TxError>(false);
+                }
+            }
+            if let Some((next, bytes)) = &revision {
+                let expected = meta.get(CURRENT_KEY)?.map(|v| decode_rev(&v));
+                if expected.map_or(1, |r| r.wrapping_add(1)) != *next {
+                    return Err(TxError::Abort(TxAbort::RevisionRaced));
+                }
+                revisions.insert(&encode_rev(*next), bytes.as_slice())?;
+                meta.insert(CURRENT_KEY, &encode_rev(*next))?;
+            }
+            meta.insert(APPLIED_INDEX_KEY, &encode_rev(index))?;
+            for (w, slot) in siblings.iter().zip(&slots) {
+                match &w.value {
+                    Some(v) => views[*slot].insert(w.key.as_slice(), v.as_slice())?,
+                    None => views[*slot].remove(w.key.as_slice())?,
+                };
+            }
+            Ok(true)
+        });
+        let written = outcome.map_err(|e| match e {
+            sled::transaction::TransactionError::Storage(e) => StoreError::Sled(e),
+            sled::transaction::TransactionError::Abort(TxAbort::RevisionRaced) => {
+                StoreError::ConcurrentWrite
+            }
+        })?;
+        if written {
+            self.db.flush()?;
+        }
+        Ok(written)
     }
 }
 
@@ -243,5 +391,79 @@ mod tests {
         let reopened = reopen_when_unlocked(|| Store::open(dir.path()));
         assert_eq!(reopened.current_revision().unwrap(), Some(rev));
         assert_eq!(reopened.get(rev).unwrap().unwrap(), b"config: second");
+    }
+
+    #[test]
+    fn put_applied_skips_an_index_it_has_already_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.applied_index().unwrap(), None);
+
+        assert!(matches!(
+            store.put_applied(b"one".to_vec(), 7).unwrap(),
+            Applied::Written(1)
+        ));
+        assert_eq!(store.applied_index().unwrap(), Some(7));
+        // Same index again, and any lower one: skipped, nothing written.
+        assert!(matches!(
+            store.put_applied(b"dup".to_vec(), 7).unwrap(),
+            Applied::AlreadyApplied
+        ));
+        assert!(matches!(
+            store.put_applied(b"old".to_vec(), 3).unwrap(),
+            Applied::AlreadyApplied
+        ));
+        assert_eq!(store.current_revision().unwrap(), Some(1));
+        assert!(matches!(
+            store.put_applied(b"two".to_vec(), 8).unwrap(),
+            Applied::Written(2)
+        ));
+    }
+
+    #[test]
+    fn mark_applied_advances_the_index_without_a_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.mark_applied(4).unwrap();
+        assert_eq!(store.applied_index().unwrap(), Some(4));
+        assert_eq!(store.current_revision().unwrap(), None);
+        // Never moves backwards.
+        store.mark_applied(2).unwrap();
+        assert_eq!(store.applied_index().unwrap(), Some(4));
+    }
+
+    #[test]
+    fn put_applied_with_writes_siblings_in_the_same_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let side = store.db().open_tree("side").unwrap();
+
+        let applied = store
+            .put_applied_with(b"one".to_vec(), 1, &|rev| {
+                vec![SiblingWrite {
+                    tree: &side,
+                    key: rev.to_be_bytes().to_vec(),
+                    value: Some(b"v".to_vec()),
+                }]
+            })
+            .unwrap();
+        assert!(matches!(applied, Applied::Written(1)));
+        assert_eq!(
+            side.get(1u64.to_be_bytes()).unwrap().unwrap().as_ref(),
+            b"v"
+        );
+
+        // A skipped step leaves its siblings alone too.
+        let applied = store
+            .put_applied_with(b"dup".to_vec(), 1, &|rev| {
+                vec![SiblingWrite {
+                    tree: &side,
+                    key: rev.to_be_bytes().to_vec(),
+                    value: None,
+                }]
+            })
+            .unwrap();
+        assert!(matches!(applied, Applied::AlreadyApplied));
+        assert!(side.get(1u64.to_be_bytes()).unwrap().is_some());
     }
 }

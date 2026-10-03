@@ -1,8 +1,10 @@
 //! `RaftStateMachine` + `RaftSnapshotBuilder`: applying a committed
-//! [`super::WriteRequest`] means calling the same
-//! [`crate::api::AppState::apply_revision`] /
-//! [`crate::intent::api::IntentState::apply_revision`] a direct (non-HA)
-//! write already used — see `crate::ha`'s module doc. `sled` (via those two
+//! [`super::WriteRequest`] means calling the index-aware
+//! [`crate::api::AppState::apply_entry`] /
+//! [`crate::intent::api::IntentState::apply_entry`] — the same writes a
+//! direct (non-HA) call makes, plus the Raft log index recorded in the
+//! same `sled` transaction so a replayed entry is skipped (crash-idempotent
+//! apply) — see `crate::ha`'s module doc. `sled` (via those two
 //! `Store`s) is the actual durable content; this module only adds the
 //! bookkeeping `openraft` needs on top (last-applied log id, membership,
 //! and a snapshot for a follower whose log entries have been purged — which
@@ -152,9 +154,17 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
         for entry in entries {
             meta.last_applied_log = Some(entry.log_id);
 
+            let index = entry.log_id.index;
             let response = match entry.payload {
                 EntryPayload::Blank => WriteResponse { revision: None },
                 EntryPayload::Normal(req) => {
+                    // Each step is skipped when its database already
+                    // absorbed `index` — openraft re-delivers entries
+                    // after a crash that lost `last_applied_log`, and the
+                    // `applied_index` lives in the same `sled` transaction
+                    // as the revision so a replay writes nothing. A skipped
+                    // step has no new revision to report; nobody awaits the
+                    // response of a replayed entry.
                     let revision = match req {
                         WriteRequest::Config {
                             bytes,
@@ -162,31 +172,27 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                             actor,
                         } => self
                             .config
-                            .apply_revision_with_stage_and_actor(bytes, stage, actor.as_deref())
+                            .apply_entry(index, bytes, stage, actor.as_deref())
                             .map_err(|e| StorageIOError::write_state_machine(&e))?,
                         WriteRequest::Intent(bytes) => self
                             .intent
-                            .apply_revision(bytes)
+                            .apply_entry(index, bytes)
                             .map_err(|e| StorageIOError::write_state_machine(&e))?,
                         WriteRequest::Promote(revision) => {
-                            // Best-effort: a promote of a revision this
-                            // replica doesn't have (shouldn't happen — the
-                            // revision that's being promoted was itself a
-                            // committed, and therefore already-applied,
-                            // entry) is silently a no-op rather than
-                            // failing the whole `apply` batch; the direct
-                            // (non-HA) `promote_revision` call is what gives
-                            // an accurate `404` to the caller.
-                            let _ = self
-                                .config
-                                .promote_revision(revision)
+                            // A promote of a revision this replica doesn't
+                            // have (shouldn't happen — the promoted
+                            // revision was itself a committed, and
+                            // therefore already-applied, entry) is a
+                            // no-op that still advances the index; the
+                            // direct (non-HA) `promote_revision` call is
+                            // what gives an accurate `404` to the caller.
+                            self.config
+                                .promote_entry(index, revision)
                                 .map_err(|e| StorageIOError::write_state_machine(&e))?;
-                            revision
+                            Some(revision)
                         }
                     };
-                    WriteResponse {
-                        revision: Some(revision),
-                    }
+                    WriteResponse { revision }
                 }
                 EntryPayload::Membership(ref membership) => {
                     meta.last_membership =
@@ -414,5 +420,116 @@ mod tests {
             b"pools: []"
         );
         assert!(fresh.intent.store.current().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn replaying_an_applied_config_entry_writes_no_second_revision() {
+        let (mut sm, _dirs) = test_sm();
+        sm.apply(vec![normal_entry(
+            1,
+            WriteRequest::Config {
+                bytes: b"pools: []".to_vec(),
+                stage: crate::api::Stage::promoted(),
+                actor: None,
+            },
+        )])
+        .await
+        .unwrap();
+
+        // What openraft does when `write_meta` was lost to a crash: hands
+        // the very same entry to `apply` again.
+        let replay = sm
+            .config
+            .apply_entry(
+                1,
+                b"pools: []".to_vec(),
+                crate::api::Stage::promoted(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(replay, None);
+        assert_eq!(sm.config.store.current_revision().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn replaying_an_applied_intent_entry_writes_no_second_revision() {
+        let (mut sm, _dirs) = test_sm();
+        let op = br#"{"op":"backend_add"}"#.to_vec();
+        sm.apply(vec![normal_entry(1, WriteRequest::Intent(op.clone()))])
+            .await
+            .unwrap();
+
+        let replay = sm.intent.apply_entry(1, op).unwrap();
+        assert_eq!(replay, None);
+        assert_eq!(sm.intent.store.current_revision().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn stage_and_actor_land_in_the_revision_transaction() {
+        let (sm, _dirs) = test_sm();
+        let revision = sm
+            .config
+            .apply_entry(
+                1,
+                b"pools: []".to_vec(),
+                crate::api::Stage::promoted(),
+                Some("alice"),
+            )
+            .unwrap();
+        assert_eq!(revision, Some(1));
+        assert_eq!(sm.config.stage_of(1), crate::api::Stage::promoted());
+        assert_eq!(sm.config.actor_of(1).as_deref(), Some("alice"));
+        assert_eq!(sm.config.store.applied_index().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn replaying_a_promote_entry_is_skipped_and_the_index_advances() {
+        let (mut sm, _dirs) = test_sm();
+        sm.apply(vec![
+            normal_entry(
+                1,
+                WriteRequest::Config {
+                    bytes: b"pools: []".to_vec(),
+                    stage: crate::api::Stage {
+                        promoted: false,
+                        canary_groups: vec!["g".into()],
+                    },
+                    actor: None,
+                },
+            ),
+            normal_entry(2, WriteRequest::Promote(1)),
+        ])
+        .await
+        .unwrap();
+        assert!(sm.config.stage_of(1).promoted);
+        assert_eq!(sm.config.store.applied_index().unwrap(), Some(2));
+
+        // Put the stage back to "canary" and replay entry 2: it must be
+        // skipped entirely, so the stage stays un-promoted.
+        sm.config
+            .stage
+            .insert(
+                1u64.to_be_bytes(),
+                serde_json::to_vec(&crate::api::Stage {
+                    promoted: false,
+                    canary_groups: vec!["g".into()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(sm.config.promote_entry(2, 1).unwrap(), None);
+        assert!(!sm.config.stage_of(1).promoted);
+    }
+
+    #[tokio::test]
+    async fn a_promote_of_a_missing_revision_still_advances_the_index() {
+        let (mut sm, _dirs) = test_sm();
+        let responses = sm
+            .apply(vec![normal_entry(1, WriteRequest::Promote(99))])
+            .await
+            .unwrap();
+        assert_eq!(responses[0].revision, Some(99));
+        assert_eq!(sm.config.store.applied_index().unwrap(), Some(1));
+        assert_eq!(sm.config.store.current_revision().unwrap(), None);
     }
 }
