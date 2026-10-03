@@ -81,8 +81,6 @@ Watch-list:
   deliberate edit of all jobs together: re-check `tunnel` (AppArmor userns sysctl,
   `wireguard` module) and the release jobs' glibc vs. the distroless runtime (2.41).
   GitHub supports a runner image for a while after it stops being `latest`, not forever.
-- `actions/cache@v4` prints a Node 20 deprecation warning (it still works); bump when a
-  Node 24 major exists.
 - A self-hosted-runner experiment on 2026-10-01 (reverted in `79d1bd7`) had a failing
   `tunnel (userspace)` job whose log nobody read — cause unknown (host limits? sudo/apt on
   the VPS?). Only relevant if self-hosting is tried again — see open decision 3.
