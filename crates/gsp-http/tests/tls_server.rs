@@ -275,14 +275,14 @@ fn the_default_limits() {
     assert_eq!(d.handshake_timeout, gsp_http::tls::HANDSHAKE_TIMEOUT);
     assert_eq!(d.max_pending, 512);
     assert_eq!(d.max_pending_per_source, 16);
-    assert_eq!(d.new_per_source_per_sec, 20);
+    assert_eq!(d.new_per_source_per_sec, 20.0);
     assert_eq!(d.new_per_source_burst, 64);
 }
 
 #[tokio::test]
 async fn a_source_over_its_connect_rate_is_closed_while_others_get_in() {
     let limits = HandshakeLimits {
-        new_per_source_per_sec: 1,
+        new_per_source_per_sec: 0.1,
         new_per_source_burst: 2,
         ..HandshakeLimits::default()
     };
