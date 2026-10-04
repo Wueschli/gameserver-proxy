@@ -236,7 +236,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **HA + `--role slave` together** — rejected at startup today. Needs the upward
   relay to run leader-only with its cursor promoted to replicated state (designed in
   `docs/10`, not built).
-- **`sendmmsg` UDP egress batching**, k8s discovery watch informer, resolver
+- **`sendmmsg` UDP egress batching**, resolver
   `sticky_key` / `sticky_key` recovery, per-domain gossip capacity/load signals,
   `failure_domain` auto-discovery — see the table below.
 
@@ -318,7 +318,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 | `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
 | `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
 | Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
-| k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |
 | Resolver `sticky_key` | deferred pending a design for how a later request recovers the key; overlaps the phase-11 intent model |
 | `IPV6_TRANSPARENT` on musl / non-glibc | `set_ip_transparent` already calls `socket2` 0.6's `set_ip_transparent_v6` unconditionally — may already work; build + smoke-test on a musl target before writing code |
 | Retire the UDP sticky table via `consistent_hash` | pure polish, no user-visible gap |
