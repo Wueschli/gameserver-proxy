@@ -31,10 +31,13 @@
 
 pub mod api;
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
+
+use crate::addresses::Role;
+use crate::registry::Registration;
 
 /// One origin's current registration — the whole of what `gsp-agent` submits
 /// and what a `tunnel` `BackendSource` (phase 14 slice 5) will read back.
@@ -56,7 +59,7 @@ pub struct PeerRegistration {
     /// the registration (spec: Backends).
     #[serde(default)]
     pub backends: Vec<String>,
-    /// This origin's tunnel-internal IPv4 address. Optional on request (omit to
+    /// This origin's tunnel-internal IP address (IPv4 or IPv6). Optional on request (omit to
     /// be allocated one, or give one to claim it); always set once stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_address: Option<String>,
@@ -64,7 +67,7 @@ pub struct PeerRegistration {
 
 impl PeerRegistration {
     /// The address this registration asks for, if it names one.
-    pub fn requested_address(&self) -> Option<Ipv4Addr> {
+    pub fn requested_address(&self) -> Option<IpAddr> {
         self.tunnel_address.as_deref().and_then(|a| a.parse().ok())
     }
 
@@ -88,30 +91,43 @@ impl PeerRegistration {
             }
         }
         if let Some(a) = &self.tunnel_address {
-            if a.parse::<Ipv4Addr>().is_err() {
-                return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
+            if a.parse::<IpAddr>().is_err() {
+                return Err(format!("tunnel_address {a:?} is not an IP address"));
             }
         }
         Ok(())
     }
 }
 
-/// Log payload for a deleted registration. Deliberately not a
-/// [`PeerRegistration`]: `current` never points at a tombstone, so only
-/// subscribers (via [`event_payload`]) ever read one.
-pub(crate) fn tombstone_bytes(name: &str) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({ "removed": name }))
-        .expect("a json! object always serializes")
-}
+impl Registration for PeerRegistration {
+    const ROLE: Role = Role::Origin;
 
-/// The SSE `data:` payload for one log entry:
-/// `{"revision":N,"registration":{…}}` for a registration,
-/// `{"revision":N,"removed":{"name":"…"}}` for a tombstone.
-pub(crate) fn event_payload(revision: u64, bytes: &[u8]) -> serde_json::Value {
-    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
-    match value.get("removed").and_then(|v| v.as_str()) {
-        Some(name) => serde_json::json!({ "revision": revision, "removed": { "name": name } }),
-        None => serde_json::json!({ "revision": revision, "registration": value }),
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn requested_address(&self) -> Option<IpAddr> {
+        PeerRegistration::requested_address(self)
+    }
+
+    fn backends_mut(&mut self) -> Option<&mut Vec<String>> {
+        Some(&mut self.backends)
+    }
+
+    fn set_tunnel_address(&mut self, a: IpAddr) {
+        self.tunnel_address = Some(a.to_string());
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        PeerRegistration::validate(self)
+    }
+
+    fn endpoint_mut(&mut self) -> Option<&mut String> {
+        self.endpoint.as_mut()
+    }
+
+    fn register_request(self, now: u64) -> crate::ha::WriteRequest {
+        crate::ha::WriteRequest::RegisterOrigin { reg: self, now }
     }
 }
 
@@ -146,6 +162,11 @@ mod tests {
         reg.tunnel_address = Some("10.60.0.9".into());
         assert!(reg.validate().is_ok());
         assert_eq!(reg.requested_address(), Some("10.60.0.9".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::2".into());
+        assert!(reg.validate().is_ok());
+        assert_eq!(reg.requested_address(), Some("fd49::2".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::zz".into());
+        assert!(reg.validate().is_err());
     }
 
     #[test]
@@ -201,19 +222,5 @@ mod tests {
         assert_eq!(reg.endpoint, None);
         assert!(reg.backends.is_empty());
         assert!(reg.validate().is_ok());
-    }
-
-    #[test]
-    fn event_payload_distinguishes_a_registration_from_a_tombstone() {
-        let reg = serde_json::to_vec(&valid()).unwrap();
-        let p = event_payload(3, &reg);
-        assert_eq!(p["revision"], 3);
-        assert_eq!(p["registration"]["name"], "home-origin");
-        assert!(p.get("removed").is_none());
-
-        let p = event_payload(4, &tombstone_bytes("home-origin"));
-        assert_eq!(p["revision"], 4);
-        assert_eq!(p["removed"]["name"], "home-origin");
-        assert!(p.get("registration").is_none());
     }
 }

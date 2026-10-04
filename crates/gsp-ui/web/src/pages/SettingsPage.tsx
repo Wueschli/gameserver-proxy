@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, getCurrentConfig, submitConfig } from "../api";
 import { parseConfigText, stringifyConfigDoc, type ConfigDoc } from "../lib/configDoc";
 import { Button, Input } from "../components/ui/Button";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 
 export function SettingsPage() {
   const [text, setText] = useState("");
@@ -11,6 +12,7 @@ export function SettingsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   async function refresh() {
     try {
@@ -51,6 +53,13 @@ export function SettingsPage() {
   }
 
   async function submit() {
+    const ok = await confirm({
+      title: "Apply this configuration?",
+      description:
+        "This submits a new revision that is pushed to every instance. A bad config can disrupt live traffic; you can roll back from Config history.",
+      confirmLabel: "Apply",
+    });
+    if (!ok) return;
     try {
       const result = await submitConfig(text);
       setNotice(`accepted as revision ${result.revision}`);
@@ -113,6 +122,7 @@ export function SettingsPage() {
           Submit as a new revision
         </Button>
       </div>
+      {dialog}
     </div>
   );
 }

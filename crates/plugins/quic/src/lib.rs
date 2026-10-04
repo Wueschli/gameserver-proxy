@@ -3,8 +3,8 @@
 //! A client's first datagram on a new QUIC connection is an Initial packet in
 //! a *long header*: byte 0 has the header-form and fixed bits set
 //! (`0b11xx_xxxx`), the packet type sits in bits 4-5, then a 4-byte version
-//! and a length-prefixed destination connection ID (at most 20 bytes for the
-//! versions recognised here, RFC 9000 §17.2). Only the version-independent
+//! and a length-prefixed destination connection ID (8 to 20 bytes in a client
+//! Initial, RFC 9000 §7.2 and §17.2). Only the version-independent
 //! prefix is parsed; the payload is encrypted and never inspected, so there is
 //! no hostname to extract.
 //!
@@ -21,6 +21,9 @@ const V2: u32 = 0x6b33_43cf;
 const DRAFT_FIRST: u32 = 0xff00_0000;
 const DRAFT_LAST: u32 = 0xff00_0022;
 const MAX_CID_LEN: u8 = 20;
+/// A client must pick a destination connection ID of at least 8 bytes for its
+/// first Initial (RFC 9000 §7.2).
+const MIN_INITIAL_DCID_LEN: u8 = 8;
 
 /// Recognise a QUIC Initial in `first`. Pure, so it is unit tested natively;
 /// `sniff` below is the ABI wrapper the host calls.
@@ -39,7 +42,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
         return None;
     }
     let dcid_len = *rest.get(4)?;
-    if dcid_len > MAX_CID_LEN {
+    if !(MIN_INITIAL_DCID_LEN..=MAX_CID_LEN).contains(&dcid_len) {
         return None;
     }
     // The DCID, the SCID length byte and (a possibly empty) SCID must follow.
@@ -95,7 +98,7 @@ mod tests {
     fn recognises_v2_initial_and_drafts() {
         assert!(recognise(&pkt(0xd3, V2, &[1; 8], &[])).is_some()); // v2 Initial = 0b01
         assert!(recognise(&pkt(0xc0, 0xff00_001d, &[1; 8], &[])).is_some()); // draft-29
-        assert!(recognise(&pkt(0xc0, V1, &[], &[])).is_some()); // empty CIDs are legal
+        assert!(recognise(&pkt(0xc0, V1, &[1; 8], &[])).is_some()); // empty SCID is legal
     }
 
     #[test]
@@ -112,6 +115,8 @@ mod tests {
         assert!(recognise(&pkt(0x40, V1, &[1; 8], &[])).is_none()); // short header
         assert!(recognise(&pkt(0x80, V1, &[1; 8], &[])).is_none()); // fixed bit clear
         assert!(recognise(&pkt(0xc0, V1, &[1; 21], &[])).is_none()); // DCID too long
+        assert!(recognise(&pkt(0xc0, V1, &[1; 7], &[])).is_none()); // DCID too short
+        assert!(recognise(&pkt(0xc0, V1, &[], &[])).is_none());
         assert!(recognise(&pkt(0xc0, V1, &[1; 8], &[2; 21])).is_none()); // SCID too long
     }
 

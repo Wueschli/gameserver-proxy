@@ -33,11 +33,22 @@ env:
 # the rest so a runner-image migration is a deliberate edit, not a surprise red run
 # (tunnel depends on the AppArmor userns sysctl and the wireguard module), and so
 # caches stay on one image. Move them together when upgrading.
+# Read-only GITHUB_TOKEN for every job: nothing here pushes, comments or
+# releases, so a compromised step or action cannot write to the repo.
+permissions:
+  contents: read
+
 jobs:
-  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.sh).
-  # Schedule / manual runs, a workflow edit, or a failed diff run everything.
+  # Decides which path-scoped jobs run (logic + tests: .github/scripts/changes.py):
+  # the Cargo packages a change touches, plus their dependents per `cargo
+  # metadata`, against the packages each job builds. Schedule / manual runs, a
+  # workflow edit, a failed diff or a failed `cargo metadata` run everything.
   changes:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    env:
+      # The runner image's preinstalled stable cargo is enough for `cargo
+      # metadata --no-deps`; skip rust-toolchain.toml's component installs.
+      RUSTUP_TOOLCHAIN: stable
     outputs:
       ui: ${{ steps.f.outputs.ui }}
       plugins: ${{ steps.f.outputs.plugins }}
@@ -46,13 +57,16 @@ jobs:
       fuzz: ${{ steps.f.outputs.fuzz }}
       release: ${{ steps.f.outputs.release }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Self-test the change detection and the report renderer
         run: |
-          sh .github/scripts/changes_test.sh
+          python3 .github/scripts/changes_test.py
           python3 .github/scripts/test_summary_test.py
+          python3 .github/scripts/trivy_summary_test.py
+          python3 .github/scripts/audit_summary_test.py
+          python3 .github/scripts/sarif_categories_test.py
       - name: Detect changed areas
         id: f
         env:
@@ -73,15 +87,15 @@ jobs:
               fi ;;
             *) flag=--all ;;
           esac
-          printf '%s\n' "$files" | sh .github/scripts/changes.sh $flag | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "$files" | python3 .github/scripts/changes.py $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/cargo-cache
@@ -90,6 +104,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+      # Alone, gsp-agent pulls gsp-http without its default `server` feature;
+      # every other build here unifies it on, so this is the only one that
+      # proves the client-only build still compiles.
+      - name: Check gsp-agent (gsp-http without `server`)
+        run: cargo check -p gsp-agent --locked
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
@@ -98,13 +117,38 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: junit-test
           path: target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: ignore
+
+  # Static musl build (issue #55): the five binaries must keep compiling for
+  # x86_64-unknown-linux-musl, and the transparent-socket options must still be
+  # known to a musl libc. Rides the `release` gate (plugins or deploy paths touched).
+  musl:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install protoc and musl-gcc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: ./.github/actions/cargo-cache
+        with: { name: musl }
+      - name: Build the binaries for musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --locked --target x86_64-unknown-linux-musl -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+      - name: Socket options on musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo test --locked --target x86_64-unknown-linux-musl -p gsp-core --lib -- net
 
   # One release compile shared by the jobs that need release binaries: the
   # plugins tests restore this job's cache snapshot (same `release` namespace and
@@ -120,21 +164,25 @@ jobs:
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: release }
+      # cargo-auditable embeds the dependency list in each binary, so Trivy's image
+      # scan sees the crates (deploy/scan-images.sh). Same version as the Dockerfile.
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked --version 0.7.7
       - name: Build the release binaries
-        run: cargo build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+        run: cargo auditable build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
       # Cargo unifies features per invocation, so the plugins job's `-p gsp` test
       # build (dev-dependencies included) needs different dependency artifacts than
       # the five-binary build above; without this it recompiled ~290 crates even on
       # an exact cache hit. Compile them here so the shared snapshot holds both.
       - name: Warm the dependency set the plugins tests need
         run: cargo test -p gsp --release --locked --no-run
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-binaries
           path: |
@@ -151,10 +199,10 @@ jobs:
     if: needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: wasm32-unknown-unknown
       # Same namespace + key as build-release => an exact hit on its snapshot:
@@ -187,7 +235,7 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "plugins" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: junit-plugins
@@ -207,8 +255,8 @@ jobs:
       run:
         working-directory: crates/gsp-ui/web
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
@@ -220,7 +268,7 @@ jobs:
         if: always()
         working-directory: .
         run: python3 .github/scripts/test_summary.py --title "ui (vitest)" crates/gsp-ui/web/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: junit-ui
@@ -229,6 +277,23 @@ jobs:
           if-no-files-found: ignore
       - name: Typecheck + build
         run: npm run build
+      - name: Playwright version
+        id: pw
+        run: echo "version=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browser
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install Playwright browser
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps (browser cached)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+      - name: Browser e2e (Playwright)
+        run: npm run test:e2e
 
   tunnel:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces
@@ -244,10 +309,10 @@ jobs:
     env:
       TUNNEL_BACKEND: ${{ matrix.backend }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: tunnel }
       - name: Allow unprivileged user namespaces (Ubuntu AppArmor)
@@ -262,7 +327,7 @@ jobs:
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "tunnel (${{ matrix.backend }})" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: junit-tunnel-${{ matrix.backend }}
@@ -282,10 +347,10 @@ jobs:
       # inside Docker, exercising the self-contained builder stage.
       BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Fetch the shared release binaries
         if: env.BIN_SOURCE == 'prebuilt'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-binaries
           path: deploy/prebuilt
@@ -293,6 +358,18 @@ jobs:
         run: make deploy-lint
       - name: Build all five images and run --version on each
         run: make deploy-images
+      # For the trivy job, which has no access to this runner's Docker daemon.
+      - name: Save the images for the trivy job
+        run: |
+          mkdir -p "$RUNNER_TEMP/images"
+          for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+            docker save -o "$RUNNER_TEMP/images/$t.tar" "gsp-deploy/$t:local"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: deploy-images
+          path: ${{ runner.temp }}/images/
+          retention-days: 1
       - name: Compose smoke test
         run: make deploy-smoke
       - name: Validate Kubernetes manifests (schema only)
@@ -300,14 +377,146 @@ jobs:
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
 
+  # RustSec advisories for every Cargo.lock in the repo (cargo audit): the check
+  # Trivy can't do for crates (it sees GHSA only). No build, just the lockfiles
+  # and the advisory DB, so it runs on every push / PR and nightly, path-scoped
+  # or not. Informational (owner's call): it never fails the run; findings show
+  # as a table on the run's summary page and as warning annotations, and the
+  # JSON is in the cargo-audit artifact. Accepted advisories:
+  # .cargo/audit.toml ([advisories] ignore = [...], each with a reason).
+  audit:
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-audit@0.22.2
+      - name: cargo audit (informational)
+        continue-on-error: true
+        run: sh .github/scripts/cargo_audit.sh target/cargo-audit
+      - name: cargo audit report
+        if: always()
+        run: |
+          python3 .github/scripts/audit_summary.py target/cargo-audit >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/audit_summary.py --annotations target/cargo-audit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: cargo-audit
+          path: target/cargo-audit/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # Trivy over the deploy job's images and the lockfiles they're built from.
+  # Informational (owner's call): the job reports, it never fails — findings show
+  # as a table on the run's summary page, as warning annotations, and as JSON +
+  # SARIF in the trivy-reports artifact, which is also uploaded to GitHub's
+  # Security tab (code scanning; free on this public repo). The upload is skipped
+  # for fork PRs, whose token can't write security events. The vulnerability DB
+  # (~120 MB) is cached by day: a hit skips the download entirely.
+  #
+  # Trivy runs from its official image, pinned by digest, as a `docker://` step:
+  # a job-level `container:` would need JavaScript actions (checkout, artifacts)
+  # to run inside it, which GitHub doesn't support on the Alpine-based image. Not
+  # aquasecurity/trivy-action or setup-trivy: in March 2026 their tags were
+  # force-pushed to a credential stealer and a backdoored Trivy 0.69.4 was
+  # published. The pinned digest is aquasec/trivy:0.75.0, whose trivy binary is
+  # byte-identical to the checksum-verified 0.75.0 release tarball (sha256
+  # 93f9da8e…299b8e, checked 2026-10-02); re-check when bumping it. The job also
+  # cosign-verifies the digest's keyless signature on every run (below).
+  trivy:
+    needs: [changes, deploy]
+    # Also when deploy failed later on (e.g. the smoke test): the images exist.
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    permissions:
+      contents: read
+      security-events: write   # the SARIF upload
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        continue-on-error: true   # missing images show up as "not scanned"
+        with:
+          name: deploy-images
+          path: target/images
+      # The digest pin stops a later swap of the image; it can't show the image was
+      # genuine when pinned. Aqua signs each release image keyless (Sigstore, from
+      # the release workflow at a version tag): check that signature on the exact
+      # digest the scan step runs, so a digest we pinned by mistake, or one that
+      # was never built by their release workflow, fails here. Blocking on purpose:
+      # it guards the scanner itself, not a finding.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Verify the pinned Trivy image's signature
+        run: |
+          cosign verify \
+            --certificate-identity-regexp '^https://github\.com/aquasecurity/trivy/\.github/workflows/.+@refs/tags/v[0-9.]+$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      - name: Date for the vulnerability DB cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore the vulnerability DB
+        id: db
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: target/trivy-cache
+          key: trivy-db-${{ steps.day.outputs.day }}
+      # A hit that holds no DB file (a partial save) must not skip the download.
+      - name: Check the restored vulnerability DB
+        id: dbfile
+        run: |
+          if [ "${{ steps.db.outputs.cache-hit }}" = true ] && [ -f target/trivy-cache/db/trivy.db ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Trivy scan (informational)
+        continue-on-error: true
+        uses: docker://aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        env:
+          TRIVY_IMAGE_DIR: target/images
+          TRIVY_REPORT_DIR: target/trivy
+          # The action container mounts the workspace at /github/workspace.
+          TRIVY_CACHE_DIR: /github/workspace/target/trivy-cache
+          TRIVY_SKIP_DB_UPDATE: ${{ steps.dbfile.outputs.usable == 'true' && 'true' || 'false' }}
+        with:
+          entrypoint: sh
+          args: deploy/scan-images.sh
+      # The container ran as root: hand the cache back so the cache post-step
+      # (running as the runner user) can read it.
+      - name: Take back the cache directory
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" target/trivy-cache target/trivy 2>/dev/null || true
+      - name: Trivy report
+        if: always()
+        run: |
+          python3 .github/scripts/trivy_summary.py target/trivy >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/trivy_summary.py --annotations target/trivy
+      - name: Give each SARIF its own code-scanning category
+        if: always()
+        run: python3 .github/scripts/sarif_categories.py target/trivy
+      - name: Upload SARIF to the Security tab
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: target/trivy
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: trivy-reports
+          path: target/trivy/
+          retention-days: 14
+          if-no-files-found: ignore
+
   fuzz:
     needs: changes
     if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: crates/gsp-config/fuzz
       - name: Install cargo-fuzz
@@ -326,7 +535,7 @@ jobs:
           done
       - name: Upload crash inputs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-artifacts
           path: crates/gsp-config/fuzz/artifacts/**

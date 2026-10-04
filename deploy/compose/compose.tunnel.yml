@@ -1,7 +1,11 @@
 # Adds the phase-14 WireGuard transport (docs/11, docs/12). Needs NET_ADMIN and
 # /dev/net/tun, and root in the container (a capability is useless to uid
 # 65532). The controller allocates the tunnel addresses (--tunnel-network):
-# nothing here hand-picks one. Usage (from deploy/compose):
+# nothing here hand-picks one. The tunnel network is IPv6 (a random ULA /64,
+# see docs/12); use an IPv4 one such as 10.60.0.0/16 if a game server binds
+# 0.0.0.0 only. gsp and the agent use the host's network, so the host must not
+# have IPv6 disabled (a net.* sysctl cannot be set here: Docker refuses it under
+# host networking). Usage (from deploy/compose):
 #   docker compose -f docker-compose.yml -f compose.tunnel.yml up -d
 # Not smoke-tested in CI (no privileged runner); `make tunnel-e2e` covers the logic.
 services:
@@ -10,7 +14,7 @@ services:
       - --listen=0.0.0.0:9901
       - --data-dir=/data
       - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
-      - --tunnel-network=10.60.0.0/16
+      - --tunnel-network=fd49:89c1:4b5e:60::/64
   gsp:
     user: "0"          # NET_ADMIN is only in the bounding set for non-root: run as root
     cap_add: [NET_ADMIN]

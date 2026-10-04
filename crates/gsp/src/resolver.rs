@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Generated from `proto/resolver.proto`.
 #[allow(clippy::result_large_err)] // tonic's `Status` is large; generated code
+#[allow(clippy::default_trait_access)] // generated code
 mod pb {
     tonic::include_proto!("gsp.resolver.v1");
 }

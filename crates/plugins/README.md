@@ -30,7 +30,7 @@ installed.
   `host:` patterns.
 - `quic` — recognises a QUIC Initial packet (long header, version 1, version 2
   or an IETF draft, with the packet type that version uses for Initial and
-  connection IDs within the 20-byte limit). The payload is encrypted, so there
+  a destination connection ID of 8 to 20 bytes). The payload is encrypted, so there
   is no hostname; the hint carries `key: "quic"`.
 - `wireguard` — recognises a WireGuard handshake initiation (exactly 148 bytes,
   message type 1, three zero reserved bytes) and tags it `key: "wireguard"`.
