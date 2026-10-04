@@ -15,7 +15,7 @@
 //! 2. **Drain** — wait out `--idle-sec` so every session is evicted, then
 //!    sample the proxy's RSS again: what is left is the per-worker state that
 //!    outlives sessions (the sticky table, allocator slack).
-//! 3. **Warm wave** — the *same* clients come back; reports the share that
+//! 3. **Warm wave** — the *same* clients come back, in a shuffled order; reports the share that
 //!    lands on the same backend as before (**retention**) and the open
 //!    latency again. Retention is the user-visible property the sticky table
 //!    exists for; with `--keys` above `STICKY_MAX` a table that clears
@@ -138,13 +138,14 @@ pub async fn run(args: &Args) -> Result<bool> {
     let fmt = |v: Option<f64>| v.map_or("?".into(), |v| format!("{v:.1}"));
     let rss_idle = rss();
 
-    let cold = wave(udp_addr, args).await;
+    let in_order: Vec<usize> = (0..args.keys).collect();
+    let cold = wave(udp_addr, args, &in_order).await;
     let (rss_cold, fds_cold) = (rss(), fds());
     // Eviction: idle timeout, one wheel tick of slack, one more for the wheel
     // slot rounding.
     tokio::time::sleep(Duration::from_secs(args.idle_sec + 3)).await;
     let (rss_drained, fds_drained) = (rss(), fds());
-    let warm = wave(udp_addr, args).await;
+    let warm = wave(udp_addr, args, &shuffled(args.keys)).await;
     let (rss_warm, _) = (rss(), fds());
 
     let mut same = 0usize;
@@ -236,7 +237,7 @@ impl Wave {
 
 /// Open one session for each key at `args.rate`, collecting latency and the
 /// answering backend.
-async fn wave(proxy: SocketAddr, args: &Args) -> Wave {
+async fn wave(proxy: SocketAddr, args: &Args, order: &[usize]) -> Wave {
     let sem = Arc::new(Semaphore::new(CLIENT_INFLIGHT));
     let tick = Duration::from_millis(10);
     let per_tick = (args.rate / 100).max(1);
@@ -248,7 +249,7 @@ async fn wave(proxy: SocketAddr, args: &Args) -> Wave {
     while next < args.keys {
         ticker.tick().await;
         for _ in 0..per_tick.min(args.keys - next) {
-            let k = next;
+            let k = order[next];
             next += 1;
             let sem = sem.clone();
             handles.push(tokio::spawn(async move {
@@ -287,6 +288,20 @@ async fn wave(proxy: SocketAddr, args: &Args) -> Wave {
         backend_of,
         per_backend,
     }
+}
+
+/// `0..n` in a fixed pseudo-random order (xorshift Fisher-Yates), so the warm
+/// wave does not revisit keys in the order a wholesale-cleared table filled.
+fn shuffled(n: usize) -> Vec<usize> {
+    let mut v: Vec<usize> = (0..n).collect();
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for i in (1..n).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+    v
 }
 
 /// Client `k`'s source address: one loopback IP per key (the whole `127/8`
