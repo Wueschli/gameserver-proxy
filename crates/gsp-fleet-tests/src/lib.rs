@@ -52,23 +52,29 @@ fn workspace_root() -> PathBuf {
 /// Debug, not release: this is a correctness test, not `gsp-bench`'s
 /// latency harness, and a debug build is much faster to produce in CI.
 pub fn build_fleet_bins() -> Result<()> {
+    build_bins(&[
+        "gsp",
+        "gsp-controller",
+        "gsp-aggregator",
+        "gsp-ui",
+        "gsp-agent",
+    ])
+}
+
+/// [`build_fleet_bins`] for the tunnel lab, which runs only these three. Also
+/// what `make tunnel-e2e` pre-builds, so the build inside the namespace has
+/// nothing left to compile.
+pub fn build_tunnel_bins() -> Result<()> {
+    build_bins(&["gsp", "gsp-controller", "gsp-agent"])
+}
+
+fn build_bins(packages: &[&str]) -> Result<()> {
     let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "-p",
-            "gsp",
-            "-p",
-            "gsp-controller",
-            "-p",
-            "gsp-aggregator",
-            "-p",
-            "gsp-ui",
-            "-p",
-            "gsp-agent",
-        ])
+        .arg("build")
+        .args(packages.iter().flat_map(|p| ["-p", p]))
         .current_dir(workspace_root())
         .status()
-        .context("running `cargo build -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent`")?;
+        .with_context(|| format!("running `cargo build` for {packages:?}"))?;
     ensure!(status.success(), "building the fleet binaries failed");
     Ok(())
 }
@@ -351,6 +357,8 @@ pub struct GspArgs {
     pub aggregator_url: Option<String>,
     pub aggregator_instance: Option<String>,
     pub aggregator_interval_sec: u64,
+    /// Further command-line arguments, appended last (e.g. `--ca-file`).
+    pub extra: Vec<String>,
 }
 
 impl Default for GspArgs {
@@ -362,6 +370,7 @@ impl Default for GspArgs {
             aggregator_url: None,
             aggregator_instance: None,
             aggregator_interval_sec: 1,
+            extra: Vec::new(),
         }
     }
 }
@@ -390,6 +399,7 @@ pub fn spawn_gsp(args: GspArgs) -> Result<Proc> {
     }
     argv.push("--aggregator-interval-sec".to_string());
     argv.push(args.aggregator_interval_sec.to_string());
+    argv.extend(args.extra);
     Proc::spawn("gsp", &argv)
 }
 
@@ -420,14 +430,23 @@ pub fn spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) ->
         listen.to_string(),
     ];
     args.extend(extra.iter().cloned());
+    // HA refuses to start without a peer token: give those tests a shared one.
+    let ha = args.iter().any(|a| a == "--ha-peers" || a == "--ha-join");
+    if ha && !args.iter().any(|a| a == "--ha-token") {
+        args.extend(["--ha-token".to_string(), "fleet-test-ha-token".to_string()]);
+    }
     Proc::spawn_in(None, "gsp-controller", &args)
 }
 
 pub fn spawn_aggregator(listen_port: u16) -> Result<Proc> {
-    Proc::spawn(
-        "gsp-aggregator",
-        &["--listen".to_string(), format!("127.0.0.1:{listen_port}")],
-    )
+    spawn_aggregator_with(listen_port, &[])
+}
+
+/// Like [`spawn_aggregator`] with extra command-line arguments.
+pub fn spawn_aggregator_with(listen_port: u16, extra: &[String]) -> Result<Proc> {
+    let mut args = vec!["--listen".to_string(), format!("127.0.0.1:{listen_port}")];
+    args.extend(extra.iter().cloned());
+    Proc::spawn("gsp-aggregator", &args)
 }
 
 /// True once the port refuses new connections (used after killing a
@@ -442,4 +461,11 @@ pub async fn port_is_down(port: u16, timeout: Duration) -> bool {
             _ => tokio::time::sleep(Duration::from_millis(25)).await,
         }
     }
+}
+
+/// `gsp-ui` on `127.0.0.1:listen_port` with extra command-line arguments.
+pub fn spawn_ui_with(listen_port: u16, extra: &[String]) -> Result<Proc> {
+    let mut args = vec!["--listen".to_string(), format!("127.0.0.1:{listen_port}")];
+    args.extend(extra.iter().cloned());
+    Proc::spawn("gsp-ui", &args)
 }

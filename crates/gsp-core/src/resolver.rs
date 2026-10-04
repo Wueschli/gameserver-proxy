@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -116,6 +116,7 @@ impl Resolvers {
     }
 
     /// Insert one resolver (incremental build / tests).
+    #[allow(clippy::needless_pass_by_value)] // registries take ownership of what they store
     pub fn insert(&self, name: String, resolver: Arc<dyn Resolver>) {
         self.map.rcu(|cur| {
             let mut next = (**cur).clone();
@@ -195,22 +196,24 @@ pub async fn resolve_route(
                     routing_key: mctx.sniff.and_then(|h| h.key.clone()),
                 };
                 match resolver.resolve(req).await {
-                    Ok(res) if res.target.is_some() || res.pool.is_some() => {
-                        metrics::counter!(
-                            m::RESOLVER_REQUESTS, "resolver" => name.clone(), "result" => "ok",
-                        )
-                        .increment(1);
-                        return Some(match res.target {
-                            Some(addr) => Routed::Target {
+                    Ok(res) => {
+                        let routed = match (res.target, res.pool) {
+                            (Some(addr), _) => Some(Routed::Target {
                                 addr,
                                 proxy_protocol: resolver.proxy_protocol(),
                                 connect_timeout: resolver.target_connect_timeout(),
                                 idle_timeout: resolver.target_idle_timeout(),
-                            },
-                            None => Routed::Pool(res.pool.unwrap()),
-                        });
-                    }
-                    Ok(_) => {
+                            }),
+                            (None, Some(pool)) => Some(Routed::Pool(pool)),
+                            (None, None) => None,
+                        };
+                        if let Some(routed) = routed {
+                            metrics::counter!(
+                                m::RESOLVER_REQUESTS, "resolver" => name.clone(), "result" => "ok",
+                            )
+                            .increment(1);
+                            return Some(routed);
+                        }
                         // Recognised nothing (empty resolution). Treat like an
                         // error for `on_error` purposes.
                         metrics::counter!(
@@ -339,7 +342,7 @@ impl Resolver for CachedResolver {
 
         // Fresh cache hit?
         {
-            let mut guard = self.cache.lock().unwrap();
+            let mut guard = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.get(&key) {
                 Some(Entry::Positive { res, expires }) if *expires > Instant::now() => {
                     let res = res.clone();
@@ -373,27 +376,33 @@ impl Resolver for CachedResolver {
                     .ttl_sec
                     .map(Duration::from_secs)
                     .unwrap_or(self.positive_ttl);
-                self.cache.lock().unwrap().put(
-                    key,
-                    Entry::Positive {
-                        res: res.clone(),
-                        expires: Instant::now() + ttl,
-                    },
-                );
+                self.cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .put(
+                        key,
+                        Entry::Positive {
+                            res: res.clone(),
+                            expires: Instant::now() + ttl,
+                        },
+                    );
                 Ok(res)
             }
             Ok(empty) => {
-                self.cache.lock().unwrap().put(
-                    key,
-                    Entry::Negative {
-                        expires: Instant::now() + self.negative_ttl,
-                    },
-                );
+                self.cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .put(
+                        key,
+                        Entry::Negative {
+                            expires: Instant::now() + self.negative_ttl,
+                        },
+                    );
                 Ok(empty)
             }
             Err(e) => {
                 if self.inner.on_error() == OnError::StaleOk {
-                    let mut guard = self.cache.lock().unwrap();
+                    let mut guard = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
                     if let Some(Entry::Positive { res, .. }) = guard.get(&key) {
                         let res = res.clone();
                         drop(guard);
@@ -404,12 +413,15 @@ impl Resolver for CachedResolver {
                         return Ok(res);
                     }
                 }
-                self.cache.lock().unwrap().put(
-                    key,
-                    Entry::Negative {
-                        expires: Instant::now() + self.negative_ttl,
-                    },
-                );
+                self.cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .put(
+                        key,
+                        Entry::Negative {
+                            expires: Instant::now() + self.negative_ttl,
+                        },
+                    );
                 Err(e)
             }
         }

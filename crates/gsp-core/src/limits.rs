@@ -11,11 +11,11 @@
 //! `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use gsp_config::GlobalLimits as LimitsCfg;
 
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Which resource a permit / refusal refers to.
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +34,7 @@ struct NewRate {
 
 impl NewRate {
     fn take(&mut self) -> bool {
-        let now = now_ms();
+        let now = mono_ms();
         let dt = now.saturating_sub(self.last_ms) as f64 / 1000.0;
         self.last_ms = now;
         self.tokens = (self.tokens + dt * self.rate).min(self.burst);
@@ -58,7 +58,7 @@ pub struct GlobalLimits {
 
 impl GlobalLimits {
     pub fn new(cfg: &LimitsCfg) -> Arc<Self> {
-        let now = now_ms();
+        let now = mono_ms();
         Arc::new(Self {
             max_conn: cfg.max_connections,
             max_udp: cfg.max_udp_sessions,
@@ -109,7 +109,7 @@ impl GlobalLimits {
             }
         }
         if let Some(rate) = &self.new_rate {
-            if !rate.lock().unwrap().take() {
+            if !rate.lock().unwrap_or_else(PoisonError::into_inner).take() {
                 if max.is_some() {
                     counter.fetch_sub(1, Ordering::AcqRel);
                 }
