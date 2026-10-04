@@ -267,8 +267,8 @@ IPv6 (built 2026-10-03):
 - **Limits.** Transparent mode
   (`transparent: true`) does not apply to tunnel backends whose family differs from the
   client's: the proxy logs a warning and connects without the client's source address.
-  Dual-stack tunnels, lease expiry and live address changes are future work (HANDOVER
-  "Known follow-ups").
+  Dual-stack tunnels, lease expiry and live address changes are future work (GitHub
+  issues #40 and #41).
 
 ## Open questions
 
