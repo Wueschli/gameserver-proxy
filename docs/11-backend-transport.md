@@ -258,7 +258,9 @@ IPv6 (built 2026-10-03):
   expire everyone before they re-register. Under HA only the leader sweeps and each
   expiry is a replicated `Expire` entry that re-checks `last_seen` when it applies, so
   a re-registration that commits first wins. An owner that comes back after expiry is
-  allocated afresh and may get a different address.
+  allocated afresh and may get a different address. Set the TTL well above the
+  agents' and proxies' register interval (the 2 h minimum is only a floor for the HA
+  `last_seen` refresh); hours to days is typical.
   A claim is kept even when the same registration then fails (backends not on the
   claimed address, or a storage error), so the corrected retry gets the same address;
   a stream of distinct names with bad backends can therefore use up the pool. The
