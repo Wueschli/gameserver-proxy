@@ -319,6 +319,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let node_id = args.ha_node_id.expect("checked above");
         let peers = ha::peers::parse_peers(&args.ha_peers)?;
+        for node in peers.values() {
+            ha::peers::warn_if_plain_remote(&node.addr);
+        }
         // `--ha-join` leaves `peers` empty: this node never initializes.
         let ha_token: Option<Arc<str>> = args.ha_token.clone().map(Arc::from);
 

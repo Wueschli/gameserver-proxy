@@ -432,6 +432,7 @@ leader imports exactly one node's copy, whichever node wins the first election.
   one `PUT /admin/ha/members/{id}` per member (see "HA membership"). With `host:port`
   peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
+  The controller logs a warning for each non-loopback `http://` peer.
 - **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
   SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
   HSTS) at the proxy — or use the UI's native TLS, which sets `Secure` itself.
