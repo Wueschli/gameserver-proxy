@@ -1,10 +1,10 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
+.PHONY: check fmt lint test test-minimal audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
-check: fmt-check lint test
+check: fmt-check lint test test-minimal
 
 ## fmt: apply rustfmt
 fmt:
@@ -20,6 +20,11 @@ lint:
 ## test: run the whole test suite
 test:
 	cargo test --all
+
+## test-minimal: the minimal edge build of gsp (all optional cargo features off, issue #62)
+test-minimal:
+	cargo clippy -p gsp --no-default-features --all-targets -- -D warnings
+	cargo test -p gsp --no-default-features
 
 ## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
 audit:

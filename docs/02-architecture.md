@@ -122,7 +122,8 @@ struct, the rest is shared).
   epoch ticker — a `wasmtime::Engine::increment_epoch` heartbeat that arms the
   per-call timeout for WASM sniffers. Spawned once with the `SnifferLoader`, runs
   for the process lifetime, does no I/O. Absent when no `settings.sniffers` is
-  configured.
+  configured, and absent entirely from a build without the `wasm-sniffers` cargo
+  feature (which refuses a `settings.sniffers` block at startup).
 - Memory: per-worker pre-reserved buffer pools; session structs from a slab allocator
   to avoid fragmentation.
 
