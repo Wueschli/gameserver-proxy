@@ -7,7 +7,8 @@
 //!
 //! - [`DnsSrvSource`] (`dns_srv.rs`, the `dns-srv` cargo feature) resolves an
 //!   SRV record (port from the record).
-//! - [`ConsulSource`] lists passing instances of a Consul service.
+//! - [`ConsulSource`] lists passing instances of a Consul service, and blocks
+//!   on its index so a health change lands in a fetch immediately.
 //! - [`KubernetesSource`] reads the EndpointSlices of a Kubernetes service and
 //!   watches them, so a pod change lands in a fetch immediately; the polling
 //!   interval remains as the resync safety net.
@@ -70,11 +71,17 @@ pub fn build_one(
             record.clone(),
             sc.refresh_interval,
         )?),
-        SourceKind::Consul { service, addr, tag } => Arc::new(ConsulSource::new(
+        SourceKind::Consul {
+            service,
+            addr,
+            tag,
+            token_file,
+        } => Arc::new(ConsulSource::new(
             pool,
             service.clone(),
-            addr.clone(),
+            addr,
             tag.clone(),
+            token_file.as_ref().map(TokenFile::new),
             sc.refresh_interval,
         )?),
         SourceKind::Kubernetes {
@@ -137,17 +144,169 @@ impl SourceFactory for DiscoveryFactory {
 }
 
 // ---------------------------------------------------------------------------
+// Credentials re-read from a file
+// ---------------------------------------------------------------------------
+
+/// How long a token read from a file is reused before the file is read again.
+const TOKEN_REREAD: Duration = Duration::from_secs(60);
+
+/// A bearer/ACL token kept as a path, not as contents: projected
+/// service-account tokens and secret-manager files are rotated under a running
+/// process, so the file is read again once [`TOKEN_REREAD`] has passed. A read
+/// that fails keeps the last token (the file is briefly absent mid-rotation).
+#[derive(Clone)]
+pub struct TokenFile(Arc<TokenFileInner>);
+
+struct TokenFileInner {
+    path: std::path::PathBuf,
+    reread: Duration,
+    cached: Mutex<Option<(std::time::Instant, Option<String>)>>,
+}
+
+impl TokenFile {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self::with_reread(path, TOKEN_REREAD)
+    }
+
+    fn with_reread(path: impl Into<std::path::PathBuf>, reread: Duration) -> Self {
+        Self(Arc::new(TokenFileInner {
+            path: path.into(),
+            reread,
+            cached: Mutex::new(None),
+        }))
+    }
+
+    /// The current token; `None` if the file is empty or was never readable.
+    pub fn get(&self) -> Option<String> {
+        let inner = &*self.0;
+        let mut cached = inner.cached.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, token)) = &*cached {
+            if at.elapsed() < inner.reread {
+                return token.clone();
+            }
+        }
+        let previous = cached.take().and_then(|(_, token)| token);
+        let token = match std::fs::read_to_string(&inner.path) {
+            Ok(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+            Err(e) => {
+                tracing::warn!(
+                    path = %inner.path.display(), error = %e,
+                    "cannot read token file; keeping the previous token"
+                );
+                previous
+            }
+        };
+        *cached = Some((std::time::Instant::now(), token.clone()));
+        token
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Push signals shared by the watching sources
+// ---------------------------------------------------------------------------
+
+/// How one watch request (a Kubernetes watch, a Consul blocking query) ended.
+enum WatchEnd {
+    /// The set may have changed: fetch it.
+    Changed,
+    /// The server ended the request at its own timeout; ask again from the
+    /// same position.
+    Closed,
+    /// The position (resource version, index) is no longer usable; a fetch
+    /// must renew it.
+    Expired,
+}
+
+/// Minimum time between two watch requests: backs off a failing or
+/// immediately-closing watch while the poll tick keeps the set fresh. Failures
+/// double it up to [`WATCH_RETRY_MAX`] (e.g. a missing `watch` grant).
+const WATCH_RETRY: Duration = Duration::from_secs(5);
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
+/// Shortest gap between two successful, uneventful watch requests.
+const WATCH_REQUERY_MIN: Duration = Duration::from_millis(200);
+
+/// Retry pacing and log noise for one source's watch: warns once per outage,
+/// and doubles the delay between attempts while it keeps failing.
+struct WatchBackoff<'a> {
+    what: &'static str,
+    pool: &'a str,
+    warned: bool,
+    retry: Duration,
+}
+
+impl<'a> WatchBackoff<'a> {
+    fn new(what: &'static str, pool: &'a str) -> Self {
+        Self {
+            what,
+            pool,
+            warned: false,
+            retry: WATCH_RETRY,
+        }
+    }
+
+    /// A request ended cleanly: the outage, if any, is over.
+    fn recovered(&mut self) {
+        self.warned = false;
+        self.retry = WATCH_RETRY;
+    }
+
+    /// A request failed. The poll tick still converges the set; say so once
+    /// per outage.
+    fn failed(&mut self, e: &anyhow::Error) {
+        if self.warned {
+            tracing::debug!(pool = self.pool, error = %e, "{} watch failed again", self.what);
+        } else {
+            tracing::warn!(
+                pool = self.pool, error = %e,
+                "{} watch failed; falling back to polling until it recovers", self.what
+            );
+            self.warned = true;
+        }
+    }
+
+    /// Minimum time from the start of the failed (or closed) request to the
+    /// next one; doubles for the next call while an outage lasts.
+    fn delay(&mut self) -> Duration {
+        let now = self.retry;
+        if self.warned {
+            self.retry = (self.retry * 2).min(WATCH_RETRY_MAX);
+        }
+        now
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Consul
 // ---------------------------------------------------------------------------
 
 pub struct ConsulSource {
     pool: String,
     service: String,
-    base: String,
+    base: reqwest::Url,
     tag: Option<String>,
+    /// ACL token file, sent as `X-Consul-Token`.
+    token: Option<TokenFile>,
     interval: Duration,
     client: reqwest::Client,
+    /// Same as `client`, but the request timeout covers a whole blocking query
+    /// ([`CONSUL_WAIT_SECS`] plus Consul's jitter) instead of 5 s.
+    watch_client: reqwest::Client,
+    /// `X-Consul-Index` of the newest answer seen: set by every `fetch`, and
+    /// by a blocking query that returned a new one. The next blocking query
+    /// waits on it. `None` until a fetch has run, or when Consul's index
+    /// misbehaved (see `watch_once`).
+    index: Mutex<Option<u64>>,
+    /// Permit stored by `fetch` when it sets `index`; wakes a `changed()` that
+    /// was waiting for one.
+    index_ready: Notify,
 }
+
+/// How long Consul may hold one blocking query open (its default, and ten
+/// minutes is the cap); the query is reissued afterwards.
+const CONSUL_WAIT_SECS: u64 = 300;
+/// Consul adds up to `wait / 16` of jitter to a blocking query; the HTTP
+/// timeout leaves room for that and a slow answer.
+const CONSUL_WATCH_TIMEOUT: Duration = Duration::from_secs(CONSUL_WAIT_SECS + 60);
 
 #[derive(Deserialize)]
 struct ConsulEntry {
@@ -176,22 +335,115 @@ impl ConsulSource {
     pub fn new(
         pool: String,
         service: String,
-        base: String,
+        base: &str,
         tag: Option<String>,
+        token: Option<TokenFile>,
         interval: Duration,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             pool,
             service,
-            base: base.trim_end_matches('/').to_string(),
+            base: reqwest::Url::parse(base)
+                .with_context(|| format!("Consul address {base:?} is not a URL"))?,
             tag,
+            token,
             interval,
             client: gsp_http::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .context("build Consul HTTP client")?,
+            watch_client: gsp_http::builder()
+                .timeout(CONSUL_WATCH_TIMEOUT)
+                .build()
+                .context("build Consul watch HTTP client")?,
+            index: Mutex::new(None),
+            index_ready: Notify::new(),
         })
     }
+
+    /// The health query; with `index`, a blocking one that Consul holds open
+    /// until the result changes past it or [`CONSUL_WAIT_SECS`] runs out. The
+    /// service and tag are escaped, whatever characters they hold.
+    fn health_request(
+        &self,
+        client: &reqwest::Client,
+        index: Option<u64>,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("Consul address {} cannot carry a path", self.base))?
+            .pop_if_empty()
+            .extend(["v1", "health", "service", &self.service]);
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("passing", "true");
+            if let Some(tag) = &self.tag {
+                q.append_pair("tag", tag);
+            }
+            if let Some(index) = index {
+                q.append_pair("index", &index.to_string());
+                q.append_pair("wait", &format!("{CONSUL_WAIT_SECS}s"));
+            }
+        }
+        let mut req = client.get(url);
+        if let Some(token) = self.token.as_ref().and_then(TokenFile::get) {
+            req = req.header("X-Consul-Token", token);
+        }
+        Ok(req)
+    }
+
+    fn index(&self) -> Option<u64> {
+        *self.index.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_index(&self, index: Option<u64>) {
+        let ready = index.is_some();
+        *self.index.lock().unwrap_or_else(PoisonError::into_inner) = index;
+        if ready {
+            self.index_ready.notify_one();
+        }
+    }
+
+    /// One blocking query from `index`: returns once Consul reports a new
+    /// index (the passing set may have changed), or what it answered at the
+    /// end of its wait.
+    async fn watch_once(&self, index: u64) -> anyhow::Result<WatchEnd> {
+        let resp = self
+            .health_request(&self.watch_client, Some(index))?
+            .send()
+            .await
+            .map_err(|e| anyhow!("Consul watch request: {}", gsp_http::error_chain(&e)))?
+            .error_for_status()
+            .map_err(|e| anyhow!("Consul watch status: {}", gsp_http::error_chain(&e)))?;
+        // The body is not needed: a change is answered by a `fetch`, so the
+        // blocking query only has to carry the index.
+        let new = consul_index(&resp);
+        Ok(match new {
+            Some(new) if new == index => WatchEnd::Closed, // wait ran out
+            Some(new) if new > index => {
+                self.set_index(Some(new));
+                WatchEnd::Changed
+            }
+            // Consul's contract: an index that goes backwards (or is missing
+            // or zero) means the old one is meaningless; start over from a
+            // fresh fetch.
+            _ => {
+                self.set_index(None);
+                WatchEnd::Expired
+            }
+        })
+    }
+}
+
+/// `X-Consul-Index` of a response: `None` if absent, unparsable or zero.
+fn consul_index(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get("x-consul-index")?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|&i| i > 0)
 }
 
 #[async_trait]
@@ -206,18 +458,42 @@ impl BackendSource for ConsulSource {
         self.interval
     }
 
-    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
-        let mut url = format!(
-            "{}/v1/health/service/{}?passing=true",
-            self.base, self.service
-        );
-        if let Some(tag) = &self.tag {
-            url.push_str("&tag=");
-            url.push_str(tag);
+    async fn changed(&self) {
+        let mut backoff = WatchBackoff::new("Consul", &self.pool);
+        loop {
+            // Nothing to block on until a fetch has run (or after a reset).
+            let Some(index) = self.index() else {
+                self.index_ready.notified().await;
+                continue;
+            };
+            let started = tokio::time::Instant::now();
+            match self.watch_once(index).await {
+                Ok(WatchEnd::Changed) => return,
+                // Consul answered at the end of its wait: ask again, but never
+                // faster than `WATCH_REQUERY_MIN` (a server that ignores `wait`).
+                Ok(WatchEnd::Closed) => {
+                    backoff.recovered();
+                    tokio::time::sleep_until(started + WATCH_REQUERY_MIN).await;
+                    continue;
+                }
+                Ok(WatchEnd::Expired) => {
+                    tracing::debug!(pool = self.pool, "Consul index reset");
+                    return;
+                }
+                Err(e) => backoff.failed(&e),
+            }
+            tokio::time::sleep_until(started + backoff.delay()).await;
         }
-        let entries: Vec<ConsulEntry> = self
-            .client
-            .get(&url)
+    }
+
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+        let req =
+            self.health_request(&self.client, None)
+                .map_err(|e| SourceError::BadResponse {
+                    context: "Consul request".into(),
+                    cause: e.to_string(),
+                })?;
+        let resp = req
             .send()
             .await
             .map_err(|e| SourceError::Unreachable {
@@ -228,13 +504,15 @@ impl BackendSource for ConsulSource {
             .map_err(|e| SourceError::BadResponse {
                 context: "Consul response status".into(),
                 cause: gsp_http::error_chain(&e),
-            })?
-            .json()
-            .await
-            .map_err(|e| SourceError::BadResponse {
+            })?;
+        // The index this answer is valid at: a blocking query resumes from it.
+        let index = consul_index(&resp);
+        let entries: Vec<ConsulEntry> =
+            resp.json().await.map_err(|e| SourceError::BadResponse {
                 context: "decode Consul response".into(),
                 cause: gsp_http::error_chain(&e),
             })?;
+        self.set_index(index);
 
         let mut out = Vec::new();
         for e in entries {
@@ -255,20 +533,20 @@ impl BackendSource for ConsulSource {
 
 #[derive(Clone, Default)]
 pub struct KubeAuth {
-    token: Option<String>,
+    token: Option<TokenFile>,
     ca_pem: Option<Vec<u8>>,
 }
 
 impl KubeAuth {
-    /// Load the service-account token and CA from the standard in-pod paths.
-    /// Missing files are fine (e.g. an out-of-cluster test against a plain-HTTP
-    /// mock) — the fields stay `None`.
+    /// The service-account token and CA at the standard in-pod paths. The
+    /// token is read again as the kubelet rotates it (bound tokens last about
+    /// an hour); the CA is read once. Missing files are fine (e.g. an
+    /// out-of-cluster test against a plain-HTTP mock) — the fields stay `None`.
     pub fn from_pod() -> Self {
         Self {
-            token: std::fs::read_to_string(K8S_TOKEN_PATH)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
+            token: std::path::Path::new(K8S_TOKEN_PATH)
+                .exists()
+                .then(|| TokenFile::new(K8S_TOKEN_PATH)),
             ca_pem: std::fs::read(K8S_CA_PATH).ok(),
         }
     }
@@ -281,7 +559,7 @@ pub struct KubernetesSource {
     port_name: Option<String>,
     api: String,
     interval: Duration,
-    token: Option<String>,
+    token: Option<TokenFile>,
     client: reqwest::Client,
     /// Same credentials, but no total-request timeout: a watch is a long-lived
     /// response, bounded by [`WATCH_READ_TIMEOUT`] between chunks instead.
@@ -301,11 +579,6 @@ const WATCH_TIMEOUT_SECS: u64 = 300;
 /// Client-side cap on silence from the API server (it sends bookmarks and
 /// closes at [`WATCH_TIMEOUT_SECS`]), so a dead connection cannot hang the watch.
 const WATCH_READ_TIMEOUT: Duration = Duration::from_secs(WATCH_TIMEOUT_SECS + 30);
-/// Minimum time between two watch requests: backs off a failing or
-/// immediately-closing watch while the poll tick keeps the set fresh. Failures
-/// double it up to [`WATCH_RETRY_MAX`] (e.g. a missing `watch` grant).
-const WATCH_RETRY: Duration = Duration::from_secs(5);
-const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Longest unterminated watch-event line we buffer.
 const WATCH_LINE_MAX: usize = 16 * 1024 * 1024;
 
@@ -341,16 +614,6 @@ struct WatchObject {
     code: Option<u16>,
     #[serde(default)]
     message: Option<String>,
-}
-
-/// How one watch request ended.
-enum WatchEnd {
-    /// The set may have changed: fetch it.
-    Changed,
-    /// The server closed the stream (its timeout); reopen from the last version.
-    Closed,
-    /// The resource version is too old (`410 Gone`); a fetch must renew it.
-    Expired,
 }
 
 #[derive(Deserialize)]
@@ -474,7 +737,7 @@ impl KubernetesSource {
             ("allowWatchBookmarks", "true"),
             ("timeoutSeconds", &WATCH_TIMEOUT_SECS.to_string()),
         ]);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token.as_ref().and_then(TokenFile::get) {
             req = req.bearer_auth(token);
         }
         let resp = req
@@ -540,8 +803,7 @@ impl BackendSource for KubernetesSource {
     }
 
     async fn changed(&self) {
-        let mut warned = false;
-        let mut retry = WATCH_RETRY;
+        let mut backoff = WatchBackoff::new("Kubernetes", &self.pool);
         loop {
             // Nothing to resume from until a fetch has run (or after expiry).
             let Some(version) = self.version() else {
@@ -551,10 +813,7 @@ impl BackendSource for KubernetesSource {
             let started = tokio::time::Instant::now();
             match self.watch_once(&version).await {
                 Ok(WatchEnd::Changed) => return,
-                Ok(WatchEnd::Closed) => {
-                    warned = false;
-                    retry = WATCH_RETRY;
-                }
+                Ok(WatchEnd::Closed) => backoff.recovered(),
                 Ok(WatchEnd::Expired) => {
                     // The version is too old to resume from: have `refresh_loop`
                     // fetch now, which also renews it. Cleared first, so a
@@ -563,23 +822,9 @@ impl BackendSource for KubernetesSource {
                     self.set_version(None);
                     return;
                 }
-                Err(e) => {
-                    // The poll tick still converges the set; say so once per outage.
-                    if warned {
-                        tracing::debug!(pool = self.pool, error = %e, "Kubernetes watch failed again");
-                    } else {
-                        tracing::warn!(
-                            pool = self.pool, error = %e,
-                            "Kubernetes watch failed; falling back to polling until it recovers"
-                        );
-                        warned = true;
-                    }
-                }
+                Err(e) => backoff.failed(&e),
             }
-            tokio::time::sleep_until(started + retry).await;
-            if warned {
-                retry = (retry * 2).min(WATCH_RETRY_MAX);
-            }
+            tokio::time::sleep_until(started + backoff.delay()).await;
         }
     }
 
@@ -588,7 +833,7 @@ impl BackendSource for KubernetesSource {
             .client
             .get(self.slices_url())
             .query(&[("labelSelector", self.slice_selector())]);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token.as_ref().and_then(TokenFile::get) {
             req = req.bearer_auth(token);
         }
         let list: EndpointSliceList = req
@@ -825,7 +1070,8 @@ mod tests {
         let src = ConsulSource::new(
             "p".into(),
             "game".into(),
-            REFUSED.into(),
+            REFUSED,
+            None,
             None,
             Duration::from_secs(10),
         )
@@ -859,7 +1105,8 @@ mod tests {
             let consul = ConsulSource::new(
                 "p".into(),
                 "game".into(),
-                base.clone(),
+                &base,
+                None,
                 None,
                 Duration::from_secs(10),
             )
@@ -921,7 +1168,8 @@ mod tests {
         let src = ConsulSource::new(
             "p".into(),
             "game".into(),
-            format!("http://{}", server.addr),
+            &format!("http://{}", server.addr),
+            None,
             None,
             Duration::from_secs(10),
         )
@@ -1134,6 +1382,284 @@ mod tests {
         assert_eq!(server.watch_requests().len(), 2);
     }
 
+    const CONSUL_BODY: &str =
+        r#"[{"Node":{"Address":"10.0.0.9"},"Service":{"Address":"10.0.1.1","Port":7777}}]"#;
+
+    fn blocking_consul(addr: SocketAddr) -> ConsulSource {
+        ConsulSource::new(
+            "p".into(),
+            "game".into(),
+            &format!("http://{addr}"),
+            Some("eu".into()),
+            None,
+            Duration::from_secs(3600),
+        )
+        .unwrap()
+    }
+
+    async fn consul_pending(src: &ConsulSource) -> bool {
+        tokio::time::timeout(Duration::from_millis(300), src.changed())
+            .await
+            .is_err()
+    }
+
+    #[tokio::test]
+    async fn consul_blocks_on_the_fetched_index_and_signals_a_new_one() {
+        let server = mock_http::serve_consul(Some(5), CONSUL_BODY, vec![(0, Some(6))]).await;
+        let src = blocking_consul(server.addr);
+
+        // Nothing to block on before the first fetch: no request is made.
+        assert!(consul_pending(&src).await);
+        assert!(server.blocking_requests().is_empty());
+
+        src.fetch().await.unwrap();
+        assert_eq!(src.index(), Some(5));
+        tokio::time::timeout(Duration::from_secs(2), src.changed())
+            .await
+            .expect("a new index ends the wait");
+
+        let reqs = server.blocking_requests();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert!(reqs[0].contains("index=5"), "{}", reqs[0]);
+        assert!(reqs[0].contains("wait=300s"), "{}", reqs[0]);
+        assert!(reqs[0].contains("passing=true"), "{}", reqs[0]);
+        assert!(reqs[0].contains("tag=eu"), "{}", reqs[0]);
+        assert_eq!(src.index(), Some(6), "the new index is the next position");
+        // The plain fetch carries no index.
+        assert!(!server.requests()[0].contains("index="));
+    }
+
+    #[tokio::test]
+    async fn consul_reissues_the_query_when_its_wait_runs_out() {
+        // Two answers at the unchanged index (Consul's wait elapsed), then a change.
+        let server = mock_http::serve_consul(
+            Some(5),
+            CONSUL_BODY,
+            vec![(0, Some(5)), (0, Some(5)), (0, Some(7))],
+        )
+        .await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), src.changed())
+            .await
+            .expect("the change after two quiet waits is signalled");
+        let reqs = server.blocking_requests();
+        assert_eq!(reqs.len(), 3, "{reqs:?}");
+        assert!(reqs.iter().all(|r| r.contains("index=5")), "{reqs:?}");
+        assert_eq!(src.index(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn consul_asks_for_a_fetch_when_the_index_goes_backwards() {
+        let server = mock_http::serve_consul(Some(9), CONSUL_BODY, vec![(0, Some(3))]).await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), src.changed())
+            .await
+            .expect("a reset index asks for a fetch");
+        assert_eq!(src.index(), None);
+
+        // Until that fetch renews the index, no query is made.
+        assert!(consul_pending(&src).await);
+        assert_eq!(server.blocking_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn consul_without_an_index_header_stays_on_polling() {
+        let server = mock_http::serve_consul(None, CONSUL_BODY, vec![]).await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+        assert_eq!(src.index(), None);
+        assert!(consul_pending(&src).await);
+        assert!(server.blocking_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn consul_watch_failures_are_retried_not_signalled() {
+        let server = mock_http::serve_consul_failing_watch(Some(5), CONSUL_BODY).await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+        assert!(consul_pending(&src).await, "an error is not a change");
+        assert_eq!(src.index(), Some(5), "the position is kept");
+        assert_eq!(server.blocking_requests().len(), 1, "retried after a delay");
+    }
+
+    /// A scratch file in the OS temp dir, removed on drop.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("gsp-{}-{name}", std::process::id()));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+        fn write(&self, contents: &str) {
+            std::fs::write(&self.0, contents).unwrap();
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn token_file_rereads_after_the_interval_and_keeps_the_last_token_on_error() {
+        let f = TempFile::new("token-reread", "one\n");
+        let cached = TokenFile::new(&f.0);
+        assert_eq!(cached.get().as_deref(), Some("one"), "trimmed");
+        f.write("two");
+        assert_eq!(
+            cached.get().as_deref(),
+            Some("one"),
+            "reused inside the interval"
+        );
+
+        let live = TokenFile::with_reread(&f.0, Duration::ZERO);
+        assert_eq!(live.get().as_deref(), Some("two"));
+        f.write("three");
+        assert_eq!(
+            live.get().as_deref(),
+            Some("three"),
+            "rotation is picked up"
+        );
+
+        // Mid-rotation the file can be briefly absent: keep serving the old token.
+        std::fs::remove_file(&f.0).unwrap();
+        assert_eq!(live.get().as_deref(), Some("three"));
+
+        // Never readable, or empty: no token.
+        assert_eq!(TokenFile::new("/nonexistent/gsp-token").get(), None);
+        f.write("  \n");
+        assert_eq!(TokenFile::with_reread(&f.0, Duration::ZERO).get(), None);
+    }
+
+    #[tokio::test]
+    async fn consul_sends_the_acl_token_on_fetch_and_blocking_queries_and_follows_rotation() {
+        let f = TempFile::new("consul-token", "s3cret");
+        let server =
+            mock_http::serve_consul(Some(5), CONSUL_BODY, vec![(0, Some(6)), (0, Some(7))]).await;
+        let src = ConsulSource::new(
+            "p".into(),
+            "game".into(),
+            &format!("http://{}", server.addr),
+            None,
+            Some(TokenFile::with_reread(&f.0, Duration::ZERO)),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        src.fetch().await.unwrap();
+        src.changed().await;
+        f.write("rotated");
+        src.changed().await;
+
+        let heads = server.heads();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        let token = |h: &str| {
+            h.lines()
+                .find_map(|l| l.strip_prefix("x-consul-token: "))
+                .map(str::to_string)
+        };
+        assert_eq!(token(&heads[0]).as_deref(), Some("s3cret"), "fetch");
+        assert_eq!(
+            token(&heads[1]).as_deref(),
+            Some("s3cret"),
+            "blocking query"
+        );
+        assert_eq!(
+            token(&heads[2]).as_deref(),
+            Some("rotated"),
+            "after rotation"
+        );
+    }
+
+    #[tokio::test]
+    async fn consul_without_a_token_file_sends_no_token_header() {
+        let server = mock_http::serve_consul(Some(5), CONSUL_BODY, vec![]).await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+        assert!(!server.heads()[0].to_lowercase().contains("x-consul-token"));
+    }
+
+    #[tokio::test]
+    async fn consul_escapes_the_service_and_tag_in_the_request() {
+        let server = mock_http::serve_consul(Some(5), CONSUL_BODY, vec![(0, Some(6))]).await;
+        let src = ConsulSource::new(
+            "p".into(),
+            "game/eu west".into(),
+            &format!("http://{}/", server.addr),
+            Some("a&b=c#d e%".into()),
+            None,
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        src.fetch().await.unwrap();
+        src.changed().await;
+
+        for req in server.requests() {
+            assert!(
+                req.starts_with(
+                    "GET /v1/health/service/game%2Feu%20west?passing=true&tag=a%26b%3Dc%23d+e%25"
+                ),
+                "{req}"
+            );
+        }
+        assert!(server.requests()[1].contains("&index=5&wait=300s"));
+    }
+
+    #[test]
+    fn consul_rejects_an_address_that_is_not_a_url() {
+        let err = ConsulSource::new(
+            "p".into(),
+            "g".into(),
+            "not a url",
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .err()
+        .expect("an invalid address is refused at build time");
+        assert!(err.to_string().contains("not a url"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kubernetes_follows_a_rotated_service_account_token() {
+        let f = TempFile::new("kube-token", "old-token");
+        let server = mock_http::serve_k8s(LIST_V10, vec![event("MODIFIED", "11")]).await;
+        let src = KubernetesSource::new(
+            "p".into(),
+            "games".into(),
+            "match".into(),
+            None,
+            format!("http://{}", server.addr),
+            Duration::from_secs(3600),
+            KubeAuth {
+                token: Some(TokenFile::with_reread(&f.0, Duration::ZERO)),
+                ca_pem: None,
+            },
+        )
+        .unwrap();
+
+        src.fetch().await.unwrap();
+        f.write("new-token");
+        src.fetch().await.unwrap();
+        src.changed().await; // the watch request
+
+        let bearer = |h: &str| {
+            h.lines()
+                .find_map(|l| l.strip_prefix("authorization: Bearer "))
+                .map(str::to_string)
+        };
+        let heads = server.heads();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        assert_eq!(bearer(&heads[0]).as_deref(), Some("old-token"));
+        assert_eq!(bearer(&heads[1]).as_deref(), Some("new-token"), "list");
+        assert_eq!(bearer(&heads[2]).as_deref(), Some("new-token"), "watch");
+    }
+
     #[tokio::test]
     async fn tunnel_source_returns_the_registered_backends_when_the_pubkey_matches() {
         let body = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["10.60.0.2:1","10.60.0.2:2"]}"#;
@@ -1289,12 +1815,130 @@ mod tests {
             Server { addr }
         }
 
+        pub struct ConsulServer {
+            pub addr: SocketAddr,
+            requests: Arc<Mutex<Vec<String>>>,
+            heads: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl ConsulServer {
+            /// Full request head (line + headers) of every request so far.
+            pub fn heads(&self) -> Vec<String> {
+                self.heads.lock().unwrap().clone()
+            }
+
+            /// Request lines of every request so far.
+            pub fn requests(&self) -> Vec<String> {
+                self.requests.lock().unwrap().clone()
+            }
+
+            /// Request lines of every blocking query (`index=`) so far.
+            pub fn blocking_requests(&self) -> Vec<String> {
+                self.requests()
+                    .into_iter()
+                    .filter(|r| r.contains("index="))
+                    .collect()
+            }
+        }
+
+        /// A Consul stand-in: a plain `GET` answers `body` with
+        /// `X-Consul-Index: index`; the nth blocking query (`index=`) waits
+        /// `delay_ms`, then answers with the nth `(delay, index)`. Past the
+        /// script it holds the connection like a long poll.
+        pub async fn serve_consul(
+            index: Option<u64>,
+            body: &str,
+            blocking: Vec<(u64, Option<u64>)>,
+        ) -> ConsulServer {
+            serve_consul_with(index, body, blocking, false).await
+        }
+
+        /// As [`serve_consul`], but every blocking query fails with a `500`.
+        pub async fn serve_consul_failing_watch(index: Option<u64>, body: &str) -> ConsulServer {
+            serve_consul_with(index, body, vec![], true).await
+        }
+
+        async fn serve_consul_with(
+            index: Option<u64>,
+            body: &str,
+            blocking: Vec<(u64, Option<u64>)>,
+            fail_watch: bool,
+        ) -> ConsulServer {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = requests.clone();
+            let heads = Arc::new(Mutex::new(Vec::new()));
+            let head_log = heads.clone();
+            let body = body.to_string();
+            let script = Arc::new(Mutex::new(std::collections::VecDeque::from(blocking)));
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let (log, body, script) = (log.clone(), body.clone(), script.clone());
+                    let head_log = head_log.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let line = head.lines().next().unwrap_or_default().to_string();
+                        log.lock().unwrap().push(line.clone());
+                        head_log.lock().unwrap().push(head.clone());
+                        let (status, index) = if line.contains("index=") {
+                            if fail_watch {
+                                ("500 Internal Server Error", None)
+                            } else {
+                                let next = script.lock().unwrap().pop_front();
+                                match next {
+                                    Some((delay, idx)) => {
+                                        tokio::time::sleep(std::time::Duration::from_millis(delay))
+                                            .await;
+                                        ("200 OK", idx)
+                                    }
+                                    None => {
+                                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        } else {
+                            ("200 OK", index)
+                        };
+                        let header = index
+                            .map(|i| format!("x-consul-index: {i}\r\n"))
+                            .unwrap_or_default();
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{header}\
+                             content-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            ConsulServer {
+                addr,
+                requests,
+                heads,
+            }
+        }
+
         pub struct K8sServer {
             pub addr: SocketAddr,
             requests: Arc<Mutex<Vec<String>>>,
+            heads: Arc<Mutex<Vec<String>>>,
         }
 
         impl K8sServer {
+            /// Full request head (line + headers) of every request so far.
+            pub fn heads(&self) -> Vec<String> {
+                self.heads.lock().unwrap().clone()
+            }
+
             /// Request lines of every request so far.
             pub fn requests(&self) -> Vec<String> {
                 self.requests.lock().unwrap().clone()
@@ -1318,6 +1962,8 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let log = requests.clone();
+            let heads = Arc::new(Mutex::new(Vec::new()));
+            let head_log = heads.clone();
             let list = list.to_string();
             tokio::spawn(async move {
                 loop {
@@ -1325,12 +1971,14 @@ mod tests {
                         return;
                     };
                     let (log, list, events) = (log.clone(), list.clone(), events.clone());
+                    let head_log = head_log.clone();
                     tokio::spawn(async move {
                         let mut buf = [0u8; 4096];
                         let n = sock.read(&mut buf).await.unwrap_or(0);
                         let head = String::from_utf8_lossy(&buf[..n]).to_string();
                         let line = head.lines().next().unwrap_or_default().to_string();
                         log.lock().unwrap().push(line.clone());
+                        head_log.lock().unwrap().push(head.clone());
                         if line.contains("watch=true") {
                             let _ = sock
                                 .write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
@@ -1352,7 +2000,11 @@ mod tests {
                     });
                 }
             });
-            K8sServer { addr, requests }
+            K8sServer {
+                addr,
+                requests,
+                heads,
+            }
         }
     }
 }

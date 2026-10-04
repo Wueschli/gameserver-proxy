@@ -315,6 +315,8 @@ pub enum SourceKind {
         service: String,
         addr: String,
         tag: Option<String>,
+        /// File holding the ACL token (`X-Consul-Token`); `None` ⇒ no token.
+        token_file: Option<String>,
     },
     /// Kubernetes EndpointSlices of a service (polled and watched).
     Kubernetes {

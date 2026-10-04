@@ -119,6 +119,12 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                         s.name
                     ))
                 })?;
+                if s.consul_token_file.as_deref().is_some_and(str::is_empty) {
+                    return Err(Invalid(format!(
+                        "backend_sources {}: `consul_token_file` must not be empty",
+                        s.name
+                    )));
+                }
                 ResolvedSource::Dynamic(SourceConfig {
                     name: s.name.clone(),
                     kind: SourceKind::Consul {
@@ -128,6 +134,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                             .clone()
                             .unwrap_or_else(|| "http://127.0.0.1:8500".to_string()),
                         tag: s.tag.clone(),
+                        token_file: s.consul_token_file.clone(),
                     },
                     refresh_interval,
                 })
