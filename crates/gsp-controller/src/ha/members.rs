@@ -407,6 +407,7 @@ async fn add(State(state): State<MembersState>, headers: HeaderMap, body: String
     {
         return e.into_response();
     }
+    super::peers::warn_if_plain_remote(&req.addr);
     tracing::info!(actor = actor(&headers), id = req.id, addr = %req.addr, "adding an HA member");
     // Blocking: returns once the learner has caught up, by log or snapshot.
     if let Err(e) = ha
@@ -485,6 +486,7 @@ async fn readdress(
     {
         return e.into_response();
     }
+    super::peers::warn_if_plain_remote(&req.addr);
     tracing::info!(actor = actor(&headers), id, addr = %req.addr, "re-addressing an HA member");
     let nodes = BTreeMap::from([(id, BasicNode::new(req.addr))]);
     match ha

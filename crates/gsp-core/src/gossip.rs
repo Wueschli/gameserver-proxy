@@ -42,6 +42,12 @@ use crate::metrics_defs as m;
 
 type HmacSha256 = Hmac<Sha256>;
 const HMAC_TAG_LEN: usize = 32;
+/// Bytes of sender timestamp in front of every datagram's payload.
+const TIMESTAMP_LEN: usize = 8;
+/// How far a datagram's sender timestamp may sit from our clock before it is
+/// dropped as a replay (security review O4). Also the clock skew the mesh
+/// tolerates between instances; a replay inside the window is still possible.
+const MAX_DATAGRAM_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One instance's asserted health for one backend, gossiped as a
 /// last-writer-wins register (`Invalidates` below): a newer `changed_at`
@@ -221,7 +227,7 @@ pub async fn run(
     );
     let mut runtime = AccumulatingRuntime::new();
     let mut timers: BinaryHeap<Reverse<TimerEntry>> = BinaryHeap::new();
-    let mut recv_buf = vec![0u8; max_packet + HMAC_TAG_LEN];
+    let mut recv_buf = vec![0u8; max_packet + TIMESTAMP_LEN + HMAC_TAG_LEN];
 
     for seed in &cfg.seeds {
         if let Err(error) = foca.announce(*seed, &mut runtime) {
@@ -249,16 +255,19 @@ pub async fn run(
             }
             recv = socket.recv_from(&mut recv_buf) => {
                 match recv {
-                    Ok((len, _from)) => match verify_and_strip(&cfg.psk, &recv_buf[..len]) {
-                        Some(payload) => {
+                    Ok((len, _from)) => match verify_and_strip(&cfg.psk, &recv_buf[..len], wall_ms()) {
+                        Ok(payload) => {
                             metrics::counter!(m::GOSSIP_MESSAGES_TOTAL, "direction" => "received")
                                 .increment(1);
                             if let Err(error) = foca.handle_data(payload, &mut runtime) {
                                 tracing::debug!(?error, "gossip: bad datagram");
                             }
                         }
-                        None => {
+                        Err(Reject::Auth) => {
                             metrics::counter!(m::GOSSIP_AUTH_REJECTED_TOTAL).increment(1);
+                        }
+                        Err(Reject::Stale) => {
+                            metrics::counter!(m::GOSSIP_STALE_REJECTED_TOTAL).increment(1);
                         }
                     },
                     Err(error) => {
@@ -338,7 +347,7 @@ async fn drain_to_wire(
     timers: &mut BinaryHeap<Reverse<TimerEntry>>,
 ) {
     while let Some((dst, data)) = runtime.to_send() {
-        let tagged = tag(psk, &data);
+        let tagged = tag(psk, &data, wall_ms());
         match socket.send_to(&tagged, dst).await {
             Ok(_) => {
                 metrics::counter!(m::GOSSIP_MESSAGES_TOTAL, "direction" => "sent").increment(1);
@@ -358,54 +367,114 @@ async fn drain_to_wire(
     while runtime.to_notify().is_some() {}
 }
 
-fn tag(psk: &str, payload: &[u8]) -> Vec<u8> {
+/// Wall-clock milliseconds since the Unix epoch — the sender timestamp every
+/// datagram carries. (`mono_ms` is per-process, so it means nothing to a peer.)
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Frames `payload` as `timestamp (u64 BE ms) || payload || HMAC(timestamp ||
+/// payload)`. The timestamp sits inside the MAC so an on-path attacker can
+/// neither replay a captured datagram after [`MAX_DATAGRAM_AGE`] nor refresh it.
+fn tag(psk: &str, payload: &[u8], now_ms: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(TIMESTAMP_LEN + payload.len() + HMAC_TAG_LEN);
+    out.extend_from_slice(&now_ms.to_be_bytes());
+    out.extend_from_slice(payload);
     let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes())
         .expect("HMAC accepts a key of any length");
-    mac.update(payload);
-    let tag = mac.finalize().into_bytes();
-    let mut out = Vec::with_capacity(payload.len() + HMAC_TAG_LEN);
-    out.extend_from_slice(payload);
-    out.extend_from_slice(&tag);
+    mac.update(&out);
+    out.extend_from_slice(&mac.finalize().into_bytes());
     out
 }
 
-fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8]) -> Option<&'a [u8]> {
-    if datagram.len() < HMAC_TAG_LEN {
-        return None;
+/// Why a datagram was dropped.
+#[derive(Debug, PartialEq, Eq)]
+enum Reject {
+    /// Too short, or the HMAC tag does not verify.
+    Auth,
+    /// Authentic, but its timestamp is further than [`MAX_DATAGRAM_AGE`] from
+    /// our clock (a replay, or peers with badly skewed clocks).
+    Stale,
+}
+
+fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8], now_ms: u64) -> Result<&'a [u8], Reject> {
+    if datagram.len() < TIMESTAMP_LEN + HMAC_TAG_LEN {
+        return Err(Reject::Auth);
     }
-    let (payload, tag) = datagram.split_at(datagram.len() - HMAC_TAG_LEN);
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes()).ok()?;
-    mac.update(payload);
-    mac.verify_slice(tag).ok()?;
-    Some(payload)
+    let (signed, tag) = datagram.split_at(datagram.len() - HMAC_TAG_LEN);
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes()).map_err(|_| Reject::Auth)?;
+    mac.update(signed);
+    mac.verify_slice(tag).map_err(|_| Reject::Auth)?;
+    let (ts, payload) = signed.split_at(TIMESTAMP_LEN);
+    let sent_ms = u64::from_be_bytes(ts.try_into().expect("split_at(8) yields 8 bytes"));
+    if now_ms.abs_diff(sent_ms) > MAX_DATAGRAM_AGE.as_millis() as u64 {
+        return Err(Reject::Stale);
+    }
+    Ok(payload)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const NOW: u64 = 1_700_000_000_000;
+
     #[test]
     fn tag_round_trips() {
-        let tagged = tag("secret", b"hello");
-        assert_eq!(verify_and_strip("secret", &tagged), Some(&b"hello"[..]));
+        let tagged = tag("secret", b"hello", NOW);
+        assert_eq!(verify_and_strip("secret", &tagged, NOW), Ok(&b"hello"[..]));
     }
 
     #[test]
     fn wrong_psk_is_rejected() {
-        let tagged = tag("secret", b"hello");
-        assert_eq!(verify_and_strip("other", &tagged), None);
+        let tagged = tag("secret", b"hello", NOW);
+        assert_eq!(verify_and_strip("other", &tagged, NOW), Err(Reject::Auth));
     }
 
     #[test]
     fn truncated_datagram_is_rejected() {
-        assert_eq!(verify_and_strip("secret", b"short"), None);
+        assert_eq!(verify_and_strip("secret", b"short", NOW), Err(Reject::Auth));
     }
 
     #[test]
     fn tampered_payload_is_rejected() {
-        let mut tagged = tag("secret", b"hello");
-        tagged[0] ^= 0xff;
-        assert_eq!(verify_and_strip("secret", &tagged), None);
+        let mut tagged = tag("secret", b"hello", NOW);
+        tagged[TIMESTAMP_LEN] ^= 0xff;
+        assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
+    }
+
+    #[test]
+    fn a_rewritten_timestamp_is_rejected() {
+        // Refreshing a captured datagram's timestamp must break the MAC.
+        let old = NOW - 10 * MAX_DATAGRAM_AGE.as_millis() as u64;
+        let mut tagged = tag("secret", b"hello", old);
+        tagged[..TIMESTAMP_LEN].copy_from_slice(&NOW.to_be_bytes());
+        assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
+    }
+
+    #[test]
+    fn a_replayed_datagram_outside_the_window_is_rejected() {
+        let tagged = tag("secret", b"hello", NOW);
+        let later = NOW + MAX_DATAGRAM_AGE.as_millis() as u64 + 1;
+        assert_eq!(
+            verify_and_strip("secret", &tagged, later),
+            Err(Reject::Stale)
+        );
+        // A sender whose clock runs ahead is just as stale.
+        let earlier = NOW - MAX_DATAGRAM_AGE.as_millis() as u64 - 1;
+        assert_eq!(
+            verify_and_strip("secret", &tagged, earlier),
+            Err(Reject::Stale)
+        );
+    }
+
+    #[test]
+    fn a_datagram_at_the_edge_of_the_window_is_accepted() {
+        let tagged = tag("secret", b"hello", NOW);
+        let edge = NOW + MAX_DATAGRAM_AGE.as_millis() as u64;
+        assert_eq!(verify_and_strip("secret", &tagged, edge), Ok(&b"hello"[..]));
     }
 
     #[tokio::test]

@@ -95,6 +95,9 @@
 - `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
   datagrams dropped for a missing/invalid HMAC tag; never trusted, never
   forwarded to the SWIM state machine.
+- `gsp_gossip_stale_rejected_total` (counter, no labels) — authentic gossip
+  datagrams dropped because their sender timestamp is more than 30 s from this
+  node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `gsp_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.
   Independent of, and unable to clear, the backend's own local `healthy`
