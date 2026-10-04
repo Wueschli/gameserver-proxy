@@ -561,16 +561,17 @@ impl TunnelLab {
                 .context("no tunnel_address in the registration")?
                 .to_string()
         };
+        let mut refused = String::new();
         for attempt in 0..10 {
-            client
-                .delete(&entry)
-                .send()
-                .await?
-                .error_for_status()
-                .context("releasing the registration")?;
+            // A retry finds it already released (404) until the registrant
+            // re-registers.
+            let del = client.delete(&entry).send().await?;
+            if !del.status().is_success() && del.status() != reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("releasing {name}: {}", del.status());
+            }
             // 32 zero bytes but for a distinct first one: a valid, unique key.
             let key = format!(
-                "{}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "{}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 (b'B' + attempt) as char
             );
             // An IPv6 host needs brackets in `host:port`.
@@ -599,8 +600,13 @@ impl TunnelLab {
                 let after = self.address_when_changed(&client, &entry, &old).await?;
                 return Ok((old, after));
             }
+            refused = format!(
+                "{}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
         }
-        anyhow::bail!("{name} kept getting its address {old} back")
+        anyhow::bail!("{name} kept getting its address {old} back (last refusal: {refused})")
     }
 
     async fn address_when_changed(
