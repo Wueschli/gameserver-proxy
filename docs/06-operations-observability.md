@@ -457,6 +457,11 @@ two login modes, mutually exclusive.
 With neither flag, the UI is fully open and every session is implicitly
 `admin` — same posture every other optional-auth surface in this fleet has.
 
+Sessions expire: `--session-idle-timeout-secs` (default 1800) and
+`--session-max-age-secs` (default 43200, also the cookie's `Max-Age`), with at
+most `--max-sessions` (default 1000) held at once. `POST /ui/login` is
+rate-limited per client address and per username (`429` + `Retry-After`).
+
 Three roles gate three route groups: `viewer` (every `GET` — fleet reads,
 config/revision reads/diffs, `GET /ws/fleet`), `operator` (+ the phase-5
 intent verbs — drain/undrain, backend add/patch/delete, route-hint),

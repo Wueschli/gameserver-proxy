@@ -52,6 +52,19 @@ struct Args {
     #[arg(long)]
     insecure_no_auth: bool,
 
+    /// A browser session ends after this many seconds without a request.
+    #[arg(long, default_value_t = 1800)]
+    session_idle_timeout_secs: u64,
+
+    /// A browser session ends this many seconds after login, however
+    /// active; also the session cookie's `Max-Age`.
+    #[arg(long, default_value_t = 43200)]
+    session_max_age_secs: u64,
+
+    /// Most browser sessions held at once; at the cap the oldest is evicted.
+    #[arg(long, default_value_t = 1000)]
+    max_sessions: usize,
+
     /// Print an argon2 hash for a password read from stdin, then exit —
     /// does not start the server. The intended way to populate a
     /// `--users-file` entry's `password_hash`; never handle a plaintext
@@ -134,7 +147,13 @@ async fn main() -> anyhow::Result<()> {
     let tls_cert = args.tls.load()?;
 
     let login_required = args.ui_password.is_some() || args.users_file.is_some();
-    let mut state = AppState::new(args.ui_password).with_secure_cookie(tls_cert.is_some());
+    let mut state = AppState::new(args.ui_password)
+        .with_secure_cookie(tls_cert.is_some())
+        .with_session_limits(gsp_ui::session::SessionLimits {
+            idle_timeout: std::time::Duration::from_secs(args.session_idle_timeout_secs),
+            max_age: std::time::Duration::from_secs(args.session_max_age_secs),
+            max_sessions: args.max_sessions,
+        });
     if let Some(users_file) = &args.users_file {
         let users = gsp_ui::users::load(users_file)?;
         tracing::info!(

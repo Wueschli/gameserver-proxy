@@ -623,9 +623,32 @@ impl TlsArgs {
 /// How often a served certificate's files are checked for a renewed pair.
 pub const RELOAD_EVERY: Duration = Duration::from_secs(30);
 
+/// The peer's socket address, as a handler sees it through
+/// `axum::extract::ConnectInfo<PeerAddr>` (a newtype because axum only
+/// implements `Connected` for plain `SocketAddr` over a `TcpListener`).
+#[derive(Debug, Clone, Copy)]
+pub struct PeerAddr(pub SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
+    for PeerAddr
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        PeerAddr(*stream.remote_addr())
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpListener>>
+    for PeerAddr
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TcpListener>) -> Self {
+        PeerAddr(*stream.remote_addr())
+    }
+}
+
 /// Serve `app` on `addr` until the server fails: HTTPS through [`TlsListener`]
 /// (with the files re-read every [`RELOAD_EVERY`]) when `cert` is set, plain
-/// HTTP otherwise. `name` is the binary, for the startup log line.
+/// HTTP otherwise. `name` is the binary, for the startup log line. Handlers can
+/// read the peer address through `axum::extract::ConnectInfo<PeerAddr>`.
 pub async fn serve(
     addr: SocketAddr,
     app: axum::Router,
@@ -637,12 +660,20 @@ pub async fn serve(
             let listener = TlsListener::bind(addr, cert.clone()).await?;
             let _reloader = AbortOnDrop(spawn_reloader(cert, RELOAD_EVERY));
             tracing::info!(listen = %addr, "{name} serving HTTPS");
-            axum::serve(listener, app).await
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<PeerAddr>(),
+            )
+            .await
         }
         None => {
             let listener = TcpListener::bind(addr).await?;
             tracing::info!(listen = %addr, "{name} listening");
-            axum::serve(listener, app).await
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<PeerAddr>(),
+            )
+            .await
         }
     }
 }
