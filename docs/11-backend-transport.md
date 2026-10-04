@@ -242,10 +242,12 @@ IPv6 (built 2026-10-03):
 - **Address changes.** Every re-registration (default every 30 s) answers with the
   address the controller currently holds. If it differs from the one the interface
   carries (an operator released it, or a lease expired and it was reallocated), the
-  agent or `gsp` moves the interface in place, with no restart: neither WireGuard
-  backend can replace an interface address, so it removes the interface and brings it
-  back up on the new address with the same key, listen port and peers
-  (`live_interface.rs` in both binaries). Peer updates wait on the same lock, so none is lost, and the
+  agent or `gsp` moves the interface without a restart, keeping its key, listen port
+  and peers: on the kernel backend it reconfigures the link in place (the call flushes
+  the old address and assigns the new one), on boringtun it drops the device and brings
+  it up again on the new address, since its address would otherwise be left behind
+  (`live_interface.rs` in both binaries; the library's `remove_interface` is not used
+  because it fails in DNS cleanup where no resolver tool exists). Peer updates wait on the same lock, so none is lost, and the
   new address is saved for a restart only once it is up. If the new address does not come up, the old one is restored; if that fails
   too the interface stays down and the next re-registration retries. There is a
   short traffic gap while WireGuard re-handshakes (the agent starts the handshakes

@@ -243,10 +243,18 @@ async fn main() -> anyhow::Result<()> {
             interface::bring_up_with(&iface, &key, port, address, peers, userspace)
         })
     };
+    let template = interface::config(
+        &args.iface,
+        &private_key,
+        args.listen_port,
+        address.clone(),
+        Vec::new(),
+    );
     let wg = Arc::new(live_interface::LiveInterface::new(
         bring_up(address.clone(), peers).context("bringing up the local WireGuard interface")?,
         address,
         bring_up,
+        template,
     ));
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
     if let Some(ip) = args.peer_address.as_deref().and_then(|a| a.parse().ok()) {

@@ -41,7 +41,7 @@ use defguard_wireguard_rs::{
 };
 use serde::Deserialize;
 
-use crate::live_interface::LiveInterface;
+use crate::live_interface::{Interface, LiveInterface};
 
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
@@ -99,6 +99,26 @@ pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
 /// 1280 minimum.
 pub const TUNNEL_MTU: u32 = 1420;
 
+/// The interface configuration: name, key, port, MTU, and the given address
+/// and peers.
+pub fn config(
+    ifname: &str,
+    private_key: &Key,
+    listen_port: u16,
+    address: IpAddrMask,
+    peers: Vec<Peer>,
+) -> InterfaceConfiguration {
+    InterfaceConfiguration {
+        name: ifname.to_string(),
+        prvkey: private_key.to_string(),
+        addresses: vec![address],
+        port: listen_port,
+        peers,
+        mtu: Some(TUNNEL_MTU),
+        fwmark: None,
+    }
+}
+
 /// Brings up this proxy's shared WireGuard interface — the same
 /// kernel-primary, boringtun-fallback shape `gsp-agent::interface` uses. `peers`
 /// is empty at startup; a tunnel-address change passes the live peer set so the
@@ -110,20 +130,17 @@ pub fn bring_up(
     address: IpAddrMask,
     peers: Vec<Peer>,
     prefer_userspace: bool,
-) -> anyhow::Result<Box<dyn WireguardInterfaceApi + Send + Sync>> {
-    let config = InterfaceConfiguration {
-        name: ifname.to_string(),
-        prvkey: private_key.to_string(),
-        addresses: vec![address],
-        port: listen_port,
-        peers,
-        mtu: Some(TUNNEL_MTU),
-        fwmark: None,
-    };
+) -> anyhow::Result<Interface> {
+    let config = config(ifname, private_key, listen_port, address, peers);
 
     if !prefer_userspace {
         match configure::<Kernel>(ifname, &config) {
-            Ok(api) => return Ok(Box::new(api)),
+            Ok(api) => {
+                return Ok(Interface {
+                    wg: Box::new(api),
+                    kernel: true,
+                })
+            }
             Err(e) => tracing::warn!(
                 error = %e,
                 "kernel WireGuard interface unavailable, falling back to boringtun userspace"
@@ -132,7 +149,10 @@ pub fn bring_up(
     }
     let api = configure::<Userspace>(ifname, &config)
         .context("bringing up the boringtun userspace WireGuard interface")?;
-    Ok(Box::new(api))
+    Ok(Interface {
+        wg: Box::new(api),
+        kernel: false,
+    })
 }
 
 fn configure<API>(ifname: &str, config: &InterfaceConfiguration) -> anyhow::Result<WGApi<API>>

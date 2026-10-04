@@ -523,10 +523,18 @@ async fn run(
                     tunnel_client::bring_up(&iface, &key, port, address, peers, userspace)
                 })
             };
+            let template = tunnel_client::config(
+                &tc.iface,
+                &private_key,
+                tc.listen_port,
+                address.clone(),
+                Vec::new(),
+            );
             let wg = Arc::new(live_interface::LiveInterface::new(
                 bring_up(address.clone(), Vec::new())?,
                 address,
                 bring_up,
+                template,
             ));
             tracing::info!(
                 iface = %tc.iface,
