@@ -248,6 +248,10 @@ jobs:
           if-no-files-found: ignore
       - name: Typecheck + build
         run: npm run build
+      - name: Browser e2e (Playwright)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
 
   tunnel:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces

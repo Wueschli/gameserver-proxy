@@ -126,9 +126,11 @@ details are in `git log`.
   react-router, grouped fleet tree via `settings.group`, schema-driven settings
   form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
   /admin/sniffers`). Destructive actions (drain, remove backend, set a backend
-  `draining`/`disabled`, rollback, plugin remove) confirm first via
+  `draining`/`disabled`, rollback, plugin remove, applying Settings) confirm first via
   `useConfirm()`; action buttons disable while a request is in flight; a
-  vitest suite (`make ui-test`, CI `ui` job) pins that, and
+  vitest suite (`make ui-test`, CI `ui` job) pins that, a Playwright smoke test
+  (`make ui-e2e`, same job, backend stubbed with `page.route`) drives the Settings
+  confirm in a real browser, and
   `gsp-ui`'s `header_contract` test pins that every proxied route forwards
   status + response headers (**add new proxied routes to its `ROUTES` table**).
 - **Tier-2 regional health gossip** — embedded `foca` SWIM mesh over one HMAC-auth
@@ -281,7 +283,6 @@ than here. Where the items that used to live here went:
 
 - v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
   discovery): [#65](https://github.com/Wueschli/gameserver-proxy/issues/65)
-- `gsp-ui` settings confirmation and Playwright: [#66](https://github.com/Wueschli/gameserver-proxy/issues/66)
 - The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
 - Open design questions: [#69](https://github.com/Wueschli/gameserver-proxy/issues/69)
 
