@@ -12,6 +12,8 @@
 //! keep their existing connection and timeout semantics.
 
 #[cfg(feature = "server")]
+pub mod metrics;
+#[cfg(feature = "server")]
 pub mod policy;
 pub mod sse;
 #[cfg(feature = "server")]
