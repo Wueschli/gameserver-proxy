@@ -35,6 +35,35 @@ shared the same pattern.
 | O6 | Low | Most third-party actions are referenced by a mutable tag or branch rather than a commit SHA (only `taiki-e/install-action` and the Trivy image are pinned). With F2 the blast radius is read-only, but a hijacked tag could still exfiltrate cache contents. | `.github/workflows/ci.yml` (see `uses:` lines) | Pin to commit SHAs with a version comment; let Dependabot bump them. |
 | O7 | Low | A short or guessable token is accepted as-is; there is no minimum length or entropy check on `--auth-token`, `--ha-token`, `settings.admin.auth_token`, or the gossip PSK. | CLI args in each `main.rs`, `crates/gsp-config/src/lib.rs:201` | Reject (or warn on) tokens/PSKs shorter than ~32 chars at startup. |
 
+## Status as of 2026-10-04 (main at `97cc114`, after #35)
+
+Re-checked against current code. None of O1-O7 has been fixed. Line numbers
+in the table above are from the original review and have drifted; the
+current ones are below.
+
+| # | Status | Evidence on main |
+|---|--------|------------------|
+| O1 | Open | No startup check for a non-loopback bind without a token. Every bearer middleware still passes requests through when no token is set, e.g. `crates/gsp-controller/src/auth.rs:24-34`, `crates/gsp-aggregator/src/auth.rs:25-35`. |
+| O2 | Open | `crates/gsp-ui/src/session.rs:32-73`: `SessionStore` is a bare `HashMap<String, Session>` with no timestamps, no cap and no expiry; the cookie set in `crates/gsp-ui/src/api.rs:241-247` has no `Max-Age`. |
+| O3 | Open | `crates/gsp-ui/src/api.rs:196` `login` has no rate limit or Argon2 concurrency bound. |
+| O4 | Open | `crates/gsp-core/src/gossip.rs:362-380` still MACs only the payload (no timestamp or nonce). |
+| O5 | Open | `crates/gsp/src/controller_client.rs:149-168` and `crates/gsp-agent/src/proxy_subscribe.rs:213-228` still grow `buf` until `\n\n` with no cap. |
+| O6 | Open | `.github/workflows/ci.yml` still uses `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `actions/setup-node@v7`, `actions/cache@v6`, `Swatinem/rust-cache@v2`, `dtolnay/rust-toolchain@stable|nightly` by tag or branch. Only `taiki-e/install-action` and the Trivy image are pinned. |
+| O7 | Open | No minimum-length check on `--auth-token`, `--ha-token` or the gossip PSK anywhere in `crates/`. |
+
+### New since the review (HA and IPv6 work, #24-#35)
+
+| # | Severity | Finding | Where | Suggested fix |
+|---|----------|---------|-------|---------------|
+| N1 | Medium | The Raft peer endpoints (`/raft/append`, `/raft/vote`, `/raft/snapshot`, `/raft/pre-ha`, `/raft/whoami`) and the membership API (`/admin/ha/members`, add/remove/re-address) are **open when `--ha-token` / the admin token is absent**, the same pass-through as O1 but with more impact: an unauthenticated peer could append log entries (rewrite replicated config, registries and addresses), install a snapshot, or change cluster membership. Nothing refuses `--ha-peers` or `--ha-join` without `--ha-token`. | `crates/gsp-controller/src/ha/routes.rs:41-45` (`ha_token`), `crates/gsp-controller/src/ha/members.rs:92-96` (`auth_token`), `crates/gsp-controller/src/main.rs:94,303` | Refuse to start with `--ha-peers`/`--ha-join` unless `--ha-token` is set (and the admin token for the members API when the listen address is non-loopback). Fold into the O1 fix. |
+| N2 | Low | `/raft/*` accepts bodies up to 32 MiB (`MAX_RAFT_BODY`), well above axum's 2 MiB default. Needed for snapshot chunks and pre-HA imports, and the routes are token-gated, so it is only reachable by a token holder, or by anyone when N1 applies. | `crates/gsp-controller/src/ha/routes.rs:21-33` | Keep, but raise N1 first; consider a smaller limit on `/raft/vote` and `/raft/append`. |
+| N3 | Low | Raft traffic carries the bearer token and all replicated state. It is encrypted only if the peer URLs are `https://`; plain `http://` peers send the token in clear. | `crates/gsp-controller/src/ha/network.rs:27,64` | Document that HA peers should use `https://` and `--ca-file`, or warn on an `http://` peer when a token is set. |
+
+The other HA and IPv6 additions (`/tunnel/addresses`, intent, registry and adopt
+routes) all use `gsp_http::token_eq` bearer checks (see the `token_eq` call sites
+in `crates/gsp-controller/src/{addresses/api.rs:75, intent/api.rs:114,
+registry.rs:344, adopt.rs:80}`), so F1 still holds. Not re-audited beyond that.
+
 ## Checked and fine
 
 - **TLS** (`crates/gsp-http/src/tls.rs`): rustls only, no custom verifiers,
