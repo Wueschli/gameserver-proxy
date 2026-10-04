@@ -46,6 +46,17 @@ mod ha;
 
 pub use ha::{canonical_addr, is_unchanged, normalize, RegistryHa, TOUCH_AFTER};
 
+/// What one lease-expiry attempt ([`RegistryState::expire`]) did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expiry {
+    /// Released; the address freed, if the owner held one.
+    Released(Option<IpAddr>),
+    /// The owner was seen again since the cutoff; nothing changed.
+    NotExpired,
+    /// Nothing is registered under that name any more.
+    Gone,
+}
+
 const UPDATES_CAPACITY: usize = 64;
 
 /// One registry's registration type — what `POST` takes, what `current`
@@ -203,6 +214,37 @@ impl<R: Registration> RegistryState<R> {
             let _ = self.updates.send(revision);
         }
         Ok(applied)
+    }
+
+    /// Releases `name` like `DELETE` does, but only if its `last_seen` is
+    /// still older than `last_seen_before` when the write lands, so a
+    /// re-registration that gets in first wins. Under HA this proposes an
+    /// `Expire` through Raft and must run on the leader (the lease sweeper
+    /// checks that).
+    pub async fn expire(&self, name: &str, last_seen_before: u64) -> Result<Expiry, String> {
+        if let Some(ha) = &self.ha {
+            return ha::expire::<R>(ha, name, last_seen_before).await;
+        }
+        let log = wording(R::ROLE).log;
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let seen = self.book.get(R::ROLE, name).map_err(|e| e.to_string())?;
+        let known = seen.is_some() || self.has_current(name).map_err(|e| format!("{log}: {e}"))?;
+        if !known {
+            return Ok(Expiry::Gone);
+        }
+        if seen.is_some_and(|a| a.last_seen >= last_seen_before) {
+            return Ok(Expiry::NotExpired);
+        }
+        self.remove_applied(name, None)
+            .map_err(|e| format!("{log}: {e}"))?;
+        let freed = self
+            .book
+            .release(R::ROLE, name)
+            .map_err(|e| e.to_string())?;
+        Ok(Expiry::Released(freed))
     }
 
     /// The current registration for `name`, if it has ever registered.

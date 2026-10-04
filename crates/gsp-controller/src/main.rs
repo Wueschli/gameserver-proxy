@@ -125,6 +125,13 @@ struct Args {
     #[arg(long, default_value = "14d")]
     tunnel_stale_after: String,
 
+    /// Release a tunnel address (and its registration) whose owner has not
+    /// re-registered for this long, as if it had been `DELETE`d. Units: s, m,
+    /// h, d; at least 2h. `0` never expires: only an explicit release frees
+    /// an address.
+    #[arg(long, default_value = "0")]
+    tunnel_lease_ttl: String,
+
     /// Start even though stored tunnel addresses fall outside
     /// `--tunnel-network`, and move each such peer into the network at its
     /// next registration (docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md).
@@ -169,6 +176,11 @@ async fn main() -> anyhow::Result<()> {
         args.tunnel_readdress,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+
+    let lease_ttl = gsp_controller::addresses::parse_duration(&args.tunnel_lease_ttl)
+        .map_err(|e| format!("--tunnel-lease-ttl: {e}"))
+        .and_then(|ttl| gsp_controller::lease::check_ttl(ttl).map(|()| ttl))
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -425,6 +437,18 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
     let leader_handle = ha_handle.as_ref().map(|(h, _)| h.clone());
+    let lease_leader = leader_handle.clone();
+    tokio::spawn(gsp_controller::lease::lease_loop(
+        book.clone(),
+        peers_state.clone(),
+        proxy_peers_state.clone(),
+        lease_ttl,
+        move || {
+            lease_leader
+                .as_ref()
+                .is_none_or(|h| h.raft.metrics().borrow().current_leader == Some(h.node_id))
+        },
+    ));
     tokio::spawn(gsp_controller::addresses::api::stale_warning_loop(
         book.clone(),
         stale_after,

@@ -29,8 +29,8 @@ use crate::ha::cluster_state::ClusterState;
 use crate::ha::{HaHandle, WriteRequest, WriteResponse};
 
 use super::{
-    not_registered, store_error_response, wording, DeleteResponse, ErrorResponse, Registration,
-    RegistryState, SubmitResponse,
+    not_registered, store_error_response, wording, DeleteResponse, ErrorResponse, Expiry,
+    Registration, RegistryState, SubmitResponse,
 };
 
 /// How old an unchanged registration's `last_seen` may get before a
@@ -276,6 +276,34 @@ pub(super) async fn release<R: Registration>(
         },
     )
     .await
+}
+
+/// One lease expiry under HA: proposes `Expire` on this node's Raft handle,
+/// which is only called on the leader (a follower's proposal fails and the
+/// sweeper simply tries again next tick).
+pub(super) async fn expire<R: Registration>(
+    ha: &RegistryHa,
+    name: &str,
+    last_seen_before: u64,
+) -> Result<Expiry, String> {
+    let req = WriteRequest::Expire {
+        role: R::ROLE,
+        name: name.to_owned(),
+        last_seen_before,
+    };
+    let resp = ha
+        .handle
+        .raft
+        .client_write(req)
+        .await
+        .map_err(|e| format!("proposing an expiry: {e}"))?;
+    match resp.data {
+        WriteResponse::Released { address, .. } => Ok(Expiry::Released(address)),
+        WriteResponse::NotExpired => Ok(Expiry::NotExpired),
+        WriteResponse::NotFound | WriteResponse::Revision(None) => Ok(Expiry::Gone),
+        WriteResponse::Rejected(r) => Err(ClaimError::Rejected(r).to_string()),
+        other => Err(format!("unexpected raft response to an expiry: {other:?}")),
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +606,34 @@ mod tests {
         assert_eq!(assignment.first_seen, T0);
         // The touch wrote no registry revision.
         assert_eq!(h.peers.store.current_revision().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_lease_sweep_expires_through_raft_and_spares_a_touched_owner() {
+        use crate::lease::sweep;
+        let h = ha_app("10.60.0.0/24").await;
+        let ttl = Duration::from_secs(7200);
+        for name in ["gone", "alive"] {
+            let r = call(&h.app, "POST", "/peers", peer(name, &[])).await;
+            assert_eq!(r.0, StatusCode::OK, "{r:?}");
+        }
+        // "alive" re-registers late enough to be touched (not rewritten).
+        let touched_at = T0 + TOUCH_AFTER.as_secs() + 1;
+        h.now.store(touched_at, Ordering::SeqCst);
+        call(&h.app, "POST", "/peers", peer("alive", &[])).await;
+        h.wait_for_proposals(3).await;
+        h.settle().await;
+
+        let peers = h.peers.clone().with_ha(Some(h.ha.clone()));
+        let proxies = h.proxy_peers.clone().with_ha(Some(h.ha.clone()));
+        let now = T0 + ttl.as_secs() + 1;
+        assert_eq!(sweep(&h.book, &peers, &proxies, ttl, now).await, 1);
+
+        assert_eq!(h.peers.current_for("gone").unwrap(), None);
+        assert!(h.book.get(Role::Origin, "gone").unwrap().is_none());
+        assert!(h.peers.current_for("alive").unwrap().is_some());
+        // A second sweep has nothing left to do.
+        assert_eq!(sweep(&h.book, &peers, &proxies, ttl, now).await, 0);
     }
 
     #[tokio::test]

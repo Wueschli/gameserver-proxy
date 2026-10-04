@@ -9,7 +9,7 @@
 //! bookkeeping `openraft` needs on top: last-applied log id, membership,
 //! and snapshots.
 //!
-//! Registry entries (`RegisterOrigin`/`RegisterProxy`, `Release`, `Touch`)
+//! Registry entries (`RegisterOrigin`/`RegisterProxy`, `Release`, `Expire`, `Touch`)
 //! apply through [`super::apply_registry`] into the two registries and the
 //! shared address book, against the network recorded in
 //! [`ClusterState`] by `SetTunnelNetwork` — never the node's own flag.
@@ -541,6 +541,30 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                             &self.book,
                             &self.cluster,
                             &name,
+                            index,
+                        )?,
+                        WriteRequest::Expire {
+                            role: Role::Origin,
+                            name,
+                            last_seen_before,
+                        } => apply_registry::expire(
+                            &self.peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            last_seen_before,
+                            index,
+                        )?,
+                        WriteRequest::Expire {
+                            role: Role::Proxy,
+                            name,
+                            last_seen_before,
+                        } => apply_registry::expire(
+                            &self.proxy_peers,
+                            &self.book,
+                            &self.cluster,
+                            &name,
+                            last_seen_before,
                             index,
                         )?,
                         WriteRequest::Touch {
@@ -1431,6 +1455,67 @@ mod tests {
         assert_eq!(sm.book.last_outcome().unwrap(), outcome);
         assert_eq!(sm.peers.store.applied_index().unwrap(), Some(11));
         assert_eq!(sm.book.applied_index().unwrap(), Some(11));
+    }
+
+    #[tokio::test]
+    async fn expire_frees_an_unseen_owner_and_spares_one_seen_since_the_cutoff() {
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        apply_one(&mut sm, 2, register_origin(origin("a", None, &[]), NOW)).await;
+        let expire = |cutoff| WriteRequest::Expire {
+            role: AddrRole::Origin,
+            name: "a".into(),
+            last_seen_before: cutoff,
+        };
+
+        // Seen at NOW: a cutoff at or before NOW leaves it alone.
+        assert_eq!(
+            apply_one(&mut sm, 3, expire(NOW)).await,
+            WriteResponse::NotExpired
+        );
+        assert!(sm.peers.current_for("a").unwrap().is_some());
+        assert_eq!(sm.book.entries().unwrap().len(), 1);
+
+        // A cutoff past NOW releases it, tombstone included.
+        let response = apply_one(&mut sm, 4, expire(NOW + 1)).await;
+        assert!(
+            matches!(
+                response,
+                WriteResponse::Released {
+                    address: Some(_),
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        assert_eq!(sm.peers.current_for("a").unwrap(), None);
+        assert!(sm.book.entries().unwrap().is_empty());
+
+        // An owner that is already gone is simply not found.
+        assert_eq!(
+            apply_one(&mut sm, 5, expire(NOW + 1)).await,
+            WriteResponse::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expire_replay_after_a_registry_only_crash_still_frees_the_address() {
+        let (mut sm, _d) = sm_with_network("10.60.0.0/24").await;
+        apply_one(&mut sm, 2, register_origin(origin("a", None, &[]), NOW)).await;
+        // The crash fell after the registry step: tombstoned, address kept.
+        sm.peers.remove_applied("a", Some(3)).unwrap();
+        assert_eq!(sm.book.entries().unwrap().len(), 1);
+        let response = apply_one(
+            &mut sm,
+            3,
+            WriteRequest::Expire {
+                role: AddrRole::Origin,
+                name: "a".into(),
+                last_seen_before: NOW + 1,
+            },
+        )
+        .await;
+        assert_eq!(response, WriteResponse::Revision(None));
+        assert!(sm.book.entries().unwrap().is_empty());
     }
 
     #[tokio::test]
