@@ -53,6 +53,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use gsp_config::{HashOn, ListenerConfig};
 
 use crate::drain::{ConnGuard, ConnTracker};
+use crate::error::ListenerError;
 use crate::geo::GeoDb;
 use crate::limits::{GlobalLimits, LimitGuard};
 use crate::metrics_defs as m;
@@ -148,7 +149,7 @@ pub async fn run_udp_listener(
     sniffers: Arc<Sniffers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> Result<(), ListenerError> {
     let mode = if cfg.transparent {
         UdpMode::Transparent
     } else if cfg.prefix.is_some() {

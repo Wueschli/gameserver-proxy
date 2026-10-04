@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use tokio::sync::{watch, Notify};
 
+use crate::error::SourceError;
 use crate::metrics_defs as m;
 
 /// A level-triggered source of backend addresses for one pool.
@@ -42,7 +43,7 @@ pub trait BackendSource: Send + Sync {
     /// The current full set of backend addresses. Level-triggered: the runtime
     /// diffs this against the live set. An `Err` (or an empty `Ok`) leaves the
     /// last-known-good set untouched.
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>>;
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError>;
 }
 
 /// Last-known-good discovered address set per pool.

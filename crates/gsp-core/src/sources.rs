@@ -26,13 +26,14 @@ use tokio::task::JoinHandle;
 use gsp_config::SourceConfig;
 
 use crate::discovery::{refresh_loop, BackendSource, Discovery};
+use crate::error::SourceError;
 use crate::snapshot::Snapshot;
 
 /// Builds a concrete [`BackendSource`] from its config. Implemented in the `gsp`
 /// binary (where the HTTP / DNS clients live); `gsp-core` only drives the
 /// lifecycle.
 pub trait SourceFactory: Send + Sync {
-    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>>;
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError>;
 }
 
 struct SourceGroup {
@@ -73,7 +74,7 @@ impl SourceManager {
         })
     }
 
-    fn spawn_group(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<SourceGroup> {
+    fn spawn_group(&self, pool: &str, cfg: &SourceConfig) -> Result<SourceGroup, SourceError> {
         let source = self.factory.build(pool, cfg)?;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let discovery = self.discovery.clone();
@@ -214,7 +215,7 @@ mod tests {
         fn refresh_interval(&self) -> Duration {
             Duration::from_millis(20)
         }
-        async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.addrs.clone())
         }
@@ -225,7 +226,11 @@ mod tests {
     }
 
     impl SourceFactory for FakeFactory {
-        fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+        fn build(
+            &self,
+            pool: &str,
+            cfg: &SourceConfig,
+        ) -> Result<Arc<dyn BackendSource>, SourceError> {
             let addr: SocketAddr = match &cfg.kind {
                 SourceKind::DnsSrv { record } => record.parse().unwrap(),
                 _ => unreachable!("test only uses dns_srv"),

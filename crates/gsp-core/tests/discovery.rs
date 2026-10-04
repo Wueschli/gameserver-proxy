@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use gsp_config::{parse_str, SourceConfig};
 use gsp_core::discovery::{refresh_loop, BackendSource, Discovery};
-use gsp_core::{BackendOverlay, Runtime, Snapshot, SourceFactory};
+use gsp_core::{BackendOverlay, Runtime, Snapshot, SourceError, SourceFactory};
 use tokio::sync::{watch, Notify};
 
 const CFG: &str = r#"
@@ -80,11 +80,11 @@ fn overlay_layers_on_top_of_the_discovered_set() {
 /// A scripted source: each `fetch` pops the next result off a queue.
 struct ScriptedSource {
     calls: AtomicUsize,
-    script: Mutex<Vec<anyhow::Result<Vec<SocketAddr>>>>,
+    script: Mutex<Vec<Result<Vec<SocketAddr>, SourceError>>>,
 }
 
 impl ScriptedSource {
-    fn new(script: Vec<anyhow::Result<Vec<SocketAddr>>>) -> Arc<Self> {
+    fn new(script: Vec<Result<Vec<SocketAddr>, SourceError>>) -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             script: Mutex::new(script),
@@ -103,7 +103,7 @@ impl BackendSource for ScriptedSource {
     fn refresh_interval(&self) -> Duration {
         Duration::from_millis(50)
     }
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let mut s = self.script.lock().unwrap();
         if s.is_empty() {
@@ -123,7 +123,10 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let source = ScriptedSource::new(vec![
         Ok(vec![addr("10.0.0.1:7777")]), // first refresh
         Ok(vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")]), // grew
-        Err(anyhow::anyhow!("source down")), // must not clear
+        Err(SourceError::Unreachable {
+            context: "fake".into(),
+            cause: "source down".into(),
+        }), // must not clear
         Ok(Vec::new()),                  // empty must not clear
     ]);
 
@@ -181,7 +184,7 @@ impl BackendSource for FixedSource {
     fn refresh_interval(&self) -> Duration {
         Duration::from_millis(30)
     }
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         Ok(vec![self.addr])
     }
 }
@@ -189,14 +192,14 @@ impl BackendSource for FixedSource {
 struct FixedFactory;
 
 impl SourceFactory for FixedFactory {
-    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError> {
         let record = match &cfg.kind {
             gsp_config::SourceKind::DnsSrv { record } => record.clone(),
             _ => unreachable!(),
         };
         Ok(Arc::new(FixedSource {
             pool: pool.to_string(),
-            addr: record.parse()?,
+            addr: record.parse().map_err(SourceError::build)?,
         }))
     }
 }
