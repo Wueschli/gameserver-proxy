@@ -46,6 +46,13 @@ struct Args {
     #[arg(long)]
     users_file: Option<PathBuf>,
 
+    /// Bearer token `GET /metrics` requires, at least 16 bytes. The UI's own
+    /// login is a browser session a scraper cannot hold, so `/metrics` has a
+    /// token of its own. Omitted: `/metrics` is served only when no login is
+    /// configured (an open UI); with a login it is not served at all.
+    #[arg(long)]
+    metrics_token: Option<String>,
+
     /// Allow a non-loopback `--listen` with neither `--ui-password` nor
     /// `--users-file` (an open UI). Only for deployments where the network
     /// boundary is the sole access control.
@@ -126,12 +133,15 @@ async fn main() -> anyhow::Result<()> {
     if args.ui_password.is_some() && args.users_file.is_some() {
         anyhow::bail!("--ui-password and --users-file are mutually exclusive");
     }
+    gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    let prometheus = gsp_http::metrics::install("gsp-ui", env!("CARGO_PKG_VERSION"))?;
     gsp_http::policy::check_exposure(
         "gsp-ui",
         args.listen,
@@ -185,8 +195,16 @@ async fn main() -> anyhow::Result<()> {
         "gsp-ui starting"
     );
 
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+    let mut app = Router::new().route("/healthz", get(|| async { "ok" }));
+    if args.metrics_token.is_some() || !login_required {
+        app = app.merge(gsp_http::metrics::router(
+            prometheus,
+            gsp_http::server::BearerAuth::new(args.metrics_token.as_deref()),
+        ));
+    } else {
+        tracing::info!("/metrics is not served: a login is configured and no --metrics-token");
+    }
+    let app = app
         .merge(api::router(state))
         .fallback_service(ServeDir::new(&args.static_dir));
 
