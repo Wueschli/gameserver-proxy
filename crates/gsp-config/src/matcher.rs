@@ -67,13 +67,18 @@ pub enum Matcher {
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
     /// The named sniffer plugin (see `gsp_core::sniff`) recognised the first
-    /// bytes. With `host` patterns: also requires the hint's `host` to match one
-    /// of them; empty `host` ⇒ matches on any recognition. A `reject` hint never
-    /// reaches this matcher — `gsp-core` drops the connection / datagram before
-    /// routing (see [`RouteHint::reject`]) — so the `!reject` guard below is
-    /// belt-and-braces for a direct `route_for` caller. The name is not
-    /// validated here — the proxy checks it against the loaded sniffers at
-    /// listener start (an unknown name simply never matches).
+    /// bytes. With `host` patterns: also requires the hint's `host` to match
+    /// one of them; empty `host` ⇒ matches on any recognition. A listener may
+    /// use several sniffers; the first to recognise the bytes wins, and this
+    /// matcher only matches that winner by name (see
+    /// [`ListenerConfig::sniffers`]).
+    ///
+    /// A `reject` hint never reaches this matcher — `gsp-core` drops the
+    /// connection / datagram before routing (see [`RouteHint::reject`]) — so
+    /// the `!reject` guard below is belt-and-braces for a direct `route_for`
+    /// caller. The name is not validated here — the proxy checks it against
+    /// the loaded sniffers at listener start (an unknown name simply never
+    /// matches).
     Sniffer {
         name: String,
         host: Vec<HostPattern>,
@@ -93,9 +98,11 @@ pub struct MatchContext<'a> {
     pub src: SocketAddr,
     pub local: SocketAddr,
     pub first_bytes: &'a [u8],
-    /// The listener's sniffer result, if it has a `sniffer` route and the
-    /// plugin produced a hint. `gsp-core` fills this in before routing.
-    pub sniff: Option<&'a RouteHint>,
+    /// The listener's sniffer result, if it has `sniffer` routes and one of
+    /// its plugins recognised the bytes: the plugin's configured name and its
+    /// hint. A `sniffer` route only matches the plugin it names. `gsp-core`
+    /// fills this in before routing.
+    pub sniff: Option<(&'a str, &'a RouteHint)>,
 }
 
 impl Matcher {
@@ -114,8 +121,8 @@ impl Matcher {
                 Some(host) => pats.iter().any(|p| p.matches(&host)),
                 None => false,
             },
-            Matcher::Sniffer { name: _, host } => match ctx.sniff {
-                Some(hint) if !hint.reject => {
+            Matcher::Sniffer { name, host } => match ctx.sniff {
+                Some((hit, hint)) if hit == name && !hint.reject => {
                     host.is_empty()
                         || hint
                             .host

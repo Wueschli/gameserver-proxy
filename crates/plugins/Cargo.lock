@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvpn"
+version = "0.0.1"
+dependencies = [
+ "gsp-sniffer-abi",
+]
+
+[[package]]
 name = "quic"
 version = "0.0.1"
 dependencies = [
@@ -28,7 +35,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "raknet"
+version = "0.0.1"
+dependencies = [
+ "gsp-sniffer-abi",
+]
+
+[[package]]
 name = "regex-firstbytes"
+version = "0.0.1"
+dependencies = [
+ "gsp-sniffer-abi",
+]
+
+[[package]]
+name = "teamspeak3"
 version = "0.0.1"
 dependencies = [
  "gsp-sniffer-abi",

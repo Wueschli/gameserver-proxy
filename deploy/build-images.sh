@@ -4,7 +4,7 @@
 # BIN_SOURCE=prebuilt takes binaries from deploy/prebuilt/ instead of compiling.
 set -eu
 cd "$(dirname "$0")/.."
-for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
   docker build -f deploy/Dockerfile --build-arg BIN_SOURCE="${BIN_SOURCE:-builder}" --target "$t" -t "gsp-deploy/$t:local" .
   docker run --rm "gsp-deploy/$t:local" --version
 done

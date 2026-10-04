@@ -158,7 +158,7 @@ pub async fn run_udp_listener(
         UdpMode::Plain
     };
     let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, mode)?)?);
-    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref(), &sniffers);
+    crate::sniff::warn_if_missing(&cfg.name, &cfg.sniffers, &sniffers);
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
@@ -649,22 +649,18 @@ async fn open_session(
 ) -> Result<Session, &'static str> {
     let snap = snapshot.load_full();
     let local = dst.unwrap_or_else(|| down.local_addr().unwrap_or(cfg.bind));
-    let hint = cfg
-        .sniffer
-        .as_deref()
-        .and_then(|n| sniffers.get(n))
-        .and_then(|s| s.sniff(first));
+    let hit = crate::sniff::sniff_first(&cfg.sniffers, sniffers, first);
     let mctx = gsp_config::MatchContext {
         src: client,
         local,
         first_bytes: first,
-        sniff: hint.as_ref(),
+        sniff: hit.as_ref().map(|(n, h)| (*n, h)),
     };
 
     // A sniffer that positively rejects drops the datagram outright — no
     // session, no reply (amplifier-safe). Before the gate / push-resolver hint:
     // a content-based reject outranks a spoofable src_ip hint.
-    if hint.as_ref().is_some_and(|h| h.reject) {
+    if hit.as_ref().is_some_and(|(_, h)| h.reject) {
         return Err("sniffer_reject");
     }
 

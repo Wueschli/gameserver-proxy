@@ -119,6 +119,8 @@ jobs:
         run: |
           cargo clippy -p gsp --no-default-features --all-targets
           cargo nextest run --profile ci -p gsp --no-default-features
+          cargo clippy -p gsp-core --no-default-features --all-targets
+          cargo nextest run --profile ci -p gsp-core --no-default-features
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
@@ -179,6 +181,12 @@ jobs:
       # scan sees the crates (deploy/scan-images.sh). Same version as the Dockerfile.
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.7
+      # The minimal edge build of gsp (issue #62) first, set aside as gsp-minimal for
+      # the gsp-minimal image; the full build then leaves target/release/gsp the full one.
+      - name: Build the minimal gsp
+        run: |
+          cargo auditable build --release --locked -p gsp --no-default-features
+          cp target/release/gsp target/release/gsp-minimal
       - name: Build the release binaries
         run: cargo auditable build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
       # Cargo unifies features per invocation, so the plugins job's `-p gsp` test
@@ -192,6 +200,7 @@ jobs:
           name: release-binaries
           path: |
             target/release/gsp
+            target/release/gsp-minimal
             target/release/gsp-controller
             target/release/gsp-aggregator
             target/release/gsp-ui
@@ -228,7 +237,7 @@ jobs:
         run: cargo nextest run --profile ci --workspace --config-file ../../.config/nextest.toml
       - name: Build to wasm32-unknown-unknown
         working-directory: crates/plugins
-        run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard
+        run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
       - name: Size check (informational)
         working-directory: crates/plugins
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm
@@ -361,13 +370,13 @@ jobs:
           path: deploy/prebuilt
       - name: Static checks (compose render, k8s wiring)
         run: make deploy-lint
-      - name: Build all five images and run --version on each
+      - name: Build all six images and run --version on each
         run: make deploy-images
       # For the trivy job, which has no access to this runner's Docker daemon.
       - name: Save the images for the trivy job
         run: |
           mkdir -p "$RUNNER_TEMP/images"
-          for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+          for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
             docker save -o "$RUNNER_TEMP/images/$t.tar" "gsp-deploy/$t:local"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

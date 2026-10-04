@@ -71,7 +71,7 @@ examples) or from an external routing service you control.
   (host from the peeked, non-terminated TLS ClientHello) matchers.
 - A `sniffer` matcher backed by sandboxed WASM plugins (`wasmtime`, no WASI, no host
   imports, time and memory bounded), rescanned on every reload. First-party plugins:
-  `a2s`, `minecraft`, `quic`, `wireguard` and a `regex-firstbytes` template.
+  `a2s`, `minecraft`, `quic`, `wireguard`, `openvpn`, `raknet`, `teamspeak3` and a `regex-firstbytes` template.
 - External resolvers over HTTP or gRPC (`action: { resolver: <name> }`) with
   `on_error` handling and a TTL'd LRU result cache.
 - Push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` for short-lived
@@ -188,9 +188,9 @@ make ui        # build the admin GUI frontend (needs Node/npm)
 make help      # list every target
 ```
 
-Container images (five targets in one `Dockerfile`), a Docker Compose demo
+Container images (six targets in one `Dockerfile`), a Docker Compose demo
 and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
-publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-controller`,
+publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-minimal`, `gsp-controller`,
 `gsp-aggregator`, `gsp-ui`, `gsp-agent`) via the `Release` workflow. The compose
 demo and the manifests are reference material only.
 
