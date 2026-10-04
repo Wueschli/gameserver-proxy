@@ -13,9 +13,23 @@ use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandl
 
 use crate::server::{require_bearer, BearerAuth};
 
-/// Gauge, always `1`. Labels: `component` (the binary), `version`. Set by
-/// [`install`], so a scrape of a freshly started binary is never empty.
+/// Gauge, always `1`. Labels: `component` (the binary), `version`, `commit`.
+/// The same label set on `gsp` and every fleet binary, so one query covers a
+/// whole deployment. Set by [`install`] / [`set_build_info`], so a scrape of a
+/// freshly started binary is never empty.
 pub const BUILD_INFO: &str = "gsp_build_info";
+
+/// Short git SHA this workspace was built from (`build.rs`), or `"unknown"`
+/// when `.git` was unavailable (a source tarball).
+pub const COMMIT: &str = env!("GSP_GIT_SHA");
+
+/// Set [`BUILD_INFO`] on whichever recorder is installed. `gsp` installs its
+/// own recorder and calls this directly; the fleet binaries go through
+/// [`install`].
+pub fn set_build_info(component: &'static str, version: &'static str) {
+    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version, "commit" => COMMIT)
+        .set(1.0);
+}
 
 /// Install the process-global recorder and set [`BUILD_INFO`]. Call once from
 /// `main`; a second call in the same process is an error.
@@ -24,7 +38,7 @@ pub fn install(
     version: &'static str,
 ) -> Result<PrometheusHandle, BuildError> {
     let handle = PrometheusBuilder::new().install_recorder()?;
-    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version).set(1.0);
+    set_build_info(component, version);
     Ok(handle)
 }
 
@@ -63,6 +77,21 @@ mod tests {
             metrics::counter!("gsp_test_total").increment(3);
         });
         handle
+    }
+
+    #[test]
+    fn build_info_carries_component_version_and_commit() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || set_build_info("gsp-x", "1.2.3"));
+        let body = handle.render();
+        assert!(
+            body.contains(&format!(
+                "gsp_build_info{{component=\"gsp-x\",version=\"1.2.3\",commit=\"{COMMIT}\"}} 1"
+            )),
+            "{body}"
+        );
+        assert!(!COMMIT.is_empty());
     }
 
     #[tokio::test]
