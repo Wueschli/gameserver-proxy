@@ -191,6 +191,16 @@ impl AddressSync {
         }
         self.live.readdress(&new)?;
         address_store::save(&self.path, &cidr)?;
+        // The proxies re-peer with the new address on their own; renew ours so
+        // the handshake does not wait for a keepalive to time out.
+        match self.live.renew_peers() {
+            Ok(targets) => targets
+                .into_iter()
+                .for_each(crate::interface::kick_handshake),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not renew the peers after the address change")
+            }
+        }
         Ok(true)
     }
 }

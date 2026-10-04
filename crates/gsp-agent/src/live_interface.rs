@@ -78,6 +78,25 @@ impl LiveInterface {
         Ok(self.wg.remove_interface()?)
     }
 
+    /// Re-creates every peer exactly as configured and returns their tunnel
+    /// addresses, to be kicked. The other side drops and re-adds its peer for
+    /// us when our address changes, which discards the session this side
+    /// still believes in; its packets are then ignored until a keepalive
+    /// times out (longer than a proxy waits for a backend). Re-creating the
+    /// peer resets the session, so a new handshake starts at once.
+    pub fn renew_peers(&self) -> anyhow::Result<Vec<std::net::IpAddr>> {
+        let host = self.wg.read_interface_data()?;
+        let mut targets = Vec::new();
+        for peer in host.peers.values() {
+            if let Err(e) = self.wg.remove_peer(&peer.public_key) {
+                tracing::debug!(error = %e, "removing a peer to renew its session");
+            }
+            self.wg.configure_peer(peer)?;
+            targets.extend(peer.allowed_ips.iter().map(|a| a.address));
+        }
+        Ok(targets)
+    }
+
     /// Moves the interface to `new`, keeping its peers. When the old address
     /// cannot be deleted nothing has changed; when the new one cannot be
     /// assigned the old one is put back if it can be, and either way the
@@ -124,6 +143,7 @@ pub(crate) mod testing {
     pub struct Fake {
         pub log: Log,
         pub fail_assign: Vec<String>,
+        pub peers: Vec<Peer>,
     }
 
     impl WireguardInterfaceApi for Fake {
@@ -152,14 +172,23 @@ pub(crate) mod testing {
             self.log.lock().unwrap().push("remove".into());
             Ok(())
         }
-        fn configure_peer(&self, _: &Peer) -> Result<(), WireguardInterfaceError> {
+        fn configure_peer(&self, peer: &Peer) -> Result<(), WireguardInterfaceError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("configure peer {}", peer.public_key));
             Ok(())
         }
-        fn remove_peer(&self, _: &Key) -> Result<(), WireguardInterfaceError> {
+        fn remove_peer(&self, key: &Key) -> Result<(), WireguardInterfaceError> {
+            self.log.lock().unwrap().push(format!("remove peer {key}"));
             Ok(())
         }
         fn read_interface_data(&self) -> Result<Host, WireguardInterfaceError> {
-            Ok(Host::default())
+            let mut host = Host::default();
+            for p in &self.peers {
+                host.peers.insert(p.public_key.clone(), p.clone());
+            }
+            Ok(host)
         }
         fn set_dns(&self, _: &DnsConfig<'_>) -> Result<(), WireguardInterfaceError> {
             Ok(())
@@ -174,12 +203,23 @@ pub(crate) mod testing {
     /// `fail_assign` fails, deleting one in `fail_delete` fails; both are
     /// logged otherwise.
     pub fn live(fail_assign: &[&str], fail_delete: &[&str], log: &Log) -> LiveInterface {
+        live_with_peers(fail_assign, fail_delete, &[], log)
+    }
+
+    /// [`live`] on a device that reports `peers`.
+    pub fn live_with_peers(
+        fail_assign: &[&str],
+        fail_delete: &[&str],
+        peers: &[Peer],
+        log: &Log,
+    ) -> LiveInterface {
         let fail_delete: Vec<String> = fail_delete.iter().map(ToString::to_string).collect();
         let log2 = log.clone();
         LiveInterface::new(
             Arc::new(Fake {
                 log: log.clone(),
                 fail_assign: fail_assign.iter().map(ToString::to_string).collect(),
+                peers: peers.to_vec(),
             }),
             mask("10.60.0.2/24"),
             Box::new(move |a| {
@@ -256,6 +296,29 @@ mod tests {
             log.lock().unwrap().len(),
             before + 1,
             "the recorded address is deleted and assigned again, not skipped"
+        );
+    }
+
+    #[test]
+    fn renew_peers_recreates_each_peer_and_returns_its_address() {
+        use defguard_wireguard_rs::key::Key;
+        use defguard_wireguard_rs::peer::Peer;
+        let key = Key::new([7; 32]);
+        let mut peer = Peer::new(key.clone());
+        peer.allowed_ips.push(mask("fd00::2/128"));
+        let log = Log::default();
+        let live = live_with_peers(&[], &[], &[peer], &log);
+        let targets = live.renew_peers().unwrap();
+        assert_eq!(
+            targets,
+            vec!["fd00::2".parse::<std::net::IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                format!("remove peer {key}"),
+                format!("configure peer {key}")
+            ]
         );
     }
 }
