@@ -23,12 +23,16 @@ ENV RUSTUP_TOOLCHAIN=stable
 RUN apt-get update \
  && apt-get install -y --no-install-recommends protobuf-compiler \
  && rm -rf /var/lib/apt/lists/*
+# cargo-auditable embeds the exact dependency list in each binary (a few KB), so
+# an image scan (Trivy) sees the crates a binary was built from. Same version as
+# CI's build-release job.
+RUN cargo install cargo-auditable --locked --version 0.7.7
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo auditable build --release --locked \
       -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent \
  && mkdir -p /out/data \
  && cp target/release/gsp target/release/gsp-controller \

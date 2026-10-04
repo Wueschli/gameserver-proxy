@@ -51,7 +51,11 @@ Watch-list:
   module) and the release jobs' glibc vs. the distroless runtime (2.41).
 - **Trivy pinning:** CI runs the official `aquasec/trivy` image pinned by digest, not
   `trivy-action`/`setup-trivy`, whose tags were hijacked in March 2026. Re-check the
-  binary against the release checksum when bumping the digest.
+  binary against the release checksum when bumping the digest. The `trivy` job also
+  `cosign verify`s the digest's keyless Sigstore signature (identity: Aqua's release
+  workflow at a version tag) on every run, so a bump to an unsigned digest fails there.
+- **cargo-auditable:** release binaries (CI `build-release` and the Dockerfile builder)
+  are built with `cargo auditable build`, version 0.7.7 in both; bump together.
 - **Merge queue:** PRs land one at a time, each re-run on the latest `main`. If several
   PRs are routinely in flight at once, GitHub's merge queue (needs an
   `on: merge_group` trigger) would keep `main` green.
