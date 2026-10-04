@@ -726,19 +726,13 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             }
         };
 
-        // At most one sniffer plugin per listener (gsp-core runs one per conn).
-        let mut sniffer: Option<String> = None;
+        // Distinct sniffer names, in route order (gsp-core tries them in this
+        // order; the first to recognise the bytes wins).
+        let mut sniffers: Vec<String> = Vec::new();
         for r in &routes {
             if let Matcher::Sniffer { name, .. } = &r.matcher {
-                match &sniffer {
-                    Some(prev) if prev != name => {
-                        return Err(Invalid(format!(
-                            "listener {}: routes use two different sniffers ({prev}, {name}); \
-                             only one per listener is supported",
-                            l.name
-                        )));
-                    }
-                    _ => sniffer = Some(name.clone()),
+                if !sniffers.contains(name) {
+                    sniffers.push(name.clone());
                 }
             }
         }
@@ -753,7 +747,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             prefix,
             freebind: l.freebind,
             transparent: l.transparent,
-            sniffer,
+            sniffers,
             route_hint: l.route_hint,
             first_packet_gate: l.first_packet_gate,
             acl,

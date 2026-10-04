@@ -105,7 +105,7 @@ details are in `git log`.
   (standalone workspace, `make plugins`). Per-plugin config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
   single-level timing-wheel UDP idle expiry.
-- Ops: `gsp_build_info{version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
+- Ops: `gsp_build_info{component,version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
 
 ### Distributed control plane — phases 10–13 (fully built)
 
@@ -450,7 +450,7 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/src/sniffer_loader.rs` | `SnifferLoader` (shared `wasmtime::Engine` + epoch-ticker thread) + `scan(&SniffersConfig)`; `WasmSniffer`; `build_sniffers` = `new` + one `scan`. |
 | `crates/gsp/src/discovery.rs` | `DnsSrvSource` (`hickory-resolver`), `ConsulSource` / `KubernetesSource` (`reqwest`), `DiscoveryFactory`. |
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
-| `crates/gsp/src/procinfo.rs` | `gsp_build_info` / `gsp_fd_open` / `gsp_fd_limit` — build identity + a small detached `/proc/self/fd` sampling task. |
+| `crates/gsp/src/procinfo.rs` | `gsp_fd_open` / `gsp_fd_limit` — a small detached `/proc/self/fd` sampling task. |
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
 | `crates/gsp-controller/src/addresses.rs` + `addresses/api.rs` | Tunnel address authority: `Network`, `AddressBook` (claim / release / entries over two sled trees, one mutex, flush after each transaction), `expand_backends`, `resolve_flags`; `GET /tunnel/addresses`, `claim_error_response` (409 / 422 / 503 mapping), the daily stale warning. Shared by both peer registries. |
 | `crates/gsp-controller/src/lease.rs` | `--tunnel-lease-ttl` expiry: `sweep` (list the book, `RegistryState::expire` each owner unseen past the cutoff, re-checked where the write lands), `lease_loop` (leader-only, 1 h startup grace), `check_ttl` (min 2 h). Under HA the write is `WriteRequest::Expire`. |

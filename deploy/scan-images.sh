@@ -38,7 +38,7 @@ scan() {
     echo "$name" >>"$out/not-scanned.txt" # an error, not findings: no report at all
   fi
 }
-for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
   if [ -n "${TRIVY_IMAGE_DIR:-}" ]; then
     scan "image-$t" vuln,secret image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
   else

@@ -50,6 +50,8 @@ errs << "deploy-smoke runs `up` as its own recipe line: a failed up skips logs +
 df = File.read("deploy/Dockerfile")
 gsp_stage = df[/AS gsp\n.*?(?=\nFROM |\z)/m]
 errs << "gsp image lacks a 65532-owned /data" unless gsp_stage.include?("--chown=65532:65532 /out/data /data")
+minimal_stage = df[/AS gsp-minimal\n.*?(?=\nFROM |\z)/m]
+errs << "gsp-minimal image lacks a 65532-owned /data" unless minimal_stage.to_s.include?("--chown=65532:65532 /out/data /data")
 
 # Prebuilt mode (CI feeds binaries from the shared release build): the stage
 # selector, the prebuilt stage, runtime stages reading from `bins`, and the

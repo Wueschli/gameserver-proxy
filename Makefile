@@ -25,6 +25,8 @@ test:
 test-minimal:
 	cargo clippy -p gsp --no-default-features --all-targets -- -D warnings
 	cargo test -p gsp --no-default-features
+	cargo clippy -p gsp-core --no-default-features --all-targets -- -D warnings
+	cargo test -p gsp-core --no-default-features
 
 ## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
 audit:
