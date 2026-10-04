@@ -104,6 +104,21 @@ pub fn check_flags(
     Ok(())
 }
 
+/// `/raft/*` and the membership API let a caller rewrite replicated state, so
+/// HA never starts without a peer token (security review N1), and a token it
+/// is given must not be short (O7). Unlike the client-facing `--auth-token`
+/// there is no opt-out.
+pub fn check_ha_token(ha_enabled: bool, token: Option<&str>) -> Result<(), String> {
+    match token {
+        None if ha_enabled => Err(
+            "--ha-peers/--ha-join require --ha-token: without it the /raft/* and \
+             /admin/ha/members endpoints accept any caller"
+                .into(),
+        ),
+        t => gsp_http::policy::check_optional_secret("--ha-token", t),
+    }
+}
+
 /// One proposed write, tagged by which log it targets — the Raft log
 /// carries both the config and intent logs' entries interleaved, since one
 /// tier is one Raft group (`docs/10`: "not two independent groups").
@@ -299,6 +314,20 @@ mod tests {
         assert!(check_flags(false, true, Some(4), true)
             .unwrap_err()
             .contains("--role slave"));
+    }
+
+    #[test]
+    fn ha_without_a_token_is_refused() {
+        let e = check_ha_token(true, None).unwrap_err();
+        assert!(e.contains("--ha-token"), "{e}");
+        assert!(check_ha_token(false, None).is_ok());
+    }
+
+    #[test]
+    fn short_ha_token_is_refused_whether_or_not_ha_is_on() {
+        assert!(check_ha_token(true, Some("short")).is_err());
+        assert!(check_ha_token(false, Some("short")).is_err());
+        assert!(check_ha_token(true, Some("0123456789abcdef")).is_ok());
     }
 
     #[test]

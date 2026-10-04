@@ -105,3 +105,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - `GLIBC_… not found` at container start — builder and runtime base are on
   different Debian releases; keep them on the same one.
 - `required variable … is missing` — `.env` is missing or a value is empty.
+
+## Authentication at startup
+
+The image defaults bind `0.0.0.0` without a token, and the services now refuse that: a bare `docker run` of the controller, aggregator or UI image exits with an explanation. Pass a token (`--auth-token`, `--ui-password`, at least 16 bytes) as the compose and k8s examples do, or `--insecure-no-auth` if the network boundary is your only control. See `docs/12-deployment.md`.

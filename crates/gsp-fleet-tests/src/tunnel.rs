@@ -50,7 +50,8 @@ impl Default for LabOptions {
 /// `--tunnel-network <network>` followed by `extra`, unless `extra` names its
 /// own network.
 fn controller_args(network: &str, extra: &[&str]) -> Vec<String> {
-    let mut args = Vec::new();
+    // The lab controller binds the wildcard address and the lab agents carry no token.
+    let mut args = vec!["--insecure-no-auth".to_string()];
     if !extra.contains(&"--tunnel-network") {
         args.extend(["--tunnel-network".to_string(), network.to_string()]);
     }
@@ -444,6 +445,8 @@ impl TunnelLab {
         .map(|s| s.to_string())
         .collect();
         args.extend(self.backend.gsp_flag().map(str::to_string));
+        // The lab edge's admin API binds the wildcard address with no token.
+        args.push("--insecure-no-auth".to_string());
         let gsp = Proc::spawn_in(Some(&ns), "gsp", &args)?;
         self.edges.push(Edge {
             gsp: Some(gsp),

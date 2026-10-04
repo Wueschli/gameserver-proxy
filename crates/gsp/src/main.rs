@@ -60,6 +60,12 @@ struct Args {
     #[arg(long)]
     check: bool,
 
+    /// Allow a non-loopback `settings.admin.listen` with no
+    /// `settings.admin.auth_token`. Without it startup is refused. Only for
+    /// deployments where the network boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
+
     /// Fleet aggregator base URL (e.g. "http://127.0.0.1:9902") to push
     /// periodic fleet-state summaries to (docs/10 "The aggregator").
     /// Optional and independent of `--controller` — pushing state and
@@ -257,6 +263,8 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         pools = cfg.pools.len(),
         "configuration loaded"
     );
+
+    check_admin_auth(&cfg, args.insecure_no_auth)?;
 
     // A configured GeoIP DB must load, both for `--check` and at startup.
     let geo_db = match &cfg.geo_db {
@@ -656,6 +664,25 @@ async fn run(
 /// given (an `http`/`https` base URL, optionally with a path prefix; trailing
 /// slashes are trimmed because the fan-out appends absolute paths), else this
 /// instance's own admin listener.
+/// Refuse an open admin API on a routable address and weak admin/gossip
+/// secrets (docs/security-review-2026-10.md O1, O7).
+fn check_admin_auth(cfg: &gsp_config::Config, insecure_no_auth: bool) -> anyhow::Result<()> {
+    let token = cfg.admin_auth_token.as_deref();
+    gsp_http::policy::check_optional_secret("settings.admin.auth_token", token)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(g) = &cfg.gossip {
+        gsp_http::policy::check_secret("settings.gossip.psk", &g.psk)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    gsp_http::policy::check_exposure(
+        "gsp admin API",
+        cfg.admin_listen,
+        token.is_some(),
+        insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
 fn aggregator_admin_url(
     override_url: Option<&str>,
     admin_tls: bool,
@@ -697,7 +724,48 @@ async fn wait_for_shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::aggregator_admin_url;
+    use super::{aggregator_admin_url, check_admin_auth};
+
+    fn cfg(settings: &str) -> gsp_config::Config {
+        gsp_config::parse_str(&format!(
+            "settings:\n{settings}pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_admin_on_loopback_is_fine_elsewhere_refused() {
+        assert!(check_admin_auth(&cfg(""), false).is_ok());
+        let public = cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n");
+        let e = check_admin_auth(&public, false).unwrap_err().to_string();
+        assert!(e.contains("--insecure-no-auth"), "{e}");
+        assert!(check_admin_auth(&public, true).is_ok());
+    }
+
+    #[test]
+    fn admin_token_makes_a_public_bind_ok_unless_short() {
+        let ok =
+            cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n    auth_token: \"0123456789abcdef\"\n");
+        assert!(check_admin_auth(&ok, false).is_ok());
+        let short = cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n    auth_token: \"short\"\n");
+        let e = check_admin_auth(&short, true).unwrap_err().to_string();
+        assert!(e.contains("settings.admin.auth_token"), "{e}");
+    }
+
+    #[test]
+    fn short_gossip_psk_is_refused() {
+        let gossip = |psk: &str| {
+            cfg(&format!(
+                "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"{psk}\"\n"
+            ))
+        };
+        let e = check_admin_auth(&gossip("short"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("settings.gossip.psk"), "{e}");
+        assert!(check_admin_auth(&gossip("0123456789abcdef"), false).is_ok());
+    }
 
     #[test]
     fn defaults_to_the_admin_listen_address() {

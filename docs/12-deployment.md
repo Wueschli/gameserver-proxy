@@ -163,6 +163,24 @@ The CI-runnable `make tunnel-e2e` (rootless network namespaces,
 capabilities — `NET_ADMIN` and `/dev/net/tun` as documented above stay the
 deployment requirement.
 
+## Authentication at startup
+
+Every fleet API is open when no token is configured. Startup now enforces:
+
+- **Non-loopback bind needs auth.** `gsp-controller`, `gsp-aggregator` and `gsp-ui`
+  (`--listen`) and `gsp`'s admin API (`settings.admin.listen`) refuse to start on a
+  non-loopback address without a token (`--auth-token`, `--ui-password` /
+  `--users-file`, `settings.admin.auth_token`). If the network boundary really is your
+  only control, pass `--insecure-no-auth`; it logs a warning instead.
+- **HA needs `--ha-token`.** `gsp-controller --ha-peers` / `--ha-join` refuse to start
+  without it, with no opt-out: `/raft/*` and `/admin/ha/members` would otherwise accept
+  anyone. HA peers should use `https://` URLs (see below), since the token travels in
+  each request.
+- **Minimum secret length: 16 bytes** for `--auth-token`, `--ha-token`,
+  `settings.admin.auth_token` and `settings.gossip.psk`. Generate one with
+  `openssl rand -hex 32`. `--ui-password` and the outbound tokens
+  (`--controller-token` etc., which must match the remote side) are not checked.
+
 ## TLS for the fleet services
 
 Without the settings below, `gsp-controller`, `gsp-aggregator`, `gsp-ui` and `gsp`'s

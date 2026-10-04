@@ -424,6 +424,11 @@ pub fn spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) ->
         listen.to_string(),
     ];
     args.extend(extra.iter().cloned());
+    // HA refuses to start without a peer token: give those tests a shared one.
+    let ha = args.iter().any(|a| a == "--ha-peers" || a == "--ha-join");
+    if ha && !args.iter().any(|a| a == "--ha-token") {
+        args.extend(["--ha-token".to_string(), "fleet-test-ha-token".to_string()]);
+    }
     Proc::spawn_in(None, "gsp-controller", &args)
 }
 
