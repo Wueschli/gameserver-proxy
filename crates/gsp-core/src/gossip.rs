@@ -187,6 +187,23 @@ impl GossipHandle {
     }
 }
 
+/// Spawns the mesh task for `cfg` and returns the fabric `health.rs` talks to
+/// plus the task's handle. `runtime.rs` calls it for `settings.gossip`; the
+/// stand-in in `gossip_disabled.rs` returns `None`.
+#[allow(clippy::unnecessary_wraps)] // same signature as the disabled stand-in
+pub fn spawn(
+    cfg: GossipConfig,
+    shutdown: watch::Receiver<bool>,
+) -> Option<(GossipFabric, tokio::task::JoinHandle<()>)> {
+    let (handle, inbox) = GossipHandle::new();
+    let fabric = GossipFabric {
+        handle: handle.clone(),
+        quorum_fraction: cfg.quorum_fraction,
+    };
+    let task = tokio::spawn(run(cfg, handle, inbox, shutdown));
+    Some((fabric, task))
+}
+
 type FocaInstance = Foca<SocketAddr, PostcardCodec, rand10::rngs::StdRng, BroadcastMerger>;
 
 /// Runs the gossip mesh until `shutdown` fires. Binds `cfg.bind`, announces

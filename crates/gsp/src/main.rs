@@ -279,6 +279,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     );
 
     check_admin_auth(&cfg, args.insecure_no_auth)?;
+    check_gossip_feature(&cfg)?;
 
     // A configured GeoIP DB must load, both for `--check` and at startup.
     let geo_db = match &cfg.geo_db {
@@ -692,6 +693,23 @@ fn check_admin_auth(cfg: &gsp_config::Config, insecure_no_auth: bool) -> anyhow:
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// `settings.gossip` needs the `gossip` cargo feature; a build without it must
+/// refuse the config, not silently run without the regional health fabric.
+#[cfg_attr(feature = "gossip", allow(clippy::unnecessary_wraps))] // the refusal only exists without the feature
+fn check_gossip_feature(cfg: &gsp_config::Config) -> anyhow::Result<()> {
+    #[cfg(not(feature = "gossip"))]
+    if cfg.gossip.is_some() {
+        anyhow::bail!(
+            "settings.gossip: this build of gsp was compiled without the `gossip` cargo \
+             feature, so it cannot join the regional health fabric; remove \
+             `settings.gossip` or use a full build"
+        );
+    }
+    #[cfg(feature = "gossip")]
+    let _ = cfg;
+    Ok(())
+}
+
 fn aggregator_admin_url(
     override_url: Option<&str>,
     admin_tls: bool,
@@ -733,7 +751,7 @@ async fn wait_for_shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregator_admin_url, check_admin_auth};
+    use super::{aggregator_admin_url, check_admin_auth, check_gossip_feature};
 
     fn cfg(settings: &str) -> gsp_config::Config {
         gsp_config::parse_str(&format!(
@@ -774,6 +792,26 @@ mod tests {
             .to_string();
         assert!(e.contains("settings.gossip.psk"), "{e}");
         assert!(check_admin_auth(&gossip("0123456789abcdef"), false).is_ok());
+    }
+
+    #[cfg(not(feature = "gossip"))]
+    #[test]
+    fn a_gossip_section_is_refused_with_a_message_naming_the_feature() {
+        let with = cfg(
+            "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"0123456789abcdef\"\n",
+        );
+        let e = check_gossip_feature(&with).unwrap_err().to_string();
+        assert!(e.contains("`gossip` cargo feature"), "{e}");
+        assert!(check_gossip_feature(&cfg("")).is_ok());
+    }
+
+    #[cfg(feature = "gossip")]
+    #[test]
+    fn a_gossip_section_is_accepted_in_a_full_build() {
+        let with = cfg(
+            "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"0123456789abcdef\"\n",
+        );
+        assert!(check_gossip_feature(&with).is_ok());
     }
 
     #[test]

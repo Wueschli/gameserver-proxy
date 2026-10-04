@@ -188,9 +188,9 @@ make ui        # build the admin GUI frontend (needs Node/npm)
 make help      # list every target
 ```
 
-Container images (five targets in one `Dockerfile`), a Docker Compose demo
+Container images (six targets in one `Dockerfile`), a Docker Compose demo
 and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
-publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-controller`,
+publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-minimal`, `gsp-controller`,
 `gsp-aggregator`, `gsp-ui`, `gsp-agent`) via the `Release` workflow. The compose
 demo and the manifests are reference material only.
 

@@ -16,6 +16,8 @@ COPY crates/gsp-ui/web/ ./
 RUN npm run build
 
 # --- one builder for all five binaries (deps compile once) ---------------
+# Plus gsp-minimal: `gsp` built with `--no-default-features` (issue #62), first,
+# so the full build below leaves target/release/gsp the full one.
 FROM rust:1-trixie AS builder
 # rust-toolchain.toml is deliberately not copied: with it, rustup would fetch
 # rustfmt/clippy during the build.
@@ -32,9 +34,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo auditable build --release --locked \
+    mkdir -p /out/data \
+ && cargo auditable build --release --locked -p gsp --no-default-features \
+ && cp target/release/gsp /out/gsp-minimal \
+ && cargo auditable build --release --locked \
       -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent \
- && mkdir -p /out/data \
  && cp target/release/gsp target/release/gsp-controller \
        target/release/gsp-aggregator target/release/gsp-ui \
        target/release/gsp-agent /out/ \
@@ -53,6 +57,15 @@ FROM ${BIN_SOURCE} AS bins
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp
 COPY --from=bins /out/gsp /usr/local/bin/gsp
 # Writable by the nonroot uid: the tunnel key file lives on a volume here.
+COPY --from=bins --chown=65532:65532 /out/data /data
+ENTRYPOINT ["/usr/local/bin/gsp"]
+CMD ["--config", "/etc/gsp/gsp.yaml"]
+
+# The minimal edge build of gsp (`--no-default-features`: no WASM sniffers, gRPC
+# resolver, dns_srv source or gossip fabric; a config that needs one is refused
+# at startup). Installed as `gsp`, so it takes the same arguments as the `gsp` target.
+FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-minimal
+COPY --from=bins /out/gsp-minimal /usr/local/bin/gsp
 COPY --from=bins --chown=65532:65532 /out/data /data
 ENTRYPOINT ["/usr/local/bin/gsp"]
 CMD ["--config", "/etc/gsp/gsp.yaml"]

@@ -12,6 +12,10 @@ pub mod discovery;
 pub mod drain;
 pub mod error;
 pub mod geo;
+#[cfg(feature = "gossip")]
+pub mod gossip;
+#[cfg(not(feature = "gossip"))]
+#[path = "gossip_disabled.rs"]
 pub mod gossip;
 pub mod health;
 pub mod limits;

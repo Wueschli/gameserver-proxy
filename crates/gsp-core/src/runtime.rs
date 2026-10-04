@@ -263,34 +263,23 @@ impl Runtime {
         );
         listeners.start_all(&initial);
 
-        // Built before the health task so it can hand `sweep` a
+        // Spawned before the health task so it can hand `sweep` a
         // `GossipFabric` from the start (phase 13, docs/10 "Tier 2").
-        let gossip_fabric = gossip.as_ref().map(|cfg| {
-            let (handle, inbox) = crate::gossip::GossipHandle::new();
-            (
-                crate::gossip::GossipFabric {
-                    handle,
-                    quorum_fraction: cfg.quorum_fraction,
-                },
-                inbox,
-            )
-        });
+        let (gossip_fabric, gossip_task) =
+            match gossip.and_then(|cfg| crate::gossip::spawn(cfg, shutdown_rx.clone())) {
+                Some((fabric, task)) => (Some(fabric), Some(task)),
+                None => (None, None),
+            };
 
         let mut tasks = Vec::new();
         {
             let snap = snapshot.clone();
             let mut sd = shutdown_rx.clone();
-            let fabric = gossip_fabric.as_ref().map(|(f, _)| f.clone());
             tasks.push(tokio::spawn(async move {
-                crate::health::run(snap, &mut sd, fabric).await;
+                crate::health::run(snap, &mut sd, gossip_fabric).await;
             }));
         }
-        if let (Some(gossip_cfg), Some((fabric, inbox))) = (gossip, gossip_fabric) {
-            let sd = shutdown_rx.clone();
-            tasks.push(tokio::spawn(async move {
-                crate::gossip::run(gossip_cfg, fabric.handle, inbox, sd).await;
-            }));
-        }
+        tasks.extend(gossip_task);
         let sources = source_factory.map(|factory| {
             let mgr = SourceManager::new(discovery.clone(), reload_requested.clone(), factory);
             mgr.start_all(&initial);
