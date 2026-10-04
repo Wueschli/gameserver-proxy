@@ -22,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use super::cluster_state::ClusterState;
 use super::{NodeId, WriteResponse};
 use crate::addresses::{AddressBook, BookSnapshot, Entry, Network, Rejection};
-use crate::peers::{tombstone_bytes, PeerRegistration};
+use crate::peers::PeerRegistration;
 use crate::proxy_peers::ProxyRegistration;
+use crate::registry::tombstone_bytes;
 use crate::registry::{Registration, RegistrySnapshot, RegistryState};
 use crate::store::Store;
 
@@ -640,7 +641,7 @@ mod tests {
         let removed: Vec<_> = seen
             .iter()
             .filter_map(|(_, b)| {
-                crate::peers::event_payload(0, b)["removed"]["name"]
+                crate::registry::event_payload(0, b)["removed"]["name"]
                     .as_str()
                     .map(String::from)
             })

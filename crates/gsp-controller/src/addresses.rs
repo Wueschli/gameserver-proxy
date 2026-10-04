@@ -524,7 +524,9 @@ impl AddressBook {
         )? {
             Outcome::Granted(a) => Ok(a),
             Outcome::Rejected(r) => Err(ClaimError::Rejected(r)),
-            Outcome::AlreadyApplied => unreachable!("a claim without an index never skips"),
+            Outcome::AlreadyApplied => Err(ClaimError::Storage(
+                "a claim without a Raft index was skipped as already applied".into(),
+            )),
         }
     }
 
