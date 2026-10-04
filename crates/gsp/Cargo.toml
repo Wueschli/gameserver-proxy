@@ -15,9 +15,14 @@ path = "src/main.rs"
 # `cargo build -p gsp --no-default-features`. Everything is on by default;
 # turning one off makes a config that needs it fail at startup, never silently
 # run without it.
-default = ["wasm-sniffers"]
+default = ["wasm-sniffers", "grpc-resolver", "dns-srv"]
 # WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
 wasm-sniffers = ["dep:wasmtime"]
+# `backend_sources[].type: dns_srv`; pulls in `hickory-resolver`.
+dns-srv = ["dep:hickory-resolver"]
+# gRPC external resolver (`resolvers[].kind: grpc`); pulls in `tonic`/`prost` and
+# needs `protoc` at build time.
+grpc-resolver = ["dep:tonic", "dep:prost", "dep:tonic-prost", "dep:tonic-prost-build"]
 
 [lints]
 workspace = true
@@ -32,9 +37,9 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
-tonic.workspace = true
-prost.workspace = true
-tonic-prost.workspace = true
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+tonic-prost = { workspace = true, optional = true }
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -43,7 +48,7 @@ axum.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 notify.workspace = true
-hickory-resolver.workspace = true
+hickory-resolver = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 sha2.workspace = true
 nix.workspace = true
@@ -52,7 +57,7 @@ defguard_wireguard_rs.workspace = true
 rand.workspace = true
 
 [build-dependencies]
-tonic-prost-build.workspace = true
+tonic-prost-build = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

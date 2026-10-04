@@ -75,7 +75,9 @@ crates/
     main.rs                 CLI, tracing, runtime bring-up, shutdown
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
-    discovery.rs            DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
+    discovery.rs            ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
+    dns_srv.rs              DnsSrvSource (Phase 8) — behind the `dns-srv` feature (`hickory-resolver`), `dns_srv_disabled.rs` stands in without it
+    grpc_resolver.rs        GrpcResolver (tonic) — behind the `grpc-resolver` feature (`tonic`/`prost`, and `protoc` in `build.rs`), `grpc_resolver_disabled.rs` stands in without it
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
     procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
@@ -150,7 +152,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
-| Minimal edge build | `make test-minimal` (`gsp` with `--no-default-features`: clippy + tests; also in `make check` and the `test` CI job). Optional `gsp` cargo features, issue #62: `wasm-sniffers` (wasmtime). Build it with `cargo build --release -p gsp --no-default-features` |
+| Minimal edge build | `make test-minimal` (`gsp` with `--no-default-features`: clippy + tests; also in `make check` and the `test` CI job). Optional `gsp` cargo features, issue #62: `wasm-sniffers` (wasmtime), `grpc-resolver` (tonic/prost, `protoc`), `dns-srv` (hickory). Build it with `cargo build --release -p gsp --no-default-features` |
 | Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Deploy images | `make deploy-images` (needs Docker; builds the five `deploy/Dockerfile` targets and runs `--version` on each; `BIN_SOURCE=prebuilt` uses binaries from `deploy/prebuilt/`) |
 | Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the five images (OS packages, embedded Rust crates, secrets) and `Cargo.lock` / the UI's `package-lock.json`, HIGH/CRITICAL with a fix; exits 1 on findings, reports in `target/trivy/`. In CI it is the separate, **informational** `trivy` job after `deploy` (non-blocking; scans `deploy`'s images from a `docker save` artifact; run summary + warnings + `trivy-reports` artifact; the official `aquasec/trivy` image pinned by digest, not `trivy-action`). Rust coverage is GHSA only — `cargo audit` (the `audit` CI job, `make audit`) covers RustSec. Accepted findings: `.trivyignore` |

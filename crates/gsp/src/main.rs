@@ -8,6 +8,16 @@ mod admin;
 mod aggregator_client;
 mod controller_client;
 mod discovery;
+#[cfg(feature = "dns-srv")]
+mod dns_srv;
+#[cfg(not(feature = "dns-srv"))]
+#[path = "dns_srv_disabled.rs"]
+mod dns_srv;
+#[cfg(feature = "grpc-resolver")]
+mod grpc_resolver;
+#[cfg(not(feature = "grpc-resolver"))]
+#[path = "grpc_resolver_disabled.rs"]
+mod grpc_resolver;
 mod intent_client;
 mod procinfo;
 mod proxy_register;
