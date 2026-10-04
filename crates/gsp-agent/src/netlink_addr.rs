@@ -127,10 +127,10 @@ fn interface_index(ifname: &str) -> io::Result<u32> {
 mod tests {
     use super::*;
 
-    /// Needs `CAP_NET_ADMIN` and `ip`; run with `cargo test -- --ignored` as
-    /// root (the tunnel e2e covers it end to end in CI).
+    /// Needs `CAP_NET_ADMIN` and `ip`; without them it does nothing (the
+    /// tunnel e2e covers the call end to end in CI). Not `#[ignore]`d, since
+    /// the CI jobs that run ignored tests have no such privilege.
     #[test]
-    #[ignore = "needs CAP_NET_ADMIN"]
     fn deletes_an_address_and_tolerates_one_that_is_gone() {
         let ip = |args: &[&str]| {
             let out = std::process::Command::new("ip")
@@ -140,6 +140,15 @@ mod tests {
             assert!(out.status.success(), "{args:?}: {out:?}");
             String::from_utf8(out.stdout).unwrap()
         };
+        let privileged = std::process::Command::new("ip")
+            .args(["addr", "add", "10.99.77.1/24", "dev", "lo"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !privileged {
+            eprintln!("skipped: needs CAP_NET_ADMIN and ip");
+            return;
+        }
+        ip(&["addr", "del", "10.99.77.1/24", "dev", "lo"]);
         let address: IpAddrMask = "10.99.77.1/24".parse().unwrap();
         ip(&["addr", "add", "10.99.77.1/24", "dev", "lo"]);
         assert!(ip(&["addr", "show", "dev", "lo"]).contains("10.99.77.1/24"));
