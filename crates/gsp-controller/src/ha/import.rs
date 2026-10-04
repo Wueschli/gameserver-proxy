@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::cluster_state::ClusterState;
 use super::{NodeId, WriteResponse};
 use crate::addresses::{AddressBook, BookSnapshot, Entry, Network, Rejection};
-use crate::peers::PeerRegistration;
+use crate::peers::{tombstone_bytes, PeerRegistration};
 use crate::proxy_peers::ProxyRegistration;
 use crate::registry::{Registration, RegistrySnapshot, RegistryState};
 use crate::store::Store;
@@ -57,6 +57,13 @@ pub struct ImportContent {
     pub network: Option<String>,
     pub origins_last_revision: u64,
     pub proxies_last_revision: u64,
+    /// Names whose newest log entry is a tombstone: the import logs them
+    /// removed again, so a subscriber that missed the old tombstone still
+    /// drops the peer, and an otherwise empty registry keeps its head.
+    #[serde(default)]
+    pub origins_removed: Vec<String>,
+    #[serde(default)]
+    pub proxies_removed: Vec<String>,
 }
 
 /// This node's own pre-HA data, as the `/raft/*` routes and the leader's
@@ -164,14 +171,25 @@ fn count_book(dir: &Path) -> anyhow::Result<usize> {
     Ok(book.entries().map_err(|e| anyhow!("{e}"))?.len())
 }
 
-/// The current registration per name and the last revision number.
-fn read_registry<R: Registration>(dir: &Path) -> anyhow::Result<(Vec<R>, u64)> {
+/// What a set-aside registry holds: the current registration per name, the
+/// names whose newest entry is a tombstone, and the last revision number.
+struct PreHaRegistry<R> {
+    current: Vec<R>,
+    removed: Vec<String>,
+    last_revision: u64,
+}
+
+fn read_registry<R: Registration>(dir: &Path) -> anyhow::Result<PreHaRegistry<R>> {
     if !dir.is_dir() {
-        return Ok((Vec::new(), 0));
+        return Ok(PreHaRegistry {
+            current: Vec::new(),
+            removed: Vec::new(),
+            last_revision: 0,
+        });
     }
     let store = open_store(dir)?;
     let current = store.db().open_tree("current")?;
-    let mut regs = Vec::new();
+    let mut regs: Vec<R> = Vec::new();
     for item in current.iter() {
         let (name, rev) = item?;
         let rev = u64::from_be_bytes(rev.as_ref().try_into().context("a current pointer")?);
@@ -180,7 +198,22 @@ fn read_registry<R: Registration>(dir: &Path) -> anyhow::Result<(Vec<R>, u64)> {
             .ok_or_else(|| anyhow!("{dir:?}: current {name:?} points at missing revision {rev}"))?;
         regs.push(serde_json::from_slice(&bytes).with_context(|| format!("{dir:?}: {name:?}"))?);
     }
-    Ok((regs, store.current_revision()?.unwrap_or(0)))
+    // `current` never points at a tombstone, so a tombstoned name that is
+    // also current was registered again afterwards.
+    let mut removed = std::collections::BTreeSet::new();
+    for (_, bytes) in store.all_revisions()? {
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).with_context(|| format!("{dir:?}: a log entry"))?;
+        if let Some(name) = value.get("removed").and_then(|v| v.as_str()) {
+            removed.insert(name.to_string());
+        }
+    }
+    removed.retain(|name| !regs.iter().any(|r| r.name() == name));
+    Ok(PreHaRegistry {
+        current: regs,
+        removed: removed.into_iter().collect(),
+        last_revision: store.current_revision()?.unwrap_or(0),
+    })
 }
 
 /// This node's set-aside data as [`ImportContent`], `None` when it has none.
@@ -189,8 +222,8 @@ pub fn read_pre_ha(
     network: Option<Network>,
     source: NodeId,
 ) -> anyhow::Result<Option<ImportContent>> {
-    let (origins, origins_last_revision) = read_registry(&aside(&data_dir.join("peers")))?;
-    let (proxies, proxies_last_revision) = read_registry(&aside(&data_dir.join("proxy-peers")))?;
+    let origins = read_registry::<PeerRegistration>(&aside(&data_dir.join("peers")))?;
+    let proxies = read_registry::<ProxyRegistration>(&aside(&data_dir.join("proxy-peers")))?;
     let book_dir = aside(&data_dir.join("tunnel-addresses"));
     let book = if book_dir.is_dir() {
         open_book(&book_dir)?
@@ -199,17 +232,20 @@ pub fn read_pre_ha(
     } else {
         Vec::new()
     };
-    if origins.is_empty() && proxies.is_empty() && book.is_empty() {
+    let tombstoned = !origins.removed.is_empty() || !proxies.removed.is_empty();
+    if origins.current.is_empty() && proxies.current.is_empty() && book.is_empty() && !tombstoned {
         return Ok(None);
     }
     Ok(Some(ImportContent {
         source,
-        origins,
-        proxies,
+        origins: origins.current,
+        proxies: proxies.current,
         book,
         network: network.map(|n| n.to_string()),
-        origins_last_revision,
-        proxies_last_revision,
+        origins_last_revision: origins.last_revision,
+        proxies_last_revision: proxies.last_revision,
+        origins_removed: origins.removed,
+        proxies_removed: proxies.removed,
     }))
 }
 
@@ -218,10 +254,12 @@ fn io<E: std::error::Error + 'static>(e: E) -> StorageIOError<NodeId> {
 }
 
 /// Installs `regs` as the registry's whole log, numbered from
-/// `last_revision + 1`, unless the registry already absorbed `index`.
+/// `last_revision + 1`, followed by a tombstone per `removed` name, unless the
+/// registry already absorbed `index`.
 fn import_registry<R: Registration>(
     registry: &RegistryState<R>,
     regs: &[R],
+    removed: &[String],
     last_revision: u64,
     index: u64,
 ) -> Result<(), StorageIOError<NodeId>> {
@@ -245,6 +283,10 @@ fn import_registry<R: Registration>(
         let bytes = serde_json::to_vec(reg).expect("a registration always serializes");
         snapshot.revisions.push((revision, bytes));
         snapshot.current.push((reg.name().to_string(), revision));
+    }
+    for name in removed {
+        let revision = last_revision + 1 + snapshot.revisions.len() as u64;
+        snapshot.revisions.push((revision, tombstone_bytes(name)));
     }
     registry.replace(&snapshot).map_err(io)
 }
@@ -287,12 +329,14 @@ pub(super) fn apply_import(
     import_registry(
         peers,
         &content.origins,
+        &content.origins_removed,
         content.origins_last_revision,
         index,
     )?;
     import_registry(
         proxy_peers,
         &content.proxies,
+        &content.proxies_removed,
         content.proxies_last_revision,
         index,
     )?;
@@ -482,6 +526,8 @@ mod tests {
             network: Some("10.60.0.0/24".into()),
             origins_last_revision: 40,
             proxies_last_revision: 0,
+            origins_removed: Vec::new(),
+            proxies_removed: Vec::new(),
         }
     }
 
@@ -581,5 +627,55 @@ mod tests {
         ));
         assert_eq!(t.peers.current_for("a").unwrap(), None);
         assert_eq!(t.cluster.network().unwrap(), None);
+    }
+
+    #[test]
+    fn a_tombstone_the_old_node_wrote_is_imported_for_late_subscribers() {
+        let t = target();
+        let mut c = content();
+        c.origins_removed = vec!["gone".into()];
+        apply(&t, &c, 5);
+        // A subscriber that stopped at the old head sees the tombstone.
+        let seen = t.peers.store.revisions_after(40).unwrap();
+        let removed: Vec<_> = seen
+            .iter()
+            .filter_map(|(_, b)| {
+                crate::peers::event_payload(0, b)["removed"]["name"]
+                    .as_str()
+                    .map(String::from)
+            })
+            .collect();
+        assert_eq!(removed, ["gone"]);
+        assert_eq!(t.peers.current_for("gone").unwrap(), None);
+    }
+
+    #[test]
+    fn a_registry_with_only_removed_names_keeps_its_head() {
+        let t = target();
+        let mut c = content();
+        c.origins.clear();
+        c.book.clear();
+        c.origins_removed = vec!["gone".into()];
+        apply(&t, &c, 5);
+        assert_eq!(t.peers.store.current_revision().unwrap(), Some(41));
+        assert_eq!(
+            t.peers
+                .register_applied(&origin("c", "10.60.0.3"), Some(6))
+                .unwrap(),
+            crate::store::Applied::Written(42)
+        );
+    }
+
+    #[test]
+    fn read_pre_ha_finds_names_whose_last_entry_is_a_tombstone() {
+        let dir = pre_ha_dir();
+        reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
+        let store = reopen_when_unlocked(|| open_store(&dir.path().join("peers.pre-ha")));
+        // "ghost" was removed for good; "a" was removed and registered again.
+        store.put(tombstone_bytes("ghost")).unwrap();
+        store.put(tombstone_bytes("a")).unwrap();
+        drop(store);
+        let content = reopen_when_unlocked(|| read_pre_ha(dir.path(), None, 1)).unwrap();
+        assert_eq!(content.origins_removed, ["ghost"]);
     }
 }
