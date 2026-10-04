@@ -23,8 +23,8 @@ use super::cluster_state::ClusterState;
 use super::{NodeId, WriteResponse};
 use crate::addresses::{AddressBook, BookSnapshot, Entry, Network, Rejection};
 use crate::peers::PeerRegistration;
-use crate::registry::tombstone_bytes;
 use crate::proxy_peers::ProxyRegistration;
+use crate::registry::tombstone_bytes;
 use crate::registry::{Registration, RegistrySnapshot, RegistryState};
 use crate::store::Store;
 
