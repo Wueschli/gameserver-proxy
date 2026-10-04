@@ -1,9 +1,12 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=proto/resolver.proto");
-    tonic_prost_build::configure()
-        .build_client(true)
-        .build_server(true) // the server stub is used by this crate's own tests
-        .compile_protos(&["proto/resolver.proto"], &["proto"])?;
+    #[cfg(feature = "grpc-resolver")]
+    {
+        println!("cargo:rerun-if-changed=proto/resolver.proto");
+        tonic_prost_build::configure()
+            .build_client(true)
+            .build_server(true) // the server stub is used by this crate's own tests
+            .compile_protos(&["proto/resolver.proto"], &["proto"])?;
+    }
 
     // Short git commit SHA for `gsp_build_info` (docs/06). Best-effort: a
     // source tarball / shallow checkout with no `.git` still builds, just
