@@ -445,6 +445,8 @@ impl TunnelLab {
         .map(|s| s.to_string())
         .collect();
         args.extend(self.backend.gsp_flag().map(str::to_string));
+        // The lab edge's admin API binds the wildcard address with no token.
+        args.push("--insecure-no-auth".to_string());
         let gsp = Proc::spawn_in(Some(&ns), "gsp", &args)?;
         self.edges.push(Edge {
             gsp: Some(gsp),
