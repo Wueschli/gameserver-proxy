@@ -412,9 +412,12 @@ leader imports exactly one node's copy, whichever node wins the first election.
   set-aside data stays untouched (one `WARN` each).
 - Imported registrations are re-written as new revisions that continue after the source's
   last revision number, so every edge's `since` cursor from the single-node days stays
-  valid. A tombstone the old node wrote that a subscribed edge had not received yet is
-  not carried over: that edge keeps the removed peer until it restarts. A registry with
-  no live registration at import time starts its log at 1.
+  valid. Tombstones the old node wrote are carried over too (the entry lists the names
+  whose newest log entry is a removal), so a subscribed edge that had not received one
+  still drops the peer, and a registry with no live registration keeps its log head.
+  `ImportContent` is a Raft log entry: a node on an older build applies an `Import`
+  without those tombstones, so upgrade every node of the cluster before the first
+  initialization.
 - Clients' pinned addresses that used to collide across nodes now get `409`: uniqueness
   is cluster-wide, where it was per node before.
 - Snapshots persisted by a build older than this feature (before 2026-10-03) install as

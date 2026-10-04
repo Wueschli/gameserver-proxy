@@ -202,7 +202,8 @@ fn read_registry<R: Registration>(dir: &Path) -> anyhow::Result<PreHaRegistry<R>
     // also current was registered again afterwards.
     let mut removed = std::collections::BTreeSet::new();
     for (_, bytes) in store.all_revisions()? {
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).with_context(|| format!("{dir:?}: a log entry"))?;
         if let Some(name) = value.get("removed").and_then(|v| v.as_str()) {
             removed.insert(name.to_string());
         }
