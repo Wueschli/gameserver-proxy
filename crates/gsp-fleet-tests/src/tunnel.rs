@@ -75,13 +75,16 @@ impl Backend {
         }
     }
 
-    /// Per-wait deadline. Spike (2026-10-01): kernel's first round trip is ~2 s;
-    /// userspace's was ~25 s before the agent's handshake kick (CI 2026-10-04: first round trip ~8 s; waited on the agent's persistent keepalive; the agent
-    /// now triggers the handshake itself, see `gsp_agent::interface::kick_handshake`).
+    /// Per-wait deadline. Kernel's first round trip is ~2 s. Userspace's was
+    /// ~25 s while the proxy waited on the agent's persistent keepalive; since
+    /// the agent triggers the handshake itself
+    /// (`gsp_agent::interface::kick_handshake`) it is ~8 s in CI, but
+    /// `an_edge_restarts_with_the_controller_down` takes ~37 s end to end
+    /// there, so 60 s keeps headroom.
     pub fn deadline(self) -> Duration {
         match self {
             Backend::Kernel => Duration::from_secs(30),
-            Backend::Userspace => Duration::from_secs(45),
+            Backend::Userspace => Duration::from_secs(60),
         }
     }
 

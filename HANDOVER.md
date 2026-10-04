@@ -277,7 +277,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   tunnel right after configuring a proxy peer (`interface::kick_handshake`), which
   starts the handshake immediately — fix written 2026-10-04, confirmed by
   the `tunnel (userspace)` CI leg (scenario 1 passes in ~8 s, down from ≥25 s for the
-  handshake alone; the lab's userspace deadline is now 45 s); tracked in
+  handshake alone; the lab's userspace deadline is now 60 s); tracked in
   [#67](https://github.com/Wueschli/gameserver-proxy/issues/67);
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
