@@ -44,9 +44,11 @@
 
 ### Backend discovery (phase 8)
 - `gsp_discovery_refresh_total{pool,kind,result}` – `kind` =
-  `dns_srv|consul|kubernetes`; `result` = `ok|empty|error`. One per refresh
-  attempt. `empty` / `error` keep the last-known-good backend set (the pool is
-  never cleared by a failed refresh).
+  `dns_srv|consul|kubernetes|tunnel`; `result` = `ok|empty|error|withdrawn`. One
+  per refresh attempt. `empty` / `error` keep the last-known-good backend set (the
+  pool is never cleared by a failed refresh). `withdrawn` (`tunnel` only) means the
+  controller deleted or expired an origin this proxy had seen: the pool's set is
+  cleared.
 - `gsp_discovery_backends{pool}` (gauge) – addresses returned by the pool's
   source at its last successful refresh.
 
@@ -87,6 +89,14 @@
 - `gsp_fd_limit` (gauge, no labels) — this process's `RLIMIT_NOFILE` soft
   limit (`getrlimit`, via `nix`), sampled once at startup (it doesn't change
   at runtime).
+- `gsp_tls_handshakes_refused_total{reason="per_source"|"rate"}` (counter) — TLS
+  connections to the admin API closed at the door: the source already had its cap
+  of handshakes in flight, or was opening connections faster than its rate.
+  Counted in `gsp-http` (its name lives in `gsp_http::tls`, not `metrics_defs.rs`,
+  which `gsp-http` cannot depend on); only `gsp` installs a recorder, so the fleet
+  binaries (`gsp-controller`, `gsp-aggregator`, `gsp-ui`: no `/metrics` yet, tracked in #44) emit the counters to no recorder, so nothing is exposed there. Present only with `settings.admin.tls`.
+- `gsp_tls_handshakes_evicted_total` (counter, no labels) — pending handshakes
+  dropped to make room at the global cap (same notes).
 - `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this
   instance's Tier-2 gossip mesh (phase 13, `docs/10` "Tier 2", `gsp-core::
   gossip`). Present only when `settings.gossip` is set.
@@ -95,6 +105,9 @@
 - `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
   datagrams dropped for a missing/invalid HMAC tag; never trusted, never
   forwarded to the SWIM state machine.
+- `gsp_gossip_stale_rejected_total` (counter, no labels) — authentic gossip
+  datagrams dropped because their sender timestamp is more than 30 s from this
+  node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `gsp_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.
   Independent of, and unable to clear, the backend's own local `healthy`
@@ -418,7 +431,9 @@ Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
 that couldn't be reached; a broadcast never fails or blocks on one bad
 instance. A `gsp` instance opts in with `--aggregator <url>` (+
 `--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
-default 10s) — independent of `--controller`, pushing state and pulling
+default 10s, and `--aggregator-admin-url`, the base URL the aggregator should
+fan out to when `http(s)://<settings.admin.listen>` is not reachable from it,
+e.g. in a container, behind NAT or a TLS terminator) — independent of `--controller`, pushing state and pulling
 config are unrelated axes.
 
 ### `gsp-ui` — the operator dashboard's BFF
@@ -454,6 +469,11 @@ two login modes, mutually exclusive.
 
 With neither flag, the UI is fully open and every session is implicitly
 `admin` — same posture every other optional-auth surface in this fleet has.
+
+Sessions expire: `--session-idle-timeout-secs` (default 1800) and
+`--session-max-age-secs` (default 43200, also the cookie's `Max-Age`), with at
+most `--max-sessions` (default 1000) held at once. `POST /ui/login` is
+rate-limited per client address and per username (`429` + `Retry-After`).
 
 Three roles gate three route groups: `viewer` (every `GET` — fleet reads,
 config/revision reads/diffs, `GET /ws/fleet`), `operator` (+ the phase-5

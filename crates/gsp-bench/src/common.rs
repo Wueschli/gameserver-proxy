@@ -192,5 +192,5 @@ pub fn proc_field(pid: u32, key: &str) -> Option<u64> {
 pub fn open_fd_count(pid: u32) -> Option<usize> {
     std::fs::read_dir(format!("/proc/{pid}/fd"))
         .ok()
-        .map(|d| d.count())
+        .map(std::iter::Iterator::count)
 }

@@ -46,7 +46,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::ingest::{IngestPayload, IngestStore, PoolSummary, SessionCounts};
-use crate::util::now_ms;
+use crate::util::unix_ms;
 
 /// How long since an instance's last push before `/fleet/healthz` calls it
 /// `stale` — roughly 3x `gsp`'s default `--aggregator-interval-sec` (10s),
@@ -117,8 +117,8 @@ pub fn router(state: AppState) -> Router {
         .route("/fleet/subscribe", get(subscribe_fleet))
         .merge(crate::fanout::router())
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
 }
@@ -165,7 +165,7 @@ struct FleetPools {
 /// pushed-first is not the order here; [`IngestStore::snapshot`] already
 /// sorts by instance name for a stable table.
 async fn fleet_pools(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetPools> = state
         .store
         .snapshot()
@@ -192,7 +192,7 @@ struct FleetSessions {
 /// full live registry — see the module doc's note on `IngestPayload` being a
 /// summary; an instance's own `GET /sessions` still has the detail).
 async fn fleet_sessions(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetSessions> = state
         .store
         .snapshot()
@@ -223,7 +223,7 @@ struct FleetHealth {
 /// from any one instance's `GET /healthz` (that instance's own liveness) —
 /// it answers "when did *we* last hear from each instance."
 async fn fleet_healthz(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetHealth> = state
         .store
         .snapshot()
@@ -255,7 +255,7 @@ struct FleetInstanceView {
 /// `GET /fleet/*` endpoints report, combined into one payload so `gsp-ui`
 /// doesn't need three separate subscriptions.
 fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
-    let now = now_ms();
+    let now = unix_ms();
     store
         .snapshot()
         .into_iter()
@@ -511,11 +511,11 @@ mod tests {
         let state = test_state();
         state.store.insert_state(InstanceState {
             payload: full_payload("stale-1"),
-            received_at_ms: now_ms().saturating_sub(STALE_AFTER_MS + 5_000),
+            received_at_ms: unix_ms().saturating_sub(STALE_AFTER_MS + 5_000),
         });
         state.store.insert_state(InstanceState {
             payload: full_payload("fresh-1"),
-            received_at_ms: now_ms(),
+            received_at_ms: unix_ms(),
         });
         let app = router(state);
 

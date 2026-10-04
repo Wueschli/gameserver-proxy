@@ -1,0 +1,12 @@
+# Secret-scanner allowlist (gitleaks format; trufflehog/others take the same paths).
+# No scanner runs in CI today (GitHub secret scanning covers the repo), so this is
+# the ready-made config for the day one is enabled.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-only TLS fixtures: private keys committed on purpose, never used outside tests"
+paths = [
+  '''crates/gsp-http/tests/fixtures/''',
+]

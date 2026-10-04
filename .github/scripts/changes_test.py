@@ -1,0 +1,235 @@
+"""Tests for changes.py (changed files -> the CI areas that need to run).
+
+Most cases run against the repo's real `cargo metadata`, so a new dependency
+edge that changes what a crate affects shows up here as well as in CI. The
+synthetic-graph cases pin the mechanism itself (transitive closure, ownership).
+
+Run: python3 .github/scripts/changes_test.py   (needs cargo on PATH)
+"""
+import io
+import os
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+sys.dont_write_bytecode = True  # no __pycache__ next to the scripts
+sys.path.insert(0, HERE)
+
+import changes  # noqa: E402
+
+ALL = {"ui", "plugins", "tunnel", "deploy", "fuzz", "release"}
+
+
+def flags(out):
+    return {a for a, on in out.items() if on}
+
+
+class RealRepo(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.graph = changes.load_graph(REPO)
+
+    def areas(self, *files):
+        return flags(changes.areas(list(files), self.graph))
+
+    def test_docs_only_changes_nothing(self):
+        self.assertEqual(self.areas("README.md", "docs/12-deployment.md"), set())
+
+    def test_empty_list_is_nothing_not_all(self):
+        self.assertEqual(self.areas(), set())
+
+    def test_ui_web_only(self):
+        self.assertEqual(self.areas("crates/gsp-ui/web/src/App.tsx"), {"ui"})
+
+    def test_ui_lockfile_also_runs_deploy_for_the_image_scan(self):
+        self.assertEqual(
+            self.areas("crates/gsp-ui/web/package-lock.json"),
+            {"ui", "deploy", "release"},
+        )
+
+    def test_gsp_core_reaches_plugins_and_tunnel(self):
+        self.assertEqual(
+            self.areas("crates/gsp-core/src/pool.rs"),
+            {"plugins", "tunnel", "release"},
+        )
+
+    def test_gsp_config_also_runs_fuzz(self):
+        self.assertEqual(
+            self.areas("crates/gsp-config/src/lib.rs"),
+            {"plugins", "tunnel", "fuzz", "release"},
+        )
+
+    def test_gsp_http_reaches_plugins_and_tunnel(self):
+        self.assertEqual(
+            self.areas("crates/gsp-http/tests/fixtures/leaf.pem"),
+            {"plugins", "tunnel", "release"},
+        )
+
+    def test_fuzz_workspace_only_runs_fuzz(self):
+        self.assertEqual(
+            self.areas("crates/gsp-config/fuzz/fuzz_targets/parse_config.rs"),
+            {"fuzz"},
+        )
+
+    def test_a_plugin_crate_only_runs_plugins(self):
+        self.assertEqual(self.areas("crates/plugins/a2s/src/lib.rs"), {"plugins", "release"})
+
+    def test_plugins_workspace_root_files_run_plugins(self):
+        self.assertEqual(self.areas("crates/plugins/Cargo.lock"), {"plugins", "release"})
+
+    def test_gsp_agent_is_tunnel_only(self):
+        self.assertEqual(self.areas("crates/gsp-agent/src/main.rs"), {"tunnel"})
+
+    def test_gsp_ui_crate_is_tunnel_only(self):
+        self.assertEqual(self.areas("crates/gsp-ui/src/lib.rs"), {"tunnel"})
+
+    def test_fleet_tests_are_tunnel_only(self):
+        self.assertEqual(self.areas("crates/gsp-fleet-tests/tests/tunnel.rs"), {"tunnel"})
+
+    def test_gsp_bench_runs_no_scoped_job(self):
+        self.assertEqual(self.areas("crates/gsp-bench/src/main.rs"), set())
+
+    def test_gsp_proto_runs_plugins_and_tunnel(self):
+        self.assertEqual(
+            self.areas("crates/gsp/proto/resolver.proto"),
+            {"plugins", "tunnel", "release"},
+        )
+
+    def test_an_unknown_path_under_crates_runs_every_rust_job(self):
+        self.assertEqual(
+            self.areas("crates/gsp-new/src/lib.rs"),
+            {"plugins", "tunnel", "fuzz", "release"},
+        )
+
+    def test_nextest_config_runs_the_nextest_jobs(self):
+        self.assertEqual(self.areas(".config/nextest.toml"), {"plugins", "tunnel", "release"})
+
+    def test_root_cargo_lock_runs_its_workspace_and_deploy_not_fuzz(self):
+        # crates/gsp-config/fuzz has its own workspace and lockfile.
+        self.assertEqual(self.areas("Cargo.lock"), {"plugins", "tunnel", "deploy", "release"})
+
+    def test_fuzz_lockfile_runs_fuzz_only(self):
+        self.assertEqual(self.areas("crates/gsp-config/fuzz/Cargo.lock"), {"fuzz"})
+
+    def test_root_manifest_runs_all_rust_and_deploy(self):
+        # Inherited by every workspace's members (gsp-config uses workspace = true).
+        self.assertEqual(
+            self.areas("Cargo.toml"), {"plugins", "tunnel", "deploy", "fuzz", "release"}
+        )
+
+    def test_toolchain_runs_all_rust(self):
+        self.assertEqual(
+            self.areas("rust-toolchain.toml"), {"plugins", "tunnel", "fuzz", "release"}
+        )
+
+    def test_makefile_runs_tunnel_and_deploy(self):
+        self.assertEqual(self.areas("Makefile"), {"tunnel", "deploy", "release"})
+
+    def test_deploy_dir_dockerignore_and_trivyignore(self):
+        for f in ("deploy/compose/gsp.yaml", ".dockerignore", ".trivyignore"):
+            with self.subTest(f=f):
+                self.assertEqual(self.areas(f), {"deploy", "release"})
+
+    def test_workflow_edit_runs_everything(self):
+        self.assertEqual(self.areas(".github/workflows/ci.yml"), ALL)
+
+    def test_mixed_ui_web_and_deploy(self):
+        self.assertEqual(
+            self.areas("crates/gsp-ui/web/package.json", "deploy/Dockerfile"),
+            {"ui", "deploy", "release"},
+        )
+
+    def test_every_package_is_loaded(self):
+        names = {p.name for p in self.graph.packages.values()}
+        for n in ("gsp", "gsp-agent", "gsp-fleet-tests", "a2s", "gsp-config-fuzz"):
+            self.assertIn(n, names)
+
+
+def pkg(name, *deps):
+    return changes.Package(name, frozenset(deps))
+
+
+class SyntheticGraph(unittest.TestCase):
+    """The mechanism, on a graph the test controls."""
+
+    def graph(self, **extra):
+        packages = {
+            "crates/gsp-config": pkg("gsp-config"),
+            "crates/gsp-core": pkg("gsp-core", "crates/gsp-config"),
+            "crates/gsp": pkg("gsp", "crates/gsp-core"),
+            "crates/gsp-agent": pkg("gsp-agent"),
+            "crates/gsp-controller": pkg("gsp-controller"),
+            "crates/gsp-aggregator": pkg("gsp-aggregator"),
+            "crates/gsp-ui": pkg("gsp-ui"),
+            "crates/gsp-fleet-tests": pkg("gsp-fleet-tests"),
+            "crates/gsp-config/fuzz": pkg("gsp-config-fuzz", "crates/gsp-config"),
+            "crates/plugins/a2s": pkg("a2s"),
+        }
+        packages.update(extra)
+        return changes.Graph(packages, {
+            "": [d for d in packages if not d.startswith(("crates/plugins/", "crates/gsp-config/fuzz"))],
+            "crates/plugins": ["crates/plugins/a2s"],
+            "crates/gsp-config/fuzz": ["crates/gsp-config/fuzz"],
+        })
+
+    def test_a_new_dependency_edge_is_followed_transitively(self):
+        # gsp-agent gains a dependency on gsp-core: a gsp-config change now
+        # reaches it through gsp-core, with no hand-written list to update.
+        g = self.graph(**{"crates/gsp-agent": pkg("gsp-agent", "crates/gsp-core")})
+        self.assertIn(
+            "crates/gsp-agent",
+            changes.dependents({"crates/gsp-config"}, g),
+        )
+
+    def test_the_longest_owning_package_wins(self):
+        g = self.graph()
+        self.assertEqual(
+            changes.owners("crates/gsp-config/fuzz/x.rs", g), {"crates/gsp-config/fuzz"}
+        )
+        self.assertEqual(changes.owners("crates/gsp-config/x.rs", g), {"crates/gsp-config"})
+
+    def test_a_lockfile_does_not_reach_another_workspace(self):
+        g = self.graph()
+        got = flags(changes.areas(["Cargo.lock"], g))
+        self.assertNotIn("fuzz", got)
+        self.assertIn("tunnel", got)
+
+    def test_a_crate_dir_prefix_is_not_a_partial_name_match(self):
+        # crates/gsp-core-extra is not inside crates/gsp-core.
+        self.assertIsNone(changes.owners("crates/gsp-core-extra/src/lib.rs", self.graph()))
+
+
+class Main(unittest.TestCase):
+    def run_main(self, argv, stdin, loader):
+        out = io.StringIO()
+        changes.main(argv, io.StringIO(stdin), out, io.StringIO(), loader)
+        return dict(line.split("=") for line in out.getvalue().split())
+
+    def test_all_flag_runs_everything_without_metadata(self):
+        def boom(_):
+            raise AssertionError("no metadata needed for --all")
+
+        got = self.run_main(["--all"], "", boom)
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+
+    def test_a_metadata_failure_runs_everything(self):
+        def broken(_):
+            raise changes.MetadataError("cargo metadata failed")
+
+        got = self.run_main([], "crates/gsp-agent/src/main.rs\n", broken)
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+
+    def test_a_roots_entry_matching_no_package_runs_everything(self):
+        # e.g. gsp-agent renamed: a silently empty root would skip tunnel.
+        got = self.run_main([], "README.md\n", lambda _: changes.Graph({}, {}))
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+
+    def test_output_lists_every_area_once(self):
+        got = self.run_main([], "README.md\n", lambda _: changes.load_graph(REPO))
+        self.assertEqual(set(got), ALL)
+        self.assertEqual(set(got.values()), {"false"})
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)

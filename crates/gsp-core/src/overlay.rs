@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 /// Per-pool membership edits. `added` and `removed` are disjoint.
 #[derive(Debug, Default)]
@@ -35,7 +35,7 @@ impl BackendOverlay {
 
     /// Add a backend to `pool` (idempotent). Cancels a prior removal.
     pub fn add(&self, pool: &str, addr: SocketAddr) {
-        let mut map = self.edits.lock().unwrap();
+        let mut map = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
         let e = map.entry(pool.to_string()).or_default();
         e.removed.remove(&addr);
         e.added.insert(addr);
@@ -44,7 +44,7 @@ impl BackendOverlay {
     /// Remove a backend from `pool` (idempotent). Overrides a file entry and
     /// cancels a prior addition.
     pub fn remove(&self, pool: &str, addr: SocketAddr) {
-        let mut map = self.edits.lock().unwrap();
+        let mut map = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
         let e = map.entry(pool.to_string()).or_default();
         e.added.remove(&addr);
         e.removed.insert(addr);
@@ -54,7 +54,7 @@ impl BackendOverlay {
     /// additions, minus overlay removals. Order: file order first (preserved),
     /// then added addresses sorted.
     pub fn effective_targets(&self, pool: &str, file_targets: &[SocketAddr]) -> Vec<SocketAddr> {
-        let map = self.edits.lock().unwrap();
+        let map = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(e) = map.get(pool) else {
             return file_targets.to_vec();
         };
@@ -73,7 +73,7 @@ impl BackendOverlay {
 
     /// `(added, removed)` addresses for `pool` — for `GET /config` introspection.
     pub fn pending(&self, pool: &str) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
-        let map = self.edits.lock().unwrap();
+        let map = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
         match map.get(pool) {
             Some(e) => (
                 e.added.iter().copied().collect(),

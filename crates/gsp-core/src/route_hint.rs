@@ -35,6 +35,7 @@ impl RouteHints {
     }
 
     /// Insert / replace the hint for `ip`, and drop any expired entries.
+    #[allow(clippy::needless_pass_by_value)] // the table takes ownership of what it stores
     pub fn set(&self, ip: IpAddr, pool: String, ttl: Duration) {
         let expiry = Instant::now() + ttl;
         self.table.rcu(|cur| {

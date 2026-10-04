@@ -18,11 +18,18 @@ spec:
             # Default instance name is the admin listen addr (0.0.0.0:9900 on every
             # node) — all nodes would overwrite one aggregator entry.
             - --aggregator-instance=$(NODE_NAME)
+            # The reported default (http://0.0.0.0:9900) is unreachable from the
+            # aggregator; hostNetwork puts the admin API on the node IP (IPv4 here;
+            # an IPv6 node IP needs [brackets]). https:// with settings.admin.tls.
+            - --aggregator-admin-url=http://$(NODE_IP):9900
           env:
             - name: NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
             - name: AGGREGATOR_TOKEN
               valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+          # With settings.admin.tls set, add `scheme: HTTPS` to both probes.
           readinessProbe: { httpGet: { path: /healthz, port: 9900 } }
           livenessProbe: { httpGet: { path: /healthz, port: 9900 }, initialDelaySeconds: 10 }
           volumeMounts: [{ name: config, mountPath: /etc/gsp, readOnly: true }]

@@ -9,7 +9,9 @@ ports actually works once it's namespaced by a container runtime.
 The reference build is [`deploy/Dockerfile`](../deploy/Dockerfile): one file, a
 shared `rust:1-trixie` builder and five runtime targets on
 `gcr.io/distroless/cc-debian13:nonroot` (see [`deploy/README.md`](../deploy/README.md);
-`make deploy-images` builds all five). None of these five binaries shell out to an
+`make deploy-images` builds all five; `make deploy-scan` runs an informational Trivy
+scan of them and of the lockfiles they're built from — CI's `deploy` and `trivy` jobs).
+None of these five binaries shell out to an
 external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its
@@ -17,7 +19,7 @@ dynamic library dependencies (glibc). It does not need a system CA bundle either
 HTTP clients (`--controller`, `--aggregator`, `--tunnel-controller-url`, the HTTP
 resolvers) verify against a root bundle compiled into the binary, plus whatever
 `--ca-file` adds — see
-[`gsp-controller` behind TLS](#gsp-controller-behind-tls) for what that implies. The builder and runtime base
+[TLS for the fleet services](#tls-for-the-fleet-services) for what that implies. The builder and runtime base
 must be on the same Debian release, or a binary can fail to start on an older glibc.
 
 `[profile.release]` sets `strip = true`, which trims roughly 15-20% off every binary.
@@ -56,10 +58,15 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
-`hostNetwork` DaemonSet). Both are reference only. CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
-job, blocking since 2026-10-02; first green run 2026-10-01). Known limitation: aggregator intent fan-out (drain etc.) cannot reach
-a `gsp` from these examples, because the `admin_url` it reports is derived from
-`settings.admin.listen` and no flag overrides it.
+`hostNetwork` DaemonSet). Both are reference only (the images themselves are published to GHCR on version tags by `.github/workflows/release.yml`). CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
+job, blocking since 2026-10-02; first green run 2026-10-01). Aggregator intent fan-out (drain etc.) goes to the `admin_url`
+each `gsp` reports, by default `http(s)://<settings.admin.listen>`; when that
+address is not reachable from the aggregator (`0.0.0.0`, loopback, a container
+port mapping, a TLS terminator in front), set `gsp --aggregator-admin-url`. The
+k8s DaemonSet reports `http://<node IP>:9900`, and the aggregator presents
+`--instance-token` (the admin `auth_token`). The compose demo cannot use
+fan-out: its `gsp` admin API listens on the host's loopback only, which the
+bridge-networked aggregator cannot reach.
 
 ## Networking: a proxy that binds many, changing ports
 
@@ -156,20 +163,102 @@ The CI-runnable `make tunnel-e2e` (rootless network namespaces,
 capabilities — `NET_ADMIN` and `/dev/net/tun` as documented above stay the
 deployment requirement.
 
-## `gsp-controller` behind TLS
+## Authentication at startup
 
-`gsp-controller` (and the aggregator, the UI and `gsp`'s admin API) serve **plain
-HTTP**. Run as-is across a network, that exposes:
+Every fleet API is open when no token is configured. Startup now enforces:
+
+- **Non-loopback bind needs auth.** `gsp-controller`, `gsp-aggregator` and `gsp-ui`
+  (`--listen`) and `gsp`'s admin API (`settings.admin.listen`) refuse to start on a
+  non-loopback address without a token (`--auth-token`, `--ui-password` /
+  `--users-file`, `settings.admin.auth_token`). If the network boundary really is your
+  only control, pass `--insecure-no-auth`; it logs a warning instead.
+- **HA needs `--ha-token`.** `gsp-controller --ha-peers` / `--ha-join` refuse to start
+  without it, with no opt-out: `/raft/*` and `/admin/ha/members` would otherwise accept
+  anyone. HA peers should use `https://` URLs (see below), since the token travels in
+  each request.
+- **Minimum secret length: 16 bytes** for `--auth-token`, `--ha-token`,
+  `settings.admin.auth_token` and `settings.gossip.psk`. Generate one with
+  `openssl rand -hex 32`. `--ui-password` and the outbound tokens
+  (`--controller-token` etc., which must match the remote side) are not checked.
+
+## TLS for the fleet services
+
+Without the settings below, `gsp-controller`, `gsp-aggregator`, `gsp-ui` and `gsp`'s
+admin API serve **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
 - the full config text, on `GET /config` and the SSE `GET /config/subscribe`;
 - every origin's registration (WireGuard public key, public endpoint, fronted
   backend addresses) on the `/peers*` and `/proxy-peers*` routes.
 
-The supported pattern is a **reverse proxy you run that terminates TLS**, with the
-controller listening only on loopback or a private network
-(`--listen 127.0.0.1:9901`, or a private bridge/pod network). There is no native TLS
-in the controller.
+Two ways to encrypt it: **native TLS** (below), or a **reverse proxy
+you run that terminates TLS**, with the controller listening only on loopback or a
+private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
+aggregator, the UI and `gsp`'s admin API serve native TLS the same way.
+
+### Native TLS
+
+```sh
+gsp-controller --listen 0.0.0.0:8443 \
+  --tls-cert /etc/gsp/tls/fullchain.pem --tls-key /etc/gsp/tls/privkey.pem
+```
+
+- `--tls-cert` is a PEM chain, leaf first (a Let's Encrypt `fullchain.pem` works);
+  `--tls-key` a PEM private key (PKCS#8, SEC1 or PKCS#1). Both or neither. With them,
+  `--listen` speaks **HTTPS only** — every route, including the SSE streams.
+- **Renewal without a restart:** both files are checked every 30 s and a changed pair is
+  swapped in for new connections. A broken or half-written pair (no certificate, no
+  key, key not matching the certificate) is logged and the current certificate stays in
+  service until a good pair appears. Bad files at **startup** stop the controller with
+  an error naming the file.
+- Clients use `https://` URLs; with a private CA they add `--ca-file`. HA replicas can
+  each serve native TLS and name their peers `--ha-peers 1=https://ctl-1:8443,…`
+  (plus `--ca-file`), with no terminator at all.
+- TLS handshakes run in their own tasks, so a client that connects and stalls cannot
+  hold up others. A client must send its ClientHello within 3 s and finish the
+  handshake within 10 s. At most 16 handshakes may be pending per source (an IPv4
+  address or an IPv6 /64); more are closed at once. At 512 pending handshakes in total a
+  new connection is still accepted and the oldest pending handshake is dropped, so a
+  flood of idle connects cannot lock real clients out. A source may also open at most 20
+  new connections a second on average (bursts of 64), so it cannot cycle connects under
+  its pending cap. A limit being hit logs a warning (at most once a minute) and, on
+  `gsp`, counts into `gsp_tls_handshakes_refused_total` / `gsp_tls_handshakes_evicted_total`
+  (docs/06). The limits are flags: `--tls-max-pending` (512),
+  `--tls-max-pending-per-source` (16), `--tls-new-per-source-per-sec` (20; `0` turns the
+  rate limit off) and `--tls-new-per-source-burst` (64); raise the per-source ones for
+  a fleet that reaches the service from behind one NAT. No client certificates (mTLS).
+- **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
+  push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
+  goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
+- **`gsp-ui`** takes the same two flags. Serving HTTPS itself, it marks the session
+  cookie `Secure` (without the flags it doesn't — a browser drops a `Secure` cookie on
+  `http://` and login would loop). The live view's WebSocket works over HTTP/2 too:
+  a browser on h2 opens it as an extended `CONNECT`, which the UI accepts (and the
+  session cookie counts in whichever `cookie` header h2 splits it into). Plain
+  HTTP is not redirected; serve only HTTPS on the port browsers use.
+- **`gsp`'s admin API** is configured in the YAML, next to `listen`:
+  `settings.admin.tls: { cert: <chain.pem>, key: <key.pem> }` (both required, plus the
+  optional handshake limits `max_pending`, `max_pending_per_source`,
+  `new_per_source_per_sec`, `new_per_source_burst`, same meaning as the flags above;
+  startup-only like `listen`; the files renew like the flags above; `gsp --check`
+  loads them). The admin URL `gsp` reports to the aggregator then becomes
+  `https://<settings.admin.listen>`, so the certificate needs that address as a SAN
+  (an IP SAN for an IP `listen`), and the aggregator takes `--ca-file` for a private
+  CA. As before, the reported URL is the literal `listen` address — a wildcard bind
+  (`0.0.0.0`) is not reachable as an admin URL, TLS or not. With `--controller` one
+  YAML reaches every instance, so put each host's own certificate at the same path.
+  Health probes against the admin port must then use HTTPS (Kubernetes:
+  `httpGet.scheme: HTTPS`).
+
+Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
+`UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
+TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `gsp` pushes to an
+`https://` aggregator, read back over HTTPS), `ui_native_tls.rs` (login over HTTPS
+sets a `Secure` cookie that unlocks `/ui/session`), `admin_native_tls.rs` (an
+aggregator fans an intent verb out to an `https://` admin API; `gsp --check` names a
+bad `settings.admin.tls.cert`) and `ha_tls.rs`
+`three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
+listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
 
 ### Proxy configuration
 
@@ -273,9 +362,80 @@ one with `--ca-file`, and never elect a leader without it.
 
 **Only at bootstrap.** `--ha-peers` is read when the cluster is first initialised;
 after that each member's address lives in the replicated Raft membership. Changing
-`--ha-peers` on an existing cluster does **not** change the addresses replicas use, so
-an existing plain-HTTP cluster cannot be moved to `https://` by editing the flag — that
-needs a membership change, which is not built yet.
+`--ha-peers` on an existing cluster does **not** change the addresses replicas use. To
+move a running cluster to `https://` peers, change each member's address with a `PUT`
+(see "HA membership" below).
+
+### HA membership
+
+Members are changed on a running cluster with the admin routes, gated by
+`--auth-token` (pass it as a bearer token) and answered by any node, which forwards a
+change to the leader. `X-Actor` is logged.
+
+```sh
+# A new or replacement node always starts empty with --ha-join (never --ha-peers: a
+# node with --ha-peers calls initialize and could split the cluster).
+gsp-controller --listen 0.0.0.0:7070 --ha-node-id 4 --ha-token "$HA_TOKEN" \
+  --tunnel-network 10.60.0.0/24 --ha-join
+
+curl -H "Authorization: Bearer $TOKEN" http://ctl-1:7070/admin/ha/members            # voters, learners, leader
+curl -H "Authorization: Bearer $TOKEN" -d '{"id":4,"addr":"ctl-4:7070"}' \
+  http://ctl-1:7070/admin/ha/members                                                # add (waits for catch-up)
+curl -H "Authorization: Bearer $TOKEN" -X DELETE http://ctl-1:7070/admin/ha/members/2  # remove
+curl -H "Authorization: Bearer $TOKEN" -X PUT -d '{"addr":"https://ctl-3.internal:8443"}' \
+  http://ctl-1:7070/admin/ha/members/3                                              # change an address
+```
+
+An add answers once the new node has caught up, by log or, after the log was purged,
+by snapshot; a large catch-up can take minutes (a forwarded add waits up to five).
+Before an add or a `PUT` the leader asks the node at the given address who it is
+(`/raft/whoami`, behind `--ha-token`) and refuses (`422`) unless it answers with that
+node id, and an add also unless the node's log is empty (or it is already a learner of
+this cluster): this keeps a node id from being pointed at another node's address, which
+`openraft` warns can produce two leaders. Other answers: `409` the node is already a
+voter, `404` unknown id, `422` removing the last voter, `503` the node is unreachable or
+there is no leader. Removing the current leader is allowed. A joined node restarts with
+`--ha-join` again. `--ha-join` and `--ha-peers` together, and `--tunnel-readdress` with
+either, are refused at startup. Verified by `gsp-fleet-tests` `ha_tunnel_addresses.rs`
+(join, remove the leader, move a node to a new port) and `ha_snapshots.rs` (catch-up by
+snapshot after a purge).
+
+### Upgrading a single controller to HA
+
+A controller that already holds registrations (origins, proxies, addresses) from before
+HA can become the first node of an HA cluster. Restart it with `--ha-node-id` and the
+`--ha-peers` of the new cluster next to the other, empty nodes. Every node sets aside
+pre-HA data it finds as `peers.pre-ha/`, `proxy-peers.pre-ha/` and
+`tunnel-addresses.pre-ha/` under `--data-dir` (it never deletes them), and the cluster's
+leader imports exactly one node's copy, whichever node wins the first election.
+
+- The leader asks every voter what it holds (`/raft/whoami`) before initializing, so
+  registry writes answer `503` until every voter has answered; a voter that is down
+  delays the upgrade. `--ha-import-source <node-id>` (the same value on every node)
+  waits only for that node; `none` imports nothing.
+- When **more than one** node has pre-HA data (for example a pin-only `--ha-peers`
+  deployment where each node kept its own registries) nothing is initialized: the leader
+  logs an `ERROR` naming the nodes and their counts, and registry writes stay `503`
+  until you restart the nodes with `--ha-import-source <node-id>`. The other nodes'
+  set-aside data stays untouched (one `WARN` each).
+- Imported registrations are re-written as new revisions that continue after the source's
+  last revision number, so every edge's `since` cursor from the single-node days stays
+  valid. Tombstones the old node wrote are carried over too (the entry lists the names
+  whose newest log entry is a removal), so a subscribed edge that had not received one
+  still drops the peer, and a registry with no live registration keeps its log head.
+  `ImportContent` is a Raft log entry: a node on an older build applies an `Import`
+  without those tombstones, so upgrade every node of the cluster before the first
+  initialization.
+- Clients' pinned addresses that used to collide across nodes now get `409`: uniqueness
+  is cluster-wide, where it was per node before.
+- Snapshots persisted by a build older than this feature (before 2026-10-03) are not
+  supported: a follower refuses to install one (`ERROR` naming the snapshot format) rather
+  than read it as empty registries and an empty book. Start such a node from empty
+  storage, or let the cluster re-initialize as above.
+- The registries compact their logs: each keeps one entry per name (its registration, or
+  the tombstone of a removed one), so a registry log and the Raft snapshot stay bounded by
+  the number of distinct names ever registered, not by how often they re-register.
+  Revision numbers have gaps afterwards; a subscriber's `since` cursor is unaffected.
 
 ### Limits (read these before relying on it)
 
@@ -283,21 +443,50 @@ needs a membership change, which is not built yet.
   into the binary (`reqwest`'s `rustls-tls` / `webpki-roots`) plus `--ca-file`, **not**
   the OS store or `SSL_CERT_FILE`. For a private or internal CA — or a self-signed
   certificate — pass it with `--ca-file`. No client certificates (mTLS).
-- **HA over TLS needs a terminator per replica and a fresh cluster** (see "HA
-  replicas over TLS"). With `host:port` peers, replica traffic is plain HTTP; then keep
+- **HA over TLS** (native TLS on each replica, or a terminator per replica; see "HA
+  replicas over TLS"): bootstrap with `https://` peers, or move a running cluster with
+  one `PUT /admin/ha/members/{id}` per member (see "HA membership"). With `host:port`
+  peers, replica traffic is plain HTTP; then keep
   the replicas on a private network — `--ha-token` is a shared secret, not encryption.
-- **The other services are plain HTTP too.** The aggregator, `gsp`'s admin API and
-  the UI have the same exposure; the same reverse-proxy pattern applies. For the UI
-  this matters most: it carries a password login, and its session cookie is
-  `HttpOnly; SameSite=Lax` but **not** `Secure`, so redirect HTTP to HTTPS (and
-  consider HSTS) at the proxy.
+  The controller logs a warning for each non-loopback `http://` peer.
+- **Upgrading a gossip mesh** (the datagram format gained a MAC'd sender timestamp,
+  security review O4): upgrade all instances in a failure domain together. While old
+  and new instances are mixed they cannot exchange membership or health, so the
+  domain quorum derived from gossip is unreliable until the rollout finishes (local
+  health checks keep working). Old-to-new datagrams are counted in
+  `gsp_gossip_stale_rejected_total`. Instance clocks must also agree within 30 s.
+- **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
+  SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
+  HSTS) at the proxy — or use the UI's native TLS, which sets `Secure` itself.
 - **A TLS proxy is a trust boundary.** It sees every token and registration in the
-  clear. Run it on a host you control.
+  clear. Run it on a host you control — or use native TLS where it exists.
 
 ## Tunnel addressing
 
-Tunnel-internal addressing (the WireGuard-side `10.x.x.x` space between proxies and
-origins) is not an open question any more: `gsp-controller --tunnel-network` allocates
-the addresses, so nothing here hand-picks one. See `docs/11` "Address authority". This
-document covers only the container/orchestrator-facing side of the proxy's public
-listeners.
+Tunnel-internal addressing (the WireGuard-side space between proxies and origins) is
+not an open question any more: `gsp-controller --tunnel-network` allocates the
+addresses, so nothing here hand-picks one. See `docs/11` "Address authority".
+
+**Choosing the network.** Use an IPv6 unique local address (ULA) network by default:
+generate a random `/48` once and take a `/64` from it, so it cannot clash with any
+origin's own LAN or another deployment's tunnel:
+
+```
+printf 'fd%02x:%02x%02x:%02x%02x::/48\n' $(od -An -N5 -tu1 /dev/urandom)
+# e.g. fd49:89c1:4b5e::/48 -> --tunnel-network fd49:89c1:4b5e:60::/64
+```
+
+Choose an IPv4 network (`/16` to `/30`, e.g. `10.60.0.0/16`) instead when a game server
+binds `0.0.0.0` only: it cannot be reached on an IPv6 tunnel address. The family is
+fixed per controller; changing it later needs `--tunnel-readdress` (docs/11).
+
+**Containers.** The tunnel interface needs IPv6 enabled in its network namespace.
+Docker starts containers on a network without IPv6 with
+`net.ipv6.conf.all.disable_ipv6=1`; for a container with its own network namespace set
+`sysctls: { net.ipv6.conf.all.disable_ipv6: "0" }` (Compose) or the equivalent
+`securityContext.sysctls` entry (Kubernetes). With host networking, as in
+`deploy/compose/compose.tunnel.yml` and the DaemonSet's `hostNetwork`, the host's own
+setting applies and such a sysctl is refused, so the host must not have IPv6 disabled.
+
+This document otherwise covers only the container/orchestrator-facing side of the
+proxy's public listeners.

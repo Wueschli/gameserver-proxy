@@ -67,7 +67,8 @@ pub struct PushConfig {
     pub instance: String,
     /// This instance's own admin API base URL, self-reported so the
     /// aggregator's slice-9 intent-verb fan-out has somewhere to send calls
-    /// for this instance. Always `http://{settings.admin.listen}` — a
+    /// for this instance. `http://{settings.admin.listen}`, or `https://` with
+    /// `settings.admin.tls` — a
     /// `0.0.0.0`/wildcard bind isn't reachable from the aggregator's side,
     /// same pre-existing caveat any admin-API client already has, not
     /// something this introduces.
@@ -174,7 +175,7 @@ listeners:
     #[tokio::test]
     async fn build_payload_reports_the_live_pool_and_backend_state() {
         let cfg = gsp_config::parse_str(YAML).unwrap();
-        let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
 
         let payload = build_payload("test-instance", "http://127.0.0.1:9900", &runtime.handle());
 

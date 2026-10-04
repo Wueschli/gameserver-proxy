@@ -19,8 +19,11 @@ default = ["wasm-sniffers"]
 # WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
 wasm-sniffers = ["dep:wasmtime"]
 
+[lints]
+workspace = true
+
 [dependencies]
-gsp-http.workspace = true
+gsp-http = { workspace = true, features = ["server"] }
 gsp-config = { path = "../gsp-config" }
 gsp-core = { path = "../gsp-core" }
 
@@ -31,6 +34,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 tonic.workspace = true
 prost.workspace = true
+tonic-prost.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -44,9 +48,11 @@ wasmtime = { workspace = true, optional = true }
 sha2.workspace = true
 nix.workspace = true
 defguard_wireguard_rs.workspace = true
+# `--tunnel-*`: the per-process boot id `proxy_register` sends.
+rand.workspace = true
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

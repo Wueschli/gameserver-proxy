@@ -2,24 +2,25 @@
 
 ## Overview
 
-```
-                 ┌─────────────────────────── Proxy instance ──────────────────────────┐
-                 │                                                                     │
-   Clients       │   ┌─────────┐   ┌──────────┐   ┌───────────┐   ┌────────────────┐   │   Backends
- (TCP/UDP)  ─────┼──▶│Listener │──▶│ Router   │──▶│ Upstream/ │──▶│ Connection/    │───┼──▶ Game servers
-                 │   │ (accept)│   │ (match + │   │ Pool +    │   │ Session pump   │   │    (private network)
-                 │   └─────────┘   │ resolver)│   │ LB + aff. │   │ (splice/io)    │   │
-                 │        │        └────┬─────┘   └─────┬─────┘   └───────┬────────┘   │
-                 │        │             │               │                │            │
-                 │   ┌────┴─────────────┴───────────────┴────────────────┴────────┐   │
-                 │   │                     Data plane (hot path)                  │   │
-                 │   └───────────────────────────┬───────────────────────────────┘   │
-                 │                               │ reads snapshot (lock-free)        │
-                 │   ┌───────────────────────────┴───────────────────────────────┐   │
-                 │   │  Control plane: config loader · admin API · discovery     │   │
-                 │   │  adapter · health checker · metrics/log exporter          │   │
-                 │   └───────────────────────────────────────────────────────────┘   │
-                 └─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    clients(["Clients<br/>TCP / UDP"])
+    backends(["Game servers<br/>private network"])
+
+    subgraph proxy["Proxy instance"]
+        direction LR
+        subgraph data["Data plane (hot path)"]
+            direction LR
+            listener["Listener<br/>accept"] --> router["Router<br/>match + resolver"]
+            router --> pool["Upstream pool<br/>LB + affinity"]
+            pool --> pump["Connection / session pump<br/>splice / io"]
+        end
+        control["Control plane<br/>config loader · admin API · discovery adapter<br/>health checker · metrics / log exporter"]
+        control -. "publishes immutable snapshot<br/>(read lock-free)" .-> data
+    end
+
+    clients --> listener
+    pump --> backends
 ```
 
 ## Data plane / control plane separation
