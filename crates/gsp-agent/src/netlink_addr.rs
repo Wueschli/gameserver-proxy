@@ -12,6 +12,7 @@ use std::io;
 use defguard_wireguard_rs::net::IpAddrMask;
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
+use netlink_packet_route::link::{LinkAttribute, LinkMessage};
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::constants::NETLINK_ROUTE;
@@ -84,14 +85,42 @@ pub fn delete_address(ifname: &str, address: &IpAddrMask) -> io::Result<()> {
     }
 }
 
-/// The kernel's index of `ifname`, from sysfs (the netlink link lookup in
+/// The kernel's index of `ifname`, asked of the kernel through netlink so it
+/// is the caller's own network namespace that answers (sysfs would show the
+/// namespace it was mounted in), and for any link kind (the lookup in
 /// `defguard_wireguard_rs` only matches WireGuard-kind links, not the tun
 /// device boringtun creates).
 fn interface_index(ifname: &str) -> io::Result<u32> {
-    std::fs::read_to_string(format!("/sys/class/net/{ifname}/ifindex"))?
-        .trim()
-        .parse()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))
+    let mut message = LinkMessage::default();
+    message
+        .attributes
+        .push(LinkAttribute::IfName(ifname.to_string()));
+    let mut request = NetlinkMessage::from(RouteNetlinkMessage::GetLink(message));
+    request.header.flags = NLM_F_REQUEST;
+    request.finalize();
+    let mut buf = vec![0u8; request.buffer_len()];
+    request.serialize(&mut buf);
+
+    let socket = Socket::new(NETLINK_ROUTE)?;
+    socket.connect(&SocketAddr::new(0, 0))?;
+    if socket.send(&buf, 0)? != buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short netlink write",
+        ));
+    }
+    let mut reply = [0u8; 8192];
+    let n = socket.recv(&mut &mut reply[..], 0)?;
+    let response = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&reply[..n])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    match response.payload {
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) => Ok(link.header.index),
+        NetlinkPayload::Error(e) if e.code.is_some() => Err(e.to_io()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected netlink reply",
+        )),
+    }
 }
 
 #[cfg(test)]
