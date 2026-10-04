@@ -334,12 +334,19 @@ const LIMIT_WARN_EVERY: Duration = Duration::from_secs(60);
 /// global cap would let ~cap idle connects lock every client out, while evicting
 /// only hurts a real client if the cap's worth of connects arrive within its one
 /// RTT of handshake.
+///
+/// A source may also open at most `new_per_source_per_sec` connections a second
+/// on average, with bursts up to `new_per_source_burst` (a token bucket per
+/// source); without it a source could cycle connects under its pending cap
+/// forever. `new_per_source_per_sec: 0` turns the rate limit off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HandshakeLimits {
     pub client_hello_timeout: Duration,
     pub handshake_timeout: Duration,
     pub max_pending: usize,
     pub max_pending_per_source: usize,
+    pub new_per_source_per_sec: u32,
+    pub new_per_source_burst: u32,
 }
 
 impl Default for HandshakeLimits {
@@ -349,6 +356,8 @@ impl Default for HandshakeLimits {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             max_pending: 512,
             max_pending_per_source: 16,
+            new_per_source_per_sec: 20,
+            new_per_source_burst: 64,
         }
     }
 }
@@ -371,11 +380,25 @@ fn source_key(ip: IpAddr) -> SourceKey {
     }
 }
 
+/// One source's token bucket (see [`HandshakeLimits`]).
+struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+/// Above this many tracked sources, buckets that have refilled completely (they
+/// carry no information) are dropped; if that is not enough the table is cleared,
+/// which only ever lets a flooder have a fresh burst.
+const MAX_BUCKETS: usize = 8192;
+
 /// The pending-handshake bookkeeping (see [`HandshakeLimits`]): ids in admission
 /// order, so the oldest is the first.
 struct Pending {
     max_pending: usize,
     max_pending_per_source: usize,
+    rate: f64,
+    burst: f64,
+    buckets: HashMap<SourceKey, Bucket>,
     order: BTreeMap<u64, SourceKey>,
     per_source: HashMap<SourceKey, usize>,
     next_id: u64,
@@ -387,6 +410,9 @@ impl Pending {
             // A cap of 0 would evict every handshake as it is admitted.
             max_pending: limits.max_pending.max(1),
             max_pending_per_source: limits.max_pending_per_source.max(1),
+            rate: f64::from(limits.new_per_source_per_sec),
+            burst: f64::from(limits.new_per_source_burst.max(1)),
+            buckets: HashMap::new(),
             order: BTreeMap::new(),
             per_source: HashMap::new(),
             next_id: 0,
@@ -394,9 +420,43 @@ impl Pending {
     }
 
     /// Admit a handshake from `key`: its id and the id of the handshake evicted
-    /// to make room, or `None` when `key` is at its cap.
+    /// to make room, or `None` when `key` is at its cap or over its rate.
     fn admit(&mut self, key: SourceKey) -> Option<(u64, Option<u64>)> {
+        self.admit_at(key, Instant::now())
+    }
+
+    /// Spend one token of `key`'s bucket; `false` when it is empty.
+    fn take_token(&mut self, key: SourceKey, now: Instant) -> bool {
+        if self.rate <= 0.0 {
+            return true;
+        }
+        if self.buckets.len() >= MAX_BUCKETS && !self.buckets.contains_key(&key) {
+            let (rate, burst) = (self.rate, self.burst);
+            self.buckets
+                .retain(|_, b| b.tokens + rate * now.duration_since(b.at).as_secs_f64() < burst);
+            if self.buckets.len() >= MAX_BUCKETS {
+                self.buckets.clear();
+            }
+        }
+        let b = self.buckets.entry(key).or_insert(Bucket {
+            tokens: self.burst,
+            at: now,
+        });
+        let refill = self.rate * now.saturating_duration_since(b.at).as_secs_f64();
+        b.tokens = (b.tokens + refill).min(self.burst);
+        b.at = now;
+        if b.tokens < 1.0 {
+            return false;
+        }
+        b.tokens -= 1.0;
+        true
+    }
+
+    fn admit_at(&mut self, key: SourceKey, now: Instant) -> Option<(u64, Option<u64>)> {
         if self.per_source.get(&key).copied().unwrap_or(0) >= self.max_pending_per_source {
+            return None;
+        }
+        if !self.take_token(key, now) {
             return None;
         }
         let evicted = if self.order.len() >= self.max_pending {
@@ -552,7 +612,7 @@ impl TlsListener {
                     let mut h = handshakes.lock().unwrap_or_else(PoisonError::into_inner);
                     match h.pending.admit(source_key(peer.ip())) {
                         None => {
-                            h.warn_throttled("per source");
+                            h.warn_throttled("per source, cap or rate");
                             None
                         }
                         Some((id, evicted)) => {
@@ -889,5 +949,68 @@ mod tests {
         p.admit(b).unwrap(); // evicts a's
         p.admit(a)
             .expect("a's evicted handshake no longer counts against a");
+    }
+
+    fn rate_limited(per_sec: u32, burst: u32) -> Pending {
+        Pending::new(&HandshakeLimits {
+            max_pending: 1000,
+            max_pending_per_source: 1000,
+            new_per_source_per_sec: per_sec,
+            new_per_source_burst: burst,
+            ..HandshakeLimits::default()
+        })
+    }
+
+    #[test]
+    fn a_source_cycling_connects_under_its_cap_is_rate_limited() {
+        let mut p = rate_limited(10, 3);
+        let a = source_key(ip("192.0.2.1"));
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            let (id, _) = p.admit_at(a, t0).expect("within the burst");
+            p.release(id); // finished at once: the pending cap never bites
+        }
+        assert!(p.admit_at(a, t0).is_none(), "burst spent");
+        // Another source has its own bucket.
+        assert!(p.admit_at(source_key(ip("192.0.2.2")), t0).is_some());
+        // 100 ms at 10/s is one token back.
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(p.admit_at(a, t1).is_some());
+        assert!(p.admit_at(a, t1).is_none());
+    }
+
+    #[test]
+    fn the_bucket_never_holds_more_than_the_burst() {
+        let mut p = rate_limited(10, 2);
+        let a = source_key(ip("192.0.2.1"));
+        let t0 = Instant::now();
+        p.admit_at(a, t0).unwrap();
+        // A long quiet spell refills to the burst, not beyond.
+        let later = t0 + Duration::from_secs(3600);
+        assert!(p.admit_at(a, later).is_some());
+        assert!(p.admit_at(a, later).is_some());
+        assert!(p.admit_at(a, later).is_none());
+    }
+
+    #[test]
+    fn a_rate_of_zero_turns_the_limit_off() {
+        let mut p = rate_limited(0, 1);
+        let a = source_key(ip("192.0.2.1"));
+        let t0 = Instant::now();
+        for _ in 0..200 {
+            let (id, _) = p.admit_at(a, t0).unwrap();
+            p.release(id);
+        }
+        assert!(p.buckets.is_empty());
+    }
+
+    #[test]
+    fn the_bucket_table_stays_bounded() {
+        let mut p = rate_limited(1, 1);
+        let t0 = Instant::now();
+        for n in 0..(MAX_BUCKETS as u64 * 2) {
+            p.admit_at(SourceKey::V6(n), t0);
+        }
+        assert!(p.buckets.len() <= MAX_BUCKETS);
     }
 }
