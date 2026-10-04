@@ -79,9 +79,9 @@ runs Vite's dev server with hot reload, proxying `/ui`, `/api`, `/ws`, and
 - `src/components/ConfigView.tsx` — the config editor + revision
   history/diff/rollback — phase 10's "full management" GUI level.
 
-No client-side routing: the whole app is one page, view state (which tab,
-which dialog) lives in React state, not the URL. There's nothing here that
-needs a deep link or a browser-back button yet.
+Client-side routing uses `react-router` (`/fleet`, `/settings`, `/plugins`,
+`/config-history`, `/tunnel`), so each page has a deep link and works with the
+browser back button; gsp-ui serves `index.html` for those paths.
 
 ## Browser e2e (Playwright)
 
