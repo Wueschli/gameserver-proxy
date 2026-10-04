@@ -43,7 +43,7 @@ async fn counting_echo_backend() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
 
 async fn start(yaml: &str) -> Runtime {
     let cfg = parse_str(yaml).unwrap();
-    let rt = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
     rt
 }

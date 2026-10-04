@@ -150,6 +150,7 @@ fn conflict(msg: &str) -> Response {
         .into_response()
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as a `map_err` callback, which hands the error over by value
 fn store_error_response(e: crate::store::StoreError) -> Response {
     tracing::error!(error = %e, "store error during adoption");
     (

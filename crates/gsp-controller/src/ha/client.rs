@@ -84,6 +84,7 @@ where
 
 /// The `{revision}` answer config, intent and promote writes give — the
 /// mapper their [`propose_write`] calls pass.
+#[allow(clippy::needless_pass_by_value)] // used as a mapper callback, which hands the response over by value
 pub fn revision_response(resp: WriteResponse) -> Response {
     // Config, intent and promote entries always answer `Revision`.
     let revision = match resp {

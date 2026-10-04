@@ -65,6 +65,7 @@ fn restrict_permissions(_path: &Path) -> anyhow::Result<()> {
 /// see the module doc), but persisting still avoids a pointless key churn
 /// on every restart.
 pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
+    use std::io::Write;
     if path.exists() {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading private key from {}", path.display()))?;
@@ -82,7 +83,6 @@ pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
         .create_new(true)
         .open(path)
         .with_context(|| format!("creating private key file {}", path.display()))?;
-    use std::io::Write;
     file.write_all(key.to_string().as_bytes())
         .with_context(|| format!("writing private key to {}", path.display()))?;
     drop(file);
@@ -259,7 +259,7 @@ async fn subscribe_once(
     }
     tracing::info!(controller = %base_url, "subscribed to backend-peers updates");
 
-    let mut buf = String::new();
+    let mut buf = gsp_http::sse::EventBuffer::new();
     loop {
         let chunk = resp.chunk().await.map_err(|e| {
             anyhow::anyhow!(
@@ -270,11 +270,10 @@ async fn subscribe_once(
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push(&bytes)
+            .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
-        while let Some(end) = buf.find("\n\n") {
-            let event = buf[..end].to_string();
-            buf.drain(..end + 2);
+        while let Some(event) = buf.next_event() {
             if let Some(ev) = parse_sse_event(&event) {
                 match plan(last_applied, &ev) {
                     Action::Skip => {}

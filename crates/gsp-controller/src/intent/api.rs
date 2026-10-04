@@ -261,6 +261,7 @@ async fn catch_up(
     true
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as a `map_err` callback, which hands the error over by value
 fn store_error_response(e: StoreError) -> Response {
     tracing::error!(error = %e, "store error serving the intent API");
     (

@@ -14,6 +14,9 @@ path = "src/lib.rs"
 name = "gsp-ui"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 gsp-http = { workspace = true, features = ["server"] }
 tokio.workspace = true

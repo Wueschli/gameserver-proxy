@@ -291,6 +291,7 @@ impl StateMachineStore {
     /// An unparsable network is a deterministic rejection (every replica
     /// parses the same string), never a storage error.
     #[allow(clippy::result_large_err)] // same as `read_meta` above
+    #[allow(clippy::needless_pass_by_value)] // owned like the other state-machine writes
     fn set_tunnel_network(
         &self,
         network: Option<String>,
@@ -1156,7 +1157,10 @@ mod tests {
             name: name.into(),
             pubkey: PUBKEY.into(),
             endpoint: None,
-            backends: backends.iter().map(|b| b.to_string()).collect(),
+            backends: backends
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             tunnel_address: address.map(Into::into),
         }
     }

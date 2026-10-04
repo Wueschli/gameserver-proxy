@@ -75,11 +75,26 @@ fn aside(dir: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Opens a registry store the import already inspected or renamed in this
+/// process, waiting out sled's lock release (see
+/// [`crate::store::retry_when_unlocked`]).
+fn open_store(dir: &Path) -> anyhow::Result<Store> {
+    crate::store::retry_when_unlocked(|| {
+        Store::open(dir).with_context(|| format!("opening {dir:?}"))
+    })
+}
+
+fn open_book(dir: &Path) -> anyhow::Result<AddressBook> {
+    crate::store::retry_when_unlocked(|| {
+        AddressBook::open(dir, None).with_context(|| format!("opening {dir:?}"))
+    })
+}
+
 fn is_pre_ha_store(dir: &Path) -> anyhow::Result<bool> {
     if !dir.is_dir() {
         return Ok(false);
     }
-    let store = Store::open(dir).with_context(|| format!("opening {dir:?}"))?;
+    let store = open_store(dir)?;
     Ok(store.current_revision()?.is_some() && store.applied_index()?.is_none())
 }
 
@@ -87,7 +102,7 @@ fn is_pre_ha_book(dir: &Path) -> anyhow::Result<bool> {
     if !dir.is_dir() {
         return Ok(false);
     }
-    let book = AddressBook::open(dir, None).with_context(|| format!("opening {dir:?}"))?;
+    let book = open_book(dir)?;
     Ok(!book.entries().map_err(|e| anyhow!("{e}"))?.is_empty()
         && book
             .applied_index()
@@ -137,7 +152,7 @@ fn count_registry(dir: &Path) -> anyhow::Result<usize> {
     if !dir.is_dir() {
         return Ok(0);
     }
-    let store = Store::open(dir).with_context(|| format!("opening {dir:?}"))?;
+    let store = open_store(dir)?;
     Ok(store.db().open_tree("current")?.len())
 }
 
@@ -145,7 +160,7 @@ fn count_book(dir: &Path) -> anyhow::Result<usize> {
     if !dir.is_dir() {
         return Ok(0);
     }
-    let book = AddressBook::open(dir, None).with_context(|| format!("opening {dir:?}"))?;
+    let book = open_book(dir)?;
     Ok(book.entries().map_err(|e| anyhow!("{e}"))?.len())
 }
 
@@ -154,7 +169,7 @@ fn read_registry<R: Registration>(dir: &Path) -> anyhow::Result<(Vec<R>, u64)> {
     if !dir.is_dir() {
         return Ok((Vec::new(), 0));
     }
-    let store = Store::open(dir).with_context(|| format!("opening {dir:?}"))?;
+    let store = open_store(dir)?;
     let current = store.db().open_tree("current")?;
     let mut regs = Vec::new();
     for item in current.iter() {
@@ -178,7 +193,7 @@ pub fn read_pre_ha(
     let (proxies, proxies_last_revision) = read_registry(&aside(&data_dir.join("proxy-peers")))?;
     let book_dir = aside(&data_dir.join("tunnel-addresses"));
     let book = if book_dir.is_dir() {
-        AddressBook::open(&book_dir, None)?
+        open_book(&book_dir)?
             .entries()
             .map_err(|e| anyhow!("{e}"))?
     } else {
@@ -291,6 +306,7 @@ pub(super) fn apply_import(
 mod tests {
     use super::*;
     use crate::addresses::{Assignment, Role};
+    use crate::store::{reopen_when_unlocked, retry_when_unlocked};
     use std::sync::Arc;
 
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -342,10 +358,12 @@ mod tests {
             .unwrap()
             .put_applied(b"{}".to_vec(), 7)
             .unwrap();
-        assert!(!is_pre_ha_store(&marked).unwrap());
-        assert!(!is_pre_ha_store(&dir.path().join("proxy-peers")).unwrap());
+        assert!(!reopen_when_unlocked(|| is_pre_ha_store(&marked)));
+        assert!(!reopen_when_unlocked(|| is_pre_ha_store(
+            &dir.path().join("proxy-peers")
+        )));
 
-        let summary = set_aside_pre_ha(dir.path()).unwrap();
+        let summary = reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
         assert_eq!(
             summary,
             PreHaSummary {
@@ -362,17 +380,39 @@ mod tests {
 
         // A second start (fresh dirs in place) still reports the set-aside data.
         drop(Store::open(&dir.path().join("peers")).unwrap());
-        assert_eq!(set_aside_pre_ha(dir.path()).unwrap(), summary);
+        assert_eq!(
+            reopen_when_unlocked(|| set_aside_pre_ha(dir.path())),
+            summary
+        );
+    }
+
+    #[test]
+    fn set_aside_waits_for_a_lock_that_is_about_to_be_released() {
+        // The state production hits when sled's background threads still hold
+        // a just-dropped store's lock: the open fails with `WouldBlock` until
+        // they let go.
+        let dir = pre_ha_dir();
+        let held = reopen_when_unlocked(|| Store::open(&dir.path().join("peers")));
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+        let summary = set_aside_pre_ha(dir.path()).unwrap();
+        release.join().unwrap();
+        assert_eq!(summary.origins, 3);
+        assert!(dir.path().join("peers.pre-ha").is_dir());
     }
 
     #[test]
     fn set_aside_refuses_to_overwrite_an_earlier_set_aside() {
         let dir = pre_ha_dir();
-        set_aside_pre_ha(dir.path()).unwrap();
+        reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
         // The old controller ran again and wrote new data.
         let again = pre_ha_dir();
         std::fs::rename(again.path().join("peers"), dir.path().join("peers")).unwrap();
-        let e = set_aside_pre_ha(dir.path()).unwrap_err().to_string();
+        let e = retry_when_unlocked(|| set_aside_pre_ha(dir.path()))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("already exists"), "{e}");
     }
 
@@ -381,11 +421,11 @@ mod tests {
         let dir = pre_ha_dir();
         let net = Some(Network::parse("10.60.0.0/24").unwrap());
         assert!(
-            read_pre_ha(dir.path(), net, 1).unwrap().is_none(),
+            reopen_when_unlocked(|| read_pre_ha(dir.path(), net, 1)).is_none(),
             "nothing set aside yet"
         );
-        set_aside_pre_ha(dir.path()).unwrap();
-        let content = read_pre_ha(dir.path(), net, 1).unwrap().unwrap();
+        reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
+        let content = reopen_when_unlocked(|| read_pre_ha(dir.path(), net, 1)).unwrap();
         let names: Vec<_> = content.origins.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["a", "b", "c"]);
         assert_eq!(content.origins_last_revision, 4);

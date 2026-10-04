@@ -10,6 +10,9 @@ default-run = "gsp"
 name = "gsp"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 gsp-http = { workspace = true, features = ["server"] }
 gsp-config = { path = "../gsp-config" }

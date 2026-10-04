@@ -115,7 +115,7 @@ crates/
     address_store.rs        persists the controller-assigned tunnel address next to the key (start-from-saved while the controller is down)
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
-  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `server` (the one constant-time `--auth-token` bearer middleware, `require_bearer`, shared by every fleet HTTP server) and `tls` (cargo feature `server`, which every serving binary enables), the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`, `TlsArgs` + `serve`); test-only CA/cert fixtures in `tests/fixtures/`
+  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `sse` (`EventBuffer`, which every `/…/subscribe` client reassembles events with: it keeps only the unterminated tail and refuses one past 16 MiB), and, in `server` (the one constant-time `--auth-token` bearer middleware, `require_bearer`, shared by every fleet HTTP server) and `tls` (cargo feature `server`, which every serving binary enables), the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`, `TlsArgs` + `serve`); test-only CA/cert fixtures in `tests/fixtures/`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
@@ -177,6 +177,8 @@ client from `crates/gsp/proto/resolver.proto`.
    earlier in the session does not cover edits made after it, and `--check` only
    reports diffs, it never fixes them. See HANDOVER.md "Workflow gotcha" for a case
    where skipping this let a `cargo fmt --all --check` failure reach CI.
+   The curated clippy lints live in the root `[workspace.lints.clippy]`; a new crate
+   opts in with `[lints] workspace = true`.
 2. **No `unsafe`.** The codebase currently has zero. `socket2`/`nix` give safe
    wrappers for the syscalls we need. If `unsafe` ever becomes genuinely necessary, it
    needs a `// SAFETY:` comment *and* a note in `HANDOVER.md`.

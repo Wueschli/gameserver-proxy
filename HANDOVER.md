@@ -202,6 +202,26 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   background thread); it now retries the open. **The other ~30 `sleep(150ms)` +
   connect tests in `crates/gsp-core/tests/tcp_forward.rs` have the same shape** —
   if one flakes, reuse `connect_when_listening` there rather than lengthening the sleep.
+- **sled lock flake (fixed 2026-10-04)**: `ha::import::tests::set_aside_moves_only_unmarked_non_empty_dirs`
+  failed now and then with `WouldBlock` ("could not acquire lock"). Same cause as above, and
+  it was a **production** race too, not only a test one: `set_aside_pre_ha` opens and drops
+  a registry store to inspect it, renames the directory, then reopens it to count it, and
+  `read_pre_ha` opens it again once the cluster initializes, all in one process, while
+  sled's background threads can still hold the dropped store's lock. The import's opens
+  now go through `store::retry_when_unlocked` (bounded 5 s, lock error only, also matched
+  under `anyhow` context); `set_aside_waits_for_a_lock_that_is_about_to_be_released` holds
+  the lock for 300 ms and failed before the fix. The flake itself was not reproduced
+  locally (100 runs under load), so the link to the CI failure follows from the cause.
+  Another timing flake seen on the first test run after a fresh build:
+  `an_active_session_survives_past_its_idle_window_then_expires` (`gsp-core/tests/udp_forward.rs`);
+  it passes on re-run.
+- **Lints and CI pins (2026-10-04)**: the root `Cargo.toml` has a curated
+  `[workspace.lints.clippy]` (`redundant_closure_for_method_calls`, `needless_pass_by_value`,
+  `items_after_statements`, `manual_let_else`, `default_trait_access`); every workspace
+  crate opts in. `cast_possible_truncation` is left out: ~30 of its hits are test code, and
+  the production ones are the vetted `u128` millis casts. Every third-party action in
+  `.github/` is pinned to a commit SHA with the tag in a trailing comment (the `stable` and
+  `nightly` toolchain branches of `dtolnay/rust-toolchain` too); bump them by hand.
 - **A config file directly under `/tmp`** triggers continuous ~200 ms
   `configuration reloaded source=file` log spam (a `notify` / tmpfs
   mtime-granularity interaction). Harmless — `reload.rs` only swaps the `Snapshot` —

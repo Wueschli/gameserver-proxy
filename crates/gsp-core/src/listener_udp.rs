@@ -508,9 +508,9 @@ impl RecvBatch {
         .map_err(io::Error::from)?;
 
         for msg in results {
-            let client = match msg.address.and_then(sockaddr_to_std) {
-                Some(a) => a,
-                None => continue, // no source address: drop this slot
+            // No source address: drop this slot.
+            let Some(client) = msg.address.and_then(sockaddr_to_std) else {
+                continue;
             };
             let mut dst = None;
             if want_cmsg {
@@ -533,6 +533,7 @@ impl RecvBatch {
 /// Turn a pktinfo / origdst control message into the destination `SocketAddr`.
 /// `listen_port` fills the port for `IP_PKTINFO` (which carries only the IP).
 #[cfg(target_os = "linux")]
+#[allow(clippy::needless_pass_by_value)] // `ControlMessageOwned` is consumed by value everywhere else it is matched
 fn dst_from_cmsg(
     cm: nix::sys::socket::ControlMessageOwned,
     listen_port: u16,
@@ -801,7 +802,7 @@ async fn open_session(
         }
     }
 
-    let health = guard.as_ref().map(|g| g.backend());
+    let health = guard.as_ref().map(super::pool::BackendGuard::backend);
     let last_ms = Arc::new(AtomicU64::new(mono_ms()));
     let reply_task = spawn_reply(
         cfg.name.clone(),
@@ -1025,7 +1026,7 @@ mod tests {
         idle_ms: u64,
     ) -> Session {
         let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let limits = GlobalLimits::new(&Default::default());
+        let limits = GlobalLimits::new(&gsp_config::GlobalLimits::default());
         let src = SourceLimiter::new(None);
         Session {
             upstream,
@@ -1122,7 +1123,10 @@ mod tests {
         w.schedule(k, 1_000, 0);
         let mut sessions = HashMap::new();
         assert_eq!(w.tick("t", 1_000, &mut sessions), 0);
-        assert!(w.slots.iter().all(|s| s.is_empty()), "stale key dropped");
+        assert!(
+            w.slots.iter().all(std::vec::Vec::is_empty),
+            "stale key dropped"
+        );
     }
 
     #[tokio::test]
@@ -1141,7 +1145,7 @@ mod tests {
         assert_eq!(w.tick("t", 1_000, &mut sessions), 1);
         assert!(sessions.is_empty());
         assert_eq!(tracker.active(), 0, "drain guard released on eviction");
-        assert!(w.slots.iter().all(|s| s.is_empty()));
+        assert!(w.slots.iter().all(std::vec::Vec::is_empty));
     }
 
     #[tokio::test]

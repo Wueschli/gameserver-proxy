@@ -175,7 +175,7 @@ listeners:
     #[tokio::test]
     async fn build_payload_reports_the_live_pool_and_backend_state() {
         let cfg = gsp_config::parse_str(YAML).unwrap();
-        let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
 
         let payload = build_payload("test-instance", "http://127.0.0.1:9900", &runtime.handle());
 

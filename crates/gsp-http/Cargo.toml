@@ -18,6 +18,9 @@ publish = false
 default = ["server"]
 server = ["dep:axum", "dep:tokio", "dep:tokio-rustls", "dep:arc-swap", "dep:tracing", "dep:clap"]
 
+[lints]
+workspace = true
+
 [dependencies]
 reqwest.workspace = true
 thiserror.workspace = true

@@ -13,7 +13,7 @@ async fn controller(extra: &[&str]) -> Result<(Proc, tempfile::TempDir, String)>
     build_fleet_bins()?;
     let dir = tempfile::tempdir()?;
     let port = free_port()?;
-    let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    let extra: Vec<String> = extra.iter().map(std::string::ToString::to_string).collect();
     let ctl = spawn_controller_with(dir.path(), &format!("127.0.0.1:{port}"), &extra)?;
     wait_http_up(
         &format!("http://127.0.0.1:{port}/healthz"),
@@ -123,7 +123,7 @@ async fn readdress_with_ha_is_refused(ha_flags: &[&str]) -> Result<()> {
     let mut args: Vec<String> = ["--tunnel-network", "10.60.0.0/16", "--tunnel-readdress"]
         .map(String::from)
         .into();
-    args.extend(ha_flags.iter().map(|s| s.to_string()));
+    args.extend(ha_flags.iter().map(std::string::ToString::to_string));
     let mut ctl = spawn_controller_with(dir.path(), &format!("127.0.0.1:{port}"), &args)?;
     gsp_fleet_tests::wait_until(
         || {
@@ -154,7 +154,7 @@ async fn tunnel_readdress_together_with_ha_join_is_refused_at_startup() -> Resul
 
 /// Starts a controller on `dir` and waits for it to serve.
 async fn controller_in(dir: &std::path::Path, port: u16, extra: &[&str]) -> Result<Proc> {
-    let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    let extra: Vec<String> = extra.iter().map(std::string::ToString::to_string).collect();
     let ctl = spawn_controller_with(dir, &format!("127.0.0.1:{port}"), &extra)?;
     wait_http_up(
         &format!("http://127.0.0.1:{port}/healthz"),

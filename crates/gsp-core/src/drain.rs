@@ -172,7 +172,7 @@ impl ConnGuard {
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(&self.id)
         {
-            e.pool = pool.map(|s| s.to_string());
+            e.pool = pool.map(std::string::ToString::to_string);
             e.backend = Some(backend);
         }
     }

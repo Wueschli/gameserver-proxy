@@ -133,6 +133,7 @@ fn mismatch(ha: &RegistryHa, recorded: Option<Network>) -> Option<Response> {
     })
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as a mapper callback, which hands the response over by value
 fn unexpected(registry: &str, resp: WriteResponse) -> Response {
     tracing::error!(?resp, "unexpected raft response to a {registry} write");
     (
@@ -429,7 +430,7 @@ mod tests {
                 node_id: 1,
                 ha_token: None,
                 forward: client::forward_client(client::FORWARD_TIMEOUT),
-                pre_ha: Default::default(),
+                pre_ha: crate::ha::import::LocalPreHa::default(),
             }),
             cluster,
             local_network: local.map(|n| Network::parse(n).unwrap()),

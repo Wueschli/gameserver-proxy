@@ -116,6 +116,7 @@ impl Resolvers {
     }
 
     /// Insert one resolver (incremental build / tests).
+    #[allow(clippy::needless_pass_by_value)] // registries take ownership of what they store
     pub fn insert(&self, name: String, resolver: Arc<dyn Resolver>) {
         self.map.rcu(|cur| {
             let mut next = (**cur).clone();

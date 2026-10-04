@@ -55,7 +55,7 @@ fn controller_args(network: &str, extra: &[&str]) -> Vec<String> {
     if !extra.contains(&"--tunnel-network") {
         args.extend(["--tunnel-network".to_string(), network.to_string()]);
     }
-    args.extend(extra.iter().map(|s| s.to_string()));
+    args.extend(extra.iter().map(std::string::ToString::to_string));
     args
 }
 
@@ -264,7 +264,7 @@ impl TunnelLab {
             "1",
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
         args.extend(self.backend.agent_flag().map(str::to_string));
         let agent = Proc::spawn_in(Some(&ns), "gsp-agent", &args)?;
@@ -442,7 +442,7 @@ impl TunnelLab {
             "1",
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
         args.extend(self.backend.gsp_flag().map(str::to_string));
         // The lab edge's admin API binds the wildcard address with no token.
@@ -675,7 +675,7 @@ impl TunnelLab {
             "1",
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
         args.extend(self.backend.agent_flag().map(str::to_string));
         let mut agent = Proc::spawn_in(Some(&ns), "gsp-agent", &args)?;
