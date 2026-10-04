@@ -235,7 +235,7 @@ client from `crates/gsp/proto/resolver.proto`.
   verification before claiming done; big plans run subagent-driven (fresh implementer per
   task + spec/quality review + a final whole-branch review). Specs and plans are committed;
   `.superpowers/` is git-ignored scratch (ledgers, briefs, review packages). Reviewer
-  findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
+  findings that are deferred go into a GitHub issue, never silently dropped.
 - **CI runs are slow** (the repo is public, so hosted minutes are free, but a full run
   takes ~10 min warm and ~22 min cold). Batch pushes, remember that docs-only pushes
   skip CI (`paths-ignore`), put `[skip ci]` in the tip commit message when a code push
@@ -284,7 +284,7 @@ UDP ingress, timing-wheel idle expiry), the distributed control plane (10–13:
 fleet aggregation, global config/intent store with hierarchy / HA / canary /
 RBAC, regional health gossip — [`docs/10`](docs/10-distributed-control-plane.md))
 and the WireGuard backend transport (14 — [`docs/11`](docs/11-backend-transport.md)).
-No slice is in flight; remaining work is the follow-ups in `HANDOVER.md`.
+No slice is in flight; remaining work is the open GitHub issues.
 
 For what shipped, what's deferred, and per-feature latency cost, see
 [`HANDOVER.md`](HANDOVER.md); for the full phase-by-phase plan and status,

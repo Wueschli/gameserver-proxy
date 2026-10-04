@@ -6,12 +6,12 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-03.
+Last updated: 2026-10-04.
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
-`make check`.** Remaining work is the "Known follow-ups" table below. Every CI job
+`make check`.** Remaining work is the [open GitHub issues](https://github.com/Wueschli/gameserver-proxy/issues). Every CI job
 blocks except the two informational security scans, `trivy` and `audit` (2026-10-02,
 owner's call).
 
@@ -281,32 +281,11 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
   proxies carrying traffic at once.
 
-## Known follow-ups (none blocking)
+## Open follow-ups
 
-| Item | Notes |
-|------|-------|
-| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **HA-replicated allocation** (built 2026-10-03: the registries and the address book are replicated, `--tunnel-network` works with `--ha-peers`; see docs/11 "Address authority"); **automatic lease expiry** (v1 is explicit release + a stale warning); releasing an address **from gsp-ui** (its Tunnel addresses page is read-only; release is the registry `DELETE`); **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
-| IPv6 tunnel follow-ups (2026-10-03) | Reject `transparent: true` at config load on listeners whose pool uses a `tunnel` source (today a client/backend family mismatch falls back to a plain connect); rate-limit `connect_tcp_from`'s family-mismatch `warn` (it logs per connection); dual-stack tunnels and NAT64 for IPv4-only game servers stay non-goals (spec `docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md`) |
-| HA-replicated allocation — residuals (2026-10-03) | An `Import` drops a tombstone the old node wrote that a subscribed edge had not received yet (the edge keeps the removed peer until it restarts), and a registry with no live registration at import time restarts its log at 1; the registries' logs are never compacted (every revision stays, as before HA); after a snapshot install live subscribers are woken once for the newest revision, not per revision; non-HA `claim` keeps an `unreachable!`; `registry.rs` imports helpers from `peers.rs`; `Store::start_at` from the plan was not needed (the import writes through the snapshot-install path). Snapshots persisted before 2026-10-03 install as empty registries and book. |
-| Address authority — deferred review minors (the rest were fixed 2026-10-03) | `check_pin` treats an unparseable holder as free; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
-| Native TLS — coarse timestamps / handshake limit follow-ups | `ReloadingCert`'s stamp misses a same-length, same-inode rewrite within one tick of the last load on a coarse-timestamp filesystem (ctime is as coarse as mtime there) — caught by the next change. Handshake limits (2026-10-03) leave out: a per-source *rate* of new connections (a source can cycle connects under its cap), flags for `HandshakeLimits`, and metrics for refused/evicted handshakes (`gsp-http` has no metrics registry). |
-| Trivy scan — follow-ups | (1) GitHub's Security tab ("code scanning") would show the SARIF natively; it is free now that the repo is public: add `github/codeql-action/upload-sarif` (permission `security-events: write`) over `target/trivy/*.sarif`. (2) For Rust crates Trivy sees GHSA advisories only (RustSec-only ones such as the 2026-10-01 rustls/wasmtime fixes are missed, and many crate advisories are MEDIUM) — `cargo audit` (the `audit` job) is the real check. (3) `cargo auditable` builds would let the image scan see the crates itself. (4) The vulnerability DB (~120 MB, `mirror.gcr.io` with a `ghcr.io` fallback) is fetched each run — cache it by day. (5) The pinned hash stops a later swap but can't prove 0.75.0 was clean when pinned; verifying the release's cosign/sigstore bundle would. (6) `package-lock.json` scanning includes build-only `dependencies` (tailwind, vite via `@tailwindcss/vite`), so a dev-server CVE there would be a false positive. (7) Cosmetic: `trivy convert --format table` in `scan-images.sh` logs "No enabled scanners found" and prints no table to the job log (seen on the first CI run, 2026-10-02); the run-summary table and the reports are unaffected — pass the scanners to `convert` or drop the log table. |
-| Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. Owner (2026-10-02): images should be built "for both Docker and Kubernetes" — not yet specified whether that means publishing, multi-arch or k8s packaging (Helm/Kustomize); ask. Once images are published, per-image CI jobs make sense (each versioned, rebuilt and pushed only when its inputs change); before that they don't — see the "CI change detection — residuals" row. |
-| CI change detection — residuals (2026-10-03) | `changes.py` treats any root `Cargo.lock` change as touching every root-workspace member; diffing the lockfile and walking its reverse-dependency graph would skip jobs on bumps that only reach e.g. `gsp-bench`, but nearly every real bump reaches `gsp` anyway. `deploy` still runs only for its own paths and the lockfile, not for binary source changes (unchanged; nightly covers code-driven breakage). Cross-crate file reads (`include_bytes!`, fixtures) are invisible to `cargo metadata` — today only `gsp-fleet-tests` → `gsp-http`'s fixtures, already covered. Per-container jobs were discussed 2026-10-02 and rejected: the five binaries share most of their compile, the compose smoke needs all five, and per-image Trivy jobs would fetch the ~120 MB DB five times. Related: cache the Trivy DB by day (Trivy row). |
-| HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
-| HA-over-TLS cleanup-PR minors (found reviewing the cleanup PR, 2026-10-02) | `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
-| `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
-| `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
-| Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
-| k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |
-| Resolver `sticky_key` | deferred pending a design for how a later request recovers the key; overlaps the phase-11 intent model |
-| `IPV6_TRANSPARENT` on musl / non-glibc | `set_ip_transparent` already calls `socket2` 0.6's `set_ip_transparent_v6` unconditionally — may already work; build + smoke-test on a musl target before writing code |
-| Retire the UDP sticky table via `consistent_hash` | pure polish, no user-visible gap |
-| Reload debounce only coalesces within one 200 ms window | wider-spaced events cause separate (idempotent) reloads; low priority |
-| NFR N3/N4/N5/N9 (aggregate throughput, full 500k/1M, HA) | need dedicated hardware + multiple hosts + a real load generator; the `gsp-bench --mode concurrency` ramp already went as far as one box allows (~20k TCP / ~5k UDP verified here) |
-| More sniffers (`quic`, `wireguard`, …), multiple sniffers per listener | community / plugin ecosystem; never blocks core work |
-
----
+Tracked as [GitHub issues](https://github.com/Wueschli/gameserver-proxy/issues) since
+2026-10-04 (#40–#62); this file no longer lists them. Check the issue list before
+starting new work, and file new follow-ups there rather than here.
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
 
