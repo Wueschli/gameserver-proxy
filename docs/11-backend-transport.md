@@ -249,6 +249,11 @@ IPv6 (built 2026-10-03):
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
   (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
+  A claim is kept even when the same registration then fails (backends not on the
+  claimed address, or a storage error), so the corrected retry gets the same address;
+  a stream of distinct names with bad backends can therefore use up the pool. The
+  registration endpoints are bearer-gated, and `DELETE` plus the stale flag are the
+  remedy.
   `gsp-ui` shows the same table, read-only, on its Tunnel addresses page
   (`GET /api/tunnel/addresses`, proxied with `--controller-url`/`--controller-token`).
 - **High availability (built 2026-10-03).** `--tunnel-network` works with `--ha-peers`:

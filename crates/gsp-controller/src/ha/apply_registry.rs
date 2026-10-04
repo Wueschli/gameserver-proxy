@@ -112,7 +112,8 @@ pub(super) fn register<R: Registration>(
         }
     };
     // As in the non-HA handler, the claim is kept even if the backends are
-    // rejected: the owner's corrected retry gets the same address.
+    // rejected (the owner's corrected retry gets the same address) or the
+    // registration write below fails.
     if let Some(backends) = reg.backends_mut() {
         match expand_backends(backends, assignment.address) {
             Ok(expanded) => *backends = expanded,

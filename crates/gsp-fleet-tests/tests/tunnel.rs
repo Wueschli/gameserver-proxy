@@ -138,7 +138,7 @@ async fn echo_server_round_trips_tcp_and_udp_and_stops_on_drop() -> Result<()> {
 /// show what each process said. Runs in plain `cargo test`: no namespaces.
 #[tokio::test]
 async fn proc_captures_output_for_failure_reports() -> Result<()> {
-    gsp_fleet_tests::build_fleet_bins()?;
+    gsp_fleet_tests::build_tunnel_bins()?;
     let dir = tempfile::tempdir()?;
     let port = gsp_fleet_tests::free_port()?;
     let ctl = spawn_controller_on(dir.path(), &format!("127.0.0.1:{port}"))?;
@@ -163,7 +163,7 @@ async fn proc_captures_output_for_failure_reports() -> Result<()> {
 
 fn ensure_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| gsp_fleet_tests::build_fleet_bins().expect("building binaries"));
+    BUILT.get_or_init(|| gsp_fleet_tests::build_tunnel_bins().expect("building binaries"));
 }
 
 /// Scenario 1. Real `gsp-controller` + `gsp-agent` + `gsp --tunnel-*`, real
@@ -190,12 +190,17 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
     let public = t.public_addr(edge);
     let big: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
     assert_eq!(tcp_roundtrip(public, &big).await?, big, "256 KiB over TCP");
+    // UDP is unreliable and this is one datagram on a path nothing has used
+    // yet, so one drop must not fail the scenario: allow three tries.
     let dgram = vec![0xa5; 1200];
-    assert_eq!(
-        udp_roundtrip(public, &dgram).await?,
-        dgram,
-        "1200 B over UDP"
-    );
+    let mut echoed = None;
+    for _ in 0..3 {
+        if let Ok(got) = udp_roundtrip(public, &dgram).await {
+            echoed = Some(got);
+            break;
+        }
+    }
+    assert_eq!(echoed.as_deref(), Some(&dgram[..]), "1200 B over UDP");
     assert_eq!(public.port(), PUBLIC_PORT);
     t.pass();
     Ok(())
@@ -307,6 +312,12 @@ async fn a_pinned_key_that_does_not_match_the_registry_is_refused() -> Result<()
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         let pools = t.pools(edge).await?;
+        // The pools must be listed at all, or "no backend line" proves nothing
+        // (it would also hold if the `/pools` format changed).
+        assert!(
+            pools.lines().any(|l| l.starts_with("tcp-pool\t")),
+            "expected the tcp-pool header in /pools, got:\n{pools}"
+        );
         assert!(
             !pools.lines().any(|l| l.starts_with("  ")),
             "a mismatched key must never yield a backend, but /pools shows:\n{pools}"
@@ -388,6 +399,13 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
     // `restart_edge` returns only once the admin API answers — i.e. startup
     // went ahead on the saved address instead of failing.
     t.restart_edge(edge).await?;
+    // It came up ON the saved address, not merely up: the tunnel interface
+    // carries it while the controller is still down.
+    let addrs = t.edge_run(edge, &["ip", "-o", "addr", "show", "dev", "gsp-tunnel0"])?;
+    assert!(
+        addrs.contains(&before),
+        "the restarted edge should hold its saved address {before}, got:\n{addrs}"
+    );
     t.start_controller().await?;
     let seen_after_restart = t.proxy_last_seen("edge-1").await?;
 

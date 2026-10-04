@@ -322,8 +322,7 @@ impl TunnelLab {
             .await?["tunnel_address"]
             .clone();
         let origin = self.origin.as_mut().context("start_origin first")?;
-        origin.agent = None;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        origin.agent = None; // dropping the `Proc` reaps it
         let _ = origin.ns.run(&["ip", "link", "del", "gsp-agent0"]);
         let _ = std::fs::remove_file("/run/wireguard/gsp-agent0.sock");
         origin.agent = Some(Proc::spawn_in(Some(&origin.ns), "gsp-agent", &origin.args)?);
@@ -566,14 +565,17 @@ impl TunnelLab {
         Ok(())
     }
 
-    /// Start the controller again on the same port and data directory. `sled`
-    /// releases its file lock on a background thread after a kill, so the first
-    /// attempts can fail: retry.
+    /// Start the controller again on the same port and data directory. A killed
+    /// process is reaped before this runs, so the first attempts failing is not
+    /// a sled lock held by a still-living process (the OS drops that lock with
+    /// the process); what else delays it was never pinned down. So retry, and
+    /// keep every failed attempt's log in the final error.
     pub async fn start_controller(&mut self) -> Result<()> {
         let data = self.dir.path().join("controller");
         let listen = controller_listen(self.opts.underlay, self.controller_port);
         let mut last = None;
-        for _ in 0..20 {
+        let mut logs = Vec::new();
+        for attempt in 1..=20 {
             let ctl = spawn_controller_with(&data, &listen, &self.controller_args)?;
             match wait_http_up(&self.registry_url("/healthz"), Duration::from_secs(3)).await {
                 Ok(()) => {
@@ -582,12 +584,17 @@ impl TunnelLab {
                 }
                 Err(e) => {
                     last = Some(e);
+                    let log = ctl.log();
                     drop(ctl);
+                    logs.push(format!("--- attempt {attempt} ---\n{log}"));
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
             }
         }
-        Err(last.expect("at least one attempt ran")).context("restarting the controller")
+        Err(last.expect("at least one attempt ran")).context(format!(
+            "restarting the controller; failed attempts' logs:\n{}",
+            logs.join("\n")
+        ))
     }
 
     /// Stop the controller and start it again with `--tunnel-network <lab
@@ -639,9 +646,16 @@ impl TunnelLab {
     /// Waits up to 45 s for `/healthz`: with the controller down, `gsp` spends
     /// its ~30 s startup registration budget before falling back to the saved
     /// address and binding its listeners.
+    ///
+    /// The boringtun socket path is shared by every namespace in the lab, so
+    /// with the userspace backend this is only safe while one edge exists.
     pub async fn restart_edge(&mut self, idx: usize) -> Result<()> {
+        anyhow::ensure!(
+            self.backend == Backend::Kernel || self.edges.len() == 1,
+            "restart_edge removes the shared boringtun socket path: use it with one edge only"
+        );
+        // Dropping the `Proc` reaps it, so nothing is left to wait for.
         self.edges[idx].gsp = None;
-        tokio::time::sleep(Duration::from_millis(500)).await;
         let _ = self.edges[idx]
             .ns
             .run(&["ip", "link", "del", "gsp-tunnel0"]);
@@ -679,7 +693,7 @@ impl TunnelLab {
         .collect();
         args.extend(self.backend.agent_flag().map(str::to_string));
         let mut agent = Proc::spawn_in(Some(&ns), "gsp-agent", &args)?;
-        wait_until(
+        let exited = wait_until(
             || {
                 let code = agent.exit_code();
                 async move { Ok(code.is_some_and(|c| c != 0)) }
@@ -687,7 +701,11 @@ impl TunnelLab {
             Duration::from_secs(40),
             "the refused agent to exit non-zero",
         )
-        .await?;
+        .await;
+        // On a timeout the agent's log is the only clue why it kept running.
+        if let Err(e) = exited {
+            return Err(e.context(format!("agent {name} log:\n{}", agent.log())));
+        }
         Ok(agent.log())
     }
 }

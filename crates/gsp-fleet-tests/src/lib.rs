@@ -52,23 +52,29 @@ fn workspace_root() -> PathBuf {
 /// Debug, not release: this is a correctness test, not `gsp-bench`'s
 /// latency harness, and a debug build is much faster to produce in CI.
 pub fn build_fleet_bins() -> Result<()> {
+    build_bins(&[
+        "gsp",
+        "gsp-controller",
+        "gsp-aggregator",
+        "gsp-ui",
+        "gsp-agent",
+    ])
+}
+
+/// [`build_fleet_bins`] for the tunnel lab, which runs only these three. Also
+/// what `make tunnel-e2e` pre-builds, so the build inside the namespace has
+/// nothing left to compile.
+pub fn build_tunnel_bins() -> Result<()> {
+    build_bins(&["gsp", "gsp-controller", "gsp-agent"])
+}
+
+fn build_bins(packages: &[&str]) -> Result<()> {
     let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "-p",
-            "gsp",
-            "-p",
-            "gsp-controller",
-            "-p",
-            "gsp-aggregator",
-            "-p",
-            "gsp-ui",
-            "-p",
-            "gsp-agent",
-        ])
+        .arg("build")
+        .args(packages.iter().flat_map(|p| ["-p", p]))
         .current_dir(workspace_root())
         .status()
-        .context("running `cargo build -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent`")?;
+        .with_context(|| format!("running `cargo build` for {packages:?}"))?;
     ensure!(status.success(), "building the fleet binaries failed");
     Ok(())
 }

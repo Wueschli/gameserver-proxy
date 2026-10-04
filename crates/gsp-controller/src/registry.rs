@@ -386,8 +386,12 @@ async fn register<R: Registration>(
             Ok(a) => a,
             Err(e) => return claim_error_response(&e),
         };
-    // Note: the claim above is kept even if the backends below are rejected —
-    // the owner's corrected retry gets the same address (Review Focus 1).
+    // Note: the claim above is kept even if the backends below are rejected
+    // (the owner's corrected retry gets the same address, Review Focus 1), and
+    // also if storing the registration fails afterwards (a `5xx`; the retry
+    // finds the claim idempotent). A stream of distinct names with bad backends
+    // can therefore use up the pool; the endpoint is bearer-gated and
+    // `DELETE` (or the stale-address warning) is the remedy.
     if let Some(backends) = reg.backends_mut() {
         *backends = match expand_backends(backends, assignment.address) {
             Ok(b) => b,
