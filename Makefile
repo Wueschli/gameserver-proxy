@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -61,6 +61,10 @@ ui:
 ## ui-test: run the gsp-ui frontend tests (vitest + Testing Library; needs Node/npm)
 ui-test:
 	cd crates/gsp-ui/web && npm install && npm test
+
+## ui-e2e: run the gsp-ui Playwright browser tests against the built UI (backend stubbed; first run: npx playwright install chromium)
+ui-e2e:
+	cd crates/gsp-ui/web && npm install && npm run test:e2e
 
 # Rootless when not already root: a user+net+mount namespace gives us
 # CAP_NET_ADMIN inside it. `--kill-child` reaps everything if we die.

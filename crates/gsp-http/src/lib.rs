@@ -103,13 +103,15 @@ pub fn client() -> Client {
 /// `reqwest::Error`'s own `Display` stops at "error sending request for url
 /// (…)", hiding the cause (a refused connection, an untrusted certificate);
 /// use this wherever an HTTP error becomes text. A source whose text the
-/// message already contains is skipped, since hyper/reqwest often repeat it.
+/// message already ends with (at a `": "` boundary, or the whole message) is
+/// skipped, since hyper/reqwest often repeat it; a short source that merely
+/// appears somewhere inside an earlier message is kept.
 pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     let mut out = e.to_string();
     let mut next = e.source();
     while let Some(src) = next {
         let text = src.to_string();
-        if !out.contains(&text) {
+        if out != text && !out.ends_with(&format!(": {text}")) {
             out.push_str(": ");
             out.push_str(&text);
         }

@@ -157,7 +157,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
 | gsp-ui frontend | `make ui` (needs Node/npm; builds `crates/gsp-ui/web/` to `dist/`, served by `gsp-ui --static-dir`; see `crates/gsp-ui/web/README.md`) |
-| gsp-ui frontend tests | `make ui-test` (vitest; also the `ui` CI job) |
+| gsp-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |
