@@ -1,8 +1,9 @@
 # deploy/
 
 Reference container images plus a compose demo and plain Kubernetes manifests
-for the five gsp binaries (and a minimal build of `gsp`). **Reference only**: nothing here is published —
-CI builds and smoke-tests it so `docs/12` stays true. Design:
+for the five gsp binaries (and a minimal build of `gsp`). **Reference only**: the compose demo and manifests are not
+supported deployments. CI builds and smoke-tests them so `docs/12` stays true, and
+pushing a `vX.Y.Z` tag publishes the images (`.github/workflows/release.yml`). Design:
 `docs/superpowers/specs/2026-10-01-deploy-design.md`; networking and capability
 background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 
