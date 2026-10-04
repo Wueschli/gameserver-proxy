@@ -1,7 +1,7 @@
 # deploy/
 
 Reference container images plus a compose demo and plain Kubernetes manifests
-for the five gsp binaries. **Reference only**: nothing here is published —
+for the five gsp binaries (and a minimal build of `gsp`). **Reference only**: nothing here is published —
 CI builds and smoke-tests it so `docs/12` stays true. Design:
 `docs/superpowers/specs/2026-10-01-deploy-design.md`; networking and capability
 background: [`docs/12-deployment.md`](../docs/12-deployment.md).
@@ -10,8 +10,8 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 
 | Path | Purpose |
 |---|---|
-| `Dockerfile` | one file, five targets: `gsp`, `gsp-controller`, `gsp-aggregator`, `gsp-ui`, `gsp-agent` |
-| `build-images.sh` | builds all five, runs `--version` in each, prints sizes |
+| `Dockerfile` | one file, six targets: `gsp`, `gsp-minimal`, `gsp-controller`, `gsp-aggregator`, `gsp-ui`, `gsp-agent` |
+| `build-images.sh` | builds all six, runs `--version` in each, prints sizes |
 | `compose/` | runnable control-plane demo (+ `compose.tunnel.yml` WireGuard override) |
 | `smoke.sh` | the HTTP smoke test CI runs against the compose demo |
 | `k8s/` | plain manifests (namespace, secrets example, controller, aggregator, ui, gsp RBAC, gsp DaemonSet) |
@@ -19,7 +19,7 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 ## Build
 
 ```sh
-make deploy-images                      # all five, with a --version check each
+make deploy-images                      # all six, with a --version check each
 make deploy-scan                        # then Trivy over them (needs `trivy` on PATH)
 docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .   # one
 ```
@@ -28,7 +28,7 @@ Builder is `rust:1-trixie`, runtime is `gcr.io/distroless/cc-debian13:nonroot`
 (no shell, runs as uid 65532).
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
-binaries you built yourself from `deploy/prebuilt/` (`gsp`, `gsp-controller`,
+binaries you built yourself from `deploy/prebuilt/` (`gsp`, `gsp-minimal`, `gsp-controller`,
 `gsp-aggregator`, `gsp-ui`, `gsp-agent`). CI uses it to share one release build
 with the plugins tests; they must be built against a glibc no newer than the
 runtime's (2.41). The nightly CI run uses the default, self-contained path.
@@ -88,7 +88,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
   overrides it. Fleet *reads* (pools, sessions) work.
-- `make deploy-scan` runs Trivy over the five images (OS packages, secrets, and the
+- `make deploy-scan` runs Trivy over the six images (OS packages, secrets, and the
   Rust crates each binary embeds — they're built with `cargo auditable`) and over
   `Cargo.lock` and the UI's `package-lock.json`. It reports
   HIGH/CRITICAL findings that have a fix available, writes JSON + SARIF to

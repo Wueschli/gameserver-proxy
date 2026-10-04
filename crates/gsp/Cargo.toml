@@ -15,11 +15,14 @@ path = "src/main.rs"
 # `cargo build -p gsp --no-default-features`. Everything is on by default;
 # turning one off makes a config that needs it fail at startup, never silently
 # run without it.
-default = ["wasm-sniffers", "grpc-resolver", "dns-srv"]
+default = ["wasm-sniffers", "grpc-resolver", "dns-srv", "gossip"]
 # WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
 wasm-sniffers = ["dep:wasmtime"]
 # `backend_sources[].type: dns_srv`; pulls in `hickory-resolver`.
 dns-srv = ["dep:hickory-resolver"]
+# Tier-2 regional health fabric (`settings.gossip`); pulls in `foca`, `postcard`
+# and `hmac` through `gsp-core`.
+gossip = ["gsp-core/gossip"]
 # gRPC external resolver (`resolvers[].kind: grpc`); pulls in `tonic`/`prost` and
 # needs `protoc` at build time.
 grpc-resolver = ["dep:tonic", "dep:prost", "dep:tonic-prost", "dep:tonic-prost-build"]
@@ -30,7 +33,7 @@ workspace = true
 [dependencies]
 gsp-http = { workspace = true, features = ["server"] }
 gsp-config = { path = "../gsp-config" }
-gsp-core = { path = "../gsp-core" }
+gsp-core = { path = "../gsp-core", default-features = false }
 
 tokio.workspace = true
 serde.workspace = true

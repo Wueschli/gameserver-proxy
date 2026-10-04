@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the five reference images (deploy/Dockerfile) to GHCR, amd64 only,
+# Publishes the six reference images (deploy/Dockerfile) to GHCR, amd64 only,
 # when a version tag is pushed. Nothing else triggers it, so it costs one build
 # per release. Multi-arch and Kubernetes packaging: issue #88.
 on:
@@ -40,7 +40,7 @@ jobs:
           # Pre-releases (v1.2.3-rc.1) get their own tag but never move `latest`.
           tags="$version"
           case "$version" in *-*) ;; *) tags="$tags latest" ;; esac
-          for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+          for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
             image="$REGISTRY/$owner/$t"
             docker build -f deploy/Dockerfile --target "$t" \
               --label "org.opencontainers.image.source=https://github.com/$REPO" \
