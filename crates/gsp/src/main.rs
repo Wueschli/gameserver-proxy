@@ -13,6 +13,10 @@ mod procinfo;
 mod proxy_register;
 mod reload;
 mod resolver;
+#[cfg(feature = "wasm-sniffers")]
+mod sniffer_loader;
+#[cfg(not(feature = "wasm-sniffers"))]
+#[path = "sniffer_loader_disabled.rs"]
 mod sniffer_loader;
 mod tunnel_address;
 mod tunnel_client;

@@ -10,6 +10,15 @@ default-run = "gsp"
 name = "gsp"
 path = "src/main.rs"
 
+[features]
+# Cargo features carve a minimal edge build out of `gsp` (issue #62):
+# `cargo build -p gsp --no-default-features`. Everything is on by default;
+# turning one off makes a config that needs it fail at startup, never silently
+# run without it.
+default = ["wasm-sniffers"]
+# WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
+wasm-sniffers = ["dep:wasmtime"]
+
 [dependencies]
 gsp-http.workspace = true
 gsp-config = { path = "../gsp-config" }
@@ -31,7 +40,7 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 notify.workspace = true
 hickory-resolver.workspace = true
-wasmtime.workspace = true
+wasmtime = { workspace = true, optional = true }
 sha2.workspace = true
 nix.workspace = true
 defguard_wireguard_rs.workspace = true

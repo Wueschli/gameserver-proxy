@@ -95,6 +95,11 @@ jobs:
           tool: nextest
       - name: Test
         run: cargo nextest run --profile ci --workspace
+      # The minimal edge build (issue #62): every optional `gsp` cargo feature off.
+      - name: Minimal build (clippy + tests)
+        run: |
+          cargo clippy -p gsp --no-default-features --all-targets
+          cargo nextest run --profile ci -p gsp --no-default-features
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
