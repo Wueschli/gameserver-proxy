@@ -208,24 +208,14 @@ async fn subscribe_worker(
     loop {
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {}
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        revision,
-                        "update notification for an intent revision store lost"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing intent updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     skipped,

@@ -549,24 +549,14 @@ pub(crate) async fn subscribe_worker(
     loop {
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {}
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        revision,
-                        "update notification for a registry revision the store lost"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing registry updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     skipped,
@@ -742,5 +732,23 @@ mod tests {
         assert_eq!(p["revision"], 4);
         assert_eq!(p["removed"]["name"], "home-origin");
         assert!(p.get("registration").is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_worker_replays_every_revision_behind_a_single_wake() {
+        // A snapshot install wakes subscribers once, for the newest
+        // revision; the ones before it must still reach the subscriber.
+        let (state, _d) = state();
+        state.register_applied(&reg("a"), None).unwrap();
+        let (wake, updates) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_worker(state.store.clone(), updates, 0, tx));
+        assert_eq!(rx.recv().await.unwrap().0, 1);
+
+        state.register_applied(&reg("b"), None).unwrap();
+        state.register_applied(&reg("c"), None).unwrap();
+        wake.send(3).unwrap();
+        assert_eq!(rx.recv().await.unwrap().0, 2);
+        assert_eq!(rx.recv().await.unwrap().0, 3);
     }
 }
