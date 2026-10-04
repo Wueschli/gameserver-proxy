@@ -243,15 +243,14 @@ IPv6 (built 2026-10-03):
   address the controller currently holds. If it differs from the one the interface
   carries (an operator released it, or a lease expired and it was reallocated), the
   agent or `gsp` moves the interface without a restart, keeping its key, listen port
-  and peers: on the kernel backend it reconfigures the link in place (the call flushes
-  the old address and assigns the new one), on boringtun it drops the device and brings
-  it up again on the new address, since its address would otherwise be left behind
-  (`live_interface.rs` in both binaries; the library's `remove_interface` is not relied on
-  because it fails in DNS cleanup where no resolver tool exists, and an error from it is ignored). Peer updates wait on the same lock, so none is lost, and the
-  new address is saved for a restart only once it is up. If the new address does not come up, the old one is restored; if that fails
-  too the interface stays down and the next re-registration retries. There is a
-  short traffic gap while WireGuard re-handshakes (the agent starts the handshakes
-  itself, since boringtun would wait 25 s). The other side follows on its own: each
+  and peers, on both backends: it deletes the old address with a netlink call of its own
+  and assigns the new one (`live_interface.rs` and `netlink_addr.rs` in both binaries).
+  The library can add an address but not remove one, and its `remove_interface` cannot be
+  relied on (it fails in DNS cleanup where no resolver tool exists). The old address goes
+  first, because deleting an IPv4 primary address would otherwise take the new one with it.
+  Established sessions survive. The new address is saved for a restart only once it is up;
+  if assigning it fails the old one is put back and the next re-registration retries. The
+  other side follows on its own: each
   proxy and origin re-reads the registry and re-routes the `/32` (`/128`).
 - **Routing.** Every peer is a host route (`/32`, or `/128` for IPv6): origins route each proxy's tunnel address
   (this fixed the earlier `AllowedIPs 0.0.0.0/0` bug where a second proxy stole the

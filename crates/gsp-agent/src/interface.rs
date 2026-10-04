@@ -7,8 +7,6 @@
 //! behind one API" ADR 25 called for, not two separate integrations.
 
 use anyhow::Context;
-
-use crate::live_interface::Interface;
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::net::IpAddrMask;
 use defguard_wireguard_rs::peer::Peer;
@@ -22,26 +20,6 @@ use defguard_wireguard_rs::{
 /// 80-byte overhead over an IPv6 underlay. 1420 also stays above IPv6's
 /// 1280 minimum.
 pub const TUNNEL_MTU: u32 = 1420;
-
-/// The interface configuration: name, key, port, MTU, and the given address
-/// and peers.
-pub fn config(
-    ifname: &str,
-    private_key: &Key,
-    listen_port: u16,
-    address: IpAddrMask,
-    peers: Vec<Peer>,
-) -> InterfaceConfiguration {
-    InterfaceConfiguration {
-        name: ifname.to_string(),
-        prvkey: private_key.to_string(),
-        addresses: vec![address],
-        port: listen_port,
-        peers,
-        mtu: Some(TUNNEL_MTU),
-        fwmark: None,
-    }
-}
 
 /// Creates and configures the interface, trying the kernel backend first
 /// unless `prefer_userspace` forces boringtun directly (for hosts known not
@@ -62,17 +40,20 @@ pub fn bring_up_with(
     address: IpAddrMask,
     peers: Vec<Peer>,
     prefer_userspace: bool,
-) -> anyhow::Result<Interface> {
-    let config = config(ifname, private_key, listen_port, address, peers);
+) -> anyhow::Result<Box<dyn WireguardInterfaceApi + Send + Sync>> {
+    let config = InterfaceConfiguration {
+        name: ifname.to_string(),
+        prvkey: private_key.to_string(),
+        addresses: vec![address],
+        port: listen_port,
+        peers,
+        mtu: Some(TUNNEL_MTU),
+        fwmark: None,
+    };
 
     if !prefer_userspace {
         match configure::<Kernel>(ifname, &config) {
-            Ok(api) => {
-                return Ok(Interface {
-                    wg: Box::new(api),
-                    kernel: true,
-                })
-            }
+            Ok(api) => return Ok(Box::new(api)),
             Err(e) => tracing::warn!(
                 error = %e,
                 "kernel WireGuard interface unavailable, falling back to boringtun userspace"
@@ -82,10 +63,7 @@ pub fn bring_up_with(
 
     let api = configure::<Userspace>(ifname, &config)
         .context("bringing up the boringtun userspace WireGuard interface")?;
-    Ok(Interface {
-        wg: Box::new(api),
-        kernel: false,
-    })
+    Ok(Box::new(api))
 }
 
 fn configure<API>(ifname: &str, config: &InterfaceConfiguration) -> anyhow::Result<WGApi<API>>

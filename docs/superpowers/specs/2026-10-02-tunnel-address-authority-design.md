@@ -49,7 +49,7 @@ each later:
 - **Automatic lease expiry / auto-release** (v1: explicit release + stale warning).
 - **A `gsp-ui` view** of `GET /tunnel/addresses`.
 - ~~**Changing a live peer's address without a restart**~~ (built 2026-10-04: the
-  interface is rebuilt on the new address with its peers, see `docs/11` "Address
+  old address deleted and new one assigned in place, peers kept, see `docs/11` "Address
   authority"; v1 logged the mismatch and kept running on the old address).
 - **`TunnelSource` dropping pool entries when an origin is deleted** (a `404` still means
   "keep last-known-good").

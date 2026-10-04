@@ -214,8 +214,8 @@ pub async fn run(
         match register_once(&client, &controller_url, token.as_deref(), &reg).await {
             Ok(r) => {
                 tracing::info!(revision = r.revision, "registered with the controller");
-                // Moving the interface holds a lock and sleeps between bring-up
-                // attempts: keep it off the async workers.
+                // Moving the interface makes blocking netlink calls: keep it
+                // off the async workers.
                 let s = sync.clone();
                 let moved = tokio::task::spawn_blocking(move || {
                     let from = s.live.address();
@@ -229,12 +229,6 @@ pub async fn run(
                             from = %from, to = %sync.live.address(),
                             "the controller assigned a new tunnel address; moved the interface"
                         );
-                        // boringtun arms the peers' keepalive only 25 s after
-                        // they are created, and the rebuilt interface just
-                        // created them all: start the handshakes now.
-                        for ip in sync.live.peer_hosts() {
-                            crate::interface::kick_handshake(ip);
-                        }
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -303,11 +297,11 @@ mod tests {
 
     #[test]
     fn a_changed_address_moves_the_interface_and_is_saved() {
-        use crate::live_interface::testing::{live, peer, Log};
+        use crate::live_interface::testing::{live, Log};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tunnel-address");
         let log = Log::default();
-        let live = Arc::new(live(&peer(), &[], &log));
+        let live = Arc::new(live(&[], &[], &log));
         assert!(sync(&live, None, &path)
             .apply(&reported("10.60.0.7"))
             .unwrap());
@@ -317,11 +311,11 @@ mod tests {
 
     #[test]
     fn an_unchanged_address_touches_nothing() {
-        use crate::live_interface::testing::{live, peer, Log};
+        use crate::live_interface::testing::{live, Log};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tunnel-address");
         let log = Log::default();
-        let live = Arc::new(live(&peer(), &[], &log));
+        let live = Arc::new(live(&[], &[], &log));
         assert!(!sync(&live, None, &path)
             .apply(&reported("10.60.0.2"))
             .unwrap());
@@ -331,11 +325,11 @@ mod tests {
 
     #[test]
     fn a_failed_move_saves_nothing() {
-        use crate::live_interface::testing::{live, peer, Log};
+        use crate::live_interface::testing::{live, Log};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tunnel-address");
         let log = Log::default();
-        let live = Arc::new(live(&peer(), &["10.60.0.7/24"], &log));
+        let live = Arc::new(live(&["10.60.0.7/24"], &[], &log));
         assert!(sync(&live, None, &path)
             .apply(&reported("10.60.0.7"))
             .is_err());
@@ -348,11 +342,11 @@ mod tests {
 
     #[test]
     fn pin_only_mode_keeps_the_pinned_prefix() {
-        use crate::live_interface::testing::{live, peer, Log};
+        use crate::live_interface::testing::{live, Log};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tunnel-address");
         let log = Log::default();
-        let live = Arc::new(live(&peer(), &[], &log));
+        let live = Arc::new(live(&[], &[], &log));
         let r = Registered {
             revision: 1,
             tunnel_address: "10.60.0.9".into(),

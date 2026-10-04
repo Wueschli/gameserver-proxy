@@ -33,8 +33,6 @@ use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::WireguardInterfaceApi;
 use serde::Deserialize;
 
-use crate::live_interface::LiveInterface;
-
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -170,11 +168,22 @@ fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubke
 /// `defguard_boringtun`'s userspace backend panics on a same-pubkey
 /// `configure_peer`, and re-registering on a fixed interval would otherwise
 /// tear down a just-established handshake every cycle).
-pub async fn run(controller_url: String, token: Option<String>, wg: Arc<LiveInterface>) {
+pub async fn run(
+    controller_url: String,
+    token: Option<String>,
+    wg: Arc<dyn WireguardInterfaceApi + Send + Sync>,
+) {
     let mut backoff = RECONNECT_MIN;
     let mut last_applied: HashMap<String, ProxyRegistration> = HashMap::new();
     loop {
-        match subscribe_once(&controller_url, token.as_deref(), &wg, &mut last_applied).await {
+        match subscribe_once(
+            &controller_url,
+            token.as_deref(),
+            wg.as_ref(),
+            &mut last_applied,
+        )
+        .await
+        {
             Ok(()) => {
                 backoff = RECONNECT_MIN;
                 tracing::warn!(
@@ -198,7 +207,7 @@ pub async fn run(controller_url: String, token: Option<String>, wg: Arc<LiveInte
 async fn subscribe_once(
     base_url: &str,
     token: Option<&str>,
-    wg: &LiveInterface,
+    wg: &(dyn WireguardInterfaceApi + Send + Sync),
     last_applied: &mut HashMap<String, ProxyRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/proxy-peers/subscribe");
@@ -235,20 +244,15 @@ async fn subscribe_once(
                     Action::Skip => {}
                     Action::Reconcile(reg) => {
                         if let Some(old) = replaced_pubkey(last_applied, reg) {
-                            wg.with(|w| remove_peer(w, &reg.name, old));
+                            remove_peer(wg, &reg.name, old);
                         }
-                        // `None` = the interface is down after a failed address
-                        // change; leave `last_applied` alone so the event is
-                        // not mistaken for done (the next reconnect replays it).
-                        if wg.with(|w| reconcile_peer(w, reg)).is_some() {
-                            last_applied.insert(reg.name.clone(), reg.clone());
-                        }
+                        reconcile_peer(wg, reg);
+                        last_applied.insert(reg.name.clone(), reg.clone());
                     }
                     Action::Remove(pubkey) => {
                         if let Event::Removed(name) = &ev {
-                            if wg.with(|w| remove_peer(w, name, &pubkey)).is_some() {
-                                last_applied.remove(name);
-                            }
+                            remove_peer(wg, name, &pubkey);
+                            last_applied.remove(name);
                         }
                     }
                 }

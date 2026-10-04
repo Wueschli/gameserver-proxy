@@ -41,8 +41,6 @@ use defguard_wireguard_rs::{
 };
 use serde::Deserialize;
 
-use crate::live_interface::{Interface, LiveInterface};
-
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -99,48 +97,28 @@ pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
 /// 1280 minimum.
 pub const TUNNEL_MTU: u32 = 1420;
 
-/// The interface configuration: name, key, port, MTU, and the given address
-/// and peers.
-pub fn config(
-    ifname: &str,
-    private_key: &Key,
-    listen_port: u16,
-    address: IpAddrMask,
-    peers: Vec<Peer>,
-) -> InterfaceConfiguration {
-    InterfaceConfiguration {
-        name: ifname.to_string(),
-        prvkey: private_key.to_string(),
-        addresses: vec![address],
-        port: listen_port,
-        peers,
-        mtu: Some(TUNNEL_MTU),
-        fwmark: None,
-    }
-}
-
 /// Brings up this proxy's shared WireGuard interface — the same
-/// kernel-primary, boringtun-fallback shape `gsp-agent::interface` uses. `peers`
-/// is empty at startup; a tunnel-address change passes the live peer set so the
-/// rebuilt interface keeps it (see `live_interface`).
+/// kernel-primary, boringtun-fallback shape `gsp-agent::interface` uses.
 pub fn bring_up(
     ifname: &str,
     private_key: &Key,
     listen_port: u16,
     address: IpAddrMask,
-    peers: Vec<Peer>,
     prefer_userspace: bool,
-) -> anyhow::Result<Interface> {
-    let config = config(ifname, private_key, listen_port, address, peers);
+) -> anyhow::Result<Box<dyn WireguardInterfaceApi + Send + Sync>> {
+    let config = InterfaceConfiguration {
+        name: ifname.to_string(),
+        prvkey: private_key.to_string(),
+        addresses: vec![address],
+        port: listen_port,
+        peers: Vec::new(),
+        mtu: Some(TUNNEL_MTU),
+        fwmark: None,
+    };
 
     if !prefer_userspace {
         match configure::<Kernel>(ifname, &config) {
-            Ok(api) => {
-                return Ok(Interface {
-                    wg: Box::new(api),
-                    kernel: true,
-                })
-            }
+            Ok(api) => return Ok(Box::new(api)),
             Err(e) => tracing::warn!(
                 error = %e,
                 "kernel WireGuard interface unavailable, falling back to boringtun userspace"
@@ -149,10 +127,7 @@ pub fn bring_up(
     }
     let api = configure::<Userspace>(ifname, &config)
         .context("bringing up the boringtun userspace WireGuard interface")?;
-    Ok(Interface {
-        wg: Box::new(api),
-        kernel: false,
-    })
+    Ok(Box::new(api))
 }
 
 fn configure<API>(ifname: &str, config: &InterfaceConfiguration) -> anyhow::Result<WGApi<API>>
@@ -228,11 +203,22 @@ fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
 /// anything changed, so without this skip a stable tunnel would never stay
 /// up — every re-registration would tear down the handshake the previous
 /// one just completed.
-pub async fn run(controller_url: String, token: Option<String>, wg: std::sync::Arc<LiveInterface>) {
+pub async fn run(
+    controller_url: String,
+    token: Option<String>,
+    wg: std::sync::Arc<dyn WireguardInterfaceApi + Send + Sync>,
+) {
     let mut backoff = RECONNECT_MIN;
     let mut last_applied: HashMap<String, PeerRegistration> = HashMap::new();
     loop {
-        match subscribe_once(&controller_url, token.as_deref(), &wg, &mut last_applied).await {
+        match subscribe_once(
+            &controller_url,
+            token.as_deref(),
+            wg.as_ref(),
+            &mut last_applied,
+        )
+        .await
+        {
             Ok(()) => {
                 backoff = RECONNECT_MIN;
                 tracing::warn!(
@@ -256,7 +242,7 @@ pub async fn run(controller_url: String, token: Option<String>, wg: std::sync::A
 async fn subscribe_once(
     base_url: &str,
     token: Option<&str>,
-    wg: &LiveInterface,
+    wg: &(dyn WireguardInterfaceApi + Send + Sync),
     last_applied: &mut HashMap<String, PeerRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/peers/subscribe");
@@ -293,20 +279,15 @@ async fn subscribe_once(
                     Action::Skip => {}
                     Action::Reconcile(reg) => {
                         if let Some(old) = replaced_pubkey(last_applied, reg) {
-                            wg.with(|w| remove_peer(w, &reg.name, old));
+                            remove_peer(wg, &reg.name, old);
                         }
-                        // `None` = the interface is down after a failed address
-                        // change; leave `last_applied` alone so the event is
-                        // not mistaken for done (the next reconnect replays it).
-                        if wg.with(|w| reconcile_peer(w, reg)).is_some() {
-                            last_applied.insert(reg.name.clone(), reg.clone());
-                        }
+                        reconcile_peer(wg, reg);
+                        last_applied.insert(reg.name.clone(), reg.clone());
                     }
                     Action::Remove(pubkey) => {
                         if let Event::Removed(name) = &ev {
-                            if wg.with(|w| remove_peer(w, name, &pubkey)).is_some() {
-                                last_applied.remove(name);
-                            }
+                            remove_peer(wg, name, &pubkey);
+                            last_applied.remove(name);
                         }
                     }
                 }

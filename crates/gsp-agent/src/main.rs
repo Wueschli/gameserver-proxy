@@ -24,6 +24,7 @@ mod address_store;
 mod interface;
 mod keypair;
 mod live_interface;
+mod netlink_addr;
 mod proxy_subscribe;
 mod register;
 
@@ -230,31 +231,21 @@ async fn main() -> anyhow::Result<()> {
         peers.push(peer);
     }
 
-    // A changed tunnel address rebuilds the interface (see `live_interface`),
-    // so keep what that needs to bring it up again.
-    let bring_up: live_interface::BringUp = {
-        let (iface, key, port, userspace) = (
-            args.iface.clone(),
-            private_key.clone(),
+    let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> = Arc::from(
+        interface::bring_up_with(
+            &args.iface,
+            &private_key,
             args.listen_port,
+            address.clone(),
+            peers,
             args.userspace,
-        );
-        Box::new(move |address, peers| {
-            interface::bring_up_with(&iface, &key, port, address, peers, userspace)
-        })
-    };
-    let template = interface::config(
-        &args.iface,
-        &private_key,
-        args.listen_port,
-        address.clone(),
-        Vec::new(),
+        )
+        .context("bringing up the local WireGuard interface")?,
     );
-    let wg = Arc::new(live_interface::LiveInterface::new(
-        bring_up(address.clone(), peers).context("bringing up the local WireGuard interface")?,
+    let live = Arc::new(live_interface::LiveInterface::new(
+        wg,
         address,
-        bring_up,
-        template,
+        netlink_addr::deleter(args.iface.clone()),
     ));
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
     if let Some(ip) = args.peer_address.as_deref().and_then(|a| a.parse().ok()) {
@@ -268,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
         reg,
         Duration::from_secs(args.register_interval_sec),
         register::AddressSync {
-            live: wg.clone(),
+            live: live.clone(),
             pinned_cidr: pinned_cidr.map(str::to_string),
             path: addr_path,
         },
@@ -278,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     let subscribe_task = tokio::spawn(proxy_subscribe::run(
         args.controller_url.clone(),
         args.controller_token.clone(),
-        wg.clone(),
+        live.api(),
     ));
 
     tokio::signal::ctrl_c()
@@ -286,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
         .context("waiting for a shutdown signal")?;
     tracing::info!("shutting down, removing the wireguard interface");
     subscribe_task.abort();
-    if let Err(e) = wg.remove() {
+    if let Err(e) = live.remove() {
         tracing::warn!(error = %e, "failed to remove the wireguard interface cleanly");
     }
     Ok(())

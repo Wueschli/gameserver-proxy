@@ -20,6 +20,7 @@ mod grpc_resolver;
 mod grpc_resolver;
 mod intent_client;
 mod live_interface;
+mod netlink_addr;
 mod procinfo;
 mod proxy_register;
 mod reload;
@@ -510,31 +511,18 @@ async fn run(
                 .cidr
                 .parse()
                 .map_err(|e| anyhow::anyhow!("tunnel address {:?} is invalid: {e}", start.cidr))?;
-            // A changed tunnel address rebuilds the interface (see
-            // `live_interface`), so keep what that needs to bring it up again.
-            let bring_up: live_interface::BringUp = {
-                let (iface, key, port, userspace) = (
-                    tc.iface.clone(),
-                    private_key.clone(),
+            let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> =
+                Arc::from(tunnel_client::bring_up(
+                    &tc.iface,
+                    &private_key,
                     tc.listen_port,
+                    address.clone(),
                     tc.userspace,
-                );
-                Box::new(move |address, peers| {
-                    tunnel_client::bring_up(&iface, &key, port, address, peers, userspace)
-                })
-            };
-            let template = tunnel_client::config(
-                &tc.iface,
-                &private_key,
-                tc.listen_port,
-                address.clone(),
-                Vec::new(),
-            );
-            let wg = Arc::new(live_interface::LiveInterface::new(
-                bring_up(address.clone(), Vec::new())?,
+                )?);
+            let live = Arc::new(live_interface::LiveInterface::new(
+                wg,
                 address,
-                bring_up,
-                template,
+                netlink_addr::deleter(tc.iface.clone()),
             ));
             tracing::info!(
                 iface = %tc.iface,
@@ -547,7 +535,7 @@ async fn run(
             let task = tokio::spawn(tunnel_client::run(
                 tc.controller_url.clone(),
                 tc.controller_token.clone(),
-                wg.clone(),
+                live.api(),
             ));
             // Register ourselves (periodically) so every origin's `gsp-agent`
             // can peer with us — the mirror image of `task` above.
@@ -558,12 +546,12 @@ async fn run(
                 reg,
                 tc.register_interval,
                 proxy_register::AddressSync {
-                    live: wg.clone(),
+                    live: live.clone(),
                     pinned_cidr,
                     path: addr_path,
                 },
             ));
-            Some((task, register_task, wg))
+            Some((task, register_task, live))
         }
         None => None,
     };
@@ -686,10 +674,10 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
-    if let Some((task, register_task, wg)) = tunnel {
+    if let Some((task, register_task, live)) = tunnel {
         task.abort();
         register_task.abort();
-        if let Err(e) = wg.remove() {
+        if let Err(e) = live.remove() {
             tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
         }
     }
