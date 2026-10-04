@@ -44,8 +44,8 @@ current ones are below.
 | # | Status | Evidence on main |
 |---|--------|------------------|
 | O1 | Open | No startup check for a non-loopback bind without a token. Every bearer middleware still passes requests through when no token is set, e.g. `crates/gsp-controller/src/auth.rs:24-34`, `crates/gsp-aggregator/src/auth.rs:25-35`. |
-| O2 | Open | `crates/gsp-ui/src/session.rs:32-73`: `SessionStore` is a bare `HashMap<String, Session>` with no timestamps, no cap and no expiry; the cookie set in `crates/gsp-ui/src/api.rs:241-247` has no `Max-Age`. |
-| O3 | Open | `crates/gsp-ui/src/api.rs:196` `login` has no rate limit or Argon2 concurrency bound. |
+| O2 | Fixed | `crates/gsp-ui/src/session.rs`: sessions expire after an idle timeout (default 30 min, `--session-idle-timeout-secs`) and an absolute max age (default 12 h, `--session-max-age-secs`), and the store is capped (default 1000, `--max-sessions`; oldest evicted). The cookie carries `Max-Age`. |
+| O3 | Fixed | `crates/gsp-ui/src/login_limit.rs`: `POST /ui/login` is throttled per client address (IPv6 by /64; burst 10, then one per 3 s) and per username (burst 5, then one per 12 s), answering `429` with `Retry-After`. Argon2 verification runs on the blocking pool behind a 4-permit semaphore. Behind a reverse proxy the per-address bucket sees the proxy's address, so only the per-username bucket is selective there. At the key cap new keys fail closed, so a wide spray of distinct usernames can briefly 429 a new legitimate key; usernames over 256 bytes are rejected before they are tracked. |
 | O4 | Open | `crates/gsp-core/src/gossip.rs:362-380` still MACs only the payload (no timestamp or nonce). |
 | O5 | Open | `crates/gsp/src/controller_client.rs:149-168` and `crates/gsp-agent/src/proxy_subscribe.rs:213-228` still grow `buf` until `\n\n` with no cap. |
 | O6 | Open | `.github/workflows/ci.yml` still uses `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `actions/setup-node@v7`, `actions/cache@v6`, `Swatinem/rust-cache@v2`, `dtolnay/rust-toolchain@stable|nightly` by tag or branch. Only `taiki-e/install-action` and the Trivy image are pinned. |

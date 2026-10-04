@@ -21,6 +21,7 @@
 //! this fleet.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -30,8 +31,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::login_limit::{LoginLimiter, LoginLimits};
 use crate::role::Role;
-use crate::session::{Session, SessionStore};
+use crate::session::{Session, SessionLimits, SessionStore};
 use crate::users::UserRecord;
 
 /// The cookie the browser holds. `HttpOnly` (never readable from JS) +
@@ -80,7 +82,19 @@ pub struct AppState {
     /// Mark the session cookie `Secure` — set exactly when this UI serves HTTPS
     /// itself (`--tls-cert`); on plain HTTP a browser would drop such a cookie.
     pub secure_cookie: bool,
+    /// Throttles `POST /ui/login` per client address and per username.
+    pub login_limiter: Arc<LoginLimiter>,
+    /// Bounds concurrent Argon2 verifications, so a flood of logins can't
+    /// occupy every blocking thread.
+    pub verify_permits: Arc<tokio::sync::Semaphore>,
 }
+
+/// Longest username accepted at login; longer is rejected before any
+/// bookkeeping.
+const MAX_USERNAME_BYTES: usize = 256;
+
+/// Concurrent Argon2 verifications allowed at once.
+const MAX_CONCURRENT_VERIFIES: usize = 4;
 
 impl AppState {
     pub fn new(ui_password: Option<String>) -> Self {
@@ -93,7 +107,19 @@ impl AppState {
             controller: None,
             fleet_feed: None,
             secure_cookie: false,
+            login_limiter: Arc::new(LoginLimiter::default()),
+            verify_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES)),
         }
+    }
+
+    pub fn with_session_limits(mut self, limits: SessionLimits) -> Self {
+        self.sessions = Arc::new(SessionStore::with_limits(limits));
+        self
+    }
+
+    pub fn with_login_limits(mut self, limits: LoginLimits) -> Self {
+        self.login_limiter = Arc::new(LoginLimiter::new(limits));
+        self
     }
 
     pub fn with_users(mut self, users: HashMap<String, UserRecord>) -> Self {
@@ -193,27 +219,59 @@ struct ErrorResponse {
 /// succeeds (the UI is open) but still issues an (anonymous, `Admin`)
 /// session, so `check_role` behaves uniformly either way rather than
 /// needing a special case.
-async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
+async fn login(
+    State(state): State<AppState>,
+    // `ConnectInfo` as an `Extension` so a missing one (no real socket,
+    // as in tests) is `None` rather than a rejection.
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<gsp_http::tls::PeerAddr>>>,
+    Json(req): Json<LoginRequest>,
+) -> Response {
+    // No peer address (a test harness without a real socket) shares one key.
+    let ip = peer.map_or(IpAddr::from([0, 0, 0, 0]), |p| (p.0).0 .0.ip());
+    // Throttle before any password work. In legacy/open mode there is no
+    // username, so only the per-address bucket applies.
+    let username = state.users.as_ref().and(req.username.as_deref());
+    // Usernames key the limiter's map, so bound their size (no real
+    // username comes close).
+    if username.is_some_and(|u| u.len() > MAX_USERNAME_BYTES) {
+        return bad_credentials();
+    }
+    if let Err(wait) = state.login_limiter.check(ip, username) {
+        return too_many_attempts(wait);
+    }
+
     if let Some(users) = &state.users {
         let Some(username) = req.username.as_deref() else {
             return bad_credentials();
         };
-        let Some(user) = users.get(username) else {
-            // Same Argon2 cost as a known user, so timing doesn't reveal
-            // which usernames exist.
-            crate::users::verify_against_dummy(&req.password);
+        let user = users.get(username).cloned();
+        let password = req.password;
+        let Ok(_permit) = state.verify_permits.clone().acquire_owned().await else {
             return bad_credentials();
         };
-        if !crate::users::verify_password(&user.password_hash, &req.password) {
-            return bad_credentials();
-        }
-        return issue_session(
-            &state,
-            Session {
-                role: user.role,
-                username: Some(user.username.clone()),
-            },
-        );
+        let verified = tokio::task::spawn_blocking(move || match user {
+            Some(user) => crate::users::verify_password(&user.password_hash, &password)
+                .then_some((user.role, user.username)),
+            None => {
+                // Same Argon2 cost as a known user, so timing doesn't reveal
+                // which usernames exist.
+                crate::users::verify_against_dummy(&password);
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        return match verified {
+            Some((role, username)) => issue_session(
+                &state,
+                Session {
+                    role,
+                    username: Some(username),
+                },
+            ),
+            None => bad_credentials(),
+        };
     }
 
     match state.ui_password.as_deref() {
@@ -226,6 +284,18 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> 
             },
         ),
     }
+}
+
+fn too_many_attempts(wait: std::time::Duration) -> Response {
+    let secs = wait.as_secs() + 1;
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs.to_string())],
+        Json(ErrorResponse {
+            error: "too many login attempts, try again later".into(),
+        }),
+    )
+        .into_response()
 }
 
 fn bad_credentials() -> Response {
@@ -241,7 +311,8 @@ fn bad_credentials() -> Response {
 fn issue_session(state: &AppState, session: Session) -> Response {
     let id = state.sessions.create(session);
     let cookie = format!(
-        "{SESSION_COOKIE}={id}; HttpOnly; Path=/; SameSite=Lax{}",
+        "{SESSION_COOKIE}={id}; HttpOnly; Path=/; SameSite=Lax; Max-Age={}{}",
+        state.sessions.limits().max_age.as_secs(),
         secure_attr(state)
     );
     (StatusCode::OK, [(header::SET_COOKIE, cookie)], "ok").into_response()
@@ -654,5 +725,130 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    async fn post_login(app: &Router, body: &'static str) -> Response {
+        app.clone()
+            .oneshot(
+                HttpRequest::post("/ui/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_session_cookie_carries_the_absolute_max_age() {
+        let app = router(AppState::new(None).with_session_limits(SessionLimits {
+            max_age: std::time::Duration::from_secs(1234),
+            ..SessionLimits::default()
+        }));
+        let resp = post_login(&app, r#"{"password":"x"}"#).await;
+        assert!(set_cookie_value(&resp).contains("Max-Age=1234"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_rejected_like_no_session() {
+        let app = router(
+            AppState::new(Some("secret".into())).with_session_limits(SessionLimits {
+                idle_timeout: std::time::Duration::from_millis(50),
+                ..SessionLimits::default()
+            }),
+        );
+        let resp = post_login(&app, r#"{"password":"secret"}"#).await;
+        let cookie = cookie_header_from(&set_cookie_value(&resp));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let resp = app
+            .oneshot(
+                HttpRequest::get("/ui/session")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn tight_login_limits(per_ip: u32, per_username: u32) -> LoginLimits {
+        use crate::login_limit::Bucket;
+        let slow = std::time::Duration::from_secs(3600);
+        LoginLimits {
+            per_ip: Bucket {
+                burst: per_ip,
+                refill: slow,
+            },
+            per_username: Bucket {
+                burst: per_username,
+                refill: slow,
+            },
+            max_keys: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn login_attempts_beyond_the_per_ip_burst_get_429_with_retry_after() {
+        let app = router(
+            AppState::new(Some("secret".into())).with_login_limits(tight_login_limits(2, 100)),
+        );
+        for _ in 0..2 {
+            let resp = post_login(&app, r#"{"password":"wrong"}"#).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        let resp = post_login(&app, r#"{"password":"secret"}"#).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+        assert!(!resp.headers().contains_key(header::SET_COOKIE));
+    }
+
+    #[tokio::test]
+    async fn login_attempts_beyond_the_per_username_burst_get_429() {
+        let app = router(users_state().with_login_limits(tight_login_limits(100, 1)));
+        let resp = post_login(&app, r#"{"username":"alice","password":"nope"}"#).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = post_login(&app, r#"{"username":"alice","password":"alice-pass"}"#).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Another username is unaffected.
+        let resp = post_login(&app, r#"{"username":"bob","password":"bob-pass"}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn over_a_real_socket_the_limit_keys_on_the_peer_address() {
+        let app = router(
+            AppState::new(Some("secret".into())).with_login_limits(tight_login_limits(1, 100)),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<gsp_http::tls::PeerAddr>(),
+            )
+            .await
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/ui/login");
+        let post = || {
+            client
+                .post(&url)
+                .json(&serde_json::json!({"password": "wrong"}))
+        };
+        assert_eq!(post().send().await.unwrap().status(), 401);
+        assert_eq!(post().send().await.unwrap().status(), 429);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_username_is_rejected_without_touching_the_limiter() {
+        let app = router(users_state().with_login_limits(tight_login_limits(1, 1)));
+        let body = format!(r#"{{"username":"{}","password":"x"}}"#, "a".repeat(5000));
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        // Twice: a 401 both times (not 429) shows no limiter token was spent.
+        for _ in 0..2 {
+            let resp = post_login(&app, body).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 }
