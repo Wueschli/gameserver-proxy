@@ -593,7 +593,7 @@ async fn catch_up(
 }
 
 /// Log payload for a deleted registration. Deliberately not a
-/// [`PeerRegistration`]: `current` never points at a tombstone, so only
+/// [`Registration`]: `current` never points at a tombstone, so only
 /// subscribers (via [`event_payload`]) ever read one.
 pub(crate) fn tombstone_bytes(name: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({ "removed": name }))
