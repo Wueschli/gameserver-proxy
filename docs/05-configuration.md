@@ -430,7 +430,10 @@ listeners:
   for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
 - A resolver's `timeout_ms`, `target_connect_timeout_ms` and
   `target_idle_timeout_sec` must all be `> 0`.
-- `transparent: true` (TCP or UDP) may not be combined with `prefix`.
+- `transparent: true` (TCP or UDP) may not be combined with `prefix`, and may not be set
+  on a listener whose `pool:` or a route's pool action uses a `tunnel` backend source (the
+  client and tunnel address families can differ). A resolver route can still return such a
+  pool at runtime; there the proxy connects without the client's source address.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
   `rate >= 1`.
