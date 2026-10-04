@@ -25,9 +25,17 @@ pub type Wg = dyn WireguardInterfaceApi + Send + Sync;
 /// Removes an address from the interface.
 pub type DeleteAddress = Box<dyn Fn(&IpAddrMask) -> io::Result<()> + Send + Sync>;
 
+struct State {
+    address: IpAddrMask,
+    /// Both the new address and the restore of the old one failed in a
+    /// [`LiveInterface::readdress`], so the link may carry no address; the
+    /// next call repairs it even when asked for the address it records.
+    dirty: bool,
+}
+
 pub struct LiveInterface {
     wg: Arc<Wg>,
-    address: Mutex<IpAddrMask>,
+    state: Mutex<State>,
     delete: DeleteAddress,
 }
 
@@ -35,7 +43,10 @@ impl LiveInterface {
     pub fn new(wg: Arc<Wg>, address: IpAddrMask, delete: DeleteAddress) -> Self {
         Self {
             wg,
-            address: Mutex::new(address),
+            state: Mutex::new(State {
+                address,
+                dirty: false,
+            }),
             delete,
         }
     }
@@ -45,20 +56,21 @@ impl LiveInterface {
         self.wg.clone()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, IpAddrMask> {
-        self.address
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The address the interface currently carries.
     pub fn address(&self) -> IpAddrMask {
-        self.lock().clone()
+        self.lock().address.clone()
     }
 
     /// Whether the interface needs [`LiveInterface::readdress`] to carry `new`.
     pub fn needs_readdress(&self, new: &IpAddrMask) -> bool {
-        *self.lock() != *new
+        let st = self.lock();
+        st.address != *new || st.dirty
     }
 
     /// Removes the interface (shutdown).
@@ -71,18 +83,24 @@ impl LiveInterface {
     /// assigned the old one is put back if it can be, and either way the
     /// recorded address stays the old one, so the next call tries again.
     pub fn readdress(&self, new: &IpAddrMask) -> anyhow::Result<()> {
-        let mut current = self.lock();
-        if *current == *new {
+        let mut st = self.lock();
+        if st.address == *new && !st.dirty {
             return Ok(());
         }
-        (self.delete)(&current).with_context(|| format!("removing the address {}", *current))?;
+        (self.delete)(&st.address)
+            .with_context(|| format!("removing the address {}", st.address))?;
         if let Err(e) = self.wg.assign_address(new) {
-            if let Err(restore) = self.wg.assign_address(&current) {
-                tracing::error!(error = %restore, address = %*current, "could not put the old tunnel address back");
-            }
+            st.dirty = match self.wg.assign_address(&st.address) {
+                Ok(()) => false,
+                Err(restore) => {
+                    tracing::error!(error = %restore, address = %st.address, "could not put the old tunnel address back");
+                    true
+                }
+            };
             return Err(anyhow::Error::new(e).context(format!("assigning the address {new}")));
         }
-        *current = new.clone();
+        st.address = new.clone();
+        st.dirty = false;
         Ok(())
     }
 }
@@ -223,6 +241,21 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec!["delete 10.60.0.2/24", "assign 10.60.0.2/24"]
+        );
+    }
+
+    #[test]
+    fn if_the_restore_fails_too_the_next_call_repairs_even_the_recorded_address() {
+        let log = Log::default();
+        let live = live(&["10.60.0.7/24", "10.60.0.2/24"], &[], &log);
+        assert!(live.readdress(&mask("10.60.0.7/24")).is_err());
+        assert!(live.needs_readdress(&mask("10.60.0.2/24")));
+        let before = log.lock().unwrap().len();
+        assert!(live.readdress(&mask("10.60.0.2/24")).is_err());
+        assert_eq!(
+            log.lock().unwrap().len(),
+            before + 1,
+            "the recorded address is deleted and assigned again, not skipped"
         );
     }
 }
