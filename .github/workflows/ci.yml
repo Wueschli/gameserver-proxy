@@ -125,6 +125,31 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Static musl build (issue #55): the five binaries must keep compiling for
+  # x86_64-unknown-linux-musl, and the transparent-socket options must still be
+  # known to a musl libc. Rides the `release` gate (plugins or deploy paths touched).
+  musl:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install protoc and musl-gcc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: ./.github/actions/cargo-cache
+        with: { name: musl }
+      - name: Build the binaries for musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --locked --target x86_64-unknown-linux-musl -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+      - name: Socket options on musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo test --locked --target x86_64-unknown-linux-musl -p gsp-core --lib -- net
+
   # One release compile shared by the jobs that need release binaries: the
   # plugins tests restore this job's cache snapshot (same `release` namespace and
   # key, so they reuse the compiled dependencies) and deploy takes the binaries
@@ -252,10 +277,23 @@ jobs:
           if-no-files-found: ignore
       - name: Typecheck + build
         run: npm run build
+      - name: Playwright version
+        id: pw
+        run: echo "version=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browser
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install Playwright browser
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps (browser cached)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
       - name: Browser e2e (Playwright)
-        run: |
-          npx playwright install --with-deps chromium
-          npm run test:e2e
+        run: npm run test:e2e
 
   tunnel:
     # Phase-14 WireGuard tunnel e2e in rootless network namespaces

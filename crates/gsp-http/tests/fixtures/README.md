@@ -3,7 +3,7 @@
 A private CA (`ca.pem`), a `localhost` / `127.0.0.1` server certificate it signed
 (`leaf.pem`, key `leaf.key`), and an unrelated CA (`other-ca.pem`). Valid until 2126.
 The CA private keys were discarded after signing; `leaf.key` is committed on purpose
-so tests can run a TLS server. Used by `crates/gsp-http/tests/` and
+so tests can run a TLS server (the repo's `.gitleaks.toml` allowlists this directory). Used by `crates/gsp-http/tests/` and
 `crates/gsp-fleet-tests` (`--ca-file` tests).
 
 Regenerate (all four files together):
