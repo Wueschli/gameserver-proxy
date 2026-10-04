@@ -269,11 +269,12 @@ IPv6 (built 2026-10-03):
   ("cluster is initializing its registries"). An unchanged re-registration proposes
   nothing; an hourly `last_seen` refresh is the only periodic write. Pin-only mode
   works the same way. Upgrade and membership notes: docs/12.
-- **Limits.** Transparent mode
-  (`transparent: true`) does not apply to tunnel backends whose family differs from the
-  client's: the proxy logs a warning and connects without the client's source address.
-  Dual-stack tunnels, lease expiry and live address changes are future work (GitHub
-  issues #40 and #41).
+- **Limits.** Transparent mode (`transparent: true`) does not apply to tunnel backends:
+  config load rejects it on a listener whose `pool:` or route pool actions use a `tunnel`
+  source. A resolver route can still return a tunnel pool at runtime; the proxy then
+  connects without the client's source address, and a client/backend family mismatch on
+  any pool is logged at most once a minute. Dual-stack tunnels, lease expiry and live
+  address changes are future work (GitHub issue #40).
 
 ## Open questions
 

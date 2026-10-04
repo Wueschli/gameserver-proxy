@@ -2069,6 +2069,32 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
+        if l.transparent {
+            // A tunnel backend is reached over the WireGuard interface, whose address
+            // family is the tunnel network's, not the client's; the transparent bind
+            // would silently fall back to a plain connect on a family mismatch.
+            // (A resolver route can still hand back a tunnel pool at runtime.)
+            for r in &routes {
+                let Action::Pool(name) = &r.action else {
+                    continue;
+                };
+                let is_tunnel = pools.iter().any(|p| {
+                    &p.name == name
+                        && matches!(
+                            p.source.as_ref().map(|s| &s.kind),
+                            Some(SourceKind::Tunnel { .. })
+                        )
+                });
+                if is_tunnel {
+                    return Err(Invalid(format!(
+                        "listener {}: `transparent` is unsupported with pool {name}, which \
+                         uses a `tunnel` source (the client and tunnel address families can \
+                         differ)",
+                        l.name
+                    )));
+                }
+            }
+        }
         if l.first_packet_gate {
             if l.protocol != Protocol::Udp {
                 return Err(Invalid(format!(
@@ -4074,6 +4100,37 @@ listeners:
 "#;
         let cfg = parse_str(yaml).unwrap();
         assert!(cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn transparent_is_rejected_on_a_listener_reaching_a_tunnel_pool() {
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let head = format!(
+            "backend_sources:\n  - {{ name: t, type: tunnel, pubkey: \"{key}\" }}\n\
+             pools:\n  - {{ name: tp, source: t }}\n  - {{ name: sp, targets: [\"127.0.0.1:1\"] }}\n"
+        );
+        // Directly via `pool:`, and through a route action.
+        for l in [
+            "  - { name: l, bind: \"0.0.0.0:7777\", transparent: true, pool: tp }\n",
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    transparent: true\n    routes:\n      \
+             - { match: { type: sni, host: [\"a.example\"] }, action: { pool: tp } }\n      \
+             - { match: { type: always }, action: { pool: sp } }\n",
+        ] {
+            let err = parse_str(&format!("{head}listeners:\n{l}")).unwrap_err();
+            assert!(
+                err.to_string().contains("transparent") && err.to_string().contains("tunnel"),
+                "{err}"
+            );
+        }
+        // A tunnel pool without `transparent`, and `transparent` on a static pool, still load.
+        parse_str(&format!(
+            "{head}listeners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", pool: tp }}\n"
+        ))
+        .unwrap();
+        parse_str(&format!(
+            "{head}listeners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", transparent: true, pool: sp }}\n"
+        ))
+        .unwrap();
     }
 
     #[test]
