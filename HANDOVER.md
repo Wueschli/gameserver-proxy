@@ -467,7 +467,7 @@ time). Needs `protoc` on `PATH`. Not part of `make check`:
   needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` / `make deploy-scan` (need a
   Docker daemon; the scan also needs `trivy`);
 - the CI helper scripts: `python3 .github/scripts/changes_test.py` (needs `cargo`),
-  `test_summary_test.py`, `trivy_summary_test.py` and `audit_summary_test.py` (CI runs all four in the `changes` job).
+  `test_summary_test.py`, `trivy_summary_test.py`, `audit_summary_test.py` and `sarif_categories_test.py` (CI runs all five in the `changes` job).
 
 CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 "Infra / environment".
