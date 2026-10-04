@@ -62,7 +62,10 @@ errs << "build-images.sh must pass --build-arg BIN_SOURCE" unless File.read("dep
 
 # The tunnel override must use the address authority, not hand-picked addresses.
 ctl_cmd = tunnel["controller"]["command"]
-errs << "tunnel override: controller needs --tunnel-network=10.60.0.0/16" unless ctl_cmd.include?("--tunnel-network=10.60.0.0/16")
+errs << "tunnel override: controller needs --tunnel-network=fd49:89c1:4b5e:60::/64 (IPv6 is the default)" unless ctl_cmd.include?("--tunnel-network=fd49:89c1:4b5e:60::/64")
+# Both tunnel services share the host network namespace, where runc refuses
+# net.* sysctls ("not allowed in host network namespace"): `up` would fail.
+%w[gsp agent].each { |s| errs << "tunnel #{s} sets a net.* sysctl, which host networking refuses" if (tunnel[s]["sysctls"] || {}).keys.any? { |k| k.start_with?("net.") } }
 errs << "tunnel override: controller lost the base flags" unless %w[--listen=0.0.0.0:9901 --data-dir=/data].all? { |f| ctl_cmd.include?(f) } && ctl_cmd.any? { |a| a.start_with?("--auth-token=") }
 errs << "tunnel override: gsp must not hand-pick --tunnel-address" if tunnel["gsp"]["command"].any? { |a| a.start_with?("--tunnel-address") }
 agent_cmd = tunnel["agent"]["command"]

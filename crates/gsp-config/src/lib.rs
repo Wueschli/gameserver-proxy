@@ -25,7 +25,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     #[error("failed to parse YAML: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] serde_norway::Error),
     #[error("invalid configuration: {0}")]
     Invalid(String),
 }
@@ -199,6 +199,9 @@ struct RawAdmin {
     /// (phase 10+11 slice 10, `docs/10` "The aggregator").
     #[serde(default)]
     auth_token: Option<String>,
+    /// Serve the admin API over HTTPS with this certificate pair.
+    #[serde(default)]
+    tls: Option<AdminTls>,
 }
 
 impl Default for RawAdmin {
@@ -206,8 +209,19 @@ impl Default for RawAdmin {
         Self {
             listen: default_admin_listen(),
             auth_token: None,
+            tls: None,
         }
     }
+}
+
+/// `settings.admin.tls`: the admin API serves HTTPS with this pair (PEM chain,
+/// leaf first; PEM private key). Both or neither, by type. Startup-only like
+/// `listen`; the files themselves are re-read when they change.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminTls {
+    pub cert: String,
+    pub key: String,
 }
 
 fn default_admin_listen() -> String {
@@ -304,53 +318,16 @@ fn default_source_refresh_sec() -> u64 {
     15
 }
 
-/// Minimal standard-alphabet base64 decoder, just enough to validate a
-/// WireGuard key (32 bytes, i.e. exactly 44 chars with one trailing `=`).
-/// `gsp-config` may only depend on `serde`/`serde_yaml`/`thiserror` (see
-/// AGENTS.md's crate-boundary rule), so this doesn't pull in a `base64` crate
-/// for one validation check. `pub` (not just used by this crate's own
-/// `validate()`) so `gsp-controller`'s phase 14 backend-peers registry
-/// (slice 2) can apply the exact same pubkey check without duplicating it —
-/// `gsp-controller` already depends on `gsp-config` for `parse_str`.
+/// Decode a standard-alphabet base64 string that must be exactly 32 bytes —
+/// the shape of a WireGuard key (44 chars with one trailing `=`). `pub` (not
+/// just used by this crate's own `validate()`) so `gsp-controller`'s phase 14
+/// backend-peers registry can apply the exact same pubkey check without
+/// duplicating it — `gsp-controller` already depends on `gsp-config` for
+/// `parse_str`.
 pub fn base64_decode_32(s: &str) -> Option<[u8; 32]> {
-    fn val(b: u8) -> Option<u8> {
-        match b {
-            b'A'..=b'Z' => Some(b - b'A'),
-            b'a'..=b'z' => Some(b - b'a' + 26),
-            b'0'..=b'9' => Some(b - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = s.as_bytes();
-    if bytes.len() != 44 || bytes[43] != b'=' {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (chunk_idx, chunk) in bytes[..40].chunks(4).enumerate() {
-        let vals: Vec<u8> = chunk.iter().map(|&b| val(b)).collect::<Option<_>>()?;
-        let n = (vals[0] as u32) << 18
-            | (vals[1] as u32) << 12
-            | (vals[2] as u32) << 6
-            | (vals[3] as u32);
-        let o = chunk_idx * 3;
-        out[o] = (n >> 16) as u8;
-        out[o + 1] = (n >> 8) as u8;
-        out[o + 2] = n as u8;
-    }
-    // Final 4-char group "XX==" style but here it's chars[40..44] = 3 data + '='.
-    let last = &bytes[40..44];
-    let v0 = val(last[0])?;
-    let v1 = val(last[1])?;
-    let v2 = val(last[2])?;
-    if last[3] != b'=' {
-        return None;
-    }
-    let n = (v0 as u32) << 18 | (v1 as u32) << 12 | (v2 as u32) << 6;
-    out[30] = (n >> 16) as u8;
-    out[31] = (n >> 8) as u8;
-    Some(out)
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.decode(s).ok()?.try_into().ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1302,6 +1279,8 @@ pub struct Config {
     /// Bearer token every admin API request (except `GET /healthz`) must
     /// present; `None` leaves the API open.
     pub admin_auth_token: Option<String>,
+    /// `settings.admin.tls`: serve the admin API over HTTPS. Startup-only.
+    pub admin_tls: Option<AdminTls>,
     pub pools: Vec<PoolConfig>,
     pub resolvers: Vec<ResolverConfig>,
     pub listeners: Vec<ListenerConfig>,
@@ -1562,7 +1541,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
 /// Parse and validate a config from a YAML string.
 pub fn parse_str(text: &str) -> Result<Config, ConfigError> {
-    let raw: RawConfig = serde_yaml::from_str(text)?;
+    let raw: RawConfig = serde_norway::from_str(text)?;
     validate(raw)
 }
 
@@ -1580,6 +1559,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         ))
     })?;
     let admin_auth_token = raw.settings.admin.auth_token.clone();
+    let admin_tls = raw.settings.admin.tls.clone();
 
     // Resolve `backend_sources`. A `static` source becomes a fixed address list;
     // the dynamic kinds become a `SourceConfig` for the runtime refresh task.
@@ -2089,6 +2069,32 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
+        if l.transparent {
+            // A tunnel backend is reached over the WireGuard interface, whose address
+            // family is the tunnel network's, not the client's; the transparent bind
+            // would silently fall back to a plain connect on a family mismatch.
+            // (A resolver route can still hand back a tunnel pool at runtime.)
+            for r in &routes {
+                let Action::Pool(name) = &r.action else {
+                    continue;
+                };
+                let is_tunnel = pools.iter().any(|p| {
+                    &p.name == name
+                        && matches!(
+                            p.source.as_ref().map(|s| &s.kind),
+                            Some(SourceKind::Tunnel { .. })
+                        )
+                });
+                if is_tunnel {
+                    return Err(Invalid(format!(
+                        "listener {}: `transparent` is unsupported with pool {name}, which \
+                         uses a `tunnel` source (the client and tunnel address families can \
+                         differ)",
+                        l.name
+                    )));
+                }
+            }
+        }
         if l.first_packet_gate {
             if l.protocol != Protocol::Udp {
                 return Err(Invalid(format!(
@@ -2389,6 +2395,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,
         admin_auth_token,
+        admin_tls,
         pools,
         resolvers,
         listeners,
@@ -2408,7 +2415,7 @@ fn validate_group(g: String) -> Result<String, ConfigError> {
             "settings.group must not be empty or start/end with '/'".into(),
         ));
     }
-    if g.split('/').any(|segment| segment.is_empty()) {
+    if g.split('/').any(str::is_empty) {
         return Err(Invalid(
             "settings.group must not contain empty segments (e.g. \"a//b\")".into(),
         ));
@@ -2864,6 +2871,49 @@ listeners:
         )
         .expect("should parse");
         assert_eq!(cfg.admin_auth_token.as_deref(), Some("secret123"));
+    }
+
+    #[test]
+    fn parses_admin_tls() {
+        let cfg = parse_str(
+            r#"
+settings:
+  admin:
+    tls:
+      cert: /etc/gsp/tls/fullchain.pem
+      key: /etc/gsp/tls/privkey.pem
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#,
+        )
+        .expect("should parse");
+        assert_eq!(
+            cfg.admin_tls,
+            Some(AdminTls {
+                cert: "/etc/gsp/tls/fullchain.pem".into(),
+                key: "/etc/gsp/tls/privkey.pem".into(),
+            })
+        );
+        assert_eq!(parse_str(MINIMAL).unwrap().admin_tls, None);
+    }
+
+    #[test]
+    fn admin_tls_needs_both_files() {
+        for tls in [
+            "cert: /c.pem",
+            "key: /k.pem",
+            "cert: /c.pem\n      key: /k.pem\n      ca: /x",
+        ] {
+            let text = format!(
+                "settings:\n  admin:\n    tls:\n      {tls}\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+            );
+            assert!(parse_str(&text).is_err(), "accepted:\n{text}");
+        }
     }
 
     #[test]
@@ -4050,6 +4100,37 @@ listeners:
 "#;
         let cfg = parse_str(yaml).unwrap();
         assert!(cfg.listeners[0].transparent);
+    }
+
+    #[test]
+    fn transparent_is_rejected_on_a_listener_reaching_a_tunnel_pool() {
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let head = format!(
+            "backend_sources:\n  - {{ name: t, type: tunnel, pubkey: \"{key}\" }}\n\
+             pools:\n  - {{ name: tp, source: t }}\n  - {{ name: sp, targets: [\"127.0.0.1:1\"] }}\n"
+        );
+        // Directly via `pool:`, and through a route action.
+        for l in [
+            "  - { name: l, bind: \"0.0.0.0:7777\", transparent: true, pool: tp }\n",
+            "  - name: l\n    bind: \"0.0.0.0:7777\"\n    transparent: true\n    routes:\n      \
+             - { match: { type: sni, host: [\"a.example\"] }, action: { pool: tp } }\n      \
+             - { match: { type: always }, action: { pool: sp } }\n",
+        ] {
+            let err = parse_str(&format!("{head}listeners:\n{l}")).unwrap_err();
+            assert!(
+                err.to_string().contains("transparent") && err.to_string().contains("tunnel"),
+                "{err}"
+            );
+        }
+        // A tunnel pool without `transparent`, and `transparent` on a static pool, still load.
+        parse_str(&format!(
+            "{head}listeners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", pool: tp }}\n"
+        ))
+        .unwrap();
+        parse_str(&format!(
+            "{head}listeners:\n  - {{ name: l, bind: \"0.0.0.0:7777\", transparent: true, pool: sp }}\n"
+        ))
+        .unwrap();
     }
 
     #[test]

@@ -32,6 +32,27 @@ fn free_udp_addr() -> std::net::SocketAddr {
         .unwrap()
 }
 
+/// Send `payload` on `sock` until the echo comes back, for the first datagram
+/// on a fresh path. A fixed sleep after `Runtime::start` loses to listener
+/// startup under load: the datagram then lands on a port nobody reads yet and
+/// is dropped (or bounces as `ConnectionRefused`), so a bare send/recv would
+/// time out. Returns the reply length.
+async fn first_reply(sock: &UdpSocket, payload: &[u8], buf: &mut [u8]) -> usize {
+    for _ in 0..40 {
+        // `send` can fail with ConnectionRefused from an earlier ICMP bounce.
+        if sock.send(payload).await.is_ok() {
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(250), sock.recv(buf)).await
+            {
+                return n;
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    panic!("the listener never answered the first datagram");
+}
+
 #[tokio::test]
 async fn forwards_udp_datagrams_and_reuses_the_session() {
     let b1 = echo_backend(1).await;
@@ -52,7 +73,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -80,6 +101,7 @@ listeners:
 }
 
 #[tokio::test]
+#[allow(clippy::items_after_statements)] // test-local items sit next to their only use
 async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
     let b1 = echo_backend(1).await;
     let proxy_addr = free_udp_addr();
@@ -96,7 +118,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -149,7 +171,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -192,6 +214,7 @@ pools:
     targets: ["{backend}"]
     idle_timeout_sec: 1
     per_backend: {{ max_sessions: 1 }}
+    health_check: {{ type: udp_probe, send_hex: "00" }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -200,7 +223,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let roundtrip = |src_port_marker: &'static [u8]| async move {
@@ -238,7 +261,11 @@ async fn an_active_session_survives_past_its_idle_window_then_expires() {
     let backend = echo_backend(7).await;
     let proxy_addr = free_udp_addr();
     // idle_timeout 1s; one slot — a second client only gets in once the first
-    // session is evicted, so "B still refused" proves A is still alive.
+    // session is evicted, so "B still refused" proves A is still alive. The
+    // echo backend is UDP-only, so probe it over UDP: the default `tcp_connect`
+    // check fails against it and, with `fall: 3` at 2 s, marks it unhealthy about
+    // 4 s in. That races the eviction this test waits for: B then gets
+    // "no healthy backend" instead of the freed slot.
     let yaml = format!(
         r#"
 pools:
@@ -246,6 +273,7 @@ pools:
     targets: ["{backend}"]
     idle_timeout_sec: 1
     per_backend: {{ max_sessions: 1 }}
+    health_check: {{ type: udp_probe, send_hex: "00" }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -254,12 +282,17 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     a.connect(proxy_addr).await.unwrap();
     let mut buf = [0u8; 32];
+
+    // The listener may not be up yet; get A's session established first. The
+    // idle clock starts at the first datagram that reaches the proxy.
+    let n = first_reply(&a, b"a", &mut buf).await;
+    assert_eq!(&buf[..n], &[7, b'a']);
 
     // Keep A busy for ~2.5s — well past the 1s idle window. The timing wheel
     // must re-file it on every tick instead of evicting it.
@@ -323,7 +356,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let recv_tag = |payload: &'static [u8]| async move {
@@ -371,7 +404,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let tag = |bytes: Vec<u8>| async move {
@@ -423,7 +456,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The client `connect`s to the sub-address, so it only accepts a reply whose
@@ -468,7 +501,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -539,7 +572,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -606,7 +639,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Unrecognised first datagram: no session, no reply.
@@ -658,7 +691,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let backend = runtime

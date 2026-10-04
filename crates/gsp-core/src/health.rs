@@ -19,7 +19,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::gossip::GossipFabric;
 use crate::metrics_defs as m;
 use crate::snapshot::Snapshot;
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Sweep cadence. Actual per-backend probe frequency is governed by each
 /// backend's own `check_interval`; this only bounds the resolution.
@@ -53,7 +53,7 @@ pub async fn run(
 
 async fn sweep(snapshot: &Arc<ArcSwap<Snapshot>>, gossip: Option<&GossipFabric>) {
     let snap = snapshot.load_full();
-    let now = now_ms();
+    let now = mono_ms();
 
     let mut probes = Vec::new();
     for (pool_name, pool) in &snap.pools {

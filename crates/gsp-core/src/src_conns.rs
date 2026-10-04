@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use gsp_config::PerSourceLimit;
 
@@ -51,7 +51,7 @@ impl SourceLimiter {
             return Ok(SourceGuard { limiter: None });
         }
         let key = NetKey::of(ip);
-        let mut c = self.counts.lock().unwrap();
+        let mut c = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some(max) = self.max_ip {
             if c.ips.get(&ip).copied().unwrap_or(0) >= max {
@@ -75,7 +75,7 @@ impl SourceLimiter {
     }
 
     fn release(&self, ip: IpAddr, key: NetKey) {
-        let mut c = self.counts.lock().unwrap();
+        let mut c = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
         if self.max_ip.is_some() {
             if let Some(n) = c.ips.get_mut(&ip) {
                 *n -= 1;

@@ -38,10 +38,10 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9901")]
     listen: SocketAddr,
 
-    /// Bearer token required on every /config* request. Omit to leave the
-    /// API open — network-boundary-only auth, the same posture `gsp`'s own
-    /// admin API has today. Not a full RBAC/identity story, just a shared
-    /// secret (see `crate::auth`).
+    /// Bearer token required on every /config* request, at least 16 bytes.
+    /// Omit to leave the API open, which is only accepted on a loopback
+    /// `--listen` (or with `--insecure-no-auth`). Not a full RBAC/identity
+    /// story, just a shared secret (see `gsp_http::server`).
     #[arg(long)]
     auth_token: Option<String>,
 
@@ -80,13 +80,40 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     ha_peers: Vec<String>,
 
+    /// Start as a node that never bootstraps a Raft cluster and waits to be
+    /// added (`POST /admin/ha/members` on a running cluster). Use it for a
+    /// new or replacement node; mutually exclusive with `--ha-peers`. Needs
+    /// `--ha-node-id` and `--ha-token`; restart a joined node with it again.
+    #[arg(long)]
+    ha_join: bool,
+
     /// Peer-only shared secret gating `/raft/*` — a separate secret from
     /// `--auth-token` (client-facing), matching every other peer-to-peer
     /// credential in this fleet.
     #[arg(long)]
     ha_token: Option<String>,
 
-    /// IPv4 network tunnel addresses are allocated from, e.g. `10.60.0.0/16`.
+    /// Allow a non-loopback `--listen` with no `--auth-token`. Without it the
+    /// controller refuses that combination at startup. Only for deployments
+    /// where the network boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
+
+    /// Build a Raft snapshot (and let the log be purged) every this many
+    /// log entries. Test-only: fleet tests lower it to exercise catch-up by
+    /// snapshot.
+    /// Which node's pre-HA registry data seeds a freshly bootstrapped HA
+    /// cluster: a node id, or `none` to import nothing. Needed only when more
+    /// than one node holds data from before HA (the controller refuses to
+    /// guess); give every node the same value, like `--ha-peers`.
+    #[arg(long, value_name = "ID|none")]
+    ha_import_source: Option<String>,
+
+    #[arg(long, hide = true, default_value_t = ha::SNAPSHOT_AFTER)]
+    ha_snapshot_after: u64,
+
+    /// Network tunnel addresses are allocated from: IPv6 `/64` to `/120`, e.g.
+    /// `fd49:89c1:4b5e:60::/64`, or IPv4 `/16` to `/30`, e.g. `10.60.0.0/16`.
     /// Omit for pin-only mode: requested addresses are checked for uniqueness
     /// but nothing is allocated. Cannot be combined with `--ha-peers`.
     #[arg(long)]
@@ -98,10 +125,20 @@ struct Args {
     #[arg(long, default_value = "14d")]
     tunnel_stale_after: String,
 
+    /// Start even though stored tunnel addresses fall outside
+    /// `--tunnel-network`, and move each such peer into the network at its
+    /// next registration (docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md).
+    /// Re-addressing interrupts the peer's traffic until it restarts.
+    #[arg(long)]
+    tunnel_readdress: bool,
+
     /// PEM file of extra CA certificates to trust for outbound HTTPS, in
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
 }
 
 #[tokio::main]
@@ -111,21 +148,25 @@ async fn main() -> anyhow::Result<()> {
     if args.role == Role::Slave && args.parent_url.is_none() {
         anyhow::bail!("--role slave requires --parent-url");
     }
-    if !args.ha_peers.is_empty() && args.ha_node_id.is_none() {
-        anyhow::bail!("--ha-peers requires --ha-node-id");
-    }
-    if !args.ha_peers.is_empty() && args.role == Role::Slave {
-        // Scope cut for this slice — see `gsp_controller::ha`'s module doc.
-        anyhow::bail!(
-            "--ha-peers cannot be combined with --role slave yet: the upward relay needs to \
-             run leader-only with a replicated cursor, which is designed (docs/10) but not \
-             built in this slice"
-        );
-    }
+    ha::check_flags(
+        !args.ha_peers.is_empty(),
+        args.ha_join,
+        args.ha_node_id,
+        args.role == Role::Slave,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    ha::check_ha_token(
+        !args.ha_peers.is_empty() || args.ha_join,
+        args.ha_token.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
     let (tunnel_network, stale_after) = gsp_controller::addresses::resolve_flags(
         args.tunnel_network.as_deref(),
         &args.tunnel_stale_after,
-        !args.ha_peers.is_empty(),
+        !args.ha_peers.is_empty() || args.ha_join,
+        args.tunnel_readdress,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -134,18 +175,38 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    gsp_http::policy::check_exposure(
+        "gsp-controller",
+        args.listen,
+        args.auth_token.is_some(),
+        args.insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(path) = &args.ca_file {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
-    if !args.ha_peers.is_empty() {
-        // resolve_flags refuses --tunnel-network under HA, so this is pin-only mode.
-        tracing::warn!(
-            "tunnel address uniqueness under --ha-peers is enforced per controller node only, \
-             because the peer registries are not replicated; point all origins and proxies at \
-             one node"
-        );
-    }
+    // Load (and validate) the serving certificate before anything else starts.
+    let tls_cert = args.tls.load()?;
+    let ha_enabled = !args.ha_peers.is_empty() || args.ha_join;
+    let import_policy = match args.ha_import_source.as_deref() {
+        None => ha::init::ImportPolicy::Auto,
+        Some("none") => ha::init::ImportPolicy::None,
+        Some(id) => ha::init::ImportPolicy::Source(id.parse().map_err(|_| {
+            anyhow::anyhow!("--ha-import-source takes a node id or `none`, not {id:?}")
+        })?),
+    };
+    // Registry data from before HA is set aside (never deleted) before any
+    // database opens; the cluster's leader imports one node's copy.
+    let pre_ha = if ha_enabled {
+        ha::import::LocalPreHa {
+            summary: ha::import::set_aside_pre_ha(&args.data_dir)?,
+            data_dir: args.data_dir.clone(),
+            network: tunnel_network,
+        }
+    } else {
+        ha::import::LocalPreHa::default()
+    };
 
     let store = Arc::new(
         Store::open(&args.data_dir)
@@ -190,15 +251,33 @@ async fn main() -> anyhow::Result<()> {
     // The address book (spec: Controller/State) — its own sled database like
     // every other registry, shared by both peer registries below.
     let addresses_dir = args.data_dir.join("tunnel-addresses");
-    let book = Arc::new(
-        gsp_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
-            .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?,
-    );
+    // Under HA the book carries no network of its own: the state machine
+    // applies every claim against the network the cluster recorded, so a
+    // node's flag never decides an address (see `ha::init`).
+    let book_network = if ha_enabled { None } else { tunnel_network };
+    let book = gsp_controller::addresses::AddressBook::open(&addresses_dir, book_network)
+        .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?
+        .with_readdress(args.tunnel_readdress);
+    // Before any listener binds: a changed network is refused unless the
+    // operator opted in, so a mistyped flag never re-addresses anyone.
+    // (Not under HA: `--tunnel-readdress` is refused there, and the recorded
+    // network, not this flag, decides.)
+    let moving = gsp_controller::addresses::check_network_change(&book, args.tunnel_readdress)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if !moving.is_empty() {
+        tracing::warn!(
+            "--tunnel-readdress: {} stored tunnel address(es) are outside the network and \
+             move at their owner's next registration:\n{}",
+            moving.len(),
+            gsp_controller::addresses::summarize(&moving)
+        );
+    }
+    let book = Arc::new(book);
     match tunnel_network {
         Some(n) => tracing::info!(network = %n, "tunnel address allocation enabled"),
         None => tracing::info!("no --tunnel-network: pin-only tunnel addresses (no allocation)"),
     }
-    let peers_state = PeersState::new(peers_store, args.auth_token.clone(), book.clone());
+    let mut peers_state = PeersState::new(peers_store, args.auth_token.clone(), book.clone());
 
     // A fourth separate sled database (phase 14 slice 7) — the proxy-peers
     // registry, the mirror image of the backend-peers one above (see
@@ -213,24 +292,20 @@ async fn main() -> anyhow::Result<()> {
         proxy_peers_dir = %proxy_peers_dir.display(),
         "proxy-peers store opened"
     );
-    let proxy_peers_state =
+    let mut proxy_peers_state =
         ProxyPeersState::new(proxy_peers_store, args.auth_token.clone(), book.clone());
-    let addresses_state = gsp_controller::addresses::api::AddressesState::new(
+    let mut addresses_state = gsp_controller::addresses::api::AddressesState::new(
         book.clone(),
         args.auth_token.clone(),
         stale_after,
     );
-    tokio::spawn(gsp_controller::addresses::api::stale_warning_loop(
-        book.clone(),
-        stale_after,
-    ));
 
     // Shared, mutable across `AppState` and `IntentState` — `adopt` flips
     // this one cell and both write gates see it instantly (see
     // `role::RoleHandle`'s doc for why a plain `Role` field per state
     // wouldn't work once adoption exists).
     let role_handle = RoleHandle::new(args.role);
-    let mut config_state = AppState::new(store, args.auth_token.clone(), role_handle.clone());
+    let mut config_state = AppState::try_new(store, args.auth_token.clone(), role_handle.clone())?;
     let mut intent_state_val =
         IntentState::new(intent_store, role_handle.clone(), args.auth_token.clone());
 
@@ -239,11 +314,20 @@ async fn main() -> anyhow::Result<()> {
     // module doc. `None` (no `--ha-peers`, the default `replicas: 1` shape)
     // leaves every write on the exact same direct-to-`Store` path phase
     // 10+11 shipped.
-    let ha_handle: Option<Arc<HaHandle>> = if args.ha_peers.is_empty() {
+    let ha_handle: Option<(Arc<HaHandle>, Arc<ha::cluster_state::ClusterState>)> = if !ha_enabled {
         None
     } else {
         let node_id = args.ha_node_id.expect("checked above");
         let peers = ha::peers::parse_peers(&args.ha_peers)?;
+        // This node's own entry is never dialled.
+        for node in peers
+            .iter()
+            .filter(|(id, _)| **id != node_id)
+            .map(|(_, n)| n)
+        {
+            ha::peers::warn_if_plain_remote(&node.addr);
+        }
+        // `--ha-join` leaves `peers` empty: this node never initializes.
         let ha_token: Option<Arc<str>> = args.ha_token.clone().map(Arc::from);
 
         let ha_dir = args.data_dir.join("ha");
@@ -256,25 +340,22 @@ async fn main() -> anyhow::Result<()> {
                 &db,
                 Arc::new(config_state.clone()),
                 Arc::new(intent_state_val.clone()),
+                ha::state_machine::Registries {
+                    peers: Arc::new(peers_state.clone()),
+                    proxy_peers: Arc::new(proxy_peers_state.clone()),
+                    book: book.clone(),
+                },
             )
-            .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("opening raft state machine meta at {ha_dir:?}: {e}"))?
+            .with_pre_ha_notice(node_id, args.data_dir.clone()),
         );
 
+        let cluster = state_machine.cluster().clone();
         let network = ha::network::Network::new(ha_token.clone());
-        // Relaxed from the library defaults (150/300/50ms) — this is a
-        // control-plane group on plain HTTP over `reqwest`, not a
-        // low-latency data-path link; a wider election window trades a
-        // slightly slower failover for fewer spurious elections under
-        // ordinary scheduling/network jitter in a test or a loaded host.
         let raft_config = Arc::new(
-            openraft::Config {
-                heartbeat_interval: 250,
-                election_timeout_min: 800,
-                election_timeout_max: 1500,
-                ..Default::default()
-            }
-            .validate()
-            .map_err(|e| anyhow::anyhow!("invalid raft config: {e}"))?,
+            ha::raft_config(args.ha_snapshot_after)
+                .validate()
+                .map_err(|e| anyhow::anyhow!("invalid raft config: {e}"))?,
         );
         let raft = openraft::Raft::new(node_id, raft_config, network, log_store, state_machine)
             .await
@@ -287,30 +368,72 @@ async fn main() -> anyhow::Result<()> {
         // log has content — logged at `debug`, not a real failure). A
         // brief delay gives every peer's HTTP server (this one included)
         // time to come up first.
-        let bootstrap_raft = raft.clone();
-        let members = peers.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            match bootstrap_raft.initialize(members).await {
-                Ok(()) => tracing::info!("raft cluster initialized"),
-                Err(e) => tracing::debug!(
-                    error = %e,
-                    "raft initialize was a no-op (already initialized by this node or a peer, \
-                     which is the expected outcome for every node but the one that won the race)"
-                ),
-            }
-        });
+        // A `--ha-join` node never initializes: it waits to be added.
+        if !args.ha_join {
+            let bootstrap_raft = raft.clone();
+            let members = peers.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                match bootstrap_raft.initialize(members).await {
+                    Ok(()) => tracing::info!("raft cluster initialized"),
+                    Err(e) => tracing::debug!(
+                        error = %e,
+                        "raft initialize was a no-op (already initialized by this node or a \
+                         peer, which is the expected outcome for every node but the one that \
+                         won the race)"
+                    ),
+                }
+            });
+        }
 
         let handle = Arc::new(HaHandle {
             raft,
             node_id,
             ha_token,
+            forward: ha::client::forward_client(ha::client::FORWARD_TIMEOUT),
+            pre_ha,
         });
         config_state = config_state.with_ha(Some(handle.clone()));
         intent_state_val = intent_state_val.with_ha(Some(handle.clone()));
-        tracing::info!(node_id, peers = ?peers.keys().collect::<Vec<_>>(), "intra-tier HA enabled");
-        Some(handle)
+        if args.ha_join {
+            tracing::info!(
+                node_id,
+                "intra-tier HA enabled; waiting to be added to a cluster"
+            );
+        } else {
+            tracing::info!(node_id, peers = ?peers.keys().collect::<Vec<_>>(), "intra-tier HA enabled");
+        }
+        Some((handle, cluster))
     };
+
+    // Under HA the registries propose through Raft instead of writing: the
+    // state machine's own copies (handed to it above) stay the writers.
+    if let Some((handle, cluster)) = &ha_handle {
+        let registry_ha = gsp_controller::registry::RegistryHa {
+            handle: handle.clone(),
+            cluster: cluster.clone(),
+            local_network: tunnel_network,
+        };
+        peers_state = peers_state.with_ha(Some(registry_ha.clone()));
+        proxy_peers_state = proxy_peers_state.with_ha(Some(registry_ha));
+        addresses_state = addresses_state.with_cluster(cluster.clone());
+        tokio::spawn(ha::init::initialize_registries(
+            handle.clone(),
+            cluster.clone(),
+            tunnel_network,
+            import_policy,
+        ));
+    }
+    let leader_handle = ha_handle.as_ref().map(|(h, _)| h.clone());
+    tokio::spawn(gsp_controller::addresses::api::stale_warning_loop(
+        book.clone(),
+        stale_after,
+        move || {
+            leader_handle
+                .as_ref()
+                .is_none_or(|h| h.raft.metrics().borrow().current_leader == Some(h.node_id))
+        },
+    ));
 
     let state = Arc::new(config_state);
     let intent_state = Arc::new(intent_state_val);
@@ -364,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    let admin_token: Option<Arc<str>> = args.auth_token.as_deref().map(Arc::from);
     let adopt_state = AdoptState {
         role: role_handle,
         config: state.clone(),
@@ -379,13 +503,13 @@ async fn main() -> anyhow::Result<()> {
         .merge(gsp_controller::proxy_peers::api::router(proxy_peers_state))
         .merge(gsp_controller::addresses::api::router(addresses_state))
         .merge(gsp_controller::adopt::router(adopt_state));
-    if let Some(handle) = ha_handle {
-        app = app.merge(ha::routes::router(handle));
+    if let Some((handle, _)) = ha_handle {
+        app = app
+            .merge(ha::members::router(handle.clone(), admin_token))
+            .merge(ha::routes::router(handle));
     }
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(listen = %args.listen, "gsp-controller listening");
-    axum::serve(listener, app).await?;
+    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-controller").await?;
 
     Ok(())
 }

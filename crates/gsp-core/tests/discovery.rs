@@ -219,9 +219,9 @@ async fn runtime_reconciles_sources_when_backend_sources_change() {
     let snap = Snapshot::build_with_sources(&cfg, None, &BackendOverlay::new(), &discovery);
     let runtime = Runtime::start_with_discovery(
         snap,
-        Default::default(),
+        Arc::default(),
         None,
-        Default::default(),
+        Arc::default(),
         discovery.clone(),
         Some(Arc::new(FixedFactory)),
         None,

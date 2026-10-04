@@ -56,7 +56,8 @@ fn body(reg: &Registration) -> PeerRegistration<'_> {
 
 #[derive(Debug)]
 pub enum RegisterError {
-    /// The controller understood and refused (4xx): retrying cannot help.
+    /// The controller understood and refused (4xx other than 408/429):
+    /// retrying cannot help.
     Rejected(String),
     /// Transport trouble or a 5xx: worth retrying.
     Transient(anyhow::Error),
@@ -77,9 +78,16 @@ impl std::error::Error for RegisterError {}
 /// retry budget real: without them a controller that accepts TCP but never
 /// answers would block startup (and the refresh loop) forever.
 pub fn http_client() -> reqwest::Client {
+    client_with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+}
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn client_with_timeouts(connect: Duration, request: Duration) -> reqwest::Client {
     gsp_http::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(connect)
+        .timeout(request)
         .build()
         .expect("timeouts plus --ca-file roots (validated at startup) always build")
 }
@@ -111,7 +119,10 @@ pub async fn register_once(
     }
     let text = resp.text().await.unwrap_or_default();
     let msg = format!("controller rejected registration ({status}): {text}");
-    if status.is_client_error() {
+    // 408 and 429 are "not now", not "never": retry them like a 5xx.
+    let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    if status.is_client_error() && !retryable {
         Err(RegisterError::Rejected(msg))
     } else {
         Err(RegisterError::Transient(anyhow::anyhow!(msg)))
@@ -119,7 +130,7 @@ pub async fn register_once(
 }
 
 /// Retries transient failures with backoff until `budget` runs out; a
-/// rejection (4xx) returns immediately.
+/// rejection (4xx other than 408/429) returns immediately.
 pub async fn register_with_retry(
     client: &reqwest::Client,
     controller_url: &str,
@@ -149,7 +160,17 @@ pub async fn register_with_retry(
 /// the one this process is running with. Never fatal: a live interface must
 /// not be torn down over a registry change — a restart applies the new one.
 pub fn address_change(running: &str, reported: &str) -> Option<String> {
-    (running != reported).then(|| {
+    // Compare parsed addresses where both parse, so IPv6 spellings of the
+    // same address (`fd49:0::5` and the controller's canonical `fd49::5`)
+    // are not a change.
+    let same = match (
+        running.parse::<std::net::IpAddr>(),
+        reported.parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => running == reported,
+    };
+    (!same).then(|| {
         format!(
             "the controller now assigns tunnel address {reported} but this process is running \
              with {running}; keeping {running} — restart to apply the new address"
@@ -231,6 +252,14 @@ mod tests {
         assert!(msg.contains("restart"));
     }
 
+    #[test]
+    fn address_change_compares_ipv6_as_addresses_not_text() {
+        assert_eq!(address_change("fd49:0::5", "fd49::5"), None);
+        assert_eq!(address_change("FD49::5", "fd49::5"), None);
+        assert!(address_change("fd49::5", "fd49::6").is_some());
+        assert!(address_change("10.60.0.5", "fd49::5").is_some());
+    }
+
     /// A one-shot HTTP server answering every request with a canned response.
     async fn canned(status_line: &'static str, body: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -293,6 +322,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_408_or_429_is_transient_not_a_rejection() {
+        for status in ["408 Request Timeout", "429 Too Many Requests"] {
+            let url = canned(status, r#"{"error":"slow down"}"#).await;
+            match register_once(&reqwest::Client::new(), &url, None, &reg()).await {
+                Err(RegisterError::Transient(e)) => {
+                    assert!(format!("{e:#}").contains("slow down"), "{e:#}")
+                }
+                other => panic!("{status}: expected Transient, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn retrying_gives_up_on_a_permanent_rejection_immediately() {
         let url = canned("409 Conflict", r#"{"error":"held"}"#).await;
         let started = std::time::Instant::now();
@@ -340,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_production_client_has_a_request_timeout() {
+    async fn the_client_gives_up_on_a_controller_that_never_answers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -350,13 +392,17 @@ mod tests {
                 held.push(s);
             }
         });
-        // Must give up on its own (10 s request timeout), never hang.
+        // Must give up on its own (the request timeout), never hang. The
+        // production values are only checked to be finite; the hang itself is
+        // exercised with a short timeout through the same builder.
+        assert!(REQUEST_TIMEOUT <= Duration::from_secs(30));
+        let client = client_with_timeouts(CONNECT_TIMEOUT, Duration::from_millis(300));
         let got = tokio::time::timeout(
-            Duration::from_secs(20),
-            register_once(&http_client(), &url, None, &reg()),
+            Duration::from_secs(5),
+            register_once(&client, &url, None, &reg()),
         )
         .await
-        .expect("http_client() has no request timeout");
+        .expect("the client has no request timeout");
         assert!(matches!(got, Err(RegisterError::Transient(_))));
     }
 }

@@ -16,11 +16,11 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use gsp_config::{RateLimit, TokenBucket as BucketCfg};
 
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Drop the network-bucket map / IP-bucket map once either exceeds this many
 /// entries, evicting buckets that have refilled to capacity (idle sources).
@@ -112,8 +112,8 @@ impl RateLimiter {
         if !self.is_enabled() {
             return None;
         }
-        let now = now_ms();
-        let mut st = self.state.lock().unwrap();
+        let now = mono_ms();
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
 
         // Refill (creating a full bucket on first sight) and check affordability
         // for both buckets before consuming from either.
@@ -207,7 +207,7 @@ mod tests {
         // Hand the bucket ~2 tokens back (as a refill would) and confirm it
         // grants exactly two more permits before refusing again.
         {
-            let mut st = l.state.lock().unwrap();
+            let mut st = l.state.lock().unwrap_or_else(PoisonError::into_inner);
             let b = st.ips.get_mut(&ip).unwrap();
             b.tokens = 2.0;
         }

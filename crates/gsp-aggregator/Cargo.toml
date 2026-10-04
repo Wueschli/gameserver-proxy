@@ -14,8 +14,11 @@ path = "src/lib.rs"
 name = "gsp-aggregator"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-gsp-http.workspace = true
+gsp-http = { workspace = true, features = ["server"] }
 tokio.workspace = true
 axum.workspace = true
 clap.workspace = true

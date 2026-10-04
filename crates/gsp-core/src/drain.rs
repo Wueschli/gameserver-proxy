@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
@@ -99,18 +99,21 @@ impl ConnTracker {
     pub fn track(self: &Arc<Self>, meta: SessionMeta) -> ConnGuard {
         self.tx.send_modify(|n| *n += 1);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.entries.lock().unwrap().insert(
-            id,
-            Entry {
-                proto: meta.proto,
-                listener: meta.listener,
-                peer: meta.peer,
-                local: meta.local,
-                pool: None,
-                backend: None,
-                since: Instant::now(),
-            },
-        );
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id,
+                Entry {
+                    proto: meta.proto,
+                    listener: meta.listener,
+                    peer: meta.peer,
+                    local: meta.local,
+                    pool: None,
+                    backend: None,
+                    since: Instant::now(),
+                },
+            );
         ConnGuard {
             tracker: self.clone(),
             id,
@@ -162,8 +165,14 @@ impl ConnGuard {
     /// target) and backend address routing chose for this connection. Called
     /// once, right after the backend is picked.
     pub fn set_target(&self, pool: Option<&str>, backend: SocketAddr) {
-        if let Some(e) = self.tracker.entries.lock().unwrap().get_mut(&self.id) {
-            e.pool = pool.map(|s| s.to_string());
+        if let Some(e) = self
+            .tracker
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&self.id)
+        {
+            e.pool = pool.map(std::string::ToString::to_string);
             e.backend = Some(backend);
         }
     }
@@ -172,7 +181,11 @@ impl ConnGuard {
 impl Drop for ConnGuard {
     fn drop(&mut self) {
         self.tracker.tx.send_modify(|n| *n = n.saturating_sub(1));
-        self.tracker.entries.lock().unwrap().remove(&self.id);
+        self.tracker
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
     }
 }
 
