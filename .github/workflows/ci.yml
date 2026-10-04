@@ -66,6 +66,7 @@ jobs:
           python3 .github/scripts/test_summary_test.py
           python3 .github/scripts/trivy_summary_test.py
           python3 .github/scripts/audit_summary_test.py
+          python3 .github/scripts/sarif_categories_test.py
       - name: Detect changed areas
         id: f
         env:
@@ -363,8 +364,10 @@ jobs:
   # Trivy over the deploy job's images and the lockfiles they're built from.
   # Informational (owner's call): the job reports, it never fails — findings show
   # as a table on the run's summary page, as warning annotations, and as JSON +
-  # SARIF in the trivy-reports artifact (GitHub's Security tab would take the
-  # SARIF, but on a private repo only with GitHub Code Security enabled).
+  # SARIF in the trivy-reports artifact, which is also uploaded to GitHub's
+  # Security tab (code scanning; free on this public repo). The upload is skipped
+  # for fork PRs, whose token can't write security events. The vulnerability DB
+  # (~120 MB) is cached by day: a hit skips the download entirely.
   #
   # Trivy runs from its official image, pinned by digest, as a `docker://` step:
   # a job-level `container:` would need JavaScript actions (checkout, artifacts)
@@ -379,6 +382,9 @@ jobs:
     # Also when deploy failed later on (e.g. the smoke test): the images exist.
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    permissions:
+      contents: read
+      security-events: write   # the SARIF upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -386,20 +392,53 @@ jobs:
         with:
           name: deploy-images
           path: target/images
+      - name: Date for the vulnerability DB cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore the vulnerability DB
+        id: db
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: target/trivy-cache
+          key: trivy-db-${{ steps.day.outputs.day }}
+      # A hit that holds no DB file (a partial save) must not skip the download.
+      - name: Check the restored vulnerability DB
+        id: dbfile
+        run: |
+          if [ "${{ steps.db.outputs.cache-hit }}" = true ] && [ -f target/trivy-cache/db/trivy.db ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Trivy scan (informational)
         continue-on-error: true
         uses: docker://aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
         env:
           TRIVY_IMAGE_DIR: target/images
           TRIVY_REPORT_DIR: target/trivy
+          # The action container mounts the workspace at /github/workspace.
+          TRIVY_CACHE_DIR: /github/workspace/target/trivy-cache
+          TRIVY_SKIP_DB_UPDATE: ${{ steps.dbfile.outputs.usable == 'true' && 'true' || 'false' }}
         with:
           entrypoint: sh
           args: deploy/scan-images.sh
+      # The container ran as root: hand the cache back so the cache post-step
+      # (running as the runner user) can read it.
+      - name: Take back the cache directory
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" target/trivy-cache target/trivy 2>/dev/null || true
       - name: Trivy report
         if: always()
         run: |
           python3 .github/scripts/trivy_summary.py target/trivy >> "$GITHUB_STEP_SUMMARY"
           python3 .github/scripts/trivy_summary.py --annotations target/trivy
+      - name: Give each SARIF its own code-scanning category
+        if: always()
+        run: python3 .github/scripts/sarif_categories.py target/trivy
+      - name: Upload SARIF to the Security tab
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: target/trivy
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:

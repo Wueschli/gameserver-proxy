@@ -23,13 +23,14 @@ rm -rf "$out" && mkdir -p "$out"
 set -- --exit-code 1 --severity "${TRIVY_SEVERITY:-HIGH,CRITICAL}" --ignore-unfixed \
   --ignorefile .trivyignore --no-progress --format json
 rc=0
-# scan <report-name> <trivy subcommand + target...>
+# scan <report-name> <scanners> <trivy subcommand + target...>. <scanners> is
+# also handed to `convert`, which needs it to build the log table's columns.
 scan() {
-  name=$1; shift
+  name=$1; scanners=$2; shift 2
   echo "== $name"
   trivy "$@" --output "$out/$name.json" || rc=1
   if [ -s "$out/$name.json" ]; then
-    trivy convert --format table "$out/$name.json"
+    trivy convert --format table --scanners "$scanners" "$out/$name.json"
     trivy convert --format sarif --output "$out/$name.sarif" "$out/$name.json"
   else
     echo "$name" >>"$out/not-scanned.txt" # an error, not findings: no report at all
@@ -37,12 +38,12 @@ scan() {
 }
 for t in gsp gsp-controller gsp-aggregator gsp-ui gsp-agent; do
   if [ -n "${TRIVY_IMAGE_DIR:-}" ]; then
-    scan "image-$t" image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
+    scan "image-$t" vuln,secret image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
   else
     # --image-src docker: only the image just built, never a same-named registry one.
-    scan "image-$t" image "$@" --image-src docker --scanners vuln,secret "gsp-deploy/$t:local"
+    scan "image-$t" vuln,secret image "$@" --image-src docker --scanners vuln,secret "gsp-deploy/$t:local"
   fi
 done
-scan lock-cargo fs "$@" --scanners vuln Cargo.lock
-scan lock-ui-npm fs "$@" --scanners vuln crates/gsp-ui/web/package-lock.json
+scan lock-cargo vuln fs "$@" --scanners vuln Cargo.lock
+scan lock-ui-npm vuln fs "$@" --scanners vuln crates/gsp-ui/web/package-lock.json
 exit $rc
