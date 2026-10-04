@@ -18,7 +18,7 @@
 //!
 //! **Removal**: an origin's deletion arrives as a controller tombstone
 //! (`removed`) and removes the matching WireGuard peer; silence alone never
-//! does ("last known good"). Each origin is routed as one `/32` host route to
+//! does ("last known good"). Each origin is routed as one `/32` (or IPv6 `/128`) host route to
 //! its controller-assigned tunnel address. `endpoint` is only ever set when the origin's registration
 //! carries one (i.e. this proxy could dial out); the common case — an
 //! origin behind a home NAT — leaves the peer endpoint-less, and this
@@ -65,6 +65,7 @@ fn restrict_permissions(_path: &Path) -> anyhow::Result<()> {
 /// see the module doc), but persisting still avoids a pointless key churn
 /// on every restart.
 pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
+    use std::io::Write;
     if path.exists() {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading private key from {}", path.display()))?;
@@ -82,13 +83,19 @@ pub fn load_or_generate_key(path: &Path) -> anyhow::Result<Key> {
         .create_new(true)
         .open(path)
         .with_context(|| format!("creating private key file {}", path.display()))?;
-    use std::io::Write;
     file.write_all(key.to_string().as_bytes())
         .with_context(|| format!("writing private key to {}", path.display()))?;
     drop(file);
     restrict_permissions(path)?;
     Ok(key)
 }
+
+/// The tunnel interface MTU, set explicitly for both backends: the kernel
+/// module defaults to 1420, but boringtun's TUN device comes up at 1500
+/// (seen in the IPv6-underlay e2e), which leaves no room for WireGuard's
+/// 80-byte overhead over an IPv6 underlay. 1420 also stays above IPv6's
+/// 1280 minimum.
+pub const TUNNEL_MTU: u32 = 1420;
 
 /// Brings up this proxy's shared WireGuard interface — the same
 /// kernel-primary, boringtun-fallback shape `gsp-agent::interface` uses.
@@ -105,7 +112,7 @@ pub fn bring_up(
         addresses: vec![address],
         port: listen_port,
         peers: Vec::new(),
-        mtu: None,
+        mtu: Some(TUNNEL_MTU),
         fwmark: None,
     };
 
@@ -153,7 +160,7 @@ struct PeerRegistration {
 }
 
 /// Builds the WireGuard peer this registration implies: a **host route to the
-/// origin's own tunnel address** (`/32`) — the controller guarantees it is
+/// origin's own tunnel address** (`/32` or `/128`) — the controller guarantees it is
 /// unique and that every backend lives on it — and `endpoint` only when the
 /// registration carries one (the common-case-absent field, not a bug).
 fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
@@ -165,14 +172,15 @@ fn to_wg_peer(reg: &PeerRegistration) -> anyhow::Result<Peer> {
             reg.name
         )
     })?;
-    let ip: std::net::Ipv4Addr = addr.parse().map_err(|e| {
+    let ip: std::net::IpAddr = addr.parse().map_err(|e| {
         anyhow::anyhow!(
             "origin {:?} tunnel_address {addr:?} is invalid: {e}",
             reg.name
         )
     })?;
     let mut peer = Peer::new(key);
-    peer.set_allowed_ips(vec![IpAddrMask::host(std::net::IpAddr::V4(ip))]);
+    // `/32` for IPv4, `/128` for IPv6.
+    peer.set_allowed_ips(vec![IpAddrMask::host(ip)]);
     if let Some(endpoint) = &reg.endpoint {
         peer.set_endpoint(endpoint).map_err(|e| {
             anyhow::anyhow!(
@@ -251,7 +259,7 @@ async fn subscribe_once(
     }
     tracing::info!(controller = %base_url, "subscribed to backend-peers updates");
 
-    let mut buf = String::new();
+    let mut buf = gsp_http::sse::EventBuffer::new();
     loop {
         let chunk = resp.chunk().await.map_err(|e| {
             anyhow::anyhow!(
@@ -262,15 +270,17 @@ async fn subscribe_once(
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push(&bytes)
+            .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
-        while let Some(end) = buf.find("\n\n") {
-            let event = buf[..end].to_string();
-            buf.drain(..end + 2);
+        while let Some(event) = buf.next_event() {
             if let Some(ev) = parse_sse_event(&event) {
                 match plan(last_applied, &ev) {
                     Action::Skip => {}
                     Action::Reconcile(reg) => {
+                        if let Some(old) = replaced_pubkey(last_applied, reg) {
+                            remove_peer(wg, &reg.name, old);
+                        }
                         reconcile_peer(wg, reg);
                         last_applied.insert(reg.name.clone(), reg.clone());
                     }
@@ -331,6 +341,20 @@ fn plan<'a>(applied: &HashMap<String, PeerRegistration>, event: &'a Event) -> Ac
             None => Action::Skip,
         },
     }
+}
+
+/// The pubkey of a peer that `reg` supersedes: the same name now registered
+/// under a different key. `reconcile_peer` only touches the new key's peer, so
+/// without removing this one the old key would stay a live peer (with its
+/// routes) until the interface is torn down.
+fn replaced_pubkey<'a>(
+    applied: &'a HashMap<String, PeerRegistration>,
+    reg: &PeerRegistration,
+) -> Option<&'a str> {
+    applied
+        .get(&reg.name)
+        .map(|old| old.pubkey.as_str())
+        .filter(|old| *old != reg.pubkey)
 }
 
 fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubkey: &str) {
@@ -460,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_origin_is_routed_as_a_slash_128() {
+        let peer = to_wg_peer(&reg(Some("fd49::2"))).unwrap();
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.allowed_ips[0].cidr, 128);
+        assert_eq!(peer.allowed_ips[0].address.to_string(), "fd49::2");
+    }
+
+    #[test]
+    fn an_ipv6_origin_endpoint_is_accepted() {
+        let mut r = reg(Some("fd49::2"));
+        r.endpoint = Some("[2001:db8::7]:51820".into());
+        assert_eq!(
+            to_wg_peer(&r).unwrap().endpoint,
+            Some("[2001:db8::7]:51820".parse().unwrap())
+        );
+    }
+
+    #[test]
     fn to_wg_peer_rejects_an_origin_without_a_tunnel_address() {
         assert!(to_wg_peer(&reg(None)).is_err());
     }
@@ -510,5 +552,16 @@ mod tests {
         assert_eq!(plan(&applied, &del), Action::Remove(r.pubkey.clone()));
         applied.remove("home");
         assert!(applied.is_empty());
+    }
+    #[test]
+    fn a_name_re_registered_under_a_new_key_replaces_the_old_keys_peer() {
+        let mut applied = HashMap::new();
+        let old = reg(Some("10.60.0.3"));
+        assert_eq!(replaced_pubkey(&applied, &old), None, "first sight");
+        applied.insert(old.name.clone(), old.clone());
+        assert_eq!(replaced_pubkey(&applied, &old), None, "same key");
+        let mut new = old.clone();
+        new.pubkey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into();
+        assert_eq!(replaced_pubkey(&applied, &new), Some(old.pubkey.as_str()));
     }
 }

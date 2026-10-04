@@ -55,6 +55,7 @@ impl Sniffers {
     }
 
     /// Register one sniffer, replacing any earlier one under the same name.
+    #[allow(clippy::needless_pass_by_value)] // registries take ownership of what they store
     pub fn register(&self, sniffer: Arc<dyn Sniffer>) {
         self.map.rcu(|cur| {
             let mut next = (**cur).clone();
@@ -272,7 +273,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,
@@ -430,7 +431,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,
@@ -501,7 +502,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,

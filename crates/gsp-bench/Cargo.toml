@@ -10,6 +10,9 @@ publish = false
 name = "gsp-bench"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 gsp-config = { path = "../gsp-config" }
 gsp-core = { path = "../gsp-core" }

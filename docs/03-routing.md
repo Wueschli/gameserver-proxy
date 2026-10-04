@@ -66,8 +66,9 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
    first bytes. A listener may route on several sniffers (e.g. `quic`,
    `wireguard` and `a2s` on one UDP port): they are tried in order of first
    appearance in the route list and the **first that recognises the bytes wins**
-   — a later sniffer is not consulted, and a `sniffer` route only matches the
-   sniffer it names. A `RouteHint { reject: true }` **drops the connection / datagram
+   — a later sniffer is not consulted, even if none of the winner's routes
+   match (routing then falls through to non-sniffer routes such as `always`) —
+   and a `sniffer` route only matches the sniffer it names. A `RouteHint { reject: true }` **drops the connection / datagram
    immediately** (before the push-resolver hint, so a spoofable `src_ip` hint
    cannot override it); TCP `gsp_listener_connections_total{result="sniffer_reject"}`,
    UDP `gsp_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A
@@ -122,8 +123,9 @@ short-lived `src_ip → pool` mapping.
   - `sni` (generic, see above)
   - `minecraft` → handshake hostname + protocol version
   - `a2s` / `source-query` → Valve query recognized (route to a query pool)
-  - `quic` → version + (unencrypted) connection-ID length
-  - `wireguard`, `openvpn` … (if the proxy should also front those)
+  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`, no hostname: the payload is encrypted)
+  - `wireguard` → handshake initiation recognized (key `wireguard`)
+  - `openvpn` … (not built; see the plugin README for how to add one)
 - Plugin contract: **read-only**, receives up to `peek_max_bytes`, returns
   `Option<RouteHint { key?: String, pool_hint?: String, reject?: bool }>`. No access to
   later bytes, no writing.

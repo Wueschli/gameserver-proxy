@@ -217,6 +217,7 @@ impl Runtime {
     /// [`crate::gossip`] SWIM mesh task. Like `geo`/`sniffers`, it is
     /// startup-only — a reload does not start or stop the mesh.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)] // start-up hand-over: the runtime owns what it is given
     pub fn start_with_discovery(
         initial: Arc<Snapshot>,
         resolvers: Arc<Resolvers>,
@@ -237,7 +238,7 @@ impl Runtime {
 
         let worker_count = if workers == 0 {
             std::thread::available_parallelism()
-                .map(|n| n.get())
+                .map(std::num::NonZero::get)
                 .unwrap_or(1)
         } else {
             workers

@@ -14,8 +14,11 @@ path = "src/lib.rs"
 name = "gsp-ui"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-gsp-http.workspace = true
+gsp-http = { workspace = true, features = ["server"] }
 tokio.workspace = true
 axum = { workspace = true, features = ["ws"] }
 clap.workspace = true
@@ -27,7 +30,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 rand.workspace = true
 tower-http = { version = "0.6", features = ["fs"] }
-serde_yaml.workspace = true
+serde_norway.workspace = true
 argon2 = "0.6.0"
 
 [dev-dependencies]
@@ -35,3 +38,8 @@ tower = "0.5"
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false }
 tempfile.workspace = true
+# HTTP/2 WebSocket (extended CONNECT) test client; all already in the lockfile.
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"

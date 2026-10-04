@@ -51,7 +51,7 @@ async fn domain_quorum_overrides_an_instance_with_a_lenient_local_threshold() ->
 
     let target_port = free_port()?; // nothing ever listens here
     let domain = "fleet-test-domain";
-    let psk = "fleet-test-psk";
+    let psk = "fleet-test-gossip-psk";
     let quorum_fraction = 0.66;
 
     let gossip_b = free_port()?;
@@ -203,7 +203,7 @@ async fn instances_with_different_psks_never_merge_and_neither_gets_stuck() -> R
         1,
         0.66,
         domain,
-        "psk-a",
+        "gossip-psk-a-0123456",
     );
     let cfg_b = gossip_gsp_config(
         admin_b,
@@ -214,7 +214,7 @@ async fn instances_with_different_psks_never_merge_and_neither_gets_stuck() -> R
         1,
         0.66,
         domain,
-        "psk-b",
+        "gossip-psk-b-0123456",
     );
 
     let path_a = write_config(&dir, "a.yaml", &cfg_a)?;

@@ -22,13 +22,21 @@
 //!
 //! - [`log_store`] — `RaftLogStorage` + `RaftLogReader`, backed by two
 //!   `sled` trees (`log`, `meta`) so the Raft log itself survives a
-//!   restart, not just the state machine it replicates.
+//!   restart, not just the state machine it replicates; `openraft` purges
+//!   it up to each snapshot (keeping the last 1000 entries).
 //! - [`state_machine`] — `RaftStateMachine` + `RaftSnapshotBuilder`, wraps
 //!   the config and intent [`crate::api::AppState`]/
-//!   [`crate::intent::api::IntentState`] directly and calls their existing
-//!   `apply_revision` (the same bypass a `slave`'s relay already uses) —
-//!   applying a committed Raft entry is not a new code path, just a new
-//!   *source* for the exact write `submit()` already made when HA is off.
+//!   [`crate::intent::api::IntentState`] directly and calls their
+//!   index-aware `apply_entry` — applying a committed Raft entry is not a
+//!   new code path, just a new *source* for the exact write `submit()`
+//!   already made when HA is off. The log is purged per [`raft_config`]'s
+//!   snapshot policy, so snapshots (which replace both stores on install)
+//!   are how a lagging follower or a new learner catches up.
+//! - [`apply_registry`] — how the state machine applies the registry
+//!   entries (register, release, touch) into the two registries and the
+//!   shared address book, deterministically and crash-idempotently.
+//! - [`cluster_state`] — the replicated tunnel network registry entries are
+//!   applied against, recorded once by `SetTunnelNetwork`.
 //! - [`network`] — `RaftNetworkFactory` + `RaftNetwork` over `reqwest`,
 //!   posting to peers' `/raft/*` routes.
 //! - [`routes`] — the `axum` handlers for `/raft/append`, `/raft/vote`,
@@ -40,18 +48,76 @@
 //!   no client of this API (`gsp`, `gsp-ui`, `curl`) ever needs to know HA
 //!   exists.
 
+pub mod apply_registry;
 pub mod client;
+pub mod cluster_state;
+pub mod import;
+pub mod init;
 pub mod log_store;
+pub mod members;
 pub mod network;
 pub mod peers;
 pub mod routes;
 pub mod state_machine;
+#[cfg(test)]
+pub(crate) mod test_support;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::addresses::{Rejection, Role};
+use crate::peers::PeerRegistration;
+use crate::proxy_peers::ProxyRegistration;
+
 pub type NodeId = u64;
+
+/// Startup checks on the HA flags together: `--ha-peers` (bootstrap a cluster
+/// with a static member list) and `--ha-join` (wait to be added) are mutually
+/// exclusive, either needs `--ha-node-id`, and neither combines with
+/// `--role slave` yet.
+pub fn check_flags(
+    ha_peers: bool,
+    ha_join: bool,
+    node_id: Option<NodeId>,
+    slave: bool,
+) -> Result<(), String> {
+    if ha_peers && ha_join {
+        return Err(
+            "--ha-join and --ha-peers are mutually exclusive: --ha-peers bootstraps a \
+             new cluster, --ha-join starts a node that is added to a running one"
+                .into(),
+        );
+    }
+    let flag = if ha_join { "--ha-join" } else { "--ha-peers" };
+    if (ha_peers || ha_join) && node_id.is_none() {
+        return Err(format!("{flag} requires --ha-node-id"));
+    }
+    if (ha_peers || ha_join) && slave {
+        // Scope cut — see this module's doc.
+        return Err(format!(
+            "{flag} cannot be combined with --role slave yet: the upward relay needs to run \
+             leader-only with a replicated cursor, which is designed (docs/10) but not built"
+        ));
+    }
+    Ok(())
+}
+
+/// `/raft/*` and the membership API let a caller rewrite replicated state, so
+/// HA never starts without a peer token (security review N1), and a token it
+/// is given must not be short (O7). Unlike the client-facing `--auth-token`
+/// there is no opt-out.
+pub fn check_ha_token(ha_enabled: bool, token: Option<&str>) -> Result<(), String> {
+    match token {
+        None if ha_enabled => Err(
+            "--ha-peers/--ha-join require --ha-token: without it the /raft/* and \
+             /admin/ha/members endpoints accept any caller"
+                .into(),
+        ),
+        t => gsp_http::policy::check_optional_secret("--ha-token", t),
+    }
+}
 
 /// One proposed write, tagged by which log it targets — the Raft log
 /// carries both the config and intent logs' entries interleaved, since one
@@ -76,14 +142,78 @@ pub enum WriteRequest {
     /// to `true` in place — the same operation `AppState::promote_revision`
     /// does directly when HA is off.
     Promote(u64),
+    /// An origin's registration as received (address optional), with the
+    /// proposing leader's clock — so `first_seen`/`last_seen` are identical
+    /// on every replica.
+    RegisterOrigin {
+        reg: PeerRegistration,
+        now: u64,
+    },
+    /// A proxy's registration, as [`WriteRequest::RegisterOrigin`].
+    RegisterProxy {
+        reg: ProxyRegistration,
+        now: u64,
+    },
+    /// Tombstones `name` in `role`'s registry and frees its address.
+    Release {
+        role: Role,
+        name: String,
+    },
+    /// [`WriteRequest::Release`] for a lapsed lease: only if the owner's
+    /// `last_seen` is still older than `last_seen_before` when the entry
+    /// applies, so a re-registration that commits first (in log order) wins.
+    Expire {
+        role: Role,
+        name: String,
+        last_seen_before: u64,
+    },
+    /// Sets `last_seen = now` in the address book; no registry revision.
+    Touch {
+        role: Role,
+        name: String,
+        now: u64,
+    },
+    /// Records the cluster's tunnel network (CIDR string; `None` =
+    /// pin-only) once, before the first registry write.
+    SetTunnelNetwork(Option<String>),
+    /// The pre-HA registrations of one node, adopted once as the cluster's
+    /// initial registry state (see [`import`]).
+    Import(Box<import::ImportContent>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteResponse {
-    /// `None` only for a Raft-internal entry (blank leader no-op,
-    /// membership change) that never came from `client_write` — a real
-    /// [`WriteRequest`] always produces `Some`.
-    pub revision: Option<u64>,
+/// What applying one entry did — the HTTP layer maps it back to the status
+/// codes and bodies the non-HA handlers give.
+///
+/// A replayed entry (every step it would take already absorbed after a
+/// crash) answers `Revision(None)`: openraft only routes responses of
+/// entries proposed in the live term, so nobody receives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteResponse {
+    /// Config, intent and promote entries. `None` only for a Raft-internal
+    /// entry (blank leader no-op, membership change) that never came from
+    /// `client_write`, or a replay.
+    Revision(Option<u64>),
+    /// A registration was stored at `revision` with tunnel `address`.
+    Registered { revision: u64, address: IpAddr },
+    /// A registration's tombstone was stored at `revision`; `address` is
+    /// the tunnel address freed, if it held one.
+    Released {
+        revision: u64,
+        address: Option<IpAddr>,
+    },
+    /// A deterministic refusal (`409` / `422` / `503` as
+    /// `crate::addresses::api::claim_error_response` maps it).
+    Rejected(Rejection),
+    /// An `Expire` found the owner seen again since its cutoff; nothing
+    /// changed.
+    NotExpired,
+    /// A release or touch of a name unknown to the registry and the book.
+    NotFound,
+    /// A touch refreshed the owner's `last_seen`.
+    Touched,
+    /// `SetTunnelNetwork` was applied: the network is recorded (now, or by
+    /// an earlier entry — it is recorded once).
+    Recorded,
 }
 
 openraft::declare_raft_types!(
@@ -98,6 +228,40 @@ openraft::declare_raft_types!(
 );
 
 pub type Raft = openraft::Raft<TypeConfig>;
+
+/// The log length (entries since the last snapshot) at which production
+/// builds a snapshot and lets `openraft` purge the log — `openraft`'s own
+/// default.
+pub const SNAPSHOT_AFTER: u64 = 5000;
+
+/// This tier's `openraft` config. Election timing is relaxed from the
+/// library defaults (150/300/50ms): this is a control-plane group on plain
+/// HTTP over `reqwest`, not a low-latency data-path link, so a wider
+/// election window trades a slightly slower failover for fewer spurious
+/// elections under ordinary scheduling/network jitter in a test or a
+/// loaded host. A snapshot is built every `snapshot_after` log entries
+/// ([`SNAPSHOT_AFTER`] in production; tests lower it to exercise the
+/// purge path), after which `openraft` purges the log and catches a lagging
+/// follower or learner up by snapshot. `max_in_snapshot_log_to_keep` and
+/// `replication_lag_threshold` stay at their defaults.
+///
+/// A snapshot travels as JSON, where each byte of its content costs several
+/// characters: it is sent in 256 KiB chunks so a chunk stays well under the
+/// `/raft/*` routes' body limit, and each chunk gets 30 s instead of
+/// `openraft`'s 200 ms default, which a catch-up of a real registry never
+/// meets.
+#[allow(deprecated)] // `snapshot_max_chunk_size` is how chunks are sized in 0.9
+pub fn raft_config(snapshot_after: u64) -> openraft::Config {
+    openraft::Config {
+        heartbeat_interval: 250,
+        election_timeout_min: 800,
+        election_timeout_max: 1500,
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(snapshot_after),
+        snapshot_max_chunk_size: 256 * 1024,
+        install_snapshot_timeout: 30_000,
+        ..Default::default()
+    }
+}
 
 /// Shorthand aliases for `openraft`'s error types instantiated against this
 /// crate's [`NodeId`]/`BasicNode` — mirrors the `typ` module every
@@ -128,4 +292,76 @@ pub struct HaHandle {
     /// (slave-to-parent), matching every other cross-service credential
     /// pair in this fleet.
     pub ha_token: Option<Arc<str>>,
+    /// Carries writes this replica forwards to the leader
+    /// ([`client::forward_client`]): shared, and bounded by
+    /// [`client::FORWARD_TIMEOUT`].
+    pub forward: reqwest::Client,
+    /// This node's own set-aside pre-HA data, which `/raft/whoami` reports
+    /// and `/raft/pre-ha` serves ([`import`]).
+    pub pre_ha: import::LocalPreHa,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ha_join_and_ha_peers_together_are_refused() {
+        let e = check_flags(true, true, Some(1), false).unwrap_err();
+        assert!(e.contains("--ha-join") && e.contains("--ha-peers"), "{e}");
+        assert!(check_flags(true, false, Some(1), false).is_ok());
+        assert!(check_flags(false, true, Some(4), false).is_ok());
+        assert!(check_flags(false, false, None, false).is_ok());
+    }
+
+    #[test]
+    fn ha_needs_a_node_id_and_refuses_the_slave_role() {
+        assert!(check_flags(true, false, None, false)
+            .unwrap_err()
+            .contains("--ha-node-id"));
+        assert!(check_flags(false, true, None, false)
+            .unwrap_err()
+            .contains("--ha-join requires"));
+        assert!(check_flags(false, true, Some(4), true)
+            .unwrap_err()
+            .contains("--role slave"));
+    }
+
+    #[test]
+    fn ha_without_a_token_is_refused() {
+        let e = check_ha_token(true, None).unwrap_err();
+        assert!(e.contains("--ha-token"), "{e}");
+        assert!(check_ha_token(false, None).is_ok());
+    }
+
+    #[test]
+    fn short_ha_token_is_refused_whether_or_not_ha_is_on() {
+        assert!(check_ha_token(true, Some("short")).is_err());
+        assert!(check_ha_token(false, Some("short")).is_err());
+        assert!(check_ha_token(true, Some("0123456789abcdef")).is_ok());
+    }
+
+    #[test]
+    fn production_raft_config_keeps_openraft_snapshot_defaults() {
+        let config = raft_config(SNAPSHOT_AFTER).validate().unwrap();
+        let defaults = openraft::Config::default();
+        assert_eq!(config.snapshot_policy, defaults.snapshot_policy);
+        assert_eq!(
+            config.max_in_snapshot_log_to_keep,
+            defaults.max_in_snapshot_log_to_keep
+        );
+        assert_eq!(
+            config.replication_lag_threshold,
+            defaults.replication_lag_threshold
+        );
+    }
+
+    #[test]
+    fn a_lower_snapshot_threshold_is_honoured() {
+        let config = raft_config(10).validate().unwrap();
+        assert_eq!(
+            config.snapshot_policy,
+            openraft::SnapshotPolicy::LogsSinceLast(10)
+        );
+    }
 }

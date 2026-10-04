@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::net::{TcpSocket, TcpStream};
@@ -106,6 +107,23 @@ pub fn bind_reuseport_tcp(
     Ok(sock.into())
 }
 
+/// Minimum gap between two family-mismatch warnings (the mismatch recurs on every
+/// connection, so an unthrottled `warn` floods the log).
+const FAMILY_WARN_EVERY_MS: u64 = 60_000;
+/// `mono_ms` of the last family-mismatch warning; `u64::MAX` = none yet.
+static LAST_FAMILY_WARN: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// True at most once per `every_ms`: claims the slot in `last` with a CAS, so
+/// concurrent callers (one per worker) log it once between them, lock-free.
+fn warn_due(last: &AtomicU64, now_ms: u64, every_ms: u64) -> bool {
+    let prev = last.load(Ordering::Relaxed);
+    if prev != u64::MAX && now_ms.saturating_sub(prev) < every_ms {
+        return false;
+    }
+    last.compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
 /// Open a TCP connection to `backend`. With `source` set, bind that address as
 /// the local end first, with `IP_TRANSPARENT` so the kernel keeps a non-local
 /// address (the real client's) as the packet source — Linux TPROXY transparent
@@ -116,9 +134,15 @@ pub async fn connect_tcp_from(
     source: Option<SocketAddr>,
 ) -> std::io::Result<TcpStream> {
     let Some(src) = source.filter(|s| s.is_ipv4() == backend.is_ipv4()) else {
-        if source.is_some() {
+        if source.is_some()
+            && warn_due(
+                &LAST_FAMILY_WARN,
+                crate::util::mono_ms(),
+                FAMILY_WARN_EVERY_MS,
+            )
+        {
             tracing::warn!(%backend, "transparent connect: client/backend family mismatch; \
-                connecting without a bound source");
+                connecting without a bound source (logged at most once a minute)");
         }
         return TcpStream::connect(backend).await;
     };
@@ -160,6 +184,25 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// The option exists on every Linux libc (glibc and musl): unprivileged runs get
+    /// EPERM, privileged ones succeed. Anything else (e.g. ENOPROTOOPT) is a regression.
+    #[test]
+    fn set_ip_transparent_is_known_to_the_kernel_v4_and_v6() {
+        for (v6, bind) in [(false, "127.0.0.1:0"), (true, "[::1]:0")] {
+            let Ok(sock) = std::net::UdpSocket::bind(bind) else {
+                continue;
+            };
+            match set_ip_transparent(&sock, v6) {
+                Ok(()) => {}
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "v6={v6}: {e}"
+                ),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn connect_tcp_from_without_a_source_connects_normally() {
         let srv = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -172,6 +215,15 @@ mod tests {
         let mut buf = [0u8; 2];
         c.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ok");
+    }
+
+    #[test]
+    fn warn_due_fires_once_per_interval() {
+        let last = AtomicU64::new(u64::MAX);
+        assert!(warn_due(&last, 0, 100), "first call always warns");
+        assert!(!warn_due(&last, 99, 100));
+        assert!(warn_due(&last, 100, 100));
+        assert!(!warn_due(&last, 150, 100));
     }
 
     #[tokio::test]

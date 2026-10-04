@@ -43,6 +43,7 @@ docs/                       the plan (00–12) — source of truth for design
 deploy/                     reference Dockerfile (5 targets), compose demo, k8s manifests, smoke.sh (docs/12)
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
+    src/                     lib.rs (entry points + re-exports), schema.rs (raw YAML types), validate.rs (`validate()`; tests in validate/tests.rs), parse.rs (value parsers), resolved.rs (validated `Config` & friends), cidr.rs (`Cidr`/`CidrSet`/`Acl`/`GeoAcl`), matcher.rs (`Matcher`, `extract_sni`), keys.rs (`base64_decode_32`)
     fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
   gsp-core/                 data plane
     snapshot.rs            immutable `Snapshot` (listeners + pools + sources + resolvers) behind ArcSwap
@@ -63,6 +64,7 @@ crates/
     src_conns.rs            per-listener concurrent per-source connection / session cap
     limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)
     geo.rs                  optional MaxMind GeoIP country lookup (GeoDb) for the geo filter
+    error.rs                typed errors for the public API: `ProxyError`, `ListenerError`, `SourceError` (no `anyhow` in `gsp-core`)
     drain.rs                `ConnTracker`/`ConnGuard` — live connection/session count + registry for graceful shutdown and GET /sessions
     overlay.rs              `BackendOverlay` — runtime POST/DELETE backend edits, layered on the file config
     runtime.rs              owns listener + health + source-manager tasks + route-hint table, holds the ArcSwap
@@ -74,7 +76,7 @@ crates/
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
     discovery.rs            DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
-    sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9)
+    sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
     procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
     controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
@@ -84,22 +86,28 @@ crates/
   gsp-controller/            binary — Tier-1 config distribution (phases 10–14, docs/10 "The controller" + docs/11: `standalone`/`slave` roles, Raft HA, canary rollout, backend/proxy-peers registries)
     store.rs                `Store` — embedded sled KV (ADR 20): revisions + current-pointer trees, catch-up range scan
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
-    auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
     peers.rs                 backend-peers registry (phase 14 slice 2, `docs/11`): POST/GET /peers(+/{name}), GET /peers/subscribe (SSE) — origins register here, proxies subscribe
     addresses.rs            tunnel address book: allocation, pinning, release; shared by both peer registries
+    lease.rs                `--tunnel-lease-ttl` sweeper: expires owners unseen for the TTL through each registry's `expire` (a replicated `Expire` entry under HA)
     addresses/api.rs        `GET /tunnel/addresses` and the release plumbing over the address book
     proxy_peers.rs           proxy-peers registry (phase 14 slice 7, `docs/11`) — the mirror image of `peers.rs`: proxies register here, origins' `gsp-agent`s subscribe
+    registry.rs             the registry core both `peers.rs` and `proxy_peers.rs` run on: `Registration` trait, `RegistryState` (log + `current` tree in one transaction, Raft-index-idempotent `register_applied`/`remove_applied`), handlers, subscribe/catch-up
+    registry/ha.rs          the registries' write path under HA: the unchanged check (`normalize`/`is_unchanged`, background `Touch`), `Register*`/`Release` through `ha::client::propose_write`, the network-mismatch and not-initialized `503`s
+    ha/cluster_state.rs     the cluster's recorded tunnel network + `initialized` marker (replicated; registry entries apply against it, never a node's flag)
+    ha/apply_registry.rs    applying `Register*`/`Release`/`Touch` entries into the registries and the address book, crash-idempotent per database
+    ha/init.rs              leader-side initialization: asks every voter what pre-HA data it holds (`choose_source`), proposes `SetTunnelNetwork` or `Import`; `--ha-import-source`
+    ha/import.rs            pre-HA data on upgrade: set-aside (`*.pre-ha`), `ImportContent`, `GET /raft/pre-ha`, the once-only `Import` apply
+    ha/members.rs           `/admin/ha/members` (list, add, remove, re-address) with the `/raft/whoami` identity check; `--ha-join` nodes are added here
   gsp-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no gsp-core/gsp-config dependency, stays decoupled from the data-plane crates
     ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts, self-reported `admin_url`)
     api.rs                  POST /ingest, GET /fleet/pools|sessions|healthz|subscribe (SSE)
     fanout.rs               intent-verb fan-out to instance admin APIs — targeted (drain/undrain) + broadcast (backend add/patch/delete, route-hint)
-    auth.rs                 optional bearer-token gate (`--auth-token`) + `--instance-token` presented out to instances
   gsp-ui/                    binary — the admin GUI's BFF (phase 10+11, docs/10 "The admin GUI"); dedicated process, not hosted in the controller or aggregator; holds neither's authority, no gsp-core/gsp-config dependency
     session.rs              `SessionStore` — in-memory random session ids (ephemeral, like the aggregator's store)
     api.rs                  POST /ui/login|logout, GET /ui/session; merges aggregator_proxy/controller_proxy/ws into the session-gated route group
     auth.rs                 session-cookie gate (`require_session`) — distinct from the controller's/aggregator's bearer-token gates; the browser never holds a bearer token
     aggregator_proxy.rs     proxies fleet reads + phase-9 operational verbs to gsp-aggregator (`--aggregator-url`/`--aggregator-token`)
-    controller_proxy.rs     proxies gsp-controller's config API (submit, revisions, diff, rollback) to gsp-controller (`--controller-url`/`--controller-token`)
+    controller_proxy.rs     proxies gsp-controller's config API (submit, revisions, diff, rollback) its `GET /tunnel/addresses`, and the registry `DELETE`s that release an address, to gsp-controller (`--controller-url`/`--controller-token`)
     proxy_util.rs           shared `forwardable_headers` — both proxies forward the upstream response's headers, not just status+body
     fleet_feed.rs           single shared subscription to the aggregator's `/fleet/subscribe` SSE feed, fanned out via a broadcast channel
     ws.rs                   GET /ws/fleet — the browser's live-updates WebSocket, fed by fleet_feed
@@ -110,14 +118,14 @@ crates/
     address_store.rs        persists the controller-assigned tunnel address next to the key (start-from-saved while the controller is down)
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
-  gsp-http/                  reqwest-only: the one place production HTTP clients are built (`builder()`/`client()`), with `--ca-file`'s extra roots (set once from each binary's `main`); test-only CA fixtures in `tests/fixtures/`
+  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `sse` (`EventBuffer`, which every `/…/subscribe` client reassembles events with: it keeps only the unterminated tail and refuses one past 16 MiB), and, in `server` (the one constant-time `--auth-token` bearer middleware, `require_bearer`, shared by every fleet HTTP server) and `tls` (cargo feature `server`, which every serving binary enables), the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`, `TlsArgs` + `serve`); test-only CA/cert fixtures in `tests/fixtures/`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
                               child processes and drives them over real HTTP
                               (`cargo test -p gsp-fleet-tests`, included in `make check`); phase 14's
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
-  plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
+  plugins/                   first-party sniffer plugins (a2s/minecraft/quic/wireguard/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
 
 Dependency direction: `gsp` → `gsp-core` → `gsp-config` (`gsp-bench` → `gsp-core`
@@ -142,16 +150,18 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
+| Minimal edge build | `make test-minimal` (`gsp` with `--no-default-features`: clippy + tests; also in `make check` and the `test` CI job). Optional `gsp` cargo features, issue #62: `wasm-sniffers` (wasmtime). Build it with `cargo build --release -p gsp --no-default-features` |
 | Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Deploy images | `make deploy-images` (needs Docker; builds the five `deploy/Dockerfile` targets and runs `--version` on each; `BIN_SOURCE=prebuilt` uses binaries from `deploy/prebuilt/`) |
+| Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the five images (OS packages, embedded Rust crates, secrets) and `Cargo.lock` / the UI's `package-lock.json`, HIGH/CRITICAL with a fix; exits 1 on findings, reports in `target/trivy/`. In CI it is the separate, **informational** `trivy` job after `deploy` (non-blocking; scans `deploy`'s images from a `docker save` artifact; run summary + warnings + `trivy-reports` artifact; the official `aquasec/trivy` image pinned by digest, not `trivy-action`). Rust coverage is GHSA only — `cargo audit` (the `audit` CI job, `make audit`) covers RustSec. Accepted findings: `.trivyignore` |
 | Deploy smoke | `make deploy-smoke` (needs Docker; compose demo + `deploy/smoke.sh`; also the `deploy` CI job) |
 | Tunnel e2e (nextest) | `make tunnel-e2e-ci` (needs `cargo install cargo-nextest --locked`; writes `target/nextest/ci/junit.xml`; what the CI `tunnel` job runs) |
-| Audit | `make audit` (needs `cargo install cargo-audit --locked`) |
+| Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, plugins and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/gsp-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/gsp-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
 | gsp-ui frontend | `make ui` (needs Node/npm; builds `crates/gsp-ui/web/` to `dist/`, served by `gsp-ui --static-dir`; see `crates/gsp-ui/web/README.md`) |
-| gsp-ui frontend tests | `make ui-test` (vitest; also the `ui` CI job) |
+| gsp-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
 | Run | `cargo run -p gsp -- --config config.example.yaml` |
 | Validate a config | `cargo run -p gsp -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |
@@ -171,6 +181,8 @@ client from `crates/gsp/proto/resolver.proto`.
    earlier in the session does not cover edits made after it, and `--check` only
    reports diffs, it never fixes them. See HANDOVER.md "Workflow gotcha" for a case
    where skipping this let a `cargo fmt --all --check` failure reach CI.
+   The curated clippy lints live in the root `[workspace.lints.clippy]`; a new crate
+   opts in with `[lints] workspace = true`.
 2. **No `unsafe`.** The codebase currently has zero. `socket2`/`nix` give safe
    wrappers for the syscalls we need. If `unsafe` ever becomes genuinely necessary, it
    needs a `// SAFETY:` comment *and* a note in `HANDOVER.md`.
@@ -188,11 +200,15 @@ client from `crates/gsp/proto/resolver.proto`.
 6. **All metric names go in `crates/gsp-core/src/metrics_defs.rs`** as `pub const`,
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
-7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_yaml` +
-   `thiserror`.
+7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_norway` +
+   `thiserror` + `base64` (WireGuard key validation).
    `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `gsp-core`, the HTTP/gRPC clients in `gsp`.
+   **Poisoned locks:** recover with `lock().unwrap_or_else(PoisonError::into_inner)`
+   (same for `read`/`write`) — never `.unwrap()` / `.expect("…poisoned")`. The
+   guarded state here is plain data, so one panicked task must not cascade into
+   every later caller.
 8. **Commit directly on `main` whenever it is useful** — a finished slice, a spec or
    plan, a green docs sweep; no need to ask first and no feature branch (owner's
    standing decision, 2026-10-01). Run `make check` first (rule 1). End commit
@@ -225,11 +241,12 @@ client from `crates/gsp/proto/resolver.proto`.
   verification before claiming done; big plans run subagent-driven (fresh implementer per
   task + spec/quality review + a final whole-branch review). Specs and plans are committed;
   `.superpowers/` is git-ignored scratch (ledgers, briefs, review packages). Reviewer
-  findings that are deferred go into a `HANDOVER.md` follow-up row, never silently dropped.
-- **CI costs money** (private repo; a full run is ~35 runner-minutes, a cold one more).
-  Batch pushes, remember that docs-only pushes skip CI (`paths-ignore`), put `[skip ci]` in
-  the tip commit message when a code push needs no run, and check `changes.sh` before adding
-  a job. Never push without being asked (rule 8).
+  findings that are deferred go into a GitHub issue, never silently dropped.
+- **CI runs are slow** (the repo is public, so hosted minutes are free, but a full run
+  takes ~10 min warm and ~22 min cold). Batch pushes, remember that docs-only pushes
+  skip CI (`paths-ignore`), put `[skip ci]` in the tip commit message when a code push
+  needs no run, and update `ROOTS` in `.github/scripts/changes.py` when adding a job.
+  Never push without being asked (rule 8).
 - Keep comments at the density of the surrounding code. Module-level `//!` docs should
   say what the module is for and note deliberate simplifications.
 
@@ -241,6 +258,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | New metric | `metrics_defs.rs`, `docs/06` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
 | New / changed sniffer seam | `gsp_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as plugins (Phase 9), never as core code or a fork. |
+| New optional `gsp` cargo feature | `crates/gsp/Cargo.toml` `[features]` (on by default), a `*_disabled.rs` stub that fails startup with a message naming the feature when the config needs it, a `--no-default-features` test, the AGENTS.md command table |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
@@ -273,7 +291,7 @@ UDP ingress, timing-wheel idle expiry), the distributed control plane (10–13:
 fleet aggregation, global config/intent store with hierarchy / HA / canary /
 RBAC, regional health gossip — [`docs/10`](docs/10-distributed-control-plane.md))
 and the WireGuard backend transport (14 — [`docs/11`](docs/11-backend-transport.md)).
-No slice is in flight; remaining work is the follow-ups in `HANDOVER.md`.
+No slice is in flight; remaining work is the open GitHub issues.
 
 For what shipped, what's deferred, and per-feature latency cost, see
 [`HANDOVER.md`](HANDOVER.md); for the full phase-by-phase plan and status,

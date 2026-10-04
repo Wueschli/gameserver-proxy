@@ -105,6 +105,35 @@ async fn trusts_the_ca_from_a_file() {
     get_ok(&builder_with(&certs).build().unwrap(), addr).await;
 }
 
+/// Extra roots only matter for `https://`: a client built with `--ca-file`
+/// certs must still talk plain `http://` endpoints.
+#[tokio::test]
+async fn a_client_with_a_ca_still_reaches_a_plain_http_endpoint() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut tcp, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let _ = tcp.read(&mut buf).await;
+                let _ = tcp
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    )
+                    .await;
+            });
+        }
+    });
+    let certs = load_ca_file(&fixture("ca.pem")).unwrap();
+    let client = builder_with(&certs).build().unwrap();
+    let resp = client.get(format!("http://{addr}/")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
 #[tokio::test]
 async fn trusts_every_cert_in_a_bundle() {
     let addr = tls_server().await;
@@ -205,6 +234,15 @@ fn error_chain_skips_repeated_sources() {
     assert_eq!(error_chain(&repeated), "a: b");
     let distinct = Layer("a", Some(Box::new(Layer("b", None))));
     assert_eq!(error_chain(&distinct), "a: b");
+}
+
+#[test]
+fn error_chain_keeps_a_short_source_that_is_only_a_substring() {
+    let e = Layer(
+        "connect failed for host a.example",
+        Some(Box::new(Layer("host", None))),
+    );
+    assert_eq!(error_chain(&e), "connect failed for host a.example: host");
 }
 
 /// The cause comes via `source()` only, so `main`'s `Error: … Caused by:`
