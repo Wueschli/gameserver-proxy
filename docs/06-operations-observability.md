@@ -92,7 +92,7 @@
   of handshakes in flight, or was opening connections faster than its rate.
   Counted in `gsp-http` (its name lives in `gsp_http::tls`, not `metrics_defs.rs`,
   which `gsp-http` cannot depend on); only `gsp` installs a recorder, so the fleet
-  binaries (no `/metrics`) do not expose it. Present only with `settings.admin.tls`.
+  binaries (`gsp-controller`, `gsp-aggregator`, `gsp-ui`: no `/metrics` yet, tracked in #44) emit the counters to no recorder, so nothing is exposed there. Present only with `settings.admin.tls`.
 - `gsp_tls_handshakes_evicted_total` (counter, no labels) — pending handshakes
   dropped to make room at the global cap (same notes).
 - `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this

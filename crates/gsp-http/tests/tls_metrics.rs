@@ -54,13 +54,21 @@ async fn refused_and_evicted_handshakes_are_counted() {
         held.push(idle_from(src, addr).await);
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let out = prom.render();
-    let per_source = counter(
-        &out,
-        "gsp_tls_handshakes_refused_total{reason=\"per_source\"}",
-    );
-    let evicted = counter(&out, "gsp_tls_handshakes_evicted_total");
+    // The accept loop counts asynchronously: poll until both show, or give up.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (mut per_source, mut evicted, mut out);
+    loop {
+        out = prom.render();
+        per_source = counter(
+            &out,
+            "gsp_tls_handshakes_refused_total{reason=\"per_source\"}",
+        );
+        evicted = counter(&out, "gsp_tls_handshakes_evicted_total");
+        if (per_source >= 1 && evicted >= 1) || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(per_source >= 1, "no per-source refusal counted:\n{out}");
     assert!(evicted >= 1, "no eviction counted:\n{out}");
     drop(held);
