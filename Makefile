@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
+.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test
@@ -70,18 +70,29 @@ else
 TUNNEL_NS := unshare -Urnm --kill-child
 endif
 
+# Fails early with the fix when unprivileged user namespaces are blocked (Ubuntu's
+# AppArmor), before the build and the in-test hint that only appears once the
+# test binary runs inside the namespace.
+tunnel-ns-check:
+	@$(TUNNEL_NS) true 2>/dev/null || { \
+	  echo "cannot create a user+net namespace with: $(TUNNEL_NS) true" >&2; \
+	  echo "on Ubuntu 24.04+, AppArmor blocks unprivileged user namespaces; allow them with" >&2; \
+	  echo "  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" >&2; \
+	  echo "or run this target under sudo (the CI job does the former)" >&2; \
+	  exit 1; }
+
 ## tunnel-e2e: phase-14 WireGuard tunnel end-to-end test in rootless network
 ## namespaces (TUNNEL_BACKEND=kernel|userspace, default kernel); see
 ## docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md
-tunnel-e2e:
-	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+tunnel-e2e: tunnel-ns-check
+	cargo build -p gsp -p gsp-agent -p gsp-controller
 	cargo test -p gsp-fleet-tests --test tunnel --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## tunnel-e2e-ci: tunnel-e2e under cargo-nextest, writing a JUnit report for the CI run
 ## summary (needs cargo-nextest; `make tunnel-e2e` stays on plain cargo test)
-tunnel-e2e-ci:
-	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+tunnel-e2e-ci: tunnel-ns-check
+	cargo build -p gsp -p gsp-agent -p gsp-controller
 	cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
 

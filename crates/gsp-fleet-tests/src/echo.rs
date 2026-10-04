@@ -76,7 +76,18 @@ impl EchoServer {
                 thread: Some(thread),
             }),
             Ok(Err(e)) => bail!("echo server failed to bind port {port}: {e}"),
-            Err(_) => bail!("echo server did not report ready within 5s"),
+            // The thread ended without reporting: `setns` into the namespace
+            // (or building the runtime) failed, and its error is the cause.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match thread.join() {
+                Ok(Err(e)) | Ok(Ok(Err(e))) => {
+                    Err(e).context(format!("echo server on port {port} could not start"))
+                }
+                Ok(Ok(Ok(()))) => bail!("echo server on port {port} exited before it was ready"),
+                Err(_) => bail!("echo server thread on port {port} panicked before it was ready"),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                bail!("echo server did not report ready within 5s")
+            }
         }
     }
 }

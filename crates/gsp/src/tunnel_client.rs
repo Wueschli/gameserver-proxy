@@ -278,6 +278,9 @@ async fn subscribe_once(
                 match plan(last_applied, &ev) {
                     Action::Skip => {}
                     Action::Reconcile(reg) => {
+                        if let Some(old) = replaced_pubkey(last_applied, reg) {
+                            remove_peer(wg, &reg.name, old);
+                        }
                         reconcile_peer(wg, reg);
                         last_applied.insert(reg.name.clone(), reg.clone());
                     }
@@ -338,6 +341,20 @@ fn plan<'a>(applied: &HashMap<String, PeerRegistration>, event: &'a Event) -> Ac
             None => Action::Skip,
         },
     }
+}
+
+/// The pubkey of a peer that `reg` supersedes: the same name now registered
+/// under a different key. `reconcile_peer` only touches the new key's peer, so
+/// without removing this one the old key would stay a live peer (with its
+/// routes) until the interface is torn down.
+fn replaced_pubkey<'a>(
+    applied: &'a HashMap<String, PeerRegistration>,
+    reg: &PeerRegistration,
+) -> Option<&'a str> {
+    applied
+        .get(&reg.name)
+        .map(|old| old.pubkey.as_str())
+        .filter(|old| *old != reg.pubkey)
 }
 
 fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubkey: &str) {
@@ -535,5 +552,16 @@ mod tests {
         assert_eq!(plan(&applied, &del), Action::Remove(r.pubkey.clone()));
         applied.remove("home");
         assert!(applied.is_empty());
+    }
+    #[test]
+    fn a_name_re_registered_under_a_new_key_replaces_the_old_keys_peer() {
+        let mut applied = HashMap::new();
+        let old = reg(Some("10.60.0.3"));
+        assert_eq!(replaced_pubkey(&applied, &old), None, "first sight");
+        applied.insert(old.name.clone(), old.clone());
+        assert_eq!(replaced_pubkey(&applied, &old), None, "same key");
+        let mut new = old.clone();
+        new.pubkey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into();
+        assert_eq!(replaced_pubkey(&applied, &new), Some(old.pubkey.as_str()));
     }
 }

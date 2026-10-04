@@ -78,9 +78,16 @@ impl std::error::Error for RegisterError {}
 /// retry budget real: without them a controller that accepts TCP but never
 /// answers would block startup (and the refresh loop) forever.
 pub fn http_client() -> reqwest::Client {
+    client_with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+}
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn client_with_timeouts(connect: Duration, request: Duration) -> reqwest::Client {
     gsp_http::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(connect)
+        .timeout(request)
         .build()
         .expect("timeouts plus --ca-file roots (validated at startup) always build")
 }
@@ -375,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_production_client_has_a_request_timeout() {
+    async fn the_client_gives_up_on_a_controller_that_never_answers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -385,13 +392,17 @@ mod tests {
                 held.push(s);
             }
         });
-        // Must give up on its own (10 s request timeout), never hang.
+        // Must give up on its own (the request timeout), never hang. The
+        // production values are only checked to be finite; the hang itself is
+        // exercised with a short timeout through the same builder.
+        assert!(REQUEST_TIMEOUT <= Duration::from_secs(30));
+        let client = client_with_timeouts(CONNECT_TIMEOUT, Duration::from_millis(300));
         let got = tokio::time::timeout(
-            Duration::from_secs(20),
-            register_once(&http_client(), &url, None, &reg()),
+            Duration::from_secs(5),
+            register_once(&client, &url, None, &reg()),
         )
         .await
-        .expect("http_client() has no request timeout");
+        .expect("the client has no request timeout");
         assert!(matches!(got, Err(RegisterError::Transient(_))));
     }
 }

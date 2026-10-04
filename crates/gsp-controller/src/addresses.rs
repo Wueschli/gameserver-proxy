@@ -987,14 +987,19 @@ impl AddressBook {
             return Err(Rejection::NotHost(req).into());
         }
         if let Some(holder) = self.by_address.get(addr_key(req)).map_err(storage)? {
-            if let Some((role, name)) = parse_owner_key(&holder) {
-                return Err(Rejection::Held {
-                    address: req,
-                    role,
-                    name,
-                }
-                .into());
+            // An entry we cannot read still means "taken": fail closed rather
+            // than hand the address to a second owner.
+            let Some((role, name)) = parse_owner_key(&holder) else {
+                return Err(storage(format!(
+                    "address {req} is held by an unreadable owner entry"
+                )));
+            };
+            return Err(Rejection::Held {
+                address: req,
+                role,
+                name,
             }
+            .into());
         }
         Ok(())
     }
@@ -1285,6 +1290,23 @@ mod tests {
             })
         );
         assert!(err.to_string().contains("origin \"o1\""));
+    }
+
+    #[test]
+    fn a_pin_whose_holder_key_is_unreadable_is_not_treated_as_free() {
+        let (b, _d) = book(Some("10.60.0.0/24"));
+        // A corrupt holder entry must fail closed, never hand the address out.
+        b.by_address
+            .insert(
+                addr_key(ip("10.60.0.9")),
+                b"\xff\xfe-not-an-owner-key".to_vec(),
+            )
+            .unwrap();
+        let err = b
+            .claim(Role::Origin, "o1", Some(ip("10.60.0.9")), 1)
+            .unwrap_err();
+        assert!(matches!(err, ClaimError::Storage(_)), "{err:?}");
+        assert!(b.get(Role::Origin, "o1").unwrap().is_none());
     }
 
     #[test]

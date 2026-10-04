@@ -55,7 +55,6 @@ Watch-list:
 - **Merge queue:** PRs land one at a time, each re-run on the latest `main`. If several
   PRs are routinely in flight at once, GitHub's merge queue (needs an
   `on: merge_group` trigger) would keep `main` green.
-- **Edge restart flake:** watched in [#68](https://github.com/Wueschli/gameserver-proxy/issues/68).
 
 Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
 branch-protection required checks, a repo setting outside this tree.
@@ -212,9 +211,13 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   under `anyhow` context); `set_aside_waits_for_a_lock_that_is_about_to_be_released` holds
   the lock for 300 ms and failed before the fix. The flake itself was not reproduced
   locally (100 runs under load), so the link to the CI failure follows from the cause.
-  Another timing flake seen on the first test run after a fresh build:
-  `an_active_session_survives_past_its_idle_window_then_expires` (`gsp-core/tests/udp_forward.rs`);
-  it passes on re-run.
+- **UDP idle-eviction test flake (fixed 2026-10-04)**: `an_active_session_survives_past_its_idle_window_then_expires`
+  (`gsp-core/tests/udp_forward.rs`). Two causes. The echo backend is UDP-only, so the pool's default
+  `tcp_connect` health check failed against it and (`fall: 3` every 2 s) marked it unhealthy about 4 s in;
+  the test waits for an eviction right around then and got "no healthy backend" instead of the freed
+  slot. And the first datagram raced listener startup after a fixed 150 ms sleep. The two idle tests
+  now use a `udp_probe` check, and the first datagram is retried until it is echoed. Any new UDP
+  test against `echo_backend` needs a `udp_probe` health check if it runs past ~3 s.
 - **Lints and CI pins (2026-10-04)**: the root `Cargo.toml` has a curated
   `[workspace.lints.clippy]` (`redundant_closure_for_method_calls`, `needless_pass_by_value`,
   `items_after_statements`, `manual_let_else`, `default_trait_access`); every workspace
@@ -279,9 +282,7 @@ than here. Where the items that used to live here went:
 - v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
   discovery): [#65](https://github.com/Wueschli/gameserver-proxy/issues/65)
 - `gsp-ui` settings confirmation and Playwright: [#66](https://github.com/Wueschli/gameserver-proxy/issues/66)
-- Tunnel e2e leftovers and the 25 s `boringtun` handshake: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
-  (address-authority and lab minors: [#43](https://github.com/Wueschli/gameserver-proxy/issues/43))
-- Edge-restart flake watch: [#68](https://github.com/Wueschli/gameserver-proxy/issues/68)
+- The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
 - Open design questions: [#69](https://github.com/Wueschli/gameserver-proxy/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
