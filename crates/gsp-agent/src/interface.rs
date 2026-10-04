@@ -71,3 +71,50 @@ where
         .with_context(|| format!("configuring interface {ifname:?}"))?;
     Ok(api)
 }
+
+/// UDP port the handshake trigger is aimed at (the discard service; nothing
+/// listens, and nothing needs to).
+const KICK_PORT: u16 = 9;
+
+/// Sends one empty datagram to `peer` through the tunnel so the backend starts
+/// a handshake **now**. `boringtun` arms a peer's persistent keepalive only
+/// 25 s after the peer is created, and the edge proxy has no endpoint for this
+/// origin, so without a trigger the first handshake waits that whole interval
+/// (the kernel backend sends a keepalive the moment it is configured, ~2 s).
+/// Best-effort: the keepalive still covers a failure here.
+pub fn kick_handshake(peer: std::net::IpAddr) {
+    kick_handshake_at(std::net::SocketAddr::new(peer, KICK_PORT));
+}
+
+fn kick_handshake_at(target: std::net::SocketAddr) {
+    let bind: std::net::SocketAddr = match target {
+        std::net::SocketAddr::V4(_) => ([0, 0, 0, 0], 0).into(),
+        std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let sent = std::net::UdpSocket::bind(bind).and_then(|s| s.send_to(&[], target));
+    if let Err(e) = sent {
+        tracing::debug!(%target, error = %e, "could not trigger an immediate WireGuard handshake");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kick_handshake_sends_one_empty_datagram_to_the_target() {
+        let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        kick_handshake_at(rx.local_addr().unwrap());
+        let mut buf = [0u8; 8];
+        let (n, _) = rx.recv_from(&mut buf).expect("a datagram should arrive");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn kick_handshake_swallows_an_unreachable_target() {
+        // No route / refused must never panic or propagate.
+        kick_handshake("192.0.2.1".parse().unwrap());
+    }
+}

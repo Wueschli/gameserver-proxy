@@ -44,7 +44,8 @@ impl Backend {
     }
 
     /// Per-wait deadline. Spike (2026-10-01): kernel's first round trip is ~2 s;
-    /// userspace's was ~25 s (waits on the agent's persistent keepalive).
+    /// userspace's was ~25 s (waited on the agent's persistent keepalive; the agent
+    /// now triggers the handshake itself, see `gsp_agent::interface::kick_handshake`).
     pub fn deadline(self) -> Duration {
         match self {
             Backend::Kernel => Duration::from_secs(30),

@@ -232,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         .context("bringing up the local WireGuard interface")?,
     );
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
+    if let Some(ip) = args.peer_address.as_deref().and_then(|a| a.parse().ok()) {
+        interface::kick_handshake(ip);
+    }
 
     tokio::spawn(register::run(
         client,
