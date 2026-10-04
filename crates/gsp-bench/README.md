@@ -1,7 +1,7 @@
 # gsp-bench
 
 Single-host latency / load harness for the NFR targets in
-[`docs/01-requirements.md`](../../docs/01-requirements.md). Two modes.
+[`docs/01-requirements.md`](../../docs/01-requirements.md). Three modes.
 
 ## `latency` mode (default)
 
@@ -84,6 +84,66 @@ hundreds of new backend connections at once, timing out the proxy's own
 `connect_timeout_ms` and flapping the backend passively unhealthy. That's a
 benchmark-harness artifact, not a proxy behaviour — worth remembering if you
 extend this further.
+
+## `udp-affinity` mode
+
+The load test behind issue #56 (retire the UDP sticky table via
+`consistent_hash`). Every UDP listener keeps a worker-local sticky table
+(`STICKY_MAX` = 65,536 keys, cleared wholesale when full, no TTL) so a client
+whose idle session was evicted comes back to the same backend. A
+`consistent_hash` pool gets that from a rendezvous hash with no table.
+
+```sh
+cargo run --release -p gsp-bench -- --mode udp-affinity                          # sticky table (round_robin pool)
+cargo run --release -p gsp-bench -- --mode udp-affinity --balancer consistent-hash
+cargo run --release -p gsp-bench -- --mode udp-affinity --gsp-bin /path/to/other/gsp   # A/B two builds
+```
+
+Spawns the real `gsp` process, then runs a **cold wave** (`--keys` distinct
+clients, one loopback source IP each, open a session at `--rate`/s), waits
+out `--idle-sec` so every session is evicted, and runs a **warm wave** with the
+same clients. It reports opens/s, open-latency percentiles, backend spread, the
+proxy's RSS and fds after each phase, and **retention**: the share of clients
+that re-open on the same backend. Defaults (100,000 keys @ 4,000/s, 8 backends)
+take about 70 s and overflow the sticky table. `--strict` exits non-zero below
+99% retention. Keep `--rate` at or under ~5,000: a session holds one proxy fd
+for `--idle-sec` plus up to two 1 s wheel ticks, and a 20,000-fd limit runs out
+above that. Also runnable by hand from the Actions tab (`load-test.yml`); it
+never runs on a PR.
+
+Measured on a 4-core sandbox, loopback, `--release`, 8 backends, 4,000
+opens/s. The warm wave visits the keys in a shuffled order.
+
+| scenario | proxy workers | open p50 | open p99 | retention |
+|----------|--------------:|---------:|---------:|----------:|
+| sticky table, 100k keys | 1 | 1.8 ms | 17 ms | **26.5%** (chance is 12.5%) |
+| sticky table, 100k keys | 4 | 1.0 ms | 16 ms | **34.4%** |
+| sticky table, 30k keys (under the cap) | 4 | 1.0 ms | 15 ms | **34.6%** |
+| `consistent_hash`, 100k keys | 1 | 1.8 ms | 14 ms | **100%** |
+| `consistent_hash`, 30k keys | 4 | 0.9 ms | 11 ms | **100%** |
+| sticky table, 5k keys | 1 | 1.0 ms | 2.6 ms | 100% |
+
+Two separate effects, both of the table and not of `consistent_hash`:
+
+- The 65,536-entry cap is **per worker**. A table that overflows clears
+  wholesale, so a 1-worker run with 100k keys keeps affinity for only the keys
+  inserted since the last clear. The result depends on the visit order: the
+  in-order warm wave of an earlier run scored 12.7%, the shuffled one 26.5%.
+- The table is per worker and `SO_REUSEPORT` spreads clients by source port, so
+  a client that comes back on a new port usually reaches a *different* worker
+  with a different table. With 4 workers retention is ~34% even far under the
+  cap (1/4 same worker, otherwise chance: 0.25 + 0.75 × 0.125).
+
+Same load with the sticky lookup/insert patched out of the binary (a local
+experiment, not shipped): open p50 within ±0.2 ms and p99 within run-to-run noise
+at 4,000/s and 5,000/s, so the table's per-open cost is not measurable on top
+of the session setup it sits in. What the table *does* cost is correctness once
+it fills (it clears wholesale, so everything it knew is gone at once).
+
+Also visible here: the proxy's RSS stays near 700 MiB after every session is
+gone, with or without the table. This is most likely the 64 KiB buffer each
+session's reply task allocates (`listener_udp.rs`, `vec![0u8; MAX_DATAGRAM]`);
+it is not table state. Not verified further (issue #122).
 
 ## Measured on this box
 
