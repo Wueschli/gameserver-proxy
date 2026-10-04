@@ -123,7 +123,7 @@ async fn readdress_with_ha_is_refused(ha_flags: &[&str]) -> Result<()> {
     let mut args: Vec<String> = ["--tunnel-network", "10.60.0.0/16", "--tunnel-readdress"]
         .map(String::from)
         .into();
-    args.extend(ha_flags.iter().map(|s| s.to_string()));
+    args.extend(ha_flags.iter().map(std::string::ToString::to_string));
     let mut ctl = spawn_controller_with(dir.path(), &format!("127.0.0.1:{port}"), &args)?;
     gsp_fleet_tests::wait_until(
         || {
