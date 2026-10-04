@@ -43,7 +43,7 @@ docs/                       the plan (00–12) — source of truth for design
 deploy/                     reference Dockerfile (5 targets), compose demo, k8s manifests, smoke.sh (docs/12)
 crates/
   gsp-config/               YAML config: raw types, validation, resolved `Config`
-    src/                     lib.rs (entry points + re-exports), schema.rs (raw YAML types), validate.rs (`validate()` + tests), parse.rs (value parsers), resolved.rs (validated `Config` & friends), cidr.rs (`Cidr`/`CidrSet`/`Acl`/`GeoAcl`), matcher.rs (`Matcher`, `extract_sni`), keys.rs (`base64_decode_32`)
+    src/                     lib.rs (entry points + re-exports), schema.rs (raw YAML types), validate.rs (`validate()`; tests in validate/tests.rs), parse.rs (value parsers), resolved.rs (validated `Config` & friends), cidr.rs (`Cidr`/`CidrSet`/`Acl`/`GeoAcl`), matcher.rs (`Matcher`, `extract_sni`), keys.rs (`base64_decode_32`)
     fuzz/                    cargo-fuzz harnesses (extract_sni / route_match / parse_config) — standalone workspace
   gsp-core/                 data plane
     snapshot.rs            immutable `Snapshot` (listeners + pools + sources + resolvers) behind ArcSwap
