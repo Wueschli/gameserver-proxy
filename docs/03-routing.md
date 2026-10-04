@@ -15,7 +15,7 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > (`host` patterns: exact, `*.suffix`, `.suffix` — matched against `server_name`
 > from the peeked, non-terminated TLS ClientHello; TCP listeners only). The
 > `sniffer` matcher exists (`{ type: sniffer, sniffer: <name>, host: [...] }`,
-> one sniffer per listener) but **no sniffers are built in** — a `sniffer:`
+> several per listener) but **no sniffers are built in** — a `sniffer:`
 > route never matches until a plugin is loaded (Phase 9). The TCP path
 > `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
 > needs bytes; UDP inspects the first datagram it already holds. A ClientHello
@@ -63,7 +63,11 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 2. **Listener binding** – the listener may already map 1:1 to a pool (simplest case,
    no further logic).
 3. **Sniffer** (if a `sniffer` route is configured) – runs once on the peeked
-   first bytes. A `RouteHint { reject: true }` **drops the connection / datagram
+   first bytes. A listener may route on several sniffers (e.g. `quic`,
+   `wireguard` and `a2s` on one UDP port): they are tried in order of first
+   appearance in the route list and the **first that recognises the bytes wins**
+   — a later sniffer is not consulted, and a `sniffer` route only matches the
+   sniffer it names. A `RouteHint { reject: true }` **drops the connection / datagram
    immediately** (before the push-resolver hint, so a spoofable `src_ip` hint
    cannot override it); TCP `gsp_listener_connections_total{result="sniffer_reject"}`,
    UDP `gsp_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A

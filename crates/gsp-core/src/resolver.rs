@@ -192,7 +192,7 @@ pub async fn resolve_route(
                     dst: mctx.local,
                     sni: gsp_config::extract_sni(first),
                     first_bytes: first.to_vec(),
-                    routing_key: mctx.sniff.and_then(|h| h.key.clone()),
+                    routing_key: mctx.sniff.and_then(|(_, h)| h.key.clone()),
                 };
                 match resolver.resolve(req).await {
                     Ok(res) if res.target.is_some() || res.pool.is_some() => {

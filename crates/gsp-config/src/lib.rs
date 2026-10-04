@@ -1043,7 +1043,8 @@ pub enum Matcher {
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
     /// The named sniffer plugin (see `gsp_core::sniff`) recognised the first
-    /// bytes. With `host` patterns: also requires the hint's `host` to match one
+    /// bytes (a listener may use several; the first to recognise wins, see
+    /// [`ListenerConfig::sniffers`]). With `host` patterns: also requires the hint's `host` to match one
     /// of them; empty `host` ⇒ matches on any recognition. A `reject` hint never
     /// reaches this matcher — `gsp-core` drops the connection / datagram before
     /// routing (see [`RouteHint::reject`]) — so the `!reject` guard below is
@@ -1069,9 +1070,11 @@ pub struct MatchContext<'a> {
     pub src: SocketAddr,
     pub local: SocketAddr,
     pub first_bytes: &'a [u8],
-    /// The listener's sniffer result, if it has a `sniffer` route and the
-    /// plugin produced a hint. `gsp-core` fills this in before routing.
-    pub sniff: Option<&'a RouteHint>,
+    /// The listener's sniffer result, if it has `sniffer` routes and one of
+    /// its plugins recognised the bytes: the plugin's configured name and its
+    /// hint. A `sniffer` route only matches the plugin it names. `gsp-core`
+    /// fills this in before routing.
+    pub sniff: Option<(&'a str, &'a RouteHint)>,
 }
 
 impl Matcher {
@@ -1090,8 +1093,8 @@ impl Matcher {
                 Some(host) => pats.iter().any(|p| p.matches(&host)),
                 None => false,
             },
-            Matcher::Sniffer { name: _, host } => match ctx.sniff {
-                Some(hint) if !hint.reject => {
+            Matcher::Sniffer { name, host } => match ctx.sniff {
+                Some((hit, hint)) if hit == name && !hint.reject => {
                     host.is_empty()
                         || hint
                             .host
@@ -1476,9 +1479,12 @@ pub struct ListenerConfig {
     /// socket and a client-address-bound `IP_TRANSPARENT` upstream socket per
     /// connection. Needs `CAP_NET_ADMIN`.
     pub transparent: bool,
-    /// The single sniffer plugin this listener's routes use (`None` if no
-    /// `sniffer` route). `gsp-core` runs it once per connection before routing.
-    pub sniffer: Option<String>,
+    /// The distinct sniffer plugins this listener's routes use, in order of
+    /// first appearance (empty if no `sniffer` route). `gsp-core` runs them in
+    /// that order once per connection / first datagram before routing; the
+    /// first one that recognises the bytes wins and its hint is the only one
+    /// routing sees.
+    pub sniffers: Vec<String>,
     /// Check the `POST /route-hint` push-resolver table before the route list.
     pub route_hint: bool,
     /// UDP only: gate new sessions on positive first-datagram recognition.
@@ -1538,7 +1544,7 @@ impl ListenerConfig {
     /// route on this listener matches it? Only consulted when
     /// `first_packet_gate` is set.
     pub fn first_packet_recognised(&self, ctx: &MatchContext) -> bool {
-        if ctx.sniff.is_some_and(|h| !h.reject) {
+        if ctx.sniff.is_some_and(|(_, h)| !h.reject) {
             return true;
         }
         self.routes
@@ -2226,19 +2232,13 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             }
         };
 
-        // At most one sniffer plugin per listener (gsp-core runs one per conn).
-        let mut sniffer: Option<String> = None;
+        // Distinct sniffer names, in route order (gsp-core tries them in this
+        // order; the first to recognise the bytes wins).
+        let mut sniffers: Vec<String> = Vec::new();
         for r in &routes {
             if let Matcher::Sniffer { name, .. } = &r.matcher {
-                match &sniffer {
-                    Some(prev) if prev != name => {
-                        return Err(Invalid(format!(
-                            "listener {}: routes use two different sniffers ({prev}, {name}); \
-                             only one per listener is supported",
-                            l.name
-                        )));
-                    }
-                    _ => sniffer = Some(name.clone()),
+                if !sniffers.contains(name) {
+                    sniffers.push(name.clone());
                 }
             }
         }
@@ -2253,7 +2253,7 @@ fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             prefix,
             freebind: l.freebind,
             transparent: l.transparent,
-            sniffer,
+            sniffers,
             route_hint: l.route_hint,
             first_packet_gate: l.first_packet_gate,
             acl,
@@ -2810,13 +2810,17 @@ mod tests {
         }
     }
 
-    /// Like [`ctx`] but with a sniffer hint attached.
+    /// Like [`ctx`] but with a sniffer hint (from sniffer `minecraft`) attached.
     fn ctx_sniff<'a>(hint: &'a RouteHint) -> MatchContext<'a> {
+        ctx_sniff_by("minecraft", hint)
+    }
+
+    fn ctx_sniff_by<'a>(name: &'a str, hint: &'a RouteHint) -> MatchContext<'a> {
         MatchContext {
             src: "9.9.9.9:1".parse().unwrap(),
             local: "1.1.1.1:25565".parse().unwrap(),
             first_bytes: &[],
-            sniff: Some(hint),
+            sniff: Some((name, hint)),
         }
     }
 
@@ -3501,7 +3505,7 @@ listeners:
 "#;
         let cfg = parse_str(yaml).unwrap();
         let l = &cfg.listeners[0];
-        assert_eq!(l.sniffer.as_deref(), Some("minecraft"));
+        assert_eq!(l.sniffers, ["minecraft"]);
         assert_eq!(l.peek_len(), PEEK_MAX);
 
         let hint = |host: Option<&str>, reject: bool| RouteHint {
@@ -3540,14 +3544,51 @@ listeners:
             r#"routes: [{ match: { type: sniffer, host: ["a.example.com"] }, action: { pool: p } }]"#,
             // sniffer field on a non-sniffer matcher
             r#"routes: [{ match: { type: always, sniffer: sni }, action: { pool: p } }]"#,
-            // two different sniffers on one listener
-            r#"routes: [{ match: { type: sniffer, sniffer: minecraft }, action: { pool: p } }, { match: { type: sniffer, sniffer: a2s }, action: { pool: p } }]"#,
         ] {
             let yaml = format!(
                 "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
             );
             assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
         }
+    }
+
+    #[test]
+    fn several_sniffers_per_listener_route_by_the_recognising_one() {
+        let yaml = r#"
+pools:
+  - name: quic
+    targets: ["127.0.0.1:1"]
+  - name: wg
+    targets: ["127.0.0.1:2"]
+  - name: other
+    targets: ["127.0.0.1:3"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:443"
+    protocol: udp
+    routes:
+      - match: { type: sniffer, sniffer: quic }
+        action: { pool: quic }
+      - match: { type: sniffer, sniffer: wireguard }
+        action: { pool: wg }
+      - match: { type: sniffer, sniffer: quic, host: ["x.example.net"] }
+        action: { pool: other }
+"#;
+        let l = &parse_str(yaml).unwrap().listeners[0];
+        // distinct, in order of first appearance
+        assert_eq!(l.sniffers, ["quic", "wireguard"]);
+        let h = RouteHint::default();
+        assert_eq!(l.route_for(&ctx_sniff_by("quic", &h)), Some("quic"));
+        assert_eq!(l.route_for(&ctx_sniff_by("wireguard", &h)), Some("wg"));
+        // a hit from a sniffer no route names matches nothing
+        assert_eq!(l.route_for(&ctx_sniff_by("a2s", &h)), None);
+        // a wireguard hit never satisfies the quic host route
+        let hh = RouteHint {
+            host: Some("x.example.net".into()),
+            ..Default::default()
+        };
+        assert_eq!(l.route_for(&ctx_sniff_by("wireguard", &hh)), Some("wg"));
+        assert!(l.first_packet_recognised(&ctx_sniff_by("wireguard", &h)));
     }
 
     #[test]
