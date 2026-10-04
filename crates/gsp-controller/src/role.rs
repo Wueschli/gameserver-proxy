@@ -24,7 +24,7 @@
 //! hot path.
 
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Role {
@@ -52,11 +52,11 @@ impl RoleHandle {
     }
 
     pub fn get(&self) -> Role {
-        *self.0.read().expect("role lock poisoned")
+        *self.0.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn set(&self, role: Role) {
-        *self.0.write().expect("role lock poisoned") = role;
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = role;
     }
 }
 

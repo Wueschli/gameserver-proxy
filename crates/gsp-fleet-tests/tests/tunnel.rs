@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use gsp_fleet_tests::echo::{tcp_roundtrip, udp_roundtrip, EchoServer};
 use gsp_fleet_tests::netns::{require_lab_with, Lab};
-use gsp_fleet_tests::tunnel::{TunnelLab, PUBLIC_PORT};
+use gsp_fleet_tests::tunnel::{LabOptions, TunnelLab, Underlay, PUBLIC_PORT};
 use gsp_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};
 
 /// Review Focus 1: outside a lab the failure must say what to do.
@@ -138,7 +138,7 @@ async fn echo_server_round_trips_tcp_and_udp_and_stops_on_drop() -> Result<()> {
 /// show what each process said. Runs in plain `cargo test`: no namespaces.
 #[tokio::test]
 async fn proc_captures_output_for_failure_reports() -> Result<()> {
-    gsp_fleet_tests::build_fleet_bins()?;
+    gsp_fleet_tests::build_tunnel_bins()?;
     let dir = tempfile::tempdir()?;
     let port = gsp_fleet_tests::free_port()?;
     let ctl = spawn_controller_on(dir.path(), &format!("127.0.0.1:{port}"))?;
@@ -163,7 +163,7 @@ async fn proc_captures_output_for_failure_reports() -> Result<()> {
 
 fn ensure_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| gsp_fleet_tests::build_fleet_bins().expect("building binaries"));
+    BUILT.get_or_init(|| gsp_fleet_tests::build_tunnel_bins().expect("building binaries"));
 }
 
 /// Scenario 1. Real `gsp-controller` + `gsp-agent` + `gsp --tunnel-*`, real
@@ -190,12 +190,17 @@ async fn tcp_and_udp_round_trip_through_the_tunnel() -> Result<()> {
     let public = t.public_addr(edge);
     let big: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
     assert_eq!(tcp_roundtrip(public, &big).await?, big, "256 KiB over TCP");
+    // UDP is unreliable and this is one datagram on a path nothing has used
+    // yet, so one drop must not fail the scenario: allow three tries.
     let dgram = vec![0xa5; 1200];
-    assert_eq!(
-        udp_roundtrip(public, &dgram).await?,
-        dgram,
-        "1200 B over UDP"
-    );
+    let mut echoed = None;
+    for _ in 0..3 {
+        if let Ok(got) = udp_roundtrip(public, &dgram).await {
+            echoed = Some(got);
+            break;
+        }
+    }
+    assert_eq!(echoed.as_deref(), Some(&dgram[..]), "1200 B over UDP");
     assert_eq!(public.port(), PUBLIC_PORT);
     t.pass();
     Ok(())
@@ -307,6 +312,12 @@ async fn a_pinned_key_that_does_not_match_the_registry_is_refused() -> Result<()
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         let pools = t.pools(edge).await?;
+        // The pools must be listed at all, or "no backend line" proves nothing
+        // (it would also hold if the `/pools` format changed).
+        assert!(
+            pools.lines().any(|l| l.starts_with("tcp-pool\t")),
+            "expected the tcp-pool header in /pools, got:\n{pools}"
+        );
         assert!(
             !pools.lines().any(|l| l.starts_with("  ")),
             "a mismatched key must never yield a backend, but /pools shows:\n{pools}"
@@ -329,7 +340,9 @@ async fn a_pinned_address_collision_is_refused() -> Result<()> {
     let mut t = TunnelLab::new().await?;
     t.start_origin(true).await?;
     let taken = t.origin_ip();
-    let log = t.agent_refused("origin-b", &format!("{taken}/16")).await?;
+    let log = t
+        .agent_refused("origin-b", &format!("{taken}/{}", t.tunnel_prefix()))
+        .await?;
     assert!(
         log.contains("already held"),
         "the refusal should say why, got:\n{log}"
@@ -340,7 +353,12 @@ async fn a_pinned_address_collision_is_refused() -> Result<()> {
 }
 
 /// Scenario 7 — an edge that restarts keeps its tunnel address (the
-/// controller's allocation is sticky) and traffic recovers.
+/// controller's allocation is sticky) and traffic recovers within the
+/// backend's normal deadline. The restarted edge has no endpoint for the
+/// origin, so only the agent can re-handshake; its kernel session to the old
+/// edge still looked valid, so recovery used to wait for WireGuard's 120 s
+/// rekey (~150 s measured). The edge's new boot id now makes the agent re-set
+/// the peer, which drops that session and handshakes at once.
 #[tokio::test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
 async fn an_edge_restart_keeps_its_address() -> Result<()> {
@@ -352,7 +370,7 @@ async fn an_edge_restart_keeps_its_address() -> Result<()> {
     let before = t.proxy_address("edge-1").await?;
 
     t.restart_edge(edge).await?;
-    t.wait_roundtrip_after_restart(edge).await?;
+    t.wait_roundtrip(edge).await?;
     assert_eq!(t.proxy_address("edge-1").await?, before);
     t.pass();
     Ok(())
@@ -381,6 +399,13 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
     // `restart_edge` returns only once the admin API answers — i.e. startup
     // went ahead on the saved address instead of failing.
     t.restart_edge(edge).await?;
+    // It came up ON the saved address, not merely up: the tunnel interface
+    // carries it while the controller is still down.
+    let addrs = t.edge_run(edge, &["ip", "-o", "addr", "show", "dev", "gsp-tunnel0"])?;
+    assert!(
+        addrs.contains(&before),
+        "the restarted edge should hold its saved address {before}, got:\n{addrs}"
+    );
     t.start_controller().await?;
     let seen_after_restart = t.proxy_last_seen("edge-1").await?;
 
@@ -402,7 +427,107 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
     Ok(())
 }
 
-/// Scenario 9 — a live origin's address changes without a restart. The
+/// Scenario 9 — an IPv4 tunnel network still works end to end (every other
+/// scenario runs on the IPv6 default).
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tcp_and_udp_round_trip_on_an_ipv4_tunnel_network() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        tunnel_network: "10.60.0.0/16",
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    assert!(t.origin_ip().is_ipv4(), "{}", t.origin_ip());
+    let public = t.public_addr(edge);
+    assert_eq!(udp_roundtrip(public, b"udp").await?, b"udp");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 10 — origin, proxy and controller talk over an IPv6-only
+/// underlay (endpoints, controller URL, public listener), with the IPv6
+/// tunnel network inside. Also checks the spec's lab-only points: the tunnel
+/// interface's MTU and that its IPv6 address is not stuck "tentative" (DAD).
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn tcp_and_udp_round_trip_over_an_ipv6_underlay() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        underlay: Underlay::V6,
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+    let public = t.public_addr(edge);
+    assert!(public.is_ipv6(), "{public}");
+    assert_eq!(udp_roundtrip(public, b"udp").await?, b"udp");
+
+    let reg = t.proxy_registration("edge-1").await?;
+    let endpoint = reg["endpoint"].as_str().unwrap_or_default();
+    assert!(
+        endpoint.starts_with('['),
+        "an IPv6 endpoint, got {endpoint:?}"
+    );
+
+    let link = t.edge_run(edge, &["ip", "link", "show", "gsp-tunnel0"])?;
+    assert!(link.contains("mtu 1420"), "{link}");
+    let addr = t.edge_run(edge, &["ip", "-6", "addr", "show", "dev", "gsp-tunnel0"])?;
+    assert!(addr.contains("fd49:89c1:4b5e:60::"), "{addr}");
+    assert!(!addr.contains("tentative"), "{addr}");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 11 — restarting the controller on a network that no longer holds
+/// the stored addresses is refused; with `--tunnel-readdress` it starts, and
+/// restarted peers come up on new addresses in the new network and carry
+/// traffic again.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn a_changed_tunnel_network_is_refused_until_readdress() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::with(LabOptions {
+        tunnel_network: "10.60.0.0/16",
+        ..Default::default()
+    })
+    .await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+
+    let log = t
+        .controller_refused(&["--tunnel-network", "fd49:89c1:4b5e:60::/64"])
+        .await?;
+    assert!(log.contains("--tunnel-readdress"), "{log}");
+    assert!(log.contains("origin origin-a 10.60.0."), "{log}");
+
+    t.restart_controller(&[
+        "--tunnel-network",
+        "fd49:89c1:4b5e:60::/64",
+        "--tunnel-readdress",
+    ])
+    .await?;
+    t.restart_origin().await?;
+    t.restart_edge(edge).await?;
+    assert!(
+        t.origin_ip().to_string().starts_with("fd49:89c1:4b5e:60::"),
+        "{}",
+        t.origin_ip()
+    );
+    let proxy = t.proxy_address("edge-1").await?;
+    assert!(proxy.starts_with("fd49:89c1:4b5e:60::"), "{proxy}");
+    t.wait_roundtrip(edge).await?;
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 12 — a live origin's address changes without a restart. The
 /// controller hands the origin a different address (its old one was released
 /// and taken); the agent must re-address its interface in place, the edge
 /// must follow the new route, and traffic must flow to the new address.
@@ -424,8 +549,8 @@ async fn an_origin_changes_its_address_without_a_restart() -> Result<()> {
             || {
                 let new = new.clone();
                 async move {
-                    Ok(t.origin_iface_addrs()?.contains(&format!("inet {new}/"))
-                        && t.pools(edge).await?.contains(&format!("{new}:7000")))
+                    Ok(t.origin_iface_addrs()?.contains(&format!(" {new}/"))
+                        && t.pools(edge).await?.contains(&new))
                 }
             },
             Duration::from_secs(30),
@@ -435,7 +560,7 @@ async fn an_origin_changes_its_address_without_a_restart() -> Result<()> {
     }
     let addrs = t.origin_iface_addrs()?;
     assert!(
-        !addrs.contains(&format!("inet {old}/")),
+        !addrs.contains(&format!(" {old}/")),
         "the old address must be gone:\n{addrs}"
     );
     t.wait_roundtrip(edge).await?;
@@ -445,7 +570,7 @@ async fn an_origin_changes_its_address_without_a_restart() -> Result<()> {
     Ok(())
 }
 
-/// Scenario 10 — the same for an edge: its address changes live, the interface
+/// Scenario 13 — the same for an edge: its address changes live, the interface
 /// moves, every origin re-peers with the new address, and traffic recovers.
 #[tokio::test]
 #[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
@@ -464,7 +589,7 @@ async fn an_edge_changes_its_address_without_a_restart() -> Result<()> {
         wait_until(
             || {
                 let new = new.clone();
-                async move { Ok(t.edge_iface_addrs(edge)?.contains(&format!("inet {new}/"))) }
+                async move { Ok(t.edge_iface_addrs(edge)?.contains(&format!(" {new}/"))) }
             },
             Duration::from_secs(30),
             "the edge to move its interface",
@@ -473,11 +598,10 @@ async fn an_edge_changes_its_address_without_a_restart() -> Result<()> {
     }
     let addrs = t.edge_iface_addrs(edge)?;
     assert!(
-        !addrs.contains(&format!("inet {old}/")),
+        !addrs.contains(&format!(" {old}/")),
         "the old address must be gone:\n{addrs}"
     );
-    // The agent re-peers with the proxy's new address; a fresh handshake is
-    // needed, which userspace takes a while to start.
+    // The agent re-peers with the proxy's new address and starts a handshake.
     t.wait_roundtrip(edge).await?;
     assert!(t.edge_alive(edge), "the edge must not have restarted");
     t.pass();

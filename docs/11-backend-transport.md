@@ -163,6 +163,18 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   deployment too small to bother with the registry — they converge to the
   same interface state a registered proxy would reach anyway, so there's no
   conflict between the two paths.
+- **Edge restarts: a per-process `boot_id` (built 2026-10-03).** A restarted
+  `gsp --tunnel-*` has a fresh interface but no endpoint for any origin
+  (origins may sit behind NAT), so only the origin can re-handshake — and with
+  kernel WireGuard the origin's session to the old process still looks valid,
+  so it used to wait for the 120 s rekey (~2.5 min outage). Every proxy
+  registration therefore carries a random `boot_id` (128-bit hex, new per
+  process start; the controller accepts 1–64 of `[A-Za-z0-9-]` and stores it
+  as-is). `gsp-agent` compares whole registrations, so a changed `boot_id`
+  re-sets the peer (remove + add), which drops the dead session; the re-added
+  peer's persistent keepalive starts a new handshake at once. Optional on the
+  wire in both directions: an older proxy sends none (no change from before),
+  an older controller drops it, an older agent ignores it.
 - **Key material stays out of the config-revision log.** A peer table is
   security-sensitive, high-churn (origins come and go), and has nothing to
   do with routing/pool structure — it belongs in its own resource on the
@@ -188,33 +200,107 @@ routing, neither a reimplementation of cryptography or tunnel framing.
 
 `gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
 mis-chooses) one. Design and decisions:
-[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
+[`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md);
+IPv6 (built 2026-10-03):
+[`docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md`](superpowers/specs/2026-10-03-ipv6-tunnel-design.md).
 
-- **Allocation.** Start the controller with `--tunnel-network 10.60.0.0/16` (IPv4,
-  `/30` or shorter). A registration that omits its address is allocated the lowest
+- **Allocation.** Start the controller with `--tunnel-network fd49:89c1:4b5e:60::/64`
+  (IPv6, `/64` to `/120`; the default in the docs and examples, and a ULA cannot clash
+  with an origin's own LAN) or `--tunnel-network 10.60.0.0/16` (IPv4, `/16` to `/30`).
+  One family per controller and one address per peer; choose IPv4 when a game server
+  binds `0.0.0.0` only, since it cannot be reached on an IPv6 tunnel address. Either
+  family holds at most 65 534 entries (pins included), because allocation scans the
+  pool; `capacity` in `GET /tunnel/addresses` is the smaller of that and the host
+  count. The network and all-ones addresses are never handed out, and IPv4 written as
+  IPv6 (`::ffff:a.b.c.d`) is refused. A registration that omits its address is allocated the lowest
   free host address; the allocation is sticky per `(role, name)`. A registration may
   instead **pin** an address, which is granted only if free (`409` otherwise). One
   global address space is shared by origins and proxies. Without `--tunnel-network`
-  the controller is pin-only: it enforces uniqueness but allocates nothing.
+  the controller is pin-only: it enforces uniqueness but allocates nothing, and accepts
+  pins of either family (mixing them is the operator's responsibility: peers of
+  different families cannot reach each other).
+- **Underlay.** Independent of the tunnel's family: WireGuard endpoints
+  (`--endpoint`, `--tunnel-endpoint`, `--peer-endpoint`, written `[2001:db8::7]:51820`
+  for IPv6) and the controller URL (`http://[fd99::1]:7070`) may be IPv4 or IPv6.
+- **Changing the network.** At startup the controller refuses to run when stored
+  addresses fall outside `--tunnel-network`, naming up to ten of them. Restore the
+  previous network, or pass `--tunnel-readdress`: the controller then starts, warns
+  once, and gives each such peer a new address at its next registration. The running
+  peer logs the change and keeps its old address until it restarts, so its traffic is
+  interrupted until then. Peers that are offline keep their old entry until they
+  register again; `DELETE` the ones that will not come back. `--tunnel-readdress` is
+  refused without a network and together with `--ha-peers` or `--ha-join`, and is
+  harmless when nothing is outside the network.
 - **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
   interface up (the answer is its address), persist the answer next to their key, and
   can start from it while the controller is down. For `gsp --tunnel-*` that fallback
   is not instant: with the controller down it first spends its ~30 s registration
-  budget, then falls back to the saved address (`<tunnel-key-file>.address`). A later,
-  different answer is logged as an error and not applied until a restart.
-- **Routing.** Every peer is a `/32`: origins route each proxy's tunnel address
+  budget, then falls back to the saved address (`<tunnel-key-file>.address`), logging
+  the last error and, if a pinned address differs from the saved one, that the pin
+  needs a restart once the controller is back. `408`/`429` count as "controller unavailable", any other
+  `4xx` refuses startup.
+- **Address changes.** Every re-registration (default every 30 s) answers with the
+  address the controller currently holds. If it differs from the one the interface
+  carries (an operator released it, or a lease expired and it was reallocated), the
+  agent or `gsp` moves the interface in place, with no restart: neither WireGuard
+  backend can replace an interface address, so it removes the interface and brings it
+  back up on the new address with the same key, listen port and peers
+  (`live_interface.rs` in both binaries). Peer updates wait on the same lock, so none is lost, and the
+  new address is saved for a restart only once it is up. If the new address does not come up, the old one is restored; if that fails
+  too the interface stays down and the next re-registration retries. There is a
+  short traffic gap while WireGuard re-handshakes (the agent starts the handshakes
+  itself, since boringtun would wait 25 s). The other side follows on its own: each
+  proxy and origin re-reads the registry and re-routes the `/32` (`/128`).
+- **Routing.** Every peer is a host route (`/32`, or `/128` for IPv6): origins route each proxy's tunnel address
   (this fixed the earlier `AllowedIPs 0.0.0.0/0` bug where a second proxy stole the
   first one's route), proxies route each origin's. Backends must be on the
-  registrant's own address; `--backends :25565` means "my address, port 25565".
+  registrant's own address; `--backends :25565` means "my address, port 25565" (stored
+  as `[fd49:89c1:4b5e:60::1]:25565` on an IPv6 network).
 - **Release.** `DELETE /peers/{name}` / `DELETE /proxy-peers/{name}` free the address
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
-  (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
-- **Limits.** `--tunnel-network` is not combinable with `--ha-peers`. Pin-only mode
-  (no network) is allowed under `--ha-peers`, but each controller node keeps its own
-  unreplicated address book, so pin uniqueness is enforced per node only (the controller
-  logs a startup warning); point all origins and proxies at one node. IPv6, lease expiry, a UI view and
-  live address changes are future work (HANDOVER "Known follow-ups").
+  (`--tunnel-stale-after`, default 14 days) and a daily log warning.
+- **Lease expiry.** With `--tunnel-lease-ttl` (at least `2h`; default `0` = off) an
+  owner not re-registered for that long is released exactly like a `DELETE`:
+  tombstone, address freed, and a pool's `tunnel` source clears the origin's backends
+  (`gsp_discovery_refresh_total{result="withdrawn"}`). The controller sweeps every
+  tenth of the TTL (between 1 min and 1 h), starting an hour after it starts (or after
+  a node becomes HA leader), so a controller that was down longer than the TTL does not
+  expire everyone before they re-register. Under HA only the leader sweeps and each
+  expiry is a replicated `Expire` entry that re-checks `last_seen` when it applies, so
+  a re-registration that commits first wins. An owner that comes back after expiry is
+  allocated afresh and may get a different address. Set the TTL well above the
+  agents' and proxies' register interval (the 2 h minimum is only a floor for the HA
+  `last_seen` refresh); hours to days is typical.
+  A claim is kept even when the same registration then fails (backends not on the
+  claimed address, or a storage error), so the corrected retry gets the same address;
+  a stream of distinct names with bad backends can therefore use up the pool. The
+  registration endpoints are bearer-gated, and `DELETE` plus the stale flag are the
+  remedy.
+  `gsp-ui` shows the same table on its Tunnel addresses page (`GET /api/tunnel/addresses`,
+  proxied with `--controller-url`/`--controller-token`). Each row has a **Release**
+  button (admin role, behind a confirmation) that proxies the registry `DELETE`
+  (`DELETE /api/tunnel/origins/{name}` → `/peers/{name}`, `/api/tunnel/proxies/{name}` →
+  `/proxy-peers/{name}`).
+- **High availability (built 2026-10-03).** `--tunnel-network` works with `--ha-peers`:
+  both registries and the address book are replicated through Raft, so every node
+  serves the same registrations and addresses, and a registration or `DELETE` made on
+  any node (a follower forwards it to the leader) is allocated once, cluster-wide.
+  The leader records its `--tunnel-network` when the cluster first initializes and
+  that recorded network applies from then on. Give every node the same
+  `--tunnel-network`: a node whose flag differs logs an `ERROR` naming both networks
+  and answers registry writes `503`, though an unchanged re-registration is still
+  answered `200`. Until the network is recorded (the first seconds of a cluster, or
+  while an upgrade waits for a node, docs/12) registry writes answer `503`
+  ("cluster is initializing its registries"). An unchanged re-registration proposes
+  nothing; an hourly `last_seen` refresh is the only periodic write. Pin-only mode
+  works the same way. Upgrade and membership notes: docs/12.
+- **Limits.** Transparent mode (`transparent: true`) does not apply to tunnel backends:
+  config load rejects it on a listener whose `pool:` or route pool actions use a `tunnel`
+  source. A resolver route can still return a tunnel pool at runtime; the proxy then
+  connects without the client's source address, and a client/backend family mismatch on
+  any pool is logged at most once a minute. Dual-stack tunnels and live
+  address changes are future work (GitHub issue #40).
 
 ## Open questions
 

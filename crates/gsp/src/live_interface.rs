@@ -103,11 +103,15 @@ impl LiveInterface {
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, State> {
-        self.state.read().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, State> {
-        self.state.write().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Runs `f` against the interface; `None` when it is down (a failed
@@ -132,9 +136,9 @@ impl LiveInterface {
     /// Moves the interface to `new`, keeping its peers. On failure the old
     /// address is restored; if even that fails the interface stays down and
     /// the next call retries from the peers saved here.
-    pub fn readdress(&self, new: IpAddrMask) -> anyhow::Result<()> {
+    pub fn readdress(&self, new: &IpAddrMask) -> anyhow::Result<()> {
         let mut st = self.write();
-        if st.address == new && st.wg.is_some() {
+        if st.address == *new && st.wg.is_some() {
             return Ok(());
         }
         if let Some(old) = st.wg.take() {
@@ -154,7 +158,7 @@ impl LiveInterface {
             drop(old);
             st.peers = peers;
         }
-        match self.bring_up_retrying(&new, &st.peers) {
+        match self.bring_up_retrying(new, &st.peers) {
             Ok(wg) => {
                 st.wg = Some(wg);
                 st.address = new.clone();
@@ -314,7 +318,7 @@ mod tests {
         let log = Log::default();
         let p = peer();
         let live = live(&p, &[], &log);
-        live.readdress(mask("10.60.0.7/24")).unwrap();
+        live.readdress(&mask("10.60.0.7/24")).unwrap();
         assert_eq!(live.address(), mask("10.60.0.7/24"));
         assert_eq!(
             *log.lock().unwrap(),
@@ -331,7 +335,7 @@ mod tests {
     fn readdress_to_the_current_address_does_nothing() {
         let log = Log::default();
         let live = live(&peer(), &[], &log);
-        live.readdress(mask("10.60.0.2/24")).unwrap();
+        live.readdress(&mask("10.60.0.2/24")).unwrap();
         assert!(log.lock().unwrap().is_empty());
     }
 
@@ -339,7 +343,7 @@ mod tests {
     fn a_failed_bring_up_restores_the_old_address() {
         let log = Log::default();
         let live = live(&peer(), &["10.60.0.7/24"], &log);
-        let err = live.readdress(mask("10.60.0.7/24")).unwrap_err();
+        let err = live.readdress(&mask("10.60.0.7/24")).unwrap_err();
         assert!(
             format!("{err:#}").contains("kept the old address"),
             "{err:#}"
@@ -356,10 +360,10 @@ mod tests {
     fn if_the_rollback_fails_too_the_next_attempt_restores_from_the_saved_peers() {
         let log = Log::default();
         let live = live(&peer(), &["10.60.0.7/24", "10.60.0.2/24"], &log);
-        assert!(live.readdress(mask("10.60.0.7/24")).is_err());
+        assert!(live.readdress(&mask("10.60.0.7/24")).is_err());
         assert!(live.with(|_| ()).is_none(), "the interface is down");
         // A later attempt on a working address brings it back with the peer.
-        live.readdress(mask("10.60.0.8/24")).unwrap();
+        live.readdress(&mask("10.60.0.8/24")).unwrap();
         assert_eq!(live.address(), mask("10.60.0.8/24"));
         assert_eq!(
             log.lock().unwrap().last().unwrap(),
@@ -378,7 +382,7 @@ mod tests {
         };
         let bring_up: BringUp = Box::new(|_, _| unreachable!("must not bring up a second device"));
         let live = LiveInterface::new(Box::new(stuck), mask("10.60.0.2/24"), bring_up);
-        assert!(live.readdress(mask("10.60.0.7/24")).is_err());
+        assert!(live.readdress(&mask("10.60.0.7/24")).is_err());
         assert_eq!(live.address(), mask("10.60.0.2/24"));
         assert!(live.with(|_| ()).is_some());
     }

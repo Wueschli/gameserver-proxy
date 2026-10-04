@@ -558,7 +558,11 @@ what order," which a stateless replica set cannot give.
   fed by `openraft` applying a committed entry instead of a direct HTTP
   handler call. The Raft log itself (openraft's own append-only log of
   proposals, distinct from the config/intent revision logs it carries) lives
-  in a **third** `sled` tree, `<data_dir>/raft`, on every replica.
+  in a **third** `sled` tree, `<data_dir>/raft`, on every replica. That log
+  is purged per `openraft`'s snapshot policy (a snapshot every 5 000 entries,
+  the last 1 000 entries kept); a follower or learner behind the purge point
+  is caught up by snapshot, which replaces its config and intent stores
+  (revision numbers, stage and actor included).
 - **Writes go through Raft; reads don't.** `POST /config`, `POST /intent`,
   and `POST /admin/adopt` propose a Raft entry and wait for it to commit
   before responding (this is where "who is the leader" matters). `GET
@@ -578,7 +582,9 @@ what order," which a stateless replica set cannot give.
   to the current leader over HTTP, or HTTPS for `https://` peers (`openraft` tracks the current
   leader; the follower proxies the request body byte-for-byte, same
   `forwardable_headers` pattern `gsp-ui`'s proxies already use) and relays
-  the leader's response back verbatim. **Rejected**: an HTTP redirect
+  the leader's response back verbatim. The forward is bounded (10 s, then
+  `504`: the write may still have been applied), so a half-open leader never
+  hangs the follower's handler. **Rejected**: an HTTP redirect
   (`307` + `Location`) — every existing client of this API (`gsp`,
   `gsp-ui`, a human with `curl`) would need new leader-following logic; a
   transparent forward means literally nothing downstream of this ADR needs
@@ -604,19 +610,29 @@ what order," which a stateless replica set cannot give.
   `Store`, committed alongside each relayed entry) instead of a
   process-local variable. This is the one genuinely new piece of state HA
   introduces beyond "replicate what already exists."
-- **Cluster membership: static at bootstrap, dynamic membership deferred.**
+- **Cluster membership: static at bootstrap, dynamic afterwards (built 2026-10-03).**
   `--ha-peers 1=host1:9901,2=host2:9901,...` (or `1=https://host1:8443,...`,
   built 2026-10-02 — docs/12 "HA replicas over TLS") on every
   replica forms the initial voter set (`openraft`'s single-step static
-  bootstrap, not the joint-consensus dynamic membership change API). Adding
-  or removing a peer from a running group needs `openraft`'s membership-
-  change support and is **explicitly out of scope for the first HA slice** —
-  documented as a known limitation, not silently unsupported. `--ha-peers` is
-  only read when a cluster is first bootstrapped (`raft.initialize` is refused
-  once the log is non-empty), so restarting with a new list changes nothing for
-  existing members: growing a tier, or moving it to new addresses / `https://`
-  peers, means bootstrapping a new cluster until that slice lands (docs/12 "HA
-  replicas over TLS"; HANDOVER row "Change a live HA member's address").
+  bootstrap). `--ha-peers` is only read when a cluster is first bootstrapped
+  (`raft.initialize` is refused once the log is non-empty), so restarting with a
+  new list changes nothing for existing members. A running group changes through
+  `GET/POST /admin/ha/members` and `DELETE`/`PUT /admin/ha/members/{id}`: a new or
+  replacement node starts with `--ha-join` (it never initializes) and is added by
+  the leader, which first asks the node who it is (`/raft/whoami`) so a node id is
+  never pointed at another node's address; remove a node, or `PUT` a new address
+  (including an `https://` one), the same way. Design:
+  `docs/superpowers/specs/2026-10-03-ha-replicated-address-allocation-design.md`,
+  recipe in docs/12 "HA membership".
+- **The tunnel registries are replicated state too (built 2026-10-03).** The
+  backend-peers and proxy-peers registries and the address book are applied by the
+  state machine, next to the config and intent logs, so a registration made on any
+  node is seen on the others with the same tunnel address and a new leader keeps
+  allocating without collisions. The leader records the cluster's `--tunnel-network`
+  once (`ha/cluster_state.rs`); registry entries are applied against that recorded
+  network, never a node's own flag. On the first HA start the leader imports one
+  node's pre-HA registry data (`ha/import.rs`, docs/12 "Upgrading a single controller
+  to HA").
 - **`replicas: 1` (today's shape) needs no code path change.** A one-node
   Raft group trivially elects itself leader and commits every entry
   immediately (no network round trip) — `openraft` handles the degenerate
@@ -933,7 +949,8 @@ in `IngestPayload`, unrelated to the Tier-1/Tier-2 hierarchy above), a
 schema-driven settings form over the same submitted YAML text (a raw-YAML
 panel stays underneath so every field — including ones the form has no
 control for yet — is always reachable), and a Plugins page for managing
-sniffer modules. Plugin management needed new backend surface: `gsp` gained
+sniffer modules. (Later, 2026-10-03: a read-only Tunnel addresses page over
+the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Plugin management needed new backend surface: `gsp` gained
 `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into
 `settings.sniffers.dir`, then reuses the existing live rescan-on-reload
 mechanism — no new hot-reload path), fanned out fleet-wide via
@@ -1012,10 +1029,8 @@ Still open:
   when its parent link is down before it starts dropping — a fixed ring
   buffer sized in the same spirit as the existing recv-buffer caps
   (`docs/06`), not unbounded growth.
-- **Dynamic Raft membership** (add/remove a controller replica in a running
-  HA group without a coordinated restart): explicitly deferred in "Intra-tier
-  HA (design)" above — `openraft` supports it, this design just doesn't use
-  that support yet.
+- **Dynamic Raft membership** was deferred here and is built (2026-10-03): see
+  "Intra-tier HA (design)" above and docs/12 "HA membership".
 - **A durable, fleet-wide audit *log*** (as opposed to the per-revision
   `actor` field this session's RBAC design adds, which is durable but lives
   one field per revision, not as its own queryable log): deferred in "RBAC

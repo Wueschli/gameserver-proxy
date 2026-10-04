@@ -28,6 +28,14 @@ installed.
   how BungeeCord/Velocity-style virtual-host routing works). Strips a Forge
   `\0FML\0…` suffix; lower-cases the host to match the proxy's `sni`-style
   `host:` patterns.
+- `quic` — recognises a QUIC Initial packet (long header, version 1, version 2
+  or an IETF draft, with the packet type that version uses for Initial and
+  a destination connection ID of 8 to 20 bytes). The payload is encrypted, so there
+  is no hostname; the hint carries `key: "quic"`.
+- `wireguard` — recognises a WireGuard handshake initiation (exactly 148 bytes,
+  message type 1, three zero reserved bytes) and tags it `key: "wireguard"`.
+  Later packets of the flow are not recognised; they ride the session the
+  initiation opened.
 - `regex-firstbytes` — a bounded, allocation-light, **runtime-configured**
   first-bytes matcher (no `regex` dependency). Its `settings.sniffers.modules[].config`
   string is a tiny pattern language:
@@ -56,10 +64,10 @@ Or directly:
 ```sh
 cd crates/plugins
 cargo test --workspace                                             # native unit tests
-cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p regex-firstbytes
+cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard
 ```
 
-Output lands in `target/wasm32-unknown-unknown/release/{a2s,minecraft,regex_firstbytes}.wasm`
+Output lands in `target/wasm32-unknown-unknown/release/{a2s,minecraft,quic,regex_firstbytes,wireguard}.wasm`
 (cargo turns the `regex-firstbytes` crate name's `-` into `_` for the file
 name — the loaded sniffer's name is therefore `regex_firstbytes`, not
 `regex-firstbytes`, if you copy the file as-is).

@@ -11,10 +11,13 @@ spec:
       containers:
         - name: aggregator
           image: gsp-deploy/gsp-aggregator:local
-          args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)"]
+          # --instance-token is what intent fan-out presents to each gsp admin API.
+          args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)", "--instance-token=$(INSTANCE_TOKEN)"]
           env:
             - name: TOKEN
               valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+            - name: INSTANCE_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: admin-token } }
           ports: [{ containerPort: 9902 }]
           readinessProbe: { httpGet: { path: /healthz, port: 9902 } }
           livenessProbe: { httpGet: { path: /healthz, port: 9902 }, initialDelaySeconds: 10 }

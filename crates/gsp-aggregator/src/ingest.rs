@@ -9,11 +9,11 @@
 //! dashboard actually renders per tick.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::util::now_ms;
+use crate::util::unix_ms;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngestPayload {
@@ -98,11 +98,11 @@ impl IngestStore {
     pub fn ingest(&self, payload: IngestPayload) {
         let state = InstanceState {
             payload,
-            received_at_ms: now_ms(),
+            received_at_ms: unix_ms(),
         };
         self.instances
             .write()
-            .expect("ingest store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(state.payload.instance.clone(), state);
     }
 
@@ -110,7 +110,7 @@ impl IngestStore {
     pub fn get(&self, instance: &str) -> Option<InstanceState> {
         self.instances
             .read()
-            .expect("ingest store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(instance)
             .cloned()
     }
@@ -119,7 +119,10 @@ impl IngestStore {
     /// order for a dashboard table, not a performance concern at fleet
     /// sizes this serves).
     pub fn snapshot(&self) -> Vec<InstanceState> {
-        let map = self.instances.read().expect("ingest store lock poisoned");
+        let map = self
+            .instances
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut out: Vec<InstanceState> = map.values().cloned().collect();
         out.sort_by(|a, b| a.payload.instance.cmp(&b.payload.instance));
         out
@@ -135,7 +138,7 @@ impl IngestStore {
     pub(crate) fn insert_state(&self, state: InstanceState) {
         self.instances
             .write()
-            .expect("ingest store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(state.payload.instance.clone(), state);
     }
 }
