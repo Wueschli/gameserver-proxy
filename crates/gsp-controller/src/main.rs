@@ -45,6 +45,13 @@ struct Args {
     #[arg(long)]
     auth_token: Option<String>,
 
+    /// Bearer token `GET /metrics` accepts instead of `--auth-token`, at least
+    /// 16 bytes, so a Prometheus scraper need not hold the admin token. It
+    /// unlocks only `/metrics`. Omitted: `/metrics` is gated by `--auth-token`
+    /// like the rest of the API.
+    #[arg(long)]
+    metrics_token: Option<String>,
+
     /// `standalone` (default) accepts writes directly. `slave` never does —
     /// it relays a parent controller's revision stream instead; requires
     /// `--parent-url` (phase 12 slice 1, see `docs/10` "Fleet topology").
@@ -168,6 +175,8 @@ async fn main() -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
     let (tunnel_network, stale_after) = gsp_controller::addresses::resolve_flags(
         args.tunnel_network.as_deref(),
@@ -524,7 +533,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(gsp_http::metrics::router(
             prometheus,
-            gsp_http::server::BearerAuth::new(admin_token.as_deref()),
+            gsp_http::server::BearerAuth::new(
+                args.metrics_token.as_deref().or(admin_token.as_deref()),
+            ),
         ))
         .merge(api::router((*state).clone()))
         .merge(gsp_controller::intent::api::router((*intent_state).clone()))

@@ -563,12 +563,7 @@ async fn run(
     // built): version/commit are fixed for the process lifetime, so
     // `gsp_build_info` and `gsp_fd_limit` are set once; `gsp_fd_open` needs a
     // live sample, hence the periodic task.
-    metrics::gauge!(
-        gsp_core::metrics_defs::BUILD_INFO,
-        "version" => env!("CARGO_PKG_VERSION"),
-        "commit" => env!("GSP_GIT_SHA"),
-    )
-    .set(1.0);
+    gsp_http::metrics::set_build_info("gsp", env!("CARGO_PKG_VERSION"));
     if let Some(limit) = procinfo::fd_limit() {
         metrics::gauge!(gsp_core::metrics_defs::FD_LIMIT).set(limit as f64);
     }

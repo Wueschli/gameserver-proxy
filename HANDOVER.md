@@ -104,7 +104,7 @@ details are in `git log`.
   (standalone workspace, `make plugins`). Per-plugin config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
   single-level timing-wheel UDP idle expiry.
-- Ops: `gsp_build_info{version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
+- Ops: `gsp_build_info{component,version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
 
 ### Distributed control plane — phases 10–13 (fully built)
 
