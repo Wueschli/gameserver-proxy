@@ -28,7 +28,7 @@ Owner decisions that still hold:
 | Question | Decision |
 |----------|----------|
 | Native TLS on the fleet HTTP servers | Built (2026-10-02): controller, aggregator and UI via `--tls-cert`/`--tls-key`, `gsp`'s admin API via `settings.admin.tls`. New client code must not hard-code `http://` and must build clients via `gsp_http::{client, builder}`. |
-| Publish the reference images | Deferred: "reference only" for now. See the "Publish the reference images" follow-up row. |
+| Publish the reference images | Deferred: "reference only" for now. Tracked in [#46](https://github.com/Wueschli/gameserver-proxy/issues/46). |
 | Self-hosted CI runner | Not while the repo is public (GitHub advises against self-hosted runners on public repositories, since fork PRs can run code on them); the switch (PR #21) was closed. |
 
 **CI timings, measured** (2026-10-02). Cold (lockfile changed): `test` 8m15,
@@ -55,9 +55,7 @@ Watch-list:
 - **Merge queue:** PRs land one at a time, each re-run on the latest `main`. If several
   PRs are routinely in flight at once, GitHub's merge queue (needs an
   `on: merge_group` trigger) would keep `main` green.
-- **Edge restart flake:** proxy registrations now carry a `boot_id` (`docs/11` "Edge
-  restarts"), which should fix the intermittent `an_edge_restart_keeps_its_address`
-  timeout in the tunnel lab. Only a few green runs so far.
+- **Edge restart flake:** watched in [#68](https://github.com/Wueschli/gameserver-proxy/issues/68).
 
 Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
 branch-protection required checks, a repo setting outside this tree.
@@ -175,37 +173,6 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   host, its backends are ordinary routable addresses; `connect_backend` /
   `connect_upstream` / health dials don't know a tunnel is involved.
 
-## Deferred / not built
-
-- **CGNAT / both-sides-behind-restrictive-NAT** (phase 14) — documented v1
-  limitation. A relay-of-last-resort (closer to Steam Datagram Relay's shape) is a
-  possible v2, not designed.
-- **`gsp-ui` leftovers** — config *submit* (Settings page) still applies without a
-  confirmation step, and there is no end-to-end browser test (Playwright) — only
-  component tests against a mocked `api.ts`.
-- **Tunnel e2e leftovers** (deferred minors from the 2026-10-01 branch review; none
-  affect correctness of what is asserted today):
-  - the 1200-byte UDP check in scenario 1 is one datagram with no retry — a single
-    dropped datagram on a fresh path would flake it (a 3-try loop fixes it);
-  - scenario 4's negative check looks for `/pools` lines starting with two spaces; it
-    would pass vacuously if that format changed — also assert the pool name is present;
-  - `echo.rs`: if `setns` fails inside the thread, the error surfaces as "did not
-    report ready within 5s" instead of the real cause;
-  - a blocked user namespace (e.g. Ubuntu AppArmor without the CI `sysctl`) makes
-    `unshare -Urnm` fail in the Makefile *before* the in-test hint can name
-    `make tunnel-e2e`;
-  - `make tunnel-e2e` also builds `gsp-aggregator`/`gsp-ui` (unused by these tests, build
-    time only), and `ensure_built()` runs `cargo build` again inside the namespace, which
-    works offline only because everything is already built (and it recompiles `ring` there
-    on every run — cause not investigated);
-
-- **HA + `--role slave` together** — rejected at startup today. Needs the upward
-  relay to run leader-only with its cursor promoted to replicated state (designed in
-  `docs/10`, not built).
-- **`sendmmsg` UDP egress batching**, k8s discovery watch informer, resolver
-  `sticky_key` / `sticky_key` recovery, per-domain gossip capacity/load signals,
-  `failure_domain` auto-discovery — see the table below.
-
 ## Known flakes & environment gotchas
 
 - **Disk fills up in long sessions.** `target/debug` grew to ~30 GB over many test
@@ -276,16 +243,26 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
   up — wait for a real round trip); **userspace (`boringtun`) first handshake takes
   ~25 s** (the proxy has no endpoint for the origin, so it waits for the agent's
-  25 s persistent keepalive; kernel is ~2 s) — observed 2026-10-01, not fixed;
+  25 s persistent keepalive; kernel is ~2 s) — tracked in
+  [#67](https://github.com/Wueschli/gameserver-proxy/issues/67);
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
   proxies carrying traffic at once.
 
 ## Open follow-ups
 
-Tracked as [GitHub issues](https://github.com/Wueschli/gameserver-proxy/issues) since
-2026-10-04 (#40–#62); this file no longer lists them. Check the issue list before
-starting new work, and file new follow-ups there rather than here.
+Everything not built or not yet fixed is tracked as a
+[GitHub issue](https://github.com/Wueschli/gameserver-proxy/issues), not in this file.
+Check the issue list before starting new work, and file new follow-ups there rather
+than here. Where the items that used to live here went:
+
+- v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
+  discovery): [#65](https://github.com/Wueschli/gameserver-proxy/issues/65)
+- `gsp-ui` settings confirmation and Playwright: [#66](https://github.com/Wueschli/gameserver-proxy/issues/66)
+- Tunnel e2e leftovers and the 25 s `boringtun` handshake: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
+  (address-authority and lab minors: [#43](https://github.com/Wueschli/gameserver-proxy/issues/43))
+- Edge-restart flake watch: [#68](https://github.com/Wueschli/gameserver-proxy/issues/68)
+- Open design questions: [#69](https://github.com/Wueschli/gameserver-proxy/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
 
@@ -561,10 +538,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 
 ---
 
-## Open questions carried from `docs/01-requirements.md`
+## Open questions
 
-- Does one client ever need **two backends at once** (TCP control + UDP gameplay
-  on different instances)? Affects the session model.
-- Is **QUIC-aware routing** (connection ID) needed, or is opaque UDP enough?
-  Assumed opaque.
-- Cross-instance session failover: assumed **no** for v1 (ADR 4).
+Tracked in [#69](https://github.com/Wueschli/gameserver-proxy/issues/69). Cross-instance
+session failover is assumed **no** for v1 (ADR 4).
