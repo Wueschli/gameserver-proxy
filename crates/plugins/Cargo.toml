@@ -4,7 +4,7 @@ resolver = "2"
 # crates/gsp-config/fuzz): these crates build for wasm32-unknown-unknown, are
 # never a dependency of gsp / gsp-core, and `make check` on the main workspace
 # must not need the wasm target installed. Build them with `make plugins`.
-members = ["gsp-sniffer-abi", "a2s", "minecraft", "regex-firstbytes"]
+members = ["gsp-sniffer-abi", "a2s", "minecraft", "quic", "regex-firstbytes", "wireguard"]
 
 [workspace.package]
 version = "0.0.1"

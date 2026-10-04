@@ -125,7 +125,7 @@ crates/
                               child processes and drives them over real HTTP
                               (`cargo test -p gsp-fleet-tests`, included in `make check`); phase 14's
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
-  plugins/                   first-party sniffer plugins (a2s/minecraft/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
+  plugins/                   first-party sniffer plugins (a2s/minecraft/quic/wireguard/regex-firstbytes) + gsp-sniffer-abi — standalone workspace, `make plugins`
 ```
 
 Dependency direction: `gsp` → `gsp-core` → `gsp-config` (`gsp-bench` → `gsp-core`

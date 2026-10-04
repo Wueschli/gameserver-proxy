@@ -71,7 +71,7 @@ examples) or from an external routing service you control.
   (host from the peeked, non-terminated TLS ClientHello) matchers.
 - A `sniffer` matcher backed by sandboxed WASM plugins (`wasmtime`, no WASI, no host
   imports, time and memory bounded), rescanned on every reload. First-party plugins:
-  `a2s`, `minecraft` and a `regex-firstbytes` template.
+  `a2s`, `minecraft`, `quic`, `wireguard` and a `regex-firstbytes` template.
 - External resolvers over HTTP or gRPC (`action: { resolver: <name> }`) with
   `on_error` handling and a TTL'd LRU result cache.
 - Push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` for short-lived
