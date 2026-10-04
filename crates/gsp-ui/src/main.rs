@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(api::router(state))
         .fallback_service(ServeDir::new(&args.static_dir));
 
-    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-ui").await?;
+    gsp_http::tls::serve(args.listen, app, tls_cert, args.tls.limits(), "gsp-ui").await?;
 
     if let Some(task) = feed_task {
         task.abort();

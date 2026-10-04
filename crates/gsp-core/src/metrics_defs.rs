@@ -1,5 +1,7 @@
 //! Canonical metric names. Kept in one place so names stay stable.
 //! See `docs/06-operations-observability.md` for the full metric catalogue.
+//! The one exception: the `gsp_tls_handshakes_*` names live in `gsp_http::tls`,
+//! because `gsp-http` has no `gsp-core` dependency.
 
 /// Counter. Labels: `listener`, `result` (`accepted` | `no_route` |
 /// `sniffer_reject` | ...). `sniffer_reject` = a `sniffer` plugin returned a

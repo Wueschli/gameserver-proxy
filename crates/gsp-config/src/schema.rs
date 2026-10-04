@@ -187,11 +187,29 @@ impl Default for RawAdmin {
 /// `settings.admin.tls`: the admin API serves HTTPS with this pair (PEM chain,
 /// leaf first; PEM private key). Both or neither, by type. Startup-only like
 /// `listen`; the files themselves are re-read when they change.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// The optional `max_pending*` / `new_per_source_*` settings bound the TLS
+/// handshakes in flight (same as `gsp-controller`'s `--tls-max-pending*` /
+/// `--tls-new-per-source-*` flags); unset ones keep the defaults.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdminTls {
     pub cert: String,
     pub key: String,
+    /// Handshakes in flight in total (default 512, at least 1).
+    #[serde(default)]
+    pub max_pending: Option<usize>,
+    /// Handshakes in flight per source: an IPv4 address or an IPv6 /64 (default
+    /// 16, at least 1).
+    #[serde(default)]
+    pub max_pending_per_source: Option<usize>,
+    /// New connections per second a source may open on average (default 20;
+    /// `0` = no rate limit).
+    #[serde(default)]
+    pub new_per_source_per_sec: Option<f64>,
+    /// Burst a source may open at once (default 64, at least 1).
+    #[serde(default)]
+    pub new_per_source_burst: Option<u32>,
 }
 
 pub(crate) fn default_admin_listen() -> String {

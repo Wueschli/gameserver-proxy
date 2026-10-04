@@ -22,6 +22,11 @@ settings:
     # tls:
     #   cert: /etc/gsp/tls/fullchain.pem
     #   key: /etc/gsp/tls/privkey.pem
+    #   # Optional TLS handshake limits (defaults shown; rate 0 = off):
+    #   max_pending: 512
+    #   max_pending_per_source: 16
+    #   new_per_source_per_sec: 20
+    #   new_per_source_burst: 64
   # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
   # reload does not change these. Hitting a cap drops the new connection /
   # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|

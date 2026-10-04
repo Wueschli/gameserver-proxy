@@ -126,3 +126,23 @@ async fn tls_cert_without_key_is_refused() -> Result<()> {
     ensure!(text.contains("--tls-key"), "{text}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_zero_handshake_cap_is_refused() -> Result<()> {
+    build_fleet_bins()?;
+    let dir = tempfile::tempdir()?;
+    let out = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new(bin_path("gsp-controller"))
+            .args(["--data-dir", &dir.path().display().to_string()])
+            .args(["--listen", &format!("127.0.0.1:{}", free_port()?)])
+            .args(["--tls-max-pending", "0"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    let text = String::from_utf8_lossy(&out.stderr);
+    ensure!(!out.status.success(), "started with --tls-max-pending 0");
+    ensure!(text.contains("--tls-max-pending"), "{text}");
+    Ok(())
+}

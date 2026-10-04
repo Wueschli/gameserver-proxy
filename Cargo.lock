@@ -1335,6 +1335,8 @@ dependencies = [
  "arc-swap",
  "axum",
  "clap",
+ "metrics",
+ "metrics-exporter-prometheus",
  "reqwest",
  "tempfile",
  "thiserror 2.0.21",

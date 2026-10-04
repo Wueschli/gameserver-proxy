@@ -87,6 +87,14 @@
 - `gsp_fd_limit` (gauge, no labels) — this process's `RLIMIT_NOFILE` soft
   limit (`getrlimit`, via `nix`), sampled once at startup (it doesn't change
   at runtime).
+- `gsp_tls_handshakes_refused_total{reason="per_source"|"rate"}` (counter) — TLS
+  connections to the admin API closed at the door: the source already had its cap
+  of handshakes in flight, or was opening connections faster than its rate.
+  Counted in `gsp-http` (its name lives in `gsp_http::tls`, not `metrics_defs.rs`,
+  which `gsp-http` cannot depend on); only `gsp` installs a recorder, so the fleet
+  binaries (no `/metrics`) do not expose it. Present only with `settings.admin.tls`.
+- `gsp_tls_handshakes_evicted_total` (counter, no labels) — pending handshakes
+  dropped to make room at the global cap (same notes).
 - `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this
   instance's Tier-2 gossip mesh (phase 13, `docs/10` "Tier 2", `gsp-core::
   gossip`). Present only when `settings.gossip` is set.

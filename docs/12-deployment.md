@@ -219,8 +219,14 @@ gsp-controller --listen 0.0.0.0:8443 \
   handshake within 10 s. At most 16 handshakes may be pending per source (an IPv4
   address or an IPv6 /64); more are closed at once. At 512 pending handshakes in total a
   new connection is still accepted and the oldest pending handshake is dropped, so a
-  flood of idle connects cannot lock real clients out. A limit being hit logs a warning
-  (at most once a minute). No client certificates (mTLS).
+  flood of idle connects cannot lock real clients out. A source may also open at most 20
+  new connections a second on average (bursts of 64), so it cannot cycle connects under
+  its pending cap. A limit being hit logs a warning (at most once a minute) and, on
+  `gsp`, counts into `gsp_tls_handshakes_refused_total` / `gsp_tls_handshakes_evicted_total`
+  (docs/06). The limits are flags: `--tls-max-pending` (512),
+  `--tls-max-pending-per-source` (16), `--tls-new-per-source-per-sec` (20; `0` turns the
+  rate limit off) and `--tls-new-per-source-burst` (64); raise the per-source ones for
+  a fleet that reaches the service from behind one NAT. No client certificates (mTLS).
 - **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
   push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
   goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
@@ -231,7 +237,9 @@ gsp-controller --listen 0.0.0.0:8443 \
   session cookie counts in whichever `cookie` header h2 splits it into). Plain
   HTTP is not redirected; serve only HTTPS on the port browsers use.
 - **`gsp`'s admin API** is configured in the YAML, next to `listen`:
-  `settings.admin.tls: { cert: <chain.pem>, key: <key.pem> }` (both required;
+  `settings.admin.tls: { cert: <chain.pem>, key: <key.pem> }` (both required, plus the
+  optional handshake limits `max_pending`, `max_pending_per_source`,
+  `new_per_source_per_sec`, `new_per_source_burst`, same meaning as the flags above;
   startup-only like `listen`; the files renew like the flags above; `gsp --check`
   loads them). The admin URL `gsp` reports to the aggregator then becomes
   `https://<settings.admin.listen>`, so the certificate needs that address as a SAN

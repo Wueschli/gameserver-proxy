@@ -34,6 +34,26 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
     })?;
     let admin_auth_token = raw.settings.admin.auth_token.clone();
     let admin_tls = raw.settings.admin.tls.clone();
+    if let Some(t) = &admin_tls {
+        if t.max_pending == Some(0) || t.max_pending_per_source == Some(0) {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.max_pending and max_pending_per_source must be at least 1"
+                    .into(),
+            ));
+        }
+        if t.new_per_source_burst == Some(0) {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.new_per_source_burst must be at least 1".into(),
+            ));
+        }
+        if t.new_per_source_per_sec
+            .is_some_and(|r| !r.is_finite() || r < 0.0)
+        {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.new_per_source_per_sec must be a number of at least 0".into(),
+            ));
+        }
+    }
 
     // Resolve `backend_sources`. A `static` source becomes a fixed address list;
     // the dynamic kinds become a `SourceConfig` for the runtime refresh task.
@@ -1073,9 +1093,44 @@ listeners:
             Some(AdminTls {
                 cert: "/etc/gsp/tls/fullchain.pem".into(),
                 key: "/etc/gsp/tls/privkey.pem".into(),
+                ..AdminTls::default()
             })
         );
         assert_eq!(parse_str(MINIMAL).unwrap().admin_tls, None);
+    }
+
+    #[test]
+    fn admin_tls_takes_handshake_limits() {
+        let cfg = parse_str(
+            "settings:\n  admin:\n    tls:\n      cert: /c.pem\n      key: /k.pem\n      max_pending: 100\n      max_pending_per_source: 4\n      new_per_source_per_sec: 0\n      new_per_source_burst: 10\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+        )
+        .expect("should parse");
+        let t = cfg.admin_tls.unwrap();
+        assert_eq!(
+            (
+                t.max_pending,
+                t.max_pending_per_source,
+                t.new_per_source_per_sec,
+                t.new_per_source_burst
+            ),
+            (Some(100), Some(4), Some(0.0), Some(10))
+        );
+    }
+
+    #[test]
+    fn admin_tls_handshake_limits_are_validated() {
+        for bad in [
+            "max_pending: 0",
+            "max_pending_per_source: 0",
+            "new_per_source_burst: 0",
+            "new_per_source_per_sec: -1",
+            "new_per_source_per_sec: .nan",
+        ] {
+            let text = format!(
+                "settings:\n  admin:\n    tls:\n      cert: /c.pem\n      key: /k.pem\n      {bad}\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+            );
+            assert!(parse_str(&text).is_err(), "accepted:\n{text}");
+        }
     }
 
     #[test]

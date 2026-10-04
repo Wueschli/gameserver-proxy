@@ -212,17 +212,20 @@ fn half_a_tls_args_pair_is_an_error() {
     let only_cert = TlsArgs {
         tls_cert: Some(fixture("leaf.pem")),
         tls_key: None,
+        ..TlsArgs::default()
     };
     assert!(matches!(only_cert.load(), Err(TlsError::Incomplete)));
     let only_key = TlsArgs {
         tls_cert: None,
         tls_key: Some(fixture("leaf.key")),
+        ..TlsArgs::default()
     };
     assert!(matches!(only_key.load(), Err(TlsError::Incomplete)));
     assert!(TlsArgs::default().load().unwrap().is_none());
     let both = TlsArgs {
         tls_cert: Some(fixture("leaf.pem")),
         tls_key: Some(fixture("leaf.key")),
+        ..TlsArgs::default()
     };
     assert!(both.load().unwrap().is_some());
 }
