@@ -79,7 +79,7 @@ crates/
     dns_srv.rs              DnsSrvSource (Phase 8) — behind the `dns-srv` feature (`hickory-resolver`), `dns_srv_disabled.rs` stands in without it
     grpc_resolver.rs        GrpcResolver (tonic) — behind the `grpc-resolver` feature (`tonic`/`prost`, and `protoc` in `build.rs`), `grpc_resolver_disabled.rs` stands in without it
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
-    procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
+    procinfo.rs             gsp_fd_open / gsp_fd_limit — fd sampling (gsp_build_info lives in gsp_http::metrics)
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
     controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
     tunnel_client.rs        `--tunnel-*` (phase 14 slice 4, `docs/11`): brings up this proxy's shared WireGuard interface and subscribes to `gsp-controller`'s backend-peers registry, reconciling every registered origin onto the interface's peer list
