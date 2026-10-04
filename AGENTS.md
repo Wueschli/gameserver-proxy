@@ -84,7 +84,6 @@ crates/
   gsp-controller/            binary — Tier-1 config distribution (phases 10–14, docs/10 "The controller" + docs/11: `standalone`/`slave` roles, Raft HA, canary rollout, backend/proxy-peers registries)
     store.rs                `Store` — embedded sled KV (ADR 20): revisions + current-pointer trees, catch-up range scan
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
-    auth.rs                 optional bearer-token gate (`--auth-token`) on the whole /config* surface
     peers.rs                 backend-peers registry (phase 14 slice 2, `docs/11`): POST/GET /peers(+/{name}), GET /peers/subscribe (SSE) — origins register here, proxies subscribe
     addresses.rs            tunnel address book: allocation, pinning, release; shared by both peer registries
     addresses/api.rs        `GET /tunnel/addresses` and the release plumbing over the address book
@@ -93,7 +92,6 @@ crates/
     ingest.rs               `IngestStore` — in-memory, latest-write-wins per-instance map (deliberately unpersisted); `IngestPayload` (pool/backend summary + session counts, self-reported `admin_url`)
     api.rs                  POST /ingest, GET /fleet/pools|sessions|healthz|subscribe (SSE)
     fanout.rs               intent-verb fan-out to instance admin APIs — targeted (drain/undrain) + broadcast (backend add/patch/delete, route-hint)
-    auth.rs                 optional bearer-token gate (`--auth-token`) + `--instance-token` presented out to instances
   gsp-ui/                    binary — the admin GUI's BFF (phase 10+11, docs/10 "The admin GUI"); dedicated process, not hosted in the controller or aggregator; holds neither's authority, no gsp-core/gsp-config dependency
     session.rs              `SessionStore` — in-memory random session ids (ephemeral, like the aggregator's store)
     api.rs                  POST /ui/login|logout, GET /ui/session; merges aggregator_proxy/controller_proxy/ws into the session-gated route group
@@ -110,7 +108,7 @@ crates/
     address_store.rs        persists the controller-assigned tunnel address next to the key (start-from-saved while the controller is down)
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
-  gsp-http/                  reqwest-only: the one place production HTTP clients are built (`builder()`/`client()`), with `--ca-file`'s extra roots (set once from each binary's `main`); test-only CA fixtures in `tests/fixtures/`
+  gsp-http/                  reqwest-only (axum behind the opt-in `server` feature): the one place production HTTP clients are built (`builder()`/`client()`), with `--ca-file`'s extra roots (set once from each binary's `main`); `server::require_bearer` is the one constant-time `--auth-token` middleware every fleet HTTP server shares; test-only CA fixtures in `tests/fixtures/`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
@@ -189,10 +187,14 @@ client from `crates/gsp/proto/resolver.proto`.
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
 7. **Crate boundaries:** `gsp-config` depends only on `serde` + `serde_yaml` +
-   `thiserror`.
+   `thiserror` + `base64` (WireGuard key validation).
    `gsp-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `gsp`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `gsp-core`, the HTTP/gRPC clients in `gsp`.
+   **Poisoned locks:** recover with `lock().unwrap_or_else(PoisonError::into_inner)`
+   (same for `read`/`write`) — never `.unwrap()` / `.expect("…poisoned")`. The
+   guarded state here is plain data, so one panicked task must not cascade into
+   every later caller.
 8. **Commit directly on `main` whenever it is useful** — a finished slice, a spec or
    plan, a green docs sweep; no need to ask first and no feature branch (owner's
    standing decision, 2026-10-01). Run `make check` first (rule 1). End commit

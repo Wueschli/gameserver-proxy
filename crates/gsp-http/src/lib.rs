@@ -10,6 +10,9 @@
 //! [`builder`] / [`client`] still build a fresh client per call, so call sites
 //! keep their existing connection and timeout semantics.
 
+#[cfg(feature = "server")]
+pub mod server;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

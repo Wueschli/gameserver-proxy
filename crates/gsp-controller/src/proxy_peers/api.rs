@@ -4,11 +4,10 @@
 //! the module doc in `crate::proxy_peers` for why.
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -20,7 +19,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::ProxyRegistration;
 use crate::addresses::api::claim_error_response;
-use crate::addresses::{now_secs, AddressBook, Role};
+use crate::addresses::{unix_secs, AddressBook, Role};
 use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{RevisionBytes, Store, StoreError};
 
@@ -117,31 +116,10 @@ pub fn router(state: ProxyPeersState) -> Router {
         .route("/proxy-peers/subscribe", get(subscribe))
         .route("/proxy-peers/{name}", get(get_one).delete(delete_one))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::peers::api::require_bearer` exactly, typed against
-/// `ProxyPeersState`.
-async fn require_bearer(
-    State(state): State<ProxyPeersState>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -178,11 +156,14 @@ async fn register(State(state): State<ProxyPeersState>, body: String) -> Respons
             .into_response();
     }
 
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let assignment =
         match state
             .book
-            .claim(Role::Proxy, &reg.name, reg.requested_address(), now_secs())
+            .claim(Role::Proxy, &reg.name, reg.requested_address(), unix_secs())
         {
             Ok(a) => a,
             Err(e) => return claim_error_response(&e),
@@ -242,7 +223,10 @@ struct DeleteResponse {
 
 /// `DELETE /proxy-peers/{name}` — see `crate::peers::api::delete_one`.
 async fn delete_one(State(state): State<ProxyPeersState>, Path(name): Path<String>) -> Response {
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let has_current = match state.current.contains_key(name.as_bytes()) {
         Ok(b) => b,
         Err(e) => return store_error_response(StoreError::from(e)),

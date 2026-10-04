@@ -31,9 +31,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -58,28 +57,10 @@ pub fn router(state: AdoptState) -> Router {
     Router::new()
         .route("/admin/adopt", post(adopt))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::auth::require_bearer`, typed against [`AdoptState`] — see
-/// `crate::intent::api::require_bearer`'s doc comment for why this can't be
-/// shared as one generic function across three distinct `axum` states.
-async fn require_bearer(State(state): State<AdoptState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Deserialize)]

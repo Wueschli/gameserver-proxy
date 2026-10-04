@@ -1365,6 +1365,7 @@ dependencies = [
 name = "gsp-config"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_yaml",
  "thiserror 2.0.20",
@@ -1437,11 +1438,13 @@ dependencies = [
 name = "gsp-http"
 version = "0.0.1"
 dependencies = [
+ "axum 0.8.9",
  "reqwest",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tower 0.5.3",
 ]
 
 [[package]]

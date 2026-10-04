@@ -15,7 +15,7 @@ name = "gsp-controller"
 path = "src/main.rs"
 
 [dependencies]
-gsp-http.workspace = true
+gsp-http = { workspace = true, features = ["server"] }
 gsp-config = { path = "../gsp-config" }
 
 sled.workspace = true

@@ -26,7 +26,6 @@
 pub mod addresses;
 pub mod adopt;
 pub mod api;
-pub mod auth;
 pub mod ha;
 pub mod intent;
 pub mod parent_client;

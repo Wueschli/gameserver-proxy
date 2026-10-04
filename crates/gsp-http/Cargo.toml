@@ -10,7 +10,13 @@ publish = false
 # Deliberately reqwest-only: gsp-aggregator and gsp-ui depend on it and must
 # stay free of gsp-core / gsp-config.
 
+[features]
+# The shared axum bearer-auth middleware (`server` module). Off by default so
+# client-only users (gsp-agent) don't pull axum in.
+server = ["dep:axum"]
+
 [dependencies]
+axum = { workspace = true, optional = true }
 reqwest.workspace = true
 thiserror.workspace = true
 
@@ -18,3 +24,5 @@ thiserror.workspace = true
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tempfile = { workspace = true }
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

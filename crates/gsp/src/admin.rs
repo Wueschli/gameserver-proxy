@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
-    middleware::{self, Next},
+    extract::{Path, Query, State},
+    http::StatusCode,
+    middleware::{self},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -59,33 +59,15 @@ fn router(state: AdminState) -> Router {
         .route("/admin/sniffers", get(list_sniffers).post(upload_sniffer))
         .route("/admin/sniffers/{name}", delete(delete_sniffer))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref())
+                .with_body("unauthorized\n"),
+            gsp_http::server::require_bearer,
         ));
 
     Router::new()
         .route("/healthz", get(healthz))
         .merge(gated)
         .with_state(state)
-}
-
-/// See `AdminState::auth_token`. A single shared secret, not RBAC — the same
-/// scope call `gsp-controller`'s and `gsp-aggregator`'s own `auth.rs` make.
-async fn require_bearer(State(state): State<AdminState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await; // no token configured: open, as always
-    };
-
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response(),
-    }
 }
 
 pub async fn serve(

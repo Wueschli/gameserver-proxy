@@ -4,11 +4,10 @@
 //! state" on top of `Store`'s append-only log).
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -20,7 +19,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::PeerRegistration;
 use crate::addresses::api::claim_error_response;
-use crate::addresses::{expand_backends, now_secs, AddressBook, Role};
+use crate::addresses::{expand_backends, unix_secs, AddressBook, Role};
 use crate::store::{RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
@@ -129,27 +128,10 @@ pub fn router(state: PeersState) -> Router {
         .route("/peers/subscribe", get(subscribe))
         .route("/peers/{name}", get(get_one).delete(delete_one))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::intent::api::require_bearer` exactly, typed against
-/// `PeersState` — a distinct `axum` state needs its own instance.
-async fn require_bearer(State(state): State<PeersState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -188,15 +170,19 @@ async fn register(State(state): State<PeersState>, body: String) -> Response {
             .into_response();
     }
 
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-    let assignment =
-        match state
-            .book
-            .claim(Role::Origin, &reg.name, reg.requested_address(), now_secs())
-        {
-            Ok(a) => a,
-            Err(e) => return claim_error_response(&e),
-        };
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let assignment = match state.book.claim(
+        Role::Origin,
+        &reg.name,
+        reg.requested_address(),
+        unix_secs(),
+    ) {
+        Ok(a) => a,
+        Err(e) => return claim_error_response(&e),
+    };
     // Note: the claim above is kept even if the backends below are rejected —
     // the owner's corrected retry gets the same address (Review Focus 1).
     reg.backends = match expand_backends(&reg.backends, assignment.address) {
@@ -270,7 +256,10 @@ struct DeleteResponse {
 /// name is unknown everywhere (no current registration *and* no address), so a
 /// retry after a crash still completes.
 async fn delete_one(State(state): State<PeersState>, Path(name): Path<String>) -> Response {
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let has_current = match state.current.contains_key(name.as_bytes()) {
         Ok(b) => b,
         Err(e) => return store_error_response(StoreError::from(e)),

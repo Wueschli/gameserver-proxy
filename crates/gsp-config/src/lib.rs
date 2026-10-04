@@ -304,53 +304,16 @@ fn default_source_refresh_sec() -> u64 {
     15
 }
 
-/// Minimal standard-alphabet base64 decoder, just enough to validate a
-/// WireGuard key (32 bytes, i.e. exactly 44 chars with one trailing `=`).
-/// `gsp-config` may only depend on `serde`/`serde_yaml`/`thiserror` (see
-/// AGENTS.md's crate-boundary rule), so this doesn't pull in a `base64` crate
-/// for one validation check. `pub` (not just used by this crate's own
-/// `validate()`) so `gsp-controller`'s phase 14 backend-peers registry
-/// (slice 2) can apply the exact same pubkey check without duplicating it —
-/// `gsp-controller` already depends on `gsp-config` for `parse_str`.
+/// Decode a standard-alphabet base64 string that must be exactly 32 bytes —
+/// the shape of a WireGuard key (44 chars with one trailing `=`). `pub` (not
+/// just used by this crate's own `validate()`) so `gsp-controller`'s phase 14
+/// backend-peers registry can apply the exact same pubkey check without
+/// duplicating it — `gsp-controller` already depends on `gsp-config` for
+/// `parse_str`.
 pub fn base64_decode_32(s: &str) -> Option<[u8; 32]> {
-    fn val(b: u8) -> Option<u8> {
-        match b {
-            b'A'..=b'Z' => Some(b - b'A'),
-            b'a'..=b'z' => Some(b - b'a' + 26),
-            b'0'..=b'9' => Some(b - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = s.as_bytes();
-    if bytes.len() != 44 || bytes[43] != b'=' {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (chunk_idx, chunk) in bytes[..40].chunks(4).enumerate() {
-        let vals: Vec<u8> = chunk.iter().map(|&b| val(b)).collect::<Option<_>>()?;
-        let n = (vals[0] as u32) << 18
-            | (vals[1] as u32) << 12
-            | (vals[2] as u32) << 6
-            | (vals[3] as u32);
-        let o = chunk_idx * 3;
-        out[o] = (n >> 16) as u8;
-        out[o + 1] = (n >> 8) as u8;
-        out[o + 2] = n as u8;
-    }
-    // Final 4-char group "XX==" style but here it's chars[40..44] = 3 data + '='.
-    let last = &bytes[40..44];
-    let v0 = val(last[0])?;
-    let v1 = val(last[1])?;
-    let v2 = val(last[2])?;
-    if last[3] != b'=' {
-        return None;
-    }
-    let n = (v0 as u32) << 18 | (v1 as u32) << 12 | (v2 as u32) << 6;
-    out[30] = (n >> 16) as u8;
-    out[31] = (n >> 8) as u8;
-    Some(out)
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.decode(s).ok()?.try_into().ok()
 }
 
 #[derive(Debug, Deserialize)]

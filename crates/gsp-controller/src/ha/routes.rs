@@ -7,10 +7,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
@@ -23,25 +21,10 @@ pub fn router(ha: Arc<HaHandle>) -> Router {
         .route("/raft/vote", post(vote))
         .route("/raft/snapshot", post(snapshot))
         .route_layer(axum::middleware::from_fn_with_state(
-            ha.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(ha.ha_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(ha)
-}
-
-async fn require_bearer(State(ha): State<Arc<HaHandle>>, req: Request, next: Next) -> Response {
-    let Some(expected) = ha.ha_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 async fn vote(

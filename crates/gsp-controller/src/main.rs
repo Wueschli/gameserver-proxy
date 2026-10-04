@@ -41,7 +41,7 @@ struct Args {
     /// Bearer token required on every /config* request. Omit to leave the
     /// API open — network-boundary-only auth, the same posture `gsp`'s own
     /// admin API has today. Not a full RBAC/identity story, just a shared
-    /// secret (see `crate::auth`).
+    /// secret (see `gsp_http::server`).
     #[arg(long)]
     auth_token: Option<String>,
 
@@ -230,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
     // `role::RoleHandle`'s doc for why a plain `Role` field per state
     // wouldn't work once adoption exists).
     let role_handle = RoleHandle::new(args.role);
-    let mut config_state = AppState::new(store, args.auth_token.clone(), role_handle.clone());
+    let mut config_state = AppState::try_new(store, args.auth_token.clone(), role_handle.clone())?;
     let mut intent_state_val =
         IntentState::new(intent_store, role_handle.clone(), args.auth_token.clone());
 

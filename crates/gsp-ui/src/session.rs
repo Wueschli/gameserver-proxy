@@ -5,7 +5,7 @@
 //! valid, and what can it do," nothing durable is lost.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 use rand::RngCore;
 
@@ -45,7 +45,7 @@ impl SessionStore {
         let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         self.sessions
             .write()
-            .expect("session store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(id.clone(), session);
         id
     }
@@ -54,7 +54,7 @@ impl SessionStore {
     pub fn get(&self, id: &str) -> Option<Session> {
         self.sessions
             .read()
-            .expect("session store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(id)
             .cloned()
     }
@@ -62,14 +62,14 @@ impl SessionStore {
     pub fn is_valid(&self, id: &str) -> bool {
         self.sessions
             .read()
-            .expect("session store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .contains_key(id)
     }
 
     pub fn revoke(&self, id: &str) {
         self.sessions
             .write()
-            .expect("session store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(id);
     }
 }

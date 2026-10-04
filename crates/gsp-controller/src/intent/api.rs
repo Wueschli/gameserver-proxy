@@ -12,9 +12,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Query, Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -78,28 +77,10 @@ pub fn router(state: IntentState) -> Router {
         .route("/intent", axum::routing::post(submit_intent))
         .route("/intent/subscribe", get(subscribe))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::auth::require_bearer` exactly, just typed against
-/// [`IntentState`] instead of `crate::api::AppState` — two distinct `axum`
-/// states can't share one `State<T>`-typed middleware function.
-async fn require_bearer(State(state): State<IntentState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]

@@ -17,7 +17,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -240,7 +240,7 @@ impl AddressBook {
         requested: Option<Ipv4Addr>,
         now: u64,
     ) -> Result<Assignment, ClaimError> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let okey = owner_key(role, name);
         let existing = self.read_owner(&okey)?;
 
@@ -282,7 +282,7 @@ impl AddressBook {
 
     /// Frees `(role, name)`'s address. `Ok(None)` if it held none.
     pub fn release(&self, role: Role, name: &str) -> Result<Option<Ipv4Addr>, ClaimError> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let okey = owner_key(role, name);
         let Some(existing) = self.read_owner(&okey)? else {
             return Ok(None);
@@ -389,7 +389,7 @@ pub fn is_stale(assignment: &Assignment, now: u64, after: Duration) -> bool {
     !after.is_zero() && now.saturating_sub(assignment.last_seen) > after.as_secs()
 }
 
-pub fn now_secs() -> u64 {
+pub fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
