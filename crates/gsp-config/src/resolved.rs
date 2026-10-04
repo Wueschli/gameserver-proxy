@@ -316,7 +316,7 @@ pub enum SourceKind {
         addr: String,
         tag: Option<String>,
     },
-    /// Kubernetes Endpoints of a service (polled).
+    /// Kubernetes EndpointSlices of a service (polled and watched).
     Kubernetes {
         namespace: String,
         service: String,

@@ -86,7 +86,7 @@ struct, the rest is shared).
 
 ### 6. Config loader & discovery adapter
 - Loads/validates YAML, builds the snapshot, compiles matchers.
-- Adapters (DNS SRV, Consul, K8s Endpoints, static) implement a common
+- Adapters (DNS SRV, Consul, K8s EndpointSlices, static) implement a common
   `BackendSource` interface and provide backend lists per pool.
 - Reload: new snapshot becomes active atomically; listeners are reconciled by name
   (added spawned, removed stopped, changed re-spawned) — an unchanged listener
