@@ -420,9 +420,14 @@ leader imports exactly one node's copy, whichever node wins the first election.
   initialization.
 - Clients' pinned addresses that used to collide across nodes now get `409`: uniqueness
   is cluster-wide, where it was per node before.
-- Snapshots persisted by a build older than this feature (before 2026-10-03) install as
-  empty registries and an empty book: take the upgrade on a cluster whose nodes all run
-  this version, or let the cluster re-initialize as above.
+- Snapshots persisted by a build older than this feature (before 2026-10-03) are not
+  supported: a follower refuses to install one (`ERROR` naming the snapshot format) rather
+  than read it as empty registries and an empty book. Start such a node from empty
+  storage, or let the cluster re-initialize as above.
+- The registries compact their logs: each keeps one entry per name (its registration, or
+  the tombstone of a removed one), so a registry log and the Raft snapshot stay bounded by
+  the number of distinct names ever registered, not by how often they re-register.
+  Revision numbers have gaps afterwards; a subscriber's `since` cursor is unaffected.
 
 ### Limits (read these before relying on it)
 

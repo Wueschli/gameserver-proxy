@@ -23,6 +23,7 @@
 use std::convert::Infallible;
 use std::marker::PhantomData;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use axum::extract::{OriginalUri, Path, Query, State};
@@ -47,6 +48,16 @@ mod ha;
 pub use ha::{canonical_addr, is_unchanged, normalize, RegistryHa, TOUCH_AFTER};
 
 const UPDATES_CAPACITY: usize = 64;
+
+/// How many writes a registry takes between log compactions
+/// ([`RegistryState::compact`]). A compaction scans the log, which holds one
+/// entry per name plus what the writes since the last compaction added, so
+/// this is also (roughly) the slack the log carries over its floor.
+const COMPACT_EVERY: u64 = 1024;
+
+/// How often a read re-reads `current` when the revision it named has just
+/// been superseded and compacted away.
+const CURRENT_READ_ATTEMPTS: usize = 4;
 
 /// One registry's registration type — what `POST` takes, what `current`
 /// points at and what every subscriber event carries.
@@ -127,6 +138,10 @@ pub struct RegistryState<R: Registration> {
     /// The clock (unix seconds) a write proposed here is stamped with —
     /// [`unix_secs`] outside tests.
     now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// Writes since the last compaction; starts due, so the first write
+    /// after a start compacts a log a restart would otherwise leave long.
+    writes_since_compaction: Arc<AtomicU64>,
+    compact_every: u64,
     registration: PhantomData<R>,
 }
 
@@ -146,8 +161,17 @@ impl<R: Registration> RegistryState<R> {
             write_lock: Arc::new(std::sync::Mutex::new(())),
             ha: None,
             now_fn: Arc::new(unix_secs),
+            writes_since_compaction: Arc::new(AtomicU64::new(COMPACT_EVERY)),
+            compact_every: COMPACT_EVERY,
             registration: PhantomData,
         }
+    }
+
+    /// Compacts after every `writes` writes instead of the default (tests).
+    pub fn with_compact_every(mut self, writes: u64) -> Self {
+        self.compact_every = writes;
+        self.writes_since_compaction = Arc::new(AtomicU64::new(writes));
+        self
     }
 
     /// Routes this registry's writes through Raft (`Some`), or keeps them on
@@ -201,8 +225,46 @@ impl<R: Registration> RegistryState<R> {
         };
         if let Applied::Written(revision) = applied {
             let _ = self.updates.send(revision);
+            if self.writes_since_compaction.fetch_add(1, Ordering::Relaxed) + 1
+                >= self.compact_every
+            {
+                self.writes_since_compaction.store(0, Ordering::Relaxed);
+                // The write is durable; a failed compaction only leaves the
+                // log longer until the next one.
+                match self.compact() {
+                    Ok(0) => {}
+                    Ok(dropped) => tracing::debug!(
+                        dropped,
+                        registry = wording(R::ROLE).log,
+                        "compacted the registry log"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        registry = wording(R::ROLE).log,
+                        "compacting the registry log failed"
+                    ),
+                }
+            }
         }
         Ok(applied)
+    }
+
+    /// Drops every log entry a later one for the same name supersedes, so
+    /// the log (and the Raft snapshot that carries it) holds one entry per
+    /// name ever registered: its registration, or the tombstone that
+    /// removed it. Returns how many entries were dropped.
+    ///
+    /// Revision numbers are never reassigned, so the log has gaps but a
+    /// subscriber's `since` cursor stays meaningful: everything that changed
+    /// after it is still there at its newest revision. Tombstones are kept
+    /// on purpose: a subscriber holds its view across reconnects and replays
+    /// from `since=0` (`gsp`'s `tunnel_client`), so one that missed a
+    /// removal while disconnected must still be told. The cost is one small
+    /// entry per name that ever existed, bounded by distinct names rather
+    /// than by changes. `current` needs no update: it points at each name's
+    /// newest registration, which is never dropped.
+    pub fn compact(&self) -> Result<usize, StoreError> {
+        self.store.compact(entry_name)
     }
 
     /// The current registration for `name`, if it has ever registered.
@@ -212,14 +274,19 @@ impl<R: Registration> RegistryState<R> {
 
     /// [`RegistryState::current_for`] with the revision it was logged at.
     pub fn current_entry(&self, name: &str) -> Result<Option<(u64, R)>, StoreError> {
-        let Some(rev_bytes) = self.current.get(name.as_bytes())? else {
-            return Ok(None);
-        };
-        let revision = decode_revision(&rev_bytes);
-        Ok(self
-            .store
-            .get(revision)?
-            .map(|bytes| (revision, decode_registration(&bytes))))
+        // A write can supersede the revision `current` named and a
+        // compaction drop it between the two reads; `current` already names
+        // the newer one by then, so reading again finds it.
+        for _ in 0..CURRENT_READ_ATTEMPTS {
+            let Some(rev_bytes) = self.current.get(name.as_bytes())? else {
+                return Ok(None);
+            };
+            let revision = decode_revision(&rev_bytes);
+            if let Some(bytes) = self.store.get(revision)? {
+                return Ok(Some((revision, decode_registration(&bytes))));
+            }
+        }
+        Ok(None)
     }
 
     /// Whether `name` has a current registration (not removed).
@@ -230,10 +297,10 @@ impl<R: Registration> RegistryState<R> {
     /// Every name's current registration, ordered by name.
     pub(crate) fn all_current(&self) -> Result<Vec<R>, StoreError> {
         let mut out = Vec::new();
-        for item in self.current.iter() {
-            let (_, rev_bytes) = item?;
-            if let Some(bytes) = self.store.get(decode_revision(&rev_bytes))? {
-                out.push(decode_registration(&bytes));
+        for key in self.current.iter().keys() {
+            let name = String::from_utf8_lossy(&key?).into_owned();
+            if let Some((_, reg)) = self.current_entry(&name)? {
+                out.push(reg);
             }
         }
         Ok(out)
@@ -600,6 +667,14 @@ pub(crate) fn tombstone_bytes(name: &str) -> Vec<u8> {
         .expect("a json! object always serializes")
 }
 
+/// The name a log entry is about: the removed name of a tombstone, else the
+/// registration's own.
+fn entry_name(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let name = value.get("removed").or_else(|| value.get("name"))?;
+    name.as_str().map(str::to_owned)
+}
+
 /// The SSE `data:` payload for one log entry:
 /// `{"revision":N,"registration":{…}}` for a registration,
 /// `{"revision":N,"removed":{"name":"…"}}` for a tombstone.
@@ -718,6 +793,69 @@ mod tests {
             dst.register_applied(&reg("c"), Some(4)).unwrap(),
             Applied::Written(4)
         );
+    }
+
+    fn revision_numbers(state: &RegistryState<PeerRegistration>) -> Vec<u64> {
+        state
+            .store
+            .all_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect()
+    }
+
+    #[test]
+    fn compact_keeps_each_names_newest_entry_tombstones_included() {
+        let (state, _dir) = state();
+        state.register_applied(&reg("a"), Some(1)).unwrap(); // 1
+        state.register_applied(&reg("b"), Some(2)).unwrap(); // 2
+        state.register_applied(&reg("a"), Some(3)).unwrap(); // 3
+        state.remove_applied("b", Some(4)).unwrap(); // 4
+        state.register_applied(&reg("c"), Some(5)).unwrap(); // 5
+        state.register_applied(&reg("a"), Some(6)).unwrap(); // 6
+
+        assert_eq!(state.compact().unwrap(), 3);
+        // `b`'s tombstone stays: a subscriber that still holds `b` and
+        // reconnects must learn it is gone.
+        assert_eq!(revision_numbers(&state), vec![4, 5, 6]);
+        assert_eq!(state.current_entry("a").unwrap(), Some((6, reg("a"))));
+        assert_eq!(state.current_for("b").unwrap(), None);
+        assert_eq!(state.current_entry("c").unwrap(), Some((5, reg("c"))));
+        assert_eq!(state.store.applied_index().unwrap(), Some(6));
+
+        // A cursor taken before the compaction still sees every name that
+        // changed after it, at its newest revision.
+        let seen: Vec<u64> = state
+            .store
+            .revisions_after(2)
+            .unwrap()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        assert_eq!(seen, vec![4, 5, 6]);
+
+        // Numbering continues, and a snapshot of the compacted log installs.
+        assert_eq!(
+            state.register_applied(&reg("d"), Some(7)).unwrap(),
+            Applied::Written(7)
+        );
+        let (dst, _d) = self::state();
+        dst.replace(&state.snapshot().unwrap()).unwrap();
+        assert_eq!(revision_numbers(&dst), vec![4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn writes_compact_the_log_every_so_often() {
+        let (state, _dir) = state();
+        let state = state.with_compact_every(4);
+        // The first write after a start compacts too, so a restart never
+        // lets a long log sit.
+        for i in 1..=8 {
+            state.register_applied(&reg("home"), Some(i)).unwrap();
+        }
+        assert!(revision_numbers(&state).len() <= 4, "the log is bounded");
+        assert_eq!(state.current_entry("home").unwrap().unwrap().0, 8);
     }
 
     #[test]
