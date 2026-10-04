@@ -120,7 +120,7 @@ short-lived `src_ip → pool` mapping.
   - `a2s` / `source-query` → Valve query recognized (route to a query pool)
   - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`, no hostname: the payload is encrypted)
   - `wireguard` → handshake initiation recognized (key `wireguard`)
-  - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal, list it after stronger plugins)
+  - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal: about 3 in 256 random datagrams match, so it makes the first-packet gate leaky and belongs after stronger plugins in the sniffer list)
   - `raknet` → RakNet offline handshake recognized by its magic (Minecraft Bedrock and other RakNet games; key `raknet`)
   - `teamspeak3` → TeamSpeak 3 `TS3INIT1` client init recognized (key `teamspeak3`)
 - Plugin contract: **read-only**, receives up to `peek_max_bytes`, returns

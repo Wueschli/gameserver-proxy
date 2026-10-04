@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn rejects_other_opcodes_and_key_ids() {
-        assert!(recognise(&reset(0x48, 20)).is_none()); // P_DATA_V1-ish (9<<3)
+        assert!(recognise(&reset(0x48, 20)).is_none()); // P_DATA_V2 (9<<3)
         assert!(recognise(&reset(0x20, 20)).is_none()); // P_CONTROL_V1
         assert!(recognise(&reset(0x39, 20)).is_none()); // key id 1: a renegotiation
         assert!(recognise(&reset(0x40, 20)).is_none()); // server reset V2
