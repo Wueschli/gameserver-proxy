@@ -3,7 +3,7 @@
 
 github/codeql-action/upload-sarif takes the whole target/trivy directory, but
 GitHub rejects an upload whose runs share one tool + category, and every Trivy
-report is a "Trivy" run. This stamps `runAutomationDetails.id` with the report's
+report is a "Trivy" run. This stamps `automationDetails.id` with the report's
 name (image-gsp, lock-cargo, ...), so each report is its own category and a
 later upload replaces only that report's alerts.
 
@@ -21,7 +21,7 @@ def stamp(path: str) -> None:
     with open(path) as f:
         doc = json.load(f)
     for run in doc.get("runs", []):
-        run["runAutomationDetails"] = {"id": f"trivy/{name}/"}
+        run["automationDetails"] = {"id": f"trivy/{name}/"}
     with open(path, "w") as f:
         json.dump(doc, f)
 

@@ -29,8 +29,8 @@ class StampTest(unittest.TestCase):
     def test_each_report_gets_its_own_category(self):
         r, out = self.run_in({"image-gsp.sarif": sarif(), "lock-cargo.sarif": sarif()})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(out["image-gsp.sarif"]["runs"][0]["runAutomationDetails"]["id"], "trivy/image-gsp/")
-        self.assertEqual(out["lock-cargo.sarif"]["runs"][0]["runAutomationDetails"]["id"], "trivy/lock-cargo/")
+        self.assertEqual(out["image-gsp.sarif"]["runs"][0]["automationDetails"]["id"], "trivy/image-gsp/")
+        self.assertEqual(out["lock-cargo.sarif"]["runs"][0]["automationDetails"]["id"], "trivy/lock-cargo/")
 
     def test_keeps_the_rest_of_the_report(self):
         _, out = self.run_in({"a.sarif": sarif(2)})
