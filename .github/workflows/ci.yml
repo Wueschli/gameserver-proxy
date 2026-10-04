@@ -175,7 +175,7 @@ jobs:
         run: cargo nextest run --profile ci --workspace --config-file ../../.config/nextest.toml
       - name: Build to wasm32-unknown-unknown
         working-directory: crates/plugins
-        run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p regex-firstbytes
+        run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard
       - name: Size check (informational)
         working-directory: crates/plugins
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm

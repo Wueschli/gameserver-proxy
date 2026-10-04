@@ -634,6 +634,25 @@ mod tests {
         assert_eq!(hint.key.as_deref(), Some("a2s"));
         assert!(a2s.sniff(b"not a2s at all").is_none());
 
+        let quic = registry.get("quic").expect("quic.wasm not built");
+        // A v1 Initial: long header, version 1, 8-byte DCID, 4-byte SCID.
+        let mut initial = vec![0xc0, 0, 0, 0, 1, 8];
+        initial.extend_from_slice(&[7; 8]);
+        initial.push(4);
+        initial.extend_from_slice(&[9; 4]);
+        initial.extend_from_slice(&[0; 32]);
+        assert_eq!(quic.sniff(&initial).unwrap().key.as_deref(), Some("quic"));
+        assert!(quic.sniff(b"not quic at all").is_none());
+
+        let wireguard = registry.get("wireguard").expect("wireguard.wasm not built");
+        let mut initiation = vec![0u8; 148];
+        initiation[0] = 1;
+        assert_eq!(
+            wireguard.sniff(&initiation).unwrap().key.as_deref(),
+            Some("wireguard")
+        );
+        assert!(wireguard.sniff(&initiation[..147]).is_none());
+
         let minecraft = registry.get("minecraft").expect("minecraft.wasm not built");
         // A minimal handshake: len, id=0x00, protocol=1, "play.example.net", port, next_state=1.
         let mut pkt = vec![0x00, 0x01];
@@ -736,7 +755,7 @@ mod tests {
         sc.call_timeout = std::time::Duration::from_secs(10);
         // Pin all three (a config on `regex_firstbytes` is what makes it match;
         // once `modules` is non-empty every file must be pinned).
-        for name in ["a2s", "minecraft", "regex_firstbytes"] {
+        for name in ["a2s", "minecraft", "quic", "wireguard", "regex_firstbytes"] {
             let bytes = std::fs::read(dir.join(format!("{name}.wasm"))).unwrap();
             sc.modules.push(gsp_config::SnifferModulePin {
                 name: name.into(),
@@ -760,9 +779,21 @@ mod tests {
             framed.extend(pkt);
             framed
         };
-        let cases: [(&str, &[u8]); 3] = [
+        let quic_initial = [
+            &[0xc0u8, 0, 0, 0, 1, 8][..],
+            &[7; 8],
+            &[4],
+            &[9; 4],
+            &[0; 32],
+        ]
+        .concat();
+        let mut wg_initiation = vec![0u8; 148];
+        wg_initiation[0] = 1;
+        let cases: [(&str, &[u8]); 5] = [
             ("a2s", b"\xff\xff\xff\xffTSource Engine Query\0"),
             ("minecraft", &minecraft_handshake),
+            ("quic", &quic_initial),
+            ("wireguard", &wg_initiation),
             ("regex_firstbytes", b"GET /health HTTP/1.1\r\nHost: x\r\n"),
         ];
 

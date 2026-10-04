@@ -21,7 +21,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quic"
+version = "0.0.1"
+dependencies = [
+ "gsp-sniffer-abi",
+]
+
+[[package]]
 name = "regex-firstbytes"
+version = "0.0.1"
+dependencies = [
+ "gsp-sniffer-abi",
+]
+
+[[package]]
+name = "wireguard"
 version = "0.0.1"
 dependencies = [
  "gsp-sniffer-abi",

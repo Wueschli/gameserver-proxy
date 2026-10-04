@@ -100,11 +100,11 @@ Kubernetes manifests live in [`deploy/`](deploy/). TCP and UDP listener → back
 - sniffer plugin loader (phase 9): `settings.sniffers: { dir, call_timeout_ms,
   max_memory_bytes, modules }` loads `*.wasm` modules — sandboxed `wasmtime`
   (no WASI, no host imports, epoch-interruption time bound + a `StoreLimits`
-  memory bound), rescanned live on every config reload. Two first-party
+  memory bound), rescanned live on every config reload. Five first-party
   plugins ship as a separate `crates/plugins/` workspace (`make plugins`):
-  `a2s` (Source-engine query recognition) and `minecraft` (virtual-host
-  extraction from the protocol handshake), plus a `regex-firstbytes`
-  template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
+  `a2s` (Source-engine query recognition), `minecraft` (virtual-host
+  extraction from the protocol handshake), `quic` and `wireguard` (first-packet
+  recognition), plus a `regex-firstbytes` template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
   real plugins, loopback) — see `docs/07`
 
 **Phase 10+11 complete** (single-tier PoC), **phase 12 complete** (fleet
@@ -198,7 +198,7 @@ Admin endpoints (default `127.0.0.1:9900`): `GET /healthz` `/readyz` `/metrics`
 | `crates/gsp-agent` | origin-side WireGuard agent (phase 14, `docs/11`) |
 | `crates/gsp-fleet-tests` | multi-process integration tests over the real binaries (part of `make check`) |
 | `crates/gsp-bench` | latency / load harness (`make bench`) — added p50/p99 vs. NFR N1/N2 |
-| `crates/plugins` | first-party WASM sniffer plugins (`a2s`, `minecraft`, `regex-firstbytes`) — standalone workspace, `make plugins` |
+| `crates/plugins` | first-party WASM sniffer plugins (`a2s`, `minecraft`, `quic`, `wireguard`, `regex-firstbytes`) — standalone workspace, `make plugins` |
 
 ## Contributing / continuing the work
 
