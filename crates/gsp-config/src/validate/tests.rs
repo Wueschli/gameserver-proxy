@@ -1738,6 +1738,38 @@ listeners:
 }
 
 #[test]
+fn consul_source_takes_an_optional_token_file() {
+    let yaml = |extra: &str| {
+        format!(
+            r#"
+backend_sources:
+  - {{ name: c, type: consul, service: game{extra} }}
+pools:
+  - {{ name: pc, source: c }}
+listeners:
+  - {{ name: l, bind: "0.0.0.0:7777", pool: pc }}
+"#
+        )
+    };
+    let token_file = |extra: &str| match parse_str(&yaml(extra)).unwrap().pools[0]
+        .source
+        .clone()
+        .unwrap()
+        .kind
+    {
+        SourceKind::Consul { token_file, .. } => token_file,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(token_file(""), None);
+    assert_eq!(
+        token_file(", consul_token_file: /run/secrets/consul"),
+        Some("/run/secrets/consul".to_string())
+    );
+    let err = parse_str(&yaml(", consul_token_file: \"\"")).unwrap_err();
+    assert!(err.to_string().contains("consul_token_file"), "{err}");
+}
+
+#[test]
 fn consul_and_kubernetes_sources_apply_defaults() {
     let yaml = r#"
 backend_sources:

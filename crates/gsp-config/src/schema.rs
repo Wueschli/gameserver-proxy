@@ -282,6 +282,11 @@ pub(crate) struct RawBackendSource {
     /// `consul` only: base URL of the Consul HTTP API.
     #[serde(default)]
     pub(crate) consul_addr: Option<String>,
+    /// `consul` only: file holding an ACL token, sent as `X-Consul-Token`.
+    /// Re-read while running, so a rotated token is picked up. A path, never the
+    /// token itself, so `GET /config` and the YAML carry no secret.
+    #[serde(default)]
+    pub(crate) consul_token_file: Option<String>,
     /// `consul` only: restrict to service instances carrying this tag.
     #[serde(default)]
     pub(crate) tag: Option<String>,
