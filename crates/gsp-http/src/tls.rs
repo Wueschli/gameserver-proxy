@@ -106,6 +106,20 @@ fn read(name: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
 /// Read and validate the pair: at least one certificate, a key rustls (ring)
 /// supports in any PEM encoding, and a key that matches the leaf certificate.
 pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
+    load_with_digest(files).map(|(key, _)| key)
+}
+
+/// A digest of the pair's bytes, to tell a same-stamp rewrite from no change.
+/// Not cryptographic: nobody is forging a collision against a cert reload.
+fn digest(cert_pem: &[u8], key_pem: &[u8]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    cert_pem.hash(&mut h);
+    key_pem.hash(&mut h);
+    h.finish()
+}
+
+fn load_with_digest(files: &TlsFiles) -> Result<(CertifiedKey, u64), TlsError> {
     let cert_pem = read(files.cert_name, &files.cert)?;
     // Every PEM section must parse: a file cut off mid-chain is an error, not a
     // shorter chain.
@@ -123,6 +137,7 @@ pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
         });
     }
     let key_pem = read(files.key_name, &files.key)?;
+    let digest = digest(&cert_pem, &key_pem);
     let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|_| TlsError::NoKey {
         name: files.key_name,
         path: files.key.clone(),
@@ -141,14 +156,15 @@ pub fn load_certified_key(files: &TlsFiles) -> Result<CertifiedKey, TlsError> {
             files: Box::new(files.clone()),
             source,
         })?;
-    Ok(certified)
+    Ok((certified, digest))
 }
 
 /// What "this file changed" is judged by: mtime, size and — on Unix — inode and
 /// ctime. ctime cannot be set from user space, so a rewrite that restores the
 /// mtime (`cp -p`, `touch -r`) still shows. On a coarse-timestamp filesystem
 /// ctime is as coarse as mtime; there a same-length, same-inode rewrite within
-/// one tick of the last load would be missed until the next change.
+/// one tick of the last load leaves the stamp unchanged, so while the stamp is
+/// that recent ([`RACY_WINDOW`]) the files' bytes are compared too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
     mtime: Option<SystemTime>,
@@ -175,6 +191,44 @@ fn stamp(path: &Path) -> Option<FileStamp> {
 
 type PairStamp = (Option<FileStamp>, Option<FileStamp>);
 
+/// The coarsest timestamp tick we guard against (FAT: 2 s). A stamp this close
+/// to the last check cannot yet rule out a later rewrite with the same stamp.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// The most recent mtime/ctime in the pair.
+fn newest(stamp: &PairStamp) -> Option<SystemTime> {
+    [stamp.0, stamp.1]
+        .into_iter()
+        .flatten()
+        .flat_map(|f| {
+            #[cfg(unix)]
+            let ctime = {
+                let (secs, nanos) = f.ctime;
+                u64::try_from(secs)
+                    .ok()
+                    .map(|s| SystemTime::UNIX_EPOCH + Duration::new(s, nanos as u32))
+            };
+            #[cfg(not(unix))]
+            let ctime = None;
+            [f.mtime, ctime]
+        })
+        .flatten()
+        .max()
+}
+
+/// Whether an unchanged stamp may still hide a rewrite, judged at `checked_at`.
+fn is_racy(stamp: &PairStamp, checked_at: SystemTime) -> bool {
+    newest(stamp).is_some_and(|t| t + RACY_WINDOW > checked_at)
+}
+
+/// What the last good load looked like.
+struct Loaded {
+    stamp: PairStamp,
+    digest: u64,
+    /// When the pair was last confirmed to match `digest`.
+    checked_at: SystemTime,
+}
+
 fn stamps(files: &TlsFiles) -> PairStamp {
     (stamp(&files.cert), stamp(&files.key))
 }
@@ -183,9 +237,9 @@ fn stamps(files: &TlsFiles) -> PairStamp {
 pub struct ReloadingCert {
     files: TlsFiles,
     current: ArcSwap<CertifiedKey>,
-    /// Stamps of the pair last loaded successfully; a failed reload leaves them,
-    /// so the next poll tries again.
-    loaded: Mutex<PairStamp>,
+    /// The pair last loaded successfully; a failed reload leaves it, so the next
+    /// poll tries again.
+    loaded: Mutex<Loaded>,
 }
 
 impl fmt::Debug for ReloadingCert {
@@ -200,25 +254,45 @@ impl ReloadingCert {
     /// Load the pair (an error here is a startup error).
     pub fn new(files: TlsFiles) -> Result<Arc<Self>, TlsError> {
         let stamp = stamps(&files);
-        let key = load_certified_key(&files)?;
+        let (key, digest) = load_with_digest(&files)?;
         Ok(Arc::new(Self {
             files,
             current: ArcSwap::from_pointee(key),
-            loaded: Mutex::new(stamp),
+            loaded: Mutex::new(Loaded {
+                stamp,
+                digest,
+                checked_at: SystemTime::now(),
+            }),
         }))
     }
 
     /// Re-read the pair if either file changed (see [`FileStamp`]) since the last
-    /// good load. `Ok(true)` = swapped; on `Err` the current certificate stays.
+    /// good load, including a same-stamp rewrite right after it. `Ok(true)` = swapped; on `Err` the current certificate stays.
     pub fn reload_if_changed(&self) -> Result<bool, TlsError> {
         let stamp = stamps(&self.files);
         let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
-        if *loaded == stamp {
-            return Ok(false);
+        if loaded.stamp == stamp {
+            let now = SystemTime::now();
+            if !is_racy(&stamp, loaded.checked_at) {
+                return Ok(false);
+            }
+            // Too soon after the last check for the stamp to prove "unchanged".
+            let same = read(self.files.cert_name, &self.files.cert)
+                .and_then(|c| Ok((c, read(self.files.key_name, &self.files.key)?)))
+                .is_ok_and(|(c, k)| digest(&c, &k) == loaded.digest);
+            if same {
+                loaded.checked_at = now;
+                return Ok(false);
+            }
         }
-        let key = load_certified_key(&self.files)?;
+        let now = SystemTime::now();
+        let (key, digest) = load_with_digest(&self.files)?;
         self.current.store(Arc::new(key));
-        *loaded = stamp;
+        *loaded = Loaded {
+            stamp,
+            digest,
+            checked_at: now,
+        };
         Ok(true)
     }
 
@@ -681,6 +755,61 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    /// A loaded pair, then `leaf2.key` written over `key.pem` (same length) and
+    /// the recorded stamp forced to match: what a coarse-timestamp filesystem
+    /// shows for a rewrite within one tick of the load.
+    fn rewritten_with_unchanged_stamp() -> (tempfile::TempDir, Arc<ReloadingCert>) {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TlsFiles::new(dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        std::fs::write(&files.cert, fixture("leaf.pem")).unwrap();
+        std::fs::write(&files.key, fixture("leaf.key")).unwrap();
+        let cert = ReloadingCert::new(files.clone()).unwrap();
+        std::fs::write(&files.key, fixture("leaf2.key")).unwrap();
+        cert.loaded.lock().unwrap().stamp = stamps(&files);
+        (dir, cert)
+    }
+
+    #[test]
+    fn a_same_stamp_rewrite_right_after_the_load_is_seen() {
+        let (_dir, cert) = rewritten_with_unchanged_stamp();
+        // The new key doesn't match the old certificate: noticing the change
+        // means trying the pair and refusing it; Ok(false) would mean it went
+        // unseen.
+        let seen = cert.reload_if_changed();
+        assert!(
+            matches!(seen, Err(TlsError::KeyMismatch { .. })),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_pair_in_the_racy_window_is_not_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TlsFiles::new(dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        std::fs::write(&files.cert, fixture("leaf.pem")).unwrap();
+        std::fs::write(&files.key, fixture("leaf.key")).unwrap();
+        let cert = ReloadingCert::new(files).unwrap();
+        assert!(!cert.reload_if_changed().unwrap());
+    }
+
+    #[test]
+    fn once_the_stamp_is_older_than_the_window_the_stamp_alone_decides() {
+        let (_dir, cert) = rewritten_with_unchanged_stamp();
+        // Last checked long after the files' newest timestamp: any later write
+        // would carry a newer stamp, so an equal one means no change.
+        cert.loaded.lock().unwrap().checked_at = SystemTime::now() + Duration::from_secs(3600);
+        assert!(!cert.reload_if_changed().unwrap());
+    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
