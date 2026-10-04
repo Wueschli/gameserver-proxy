@@ -401,6 +401,13 @@ jobs:
         with:
           path: target/trivy-cache
           key: trivy-db-${{ steps.day.outputs.day }}
+      # A hit that holds no DB file (a partial save) must not skip the download.
+      - name: Check the restored vulnerability DB
+        id: dbfile
+        run: |
+          if [ "${{ steps.db.outputs.cache-hit }}" = true ] && [ -f target/trivy-cache/db/trivy.db ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Trivy scan (informational)
         continue-on-error: true
         uses: docker://aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
@@ -409,7 +416,7 @@ jobs:
           TRIVY_REPORT_DIR: target/trivy
           # The action container mounts the workspace at /github/workspace.
           TRIVY_CACHE_DIR: /github/workspace/target/trivy-cache
-          TRIVY_SKIP_DB_UPDATE: ${{ steps.db.outputs.cache-hit == 'true' && 'true' || 'false' }}
+          TRIVY_SKIP_DB_UPDATE: ${{ steps.dbfile.outputs.usable == 'true' && 'true' || 'false' }}
         with:
           entrypoint: sh
           args: deploy/scan-images.sh
