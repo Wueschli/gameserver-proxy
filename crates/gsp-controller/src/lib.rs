@@ -28,6 +28,7 @@ pub mod adopt;
 pub mod api;
 pub mod ha;
 pub mod intent;
+pub mod lease;
 pub mod parent_client;
 pub mod peers;
 pub mod proxy_peers;

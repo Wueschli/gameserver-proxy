@@ -248,7 +248,19 @@ IPv6 (built 2026-10-03):
 - **Release.** `DELETE /peers/{name}` / `DELETE /proxy-peers/{name}` free the address
   and emit a tombstone that subscribers turn into a WireGuard peer removal.
   `GET /tunnel/addresses` lists the table with a `stale` flag
-  (`--tunnel-stale-after`, default 14 days); nothing is freed automatically.
+  (`--tunnel-stale-after`, default 14 days) and a daily log warning.
+- **Lease expiry.** With `--tunnel-lease-ttl` (at least `2h`; default `0` = off) an
+  owner not re-registered for that long is released exactly like a `DELETE`:
+  tombstone, address freed, and a pool's `tunnel` source clears the origin's backends
+  (`gsp_discovery_refresh_total{result="withdrawn"}`). The controller sweeps every
+  tenth of the TTL (between 1 min and 1 h), starting an hour after it starts (or after
+  a node becomes HA leader), so a controller that was down longer than the TTL does not
+  expire everyone before they re-register. Under HA only the leader sweeps and each
+  expiry is a replicated `Expire` entry that re-checks `last_seen` when it applies, so
+  a re-registration that commits first wins. An owner that comes back after expiry is
+  allocated afresh and may get a different address. Set the TTL well above the
+  agents' and proxies' register interval (the 2 h minimum is only a floor for the HA
+  `last_seen` refresh); hours to days is typical.
   A claim is kept even when the same registration then fails (backends not on the
   claimed address, or a storage error), so the corrected retry gets the same address;
   a stream of distinct names with bad backends can therefore use up the pool. The
@@ -276,7 +288,7 @@ IPv6 (built 2026-10-03):
   config load rejects it on a listener whose `pool:` or route pool actions use a `tunnel`
   source. A resolver route can still return a tunnel pool at runtime; the proxy then
   connects without the client's source address, and a client/backend family mismatch on
-  any pool is logged at most once a minute. Dual-stack tunnels, lease expiry and live
+  any pool is logged at most once a minute. Dual-stack tunnels and live
   address changes are future work (GitHub issue #40).
 
 ## Open questions

@@ -154,6 +154,22 @@ pub async fn refresh_loop(
                     reload.notify_one();
                 }
             }
+            Err(e @ SourceError::Withdrawn { .. }) => {
+                // The one error that is an answer: the set really is empty.
+                // Clearing it stores `Some([])`, which wins over the file
+                // `targets` seed.
+                let changed = discovery.store(&pool, Vec::new());
+                tracing::info!(pool, kind, error = %e, "source withdrew its backends; clearing the pool");
+                metrics::counter!(
+                    m::DISCOVERY_REFRESH,
+                    "pool" => pool.clone(), "kind" => kind, "result" => "withdrawn"
+                )
+                .increment(1);
+                metrics::gauge!(m::DISCOVERY_BACKENDS, "pool" => pool.clone()).set(0.0);
+                if changed {
+                    reload.notify_one();
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     pool, kind, error = %e,

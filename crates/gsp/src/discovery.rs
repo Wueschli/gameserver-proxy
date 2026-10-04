@@ -11,6 +11,7 @@
 //!   (a watch-based informer is a deferred optimisation — see `docs/08`).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -553,6 +554,10 @@ pub struct TunnelSource {
     token: Option<String>,
     interval: Duration,
     client: reqwest::Client,
+    /// Whether the registry has served this origin since the last
+    /// withdrawal. A `404` after that is a deletion (or lease expiry), not
+    /// "not registered yet".
+    seen: AtomicBool,
 }
 
 impl TunnelSource {
@@ -575,6 +580,7 @@ impl TunnelSource {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .context("build tunnel backend-peers HTTP client")?,
+            seen: AtomicBool::new(false),
         })
     }
 }
@@ -618,10 +624,16 @@ impl BackendSource for TunnelSource {
         })?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            // The origin hasn't registered yet (or ever) — not an error,
-            // just "no addresses known right now". The level-triggered
-            // discovery contract already treats an empty `Ok` as "keep the
-            // last-known-good set", so this needs no special handling here.
+            // An origin this source has seen is gone (deleted, or its lease
+            // expired): say so once, so the pool is cleared instead of
+            // frozen. Otherwise the origin hasn't registered yet (or ever) —
+            // "no addresses known right now", and the level-triggered
+            // contract keeps the last-known-good set for an empty `Ok`.
+            if self.seen.swap(false, Ordering::Relaxed) {
+                return Err(SourceError::Withdrawn {
+                    origin: self.origin.clone(),
+                });
+            }
             return Ok(Vec::new());
         }
         if !resp.status().is_success() {
@@ -643,6 +655,7 @@ impl BackendSource for TunnelSource {
             });
         }
 
+        self.seen.store(true, Ordering::Relaxed);
         let mut out = Vec::with_capacity(reg.backends.len());
         for b in &reg.backends {
             out.push(b.parse().map_err(|_| SourceError::BadResponse {
@@ -924,6 +937,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tunnel_source_withdraws_an_origin_that_vanishes_after_being_seen() {
+        let seen = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["10.60.0.2:1"]}"#;
+        let server = mock_http::serve_script(&[
+            ("200 OK", seen),
+            ("404 Not Found", r#"{"error":"no peer"}"#),
+        ])
+        .await;
+        let src = TunnelSource::new(
+            "p".into(),
+            "home".into(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            format!("http://{}", server.addr),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(src.fetch().await.unwrap().len(), 1);
+        assert!(matches!(
+            src.fetch().await,
+            Err(SourceError::Withdrawn { .. })
+        ));
+        // The withdrawal is reported once; a later 404 is "not registered".
+        assert_eq!(src.fetch().await.unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
     async fn tunnel_source_rejects_a_malformed_backend_address() {
         let body = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["not-an-addr"]}"#;
         let server = mock_http::serve_json(body).await;
@@ -943,6 +982,8 @@ mod tests {
     /// fixed JSON body. Enough for the Consul / Kubernetes adapters.
     pub(super) mod mock_http {
         use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -958,17 +999,26 @@ mod tests {
         /// a non-200 response (e.g. `TunnelSource`'s `404` "not registered
         /// yet" case).
         pub async fn serve_status(status_line: &str, body: &str) -> Server {
+            serve_script(&[(status_line, body)]).await
+        }
+
+        /// Answers the nth request with the nth `(status line, body)`, and
+        /// every request past the end with the last one.
+        pub async fn serve_script(script: &[(&str, &str)]) -> Server {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let body = body.to_string();
-            let status_line = status_line.to_string();
+            let script: Vec<(String, String)> = script
+                .iter()
+                .map(|(s, b)| ((*s).to_string(), (*b).to_string()))
+                .collect();
+            let served = Arc::new(AtomicUsize::new(0));
             tokio::spawn(async move {
                 loop {
                     let Ok((mut sock, _)) = listener.accept().await else {
                         return;
                     };
-                    let body = body.clone();
-                    let status_line = status_line.clone();
+                    let n = served.fetch_add(1, Ordering::SeqCst).min(script.len() - 1);
+                    let (status_line, body) = script[n].clone();
                     tokio::spawn(async move {
                         let mut buf = [0u8; 2048];
                         let _ = sock.read(&mut buf).await;

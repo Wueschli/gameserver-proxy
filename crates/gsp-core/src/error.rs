@@ -58,6 +58,11 @@ pub enum SourceError {
     /// undecodable body, an address that does not parse, no addresses).
     #[error("{context}: {cause}")]
     BadResponse { context: String, cause: String },
+    /// The registry affirmatively reports that an origin it served before is
+    /// gone (deleted or expired). Unlike every other error, and unlike an empty
+    /// set, this clears the pool's last-known-good set.
+    #[error("origin {origin:?} is no longer registered")]
+    Withdrawn { origin: String },
     /// A pinned peer identity does not match what the registry reports.
     #[error(
         "origin {origin:?} is currently registered with a different pubkey than \

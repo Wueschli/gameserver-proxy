@@ -44,9 +44,11 @@
 
 ### Backend discovery (phase 8)
 - `gsp_discovery_refresh_total{pool,kind,result}` – `kind` =
-  `dns_srv|consul|kubernetes`; `result` = `ok|empty|error`. One per refresh
-  attempt. `empty` / `error` keep the last-known-good backend set (the pool is
-  never cleared by a failed refresh).
+  `dns_srv|consul|kubernetes|tunnel`; `result` = `ok|empty|error|withdrawn`. One
+  per refresh attempt. `empty` / `error` keep the last-known-good backend set (the
+  pool is never cleared by a failed refresh). `withdrawn` (`tunnel` only) means the
+  controller deleted or expired an origin this proxy had seen: the pool's set is
+  cleared.
 - `gsp_discovery_backends{pool}` (gauge) – addresses returned by the pool's
   source at its last successful refresh.
 

@@ -1,5 +1,5 @@
 //! Applying the registry entries (`RegisterOrigin`/`RegisterProxy`,
-//! `Release`, `Touch`) of the Raft log — split out of [`super::state_machine`]
+//! `Release`, `Expire`, `Touch`) of the Raft log — split out of [`super::state_machine`]
 //! so that module stays about `openraft`'s bookkeeping.
 //!
 //! The steps are the non-HA handlers' (`crate::registry`), in their order:
@@ -183,6 +183,32 @@ pub(super) fn release<R: Registration>(
         *address = freed;
     }
     Ok(response)
+}
+
+/// `Expire` at `index`: [`release`], unless the owner was seen at or after
+/// `last_seen_before` (`NotExpired`). The check only runs while the registry
+/// step is still to do: the book step comes after it, so a replay that finds
+/// the registry done is already past the decision.
+pub(super) fn expire<R: Registration>(
+    registry: &RegistryState<R>,
+    book: &AddressBook,
+    cluster: &ClusterState,
+    name: &str,
+    last_seen_before: u64,
+    index: u64,
+) -> ApplyResult {
+    if cluster.network().map_err(io)?.is_some() && !registry_done(registry, index)? {
+        let seen_since = book
+            .get(R::ROLE, name)
+            .map_err(io)?
+            .is_some_and(|a| a.last_seen >= last_seen_before);
+        if seen_since {
+            registry.store.mark_applied(index).map_err(io)?;
+            book.mark_applied(index).map_err(io)?;
+            return Ok(WriteResponse::NotExpired);
+        }
+    }
+    release(registry, book, cluster, name, index)
 }
 
 /// `Touch` at `index`: `last_seen = now` in the book, no registry revision

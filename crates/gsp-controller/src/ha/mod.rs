@@ -159,6 +159,14 @@ pub enum WriteRequest {
         role: Role,
         name: String,
     },
+    /// [`WriteRequest::Release`] for a lapsed lease: only if the owner's
+    /// `last_seen` is still older than `last_seen_before` when the entry
+    /// applies, so a re-registration that commits first (in log order) wins.
+    Expire {
+        role: Role,
+        name: String,
+        last_seen_before: u64,
+    },
     /// Sets `last_seen = now` in the address book; no registry revision.
     Touch {
         role: Role,
@@ -196,6 +204,9 @@ pub enum WriteResponse {
     /// A deterministic refusal (`409` / `422` / `503` as
     /// `crate::addresses::api::claim_error_response` maps it).
     Rejected(Rejection),
+    /// An `Expire` found the owner seen again since its cutoff; nothing
+    /// changed.
+    NotExpired,
     /// A release or touch of a name unknown to the registry and the book.
     NotFound,
     /// A touch refreshed the owner's `last_seen`.

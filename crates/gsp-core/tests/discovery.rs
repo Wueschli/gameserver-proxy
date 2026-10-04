@@ -165,6 +165,41 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
+#[tokio::test]
+async fn a_withdrawn_source_clears_the_pool_but_an_error_does_not() {
+    let discovery = Arc::new(Discovery::new());
+    let reload = Arc::new(Notify::new());
+    let (sd_tx, mut sd_rx) = watch::channel(false);
+
+    let source = ScriptedSource::new(vec![
+        Ok(vec![addr("10.0.0.1:7777")]),
+        Err(SourceError::Withdrawn {
+            origin: "home".into(),
+        }),
+    ]);
+    let src_dyn: Arc<dyn BackendSource> = source.clone();
+    let d = discovery.clone();
+    let r = reload.clone();
+    let task = tokio::spawn(async move {
+        refresh_loop(src_dyn, d, r, &mut sd_rx).await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("first change notified");
+    assert_eq!(discovery.get("game").unwrap(), vec![addr("10.0.0.1:7777")]);
+
+    // The withdrawal empties the set (an empty `Some`, not the file seed) and
+    // wakes the reload path so the snapshot drops the backend.
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("withdrawal notified");
+    assert_eq!(discovery.get("game").unwrap(), Vec::new());
+
+    let _ = sd_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
 /// A fixed-set source + a factory over it, keyed by the SRV `record` string
 /// (abused as a literal `ip:port`) so a reconcile with a changed spec is
 /// observable.

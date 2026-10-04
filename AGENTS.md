@@ -88,6 +88,7 @@ crates/
     api.rs                  POST/GET /config, GET /config/subscribe (SSE), GET /config/revisions(+/{rev}(/diff)), POST /config/rollback/{rev}
     peers.rs                 backend-peers registry (phase 14 slice 2, `docs/11`): POST/GET /peers(+/{name}), GET /peers/subscribe (SSE) — origins register here, proxies subscribe
     addresses.rs            tunnel address book: allocation, pinning, release; shared by both peer registries
+    lease.rs                `--tunnel-lease-ttl` sweeper: expires owners unseen for the TTL through each registry's `expire` (a replicated `Expire` entry under HA)
     addresses/api.rs        `GET /tunnel/addresses` and the release plumbing over the address book
     proxy_peers.rs           proxy-peers registry (phase 14 slice 7, `docs/11`) — the mirror image of `peers.rs`: proxies register here, origins' `gsp-agent`s subscribe
     registry.rs             the registry core both `peers.rs` and `proxy_peers.rs` run on: `Registration` trait, `RegistryState` (log + `current` tree in one transaction, Raft-index-idempotent `register_applied`/`remove_applied`), handlers, subscribe/catch-up
