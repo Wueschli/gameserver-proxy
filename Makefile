@@ -56,7 +56,7 @@ fuzz:
 ## (needs `rustup target add wasm32-unknown-unknown`); see crates/plugins/README.md
 plugins:
 	cd crates/plugins && cargo test --workspace
-	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard
+	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
 	@echo "built:" crates/plugins/target/wasm32-unknown-unknown/release/*.wasm
 
 ## ui: build the gsp-ui frontend (needs Node/npm) — output gsp-ui serves via --static-dir

@@ -604,6 +604,26 @@ mod tests {
         assert!(registry.get("other").is_none());
     }
 
+    /// A RakNet Unconnected Ping: id, 8-byte time, the offline magic, client GUID.
+    fn raknet_ping() -> Vec<u8> {
+        let mut p = vec![0x01u8; 1];
+        p.extend_from_slice(&[0; 8]);
+        p.extend_from_slice(&[
+            0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34,
+            0x56, 0x78,
+        ]);
+        p.extend_from_slice(&[7; 8]);
+        p
+    }
+
+    /// A TeamSpeak 3 init step 0 packet.
+    fn ts3_init() -> Vec<u8> {
+        let mut p = b"TS3INIT1".to_vec();
+        p.extend_from_slice(&[0, 101, 0, 0, 0x88, 6, 0x3b, 0xec, 0xe9, 0]);
+        p.extend_from_slice(&[0; 16]);
+        p
+    }
+
     /// Loads the real first-party plugins (`crates/plugins/`) built by
     /// `make plugins` and drives each one through this crate's own loader —
     /// not just the plugin's own native `recognise()` unit tests, but the
@@ -658,6 +678,27 @@ mod tests {
             Some("wireguard")
         );
         assert!(wireguard.sniff(&initiation[..147]).is_none());
+
+        let openvpn = registry.get("openvpn").expect("openvpn.wasm not built");
+        let mut reset = vec![0x38u8];
+        reset.extend_from_slice(&[1; 13]);
+        assert_eq!(
+            openvpn.sniff(&reset).unwrap().key.as_deref(),
+            Some("openvpn")
+        );
+        assert!(openvpn.sniff(&reset[..13]).is_none());
+
+        let raknet = registry.get("raknet").expect("raknet.wasm not built");
+        let ping = raknet_ping();
+        assert_eq!(raknet.sniff(&ping).unwrap().key.as_deref(), Some("raknet"));
+        assert!(raknet.sniff(&ping[..24]).is_none());
+
+        let ts3 = registry
+            .get("teamspeak3")
+            .expect("teamspeak3.wasm not built");
+        let init = ts3_init();
+        assert_eq!(ts3.sniff(&init).unwrap().key.as_deref(), Some("teamspeak3"));
+        assert!(ts3.sniff(&init[..17]).is_none());
 
         let minecraft = registry.get("minecraft").expect("minecraft.wasm not built");
         // A minimal handshake: len, id=0x00, protocol=1, "play.example.net", port, next_state=1.
@@ -763,7 +804,16 @@ mod tests {
         sc.call_timeout = std::time::Duration::from_secs(10);
         // Pin all three (a config on `regex_firstbytes` is what makes it match;
         // once `modules` is non-empty every file must be pinned).
-        for name in ["a2s", "minecraft", "quic", "wireguard", "regex_firstbytes"] {
+        for name in [
+            "a2s",
+            "minecraft",
+            "quic",
+            "wireguard",
+            "openvpn",
+            "raknet",
+            "teamspeak3",
+            "regex_firstbytes",
+        ] {
             let bytes = std::fs::read(dir.join(format!("{name}.wasm"))).unwrap();
             sc.modules.push(gsp_config::SnifferModulePin {
                 name: name.into(),
@@ -797,11 +847,17 @@ mod tests {
         .concat();
         let mut wg_initiation = vec![0u8; 148];
         wg_initiation[0] = 1;
-        let cases: [(&str, &[u8]); 5] = [
+        let mut openvpn_reset = vec![0x38u8];
+        openvpn_reset.extend_from_slice(&[1; 13]);
+        let (raknet_ping, ts3_init) = (raknet_ping(), ts3_init());
+        let cases: [(&str, &[u8]); 8] = [
             ("a2s", b"\xff\xff\xff\xffTSource Engine Query\0"),
             ("minecraft", &minecraft_handshake),
             ("quic", &quic_initial),
             ("wireguard", &wg_initiation),
+            ("openvpn", &openvpn_reset),
+            ("raknet", &raknet_ping),
+            ("teamspeak3", &ts3_init),
             ("regex_firstbytes", b"GET /health HTTP/1.1\r\nHost: x\r\n"),
         ];
 
