@@ -186,7 +186,7 @@ impl AddressSync {
         let new: IpAddrMask = cidr
             .parse()
             .map_err(|e| anyhow::anyhow!("tunnel address {cidr:?} is not a valid ip/cidr: {e}"))?;
-        if new == self.live.address() {
+        if !self.live.needs_readdress(&new) {
             return Ok(false);
         }
         self.live.readdress(&new)?;

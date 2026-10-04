@@ -51,6 +51,10 @@ struct State {
     wg: Option<Box<Wg>>,
     kernel: bool,
     address: IpAddrMask,
+    /// A kernel reconfigure failed after possibly flushing the address, so
+    /// the link may not carry `address`; the next call reconfigures even if
+    /// the address is unchanged.
+    dirty: bool,
     peers: Vec<Peer>,
 }
 
@@ -95,6 +99,7 @@ impl LiveInterface {
                 wg: Some(first.wg),
                 kernel: first.kernel,
                 address,
+                dirty: false,
                 peers: Vec::new(),
             }),
             bring_up,
@@ -146,6 +151,12 @@ impl LiveInterface {
         self.read().wg.as_deref().map(f)
     }
 
+    /// Whether the interface needs [`LiveInterface::readdress`] to carry `new`.
+    pub fn needs_readdress(&self, new: &IpAddrMask) -> bool {
+        let st = self.read();
+        st.address != *new || st.dirty || st.wg.is_none()
+    }
+
     /// The address the interface currently carries.
     pub fn address(&self) -> IpAddrMask {
         self.read().address.clone()
@@ -182,7 +193,7 @@ impl LiveInterface {
     /// peers saved here.
     pub fn readdress(&self, new: &IpAddrMask) -> anyhow::Result<()> {
         let mut st = self.write();
-        if st.address == *new && st.wg.is_some() {
+        if st.address == *new && st.wg.is_some() && !st.dirty {
             return Ok(());
         }
         let result = if st.kernel && st.wg.is_some() {
@@ -204,9 +215,12 @@ impl LiveInterface {
             peers,
             ..self.template.clone()
         };
-        wg.configure_interface(&config)
-            .context("reconfiguring the interface")?;
+        if let Err(e) = wg.configure_interface(&config) {
+            st.dirty = true;
+            return Err(anyhow::Error::new(e).context("reconfiguring the interface"));
+        }
         st.address = new.clone();
+        st.dirty = false;
         Ok(())
     }
 
@@ -468,6 +482,21 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec!["configure 10.60.0.7/24 peers=1 mtu=Some(1420)"]
+        );
+    }
+
+    #[test]
+    fn a_refused_kernel_reconfigure_is_retried_even_for_the_unchanged_address() {
+        let log = Log::default();
+        let live = live_with(&peer(), true, &[], false, true, &log);
+        assert!(live.readdress(&mask("10.60.0.7/24")).is_err());
+        assert!(
+            live.needs_readdress(&mask("10.60.0.2/24")),
+            "the link may have lost its address"
+        );
+        assert!(
+            live.readdress(&mask("10.60.0.2/24")).is_err(),
+            "retried, not skipped"
         );
     }
 

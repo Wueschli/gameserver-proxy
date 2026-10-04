@@ -246,8 +246,8 @@ IPv6 (built 2026-10-03):
   and peers: on the kernel backend it reconfigures the link in place (the call flushes
   the old address and assigns the new one), on boringtun it drops the device and brings
   it up again on the new address, since its address would otherwise be left behind
-  (`live_interface.rs` in both binaries; the library's `remove_interface` is not used
-  because it fails in DNS cleanup where no resolver tool exists). Peer updates wait on the same lock, so none is lost, and the
+  (`live_interface.rs` in both binaries; the library's `remove_interface` is not relied on
+  because it fails in DNS cleanup where no resolver tool exists, and an error from it is ignored). Peer updates wait on the same lock, so none is lost, and the
   new address is saved for a restart only once it is up. If the new address does not come up, the old one is restored; if that fails
   too the interface stays down and the next re-registration retries. There is a
   short traffic gap while WireGuard re-handshakes (the agent starts the handshakes
