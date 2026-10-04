@@ -184,6 +184,25 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// The option exists on every Linux libc (glibc and musl): unprivileged runs get
+    /// EPERM, privileged ones succeed. Anything else (e.g. ENOPROTOOPT) is a regression.
+    #[test]
+    fn set_ip_transparent_is_known_to_the_kernel_v4_and_v6() {
+        for (v6, bind) in [(false, "127.0.0.1:0"), (true, "[::1]:0")] {
+            let Ok(sock) = std::net::UdpSocket::bind(bind) else {
+                continue;
+            };
+            match set_ip_transparent(&sock, v6) {
+                Ok(()) => {}
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "v6={v6}: {e}"
+                ),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn connect_tcp_from_without_a_source_connects_normally() {
         let srv = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
