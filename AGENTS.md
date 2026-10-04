@@ -64,6 +64,7 @@ crates/
     src_conns.rs            per-listener concurrent per-source connection / session cap
     limits.rs               process-wide caps (max_connections / max_udp_sessions / new-session rate)
     geo.rs                  optional MaxMind GeoIP country lookup (GeoDb) for the geo filter
+    error.rs                typed errors for the public API: `ProxyError`, `ListenerError`, `SourceError` (no `anyhow` in `gsp-core`)
     drain.rs                `ConnTracker`/`ConnGuard` — live connection/session count + registry for graceful shutdown and GET /sessions
     overlay.rs              `BackendOverlay` — runtime POST/DELETE backend edits, layered on the file config
     runtime.rs              owns listener + health + source-manager tasks + route-hint table, holds the ArcSwap

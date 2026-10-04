@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use gsp_config::{Config, SourceConfig, SourceKind};
-use gsp_core::{BackendSource, SourceFactory};
+use gsp_core::{BackendSource, SourceError, SourceFactory};
 use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
@@ -128,8 +128,9 @@ impl DiscoveryFactory {
 }
 
 impl SourceFactory for DiscoveryFactory {
-    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError> {
         build_one(pool, cfg, &self.kube_auth, self.tunnel_registry.as_ref())
+            .map_err(SourceError::build)
     }
 }
 
@@ -202,12 +203,15 @@ impl BackendSource for DnsSrvSource {
         self.interval
     }
 
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
-        let lookup = self
-            .resolver
-            .srv_lookup(&self.record)
-            .await
-            .with_context(|| format!("SRV lookup for {}", self.record))?;
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+        let lookup =
+            self.resolver
+                .srv_lookup(&self.record)
+                .await
+                .map_err(|e| SourceError::Unreachable {
+                    context: format!("SRV lookup for {}", self.record),
+                    cause: e.to_string(),
+                })?;
 
         let mut out = Vec::new();
         for record in lookup.answers() {
@@ -220,11 +224,12 @@ impl BackendSource for DnsSrvSource {
             match target.parse() {
                 Ok(ip) => out.push(SocketAddr::new(ip, port)),
                 Err(_) => {
-                    let ips = self
-                        .resolver
-                        .lookup_ip(target)
-                        .await
-                        .with_context(|| format!("A/AAAA lookup for SRV target {target}"))?;
+                    let ips = self.resolver.lookup_ip(target).await.map_err(|e| {
+                        SourceError::Unreachable {
+                            context: format!("A/AAAA lookup for SRV target {target}"),
+                            cause: e.to_string(),
+                        }
+                    })?;
                     for ip in ips.iter() {
                         out.push(SocketAddr::new(ip, port));
                     }
@@ -305,7 +310,7 @@ impl BackendSource for ConsulSource {
         self.interval
     }
 
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         let mut url = format!(
             "{}/v1/health/service/{}?passing=true",
             self.base, self.service
@@ -319,13 +324,20 @@ impl BackendSource for ConsulSource {
             .get(&url)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Consul request: {}", gsp_http::error_chain(&e)))?
+            .map_err(|e| SourceError::Unreachable {
+                context: "Consul request".into(),
+                cause: gsp_http::error_chain(&e),
+            })?
             .error_for_status()
-            .map_err(|e| anyhow::anyhow!("Consul response status: {}", gsp_http::error_chain(&e)))?
+            .map_err(|e| SourceError::BadResponse {
+                context: "Consul response status".into(),
+                cause: gsp_http::error_chain(&e),
+            })?
             .json()
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("decode Consul response: {}", gsp_http::error_chain(&e))
+            .map_err(|e| SourceError::BadResponse {
+                context: "decode Consul response".into(),
+                cause: gsp_http::error_chain(&e),
             })?;
 
         let mut out = Vec::new();
@@ -445,7 +457,7 @@ impl BackendSource for KubernetesSource {
         self.interval
     }
 
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         let url = format!(
             "{}/api/v1/namespaces/{}/endpoints/{}",
             self.api, self.namespace, self.service
@@ -457,15 +469,20 @@ impl BackendSource for KubernetesSource {
         let ep: Endpoints = req
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Kubernetes request: {}", gsp_http::error_chain(&e)))?
+            .map_err(|e| SourceError::Unreachable {
+                context: "Kubernetes request".into(),
+                cause: gsp_http::error_chain(&e),
+            })?
             .error_for_status()
-            .map_err(|e| {
-                anyhow::anyhow!("Kubernetes response status: {}", gsp_http::error_chain(&e))
+            .map_err(|e| SourceError::BadResponse {
+                context: "Kubernetes response status".into(),
+                cause: gsp_http::error_chain(&e),
             })?
             .json()
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("decode Kubernetes Endpoints: {}", gsp_http::error_chain(&e))
+            .map_err(|e| SourceError::BadResponse {
+                context: "decode Kubernetes Endpoints".into(),
+                cause: gsp_http::error_chain(&e),
             })?;
 
         let mut out = Vec::new();
@@ -479,10 +496,10 @@ impl BackendSource for KubernetesSource {
             };
             let Some(port) = port else { continue };
             for addr in &subset.addresses {
-                let ip = addr
-                    .ip
-                    .parse()
-                    .map_err(|_| anyhow!("endpoint address {:?} is not an IP", addr.ip))?;
+                let ip = addr.ip.parse().map_err(|_| SourceError::BadResponse {
+                    context: "Kubernetes Endpoints".into(),
+                    cause: format!("endpoint address {:?} is not an IP", addr.ip),
+                })?;
                 out.push(SocketAddr::new(ip, port.port));
             }
         }
@@ -492,16 +509,22 @@ impl BackendSource for KubernetesSource {
 
 /// Parse `host` as an IP, or resolve it (A/AAAA) and pair every result with
 /// `port`.
-async fn resolve_host_port(host: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
+async fn resolve_host_port(host: &str, port: u16) -> Result<Vec<SocketAddr>, SourceError> {
     if let Ok(ip) = host.parse() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
-        .with_context(|| format!("resolve {host}:{port}"))?
+        .map_err(|e| SourceError::Unreachable {
+            context: format!("resolve {host}:{port}"),
+            cause: e.to_string(),
+        })?
         .collect();
     if addrs.is_empty() {
-        return Err(anyhow!("{host} resolved to no addresses"));
+        return Err(SourceError::BadResponse {
+            context: format!("resolve {host}:{port}"),
+            cause: "no addresses".into(),
+        });
     }
     Ok(addrs)
 }
@@ -579,7 +602,7 @@ impl BackendSource for TunnelSource {
         self.interval
     }
 
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         let url = format!(
             "{}/peers/{}",
             self.controller_url.trim_end_matches('/'),
@@ -589,10 +612,10 @@ impl BackendSource for TunnelSource {
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("fetching {url}: {}", gsp_http::error_chain(&e)))?;
+        let resp = req.send().await.map_err(|e| SourceError::Unreachable {
+            context: format!("fetching {url}"),
+            cause: gsp_http::error_chain(&e),
+        })?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             // The origin hasn't registered yet (or ever) — not an error,
@@ -602,32 +625,29 @@ impl BackendSource for TunnelSource {
             return Ok(Vec::new());
         }
         if !resp.status().is_success() {
-            anyhow::bail!("controller {url} returned {}", resp.status());
+            return Err(SourceError::BadResponse {
+                context: format!("controller {url}"),
+                cause: format!("returned {}", resp.status()),
+            });
         }
 
-        let reg: PeerRegistration = resp.json().await.map_err(|e| {
-            anyhow::anyhow!(
-                "parsing peer registration from {url}: {}",
-                gsp_http::error_chain(&e)
-            )
+        let reg: PeerRegistration = resp.json().await.map_err(|e| SourceError::BadResponse {
+            context: format!("parsing peer registration from {url}"),
+            cause: gsp_http::error_chain(&e),
         })?;
         if reg.pubkey != self.pubkey {
-            anyhow::bail!(
-                "origin {:?} is currently registered with a different pubkey than \
-                 backend_sources pins (expected {:?}, got {:?}) — refusing to trust it",
-                self.origin,
-                self.pubkey,
-                reg.pubkey
-            );
+            return Err(SourceError::PubkeyMismatch {
+                origin: self.origin.clone(),
+                expected: self.pubkey.clone(),
+                got: reg.pubkey,
+            });
         }
 
         let mut out = Vec::with_capacity(reg.backends.len());
         for b in &reg.backends {
-            out.push(b.parse().with_context(|| {
-                format!(
-                    "origin {:?} backend {b:?} is not a valid ip:port",
-                    self.origin
-                )
+            out.push(b.parse().map_err(|_| SourceError::BadResponse {
+                context: format!("origin {:?}", self.origin),
+                cause: format!("backend {b:?} is not a valid ip:port"),
             })?);
         }
         Ok(out)
@@ -641,7 +661,7 @@ mod tests {
     /// A failed request's error text must carry its cause: `refresh_loop`
     /// logs it with `%e`, which for anyhow is only the outermost message.
     #[allow(clippy::needless_pass_by_value)] // constructors take ownership of their settings
-    fn assert_names_the_cause(e: anyhow::Error) {
+    fn assert_names_the_cause(e: SourceError) {
         let text = e.to_string().to_lowercase();
         assert!(text.contains("connection refused"), "{text}");
     }
