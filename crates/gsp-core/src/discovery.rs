@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{watch, Notify};
@@ -67,7 +67,7 @@ impl Discovery {
     pub fn store(&self, pool: &str, mut addrs: Vec<SocketAddr>) -> bool {
         addrs.sort();
         addrs.dedup();
-        let mut map = self.sets.lock().unwrap();
+        let mut map = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
         match map.get(pool) {
             Some(cur) if *cur == addrs => false,
             _ => {
@@ -79,14 +79,21 @@ impl Discovery {
 
     /// The discovered set for `pool`, if a source has ever populated it.
     pub fn get(&self, pool: &str) -> Option<Vec<SocketAddr>> {
-        self.sets.lock().unwrap().get(pool).cloned()
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(pool)
+            .cloned()
     }
 
     /// Drop the last-known-good set for `pool`. Called when a pool's `source` is
     /// removed on reload so a later re-add (or `GET`) starts from a clean slate
     /// rather than a stale set; harmless if the pool keeps a static target list.
     pub fn forget(&self, pool: &str) {
-        self.sets.lock().unwrap().remove(pool);
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pool);
     }
 }
 

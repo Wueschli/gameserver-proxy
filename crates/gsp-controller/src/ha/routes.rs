@@ -8,9 +8,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -32,25 +31,10 @@ pub fn router(ha: Arc<HaHandle>) -> Router {
         // default; the routes are peer-token gated.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_RAFT_BODY))
         .route_layer(axum::middleware::from_fn_with_state(
-            ha.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(ha.ha_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(ha)
-}
-
-async fn require_bearer(State(ha): State<Arc<HaHandle>>, req: Request, next: Next) -> Response {
-    let Some(expected) = ha.ha_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 /// Who this node is and what it holds: the leader of a fresh cluster asks every

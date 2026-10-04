@@ -26,7 +26,7 @@
 //! validate-then-[`Store::put`] path `submit_config` uses, so a subscriber
 //! sees rollback as just another ordinary revision, no special-casing
 //! needed anywhere else. The whole surface is gated by
-//! [`crate::auth::require_bearer`] when `AppState::auth_token` is set.
+//! [`gsp_http::server::require_bearer`] when `AppState::auth_token` is set.
 //!
 //! Slice 7 (`docs/10` "Staged / canary rollout (design)") adds **staged
 //! rollout on top of the same single, never-forked revision log**: `POST
@@ -124,7 +124,7 @@ pub struct AppState {
     /// only ever carries a `u64`, never the config text).
     pub updates: broadcast::Sender<u64>,
     /// Bearer token every `/config*` request must present, or `None` to
-    /// leave the API open (`crate::auth`).
+    /// leave the API open (`gsp_http::server`).
     pub auth_token: Option<Arc<str>>,
     /// `standalone` (default) accepts writes directly; `slave` (phase 12
     /// slice 1) never does — every revision it holds arrived via
@@ -144,19 +144,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
+    pub fn try_new(
+        store: Arc<Store>,
+        auth_token: Option<String>,
+        role: RoleHandle,
+    ) -> Result<Self, StoreError> {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         // A sibling tree in the exact same `sled` database `store` opened —
         // see `Store::db`'s doc.
-        let stage = store
-            .db()
-            .open_tree("stage")
-            .expect("opening the stage tree");
-        let actors = store
-            .db()
-            .open_tree("actors")
-            .expect("opening the actors tree");
-        AppState {
+        let stage = store.db().open_tree("stage")?;
+        let actors = store.db().open_tree("actors")?;
+        Ok(AppState {
             store,
             stage,
             updates,
@@ -164,7 +162,13 @@ impl AppState {
             role,
             actors,
             ha: None,
-        }
+        })
+    }
+
+    /// Test convenience: [`Self::try_new`] on a store that is known to open.
+    #[cfg(test)]
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
+        Self::try_new(store, auth_token, role).expect("opening the sibling trees")
     }
 
     pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
@@ -373,8 +377,8 @@ pub fn router(state: AppState) -> Router {
         .route("/config/rollback/{revision}", post(rollback))
         .route("/config/promote/{revision}", post(promote))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
 }

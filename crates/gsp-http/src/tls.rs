@@ -13,7 +13,7 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
@@ -212,7 +212,7 @@ impl ReloadingCert {
     /// good load. `Ok(true)` = swapped; on `Err` the current certificate stays.
     pub fn reload_if_changed(&self) -> Result<bool, TlsError> {
         let stamp = stamps(&self.files);
-        let mut loaded = self.loaded.lock().expect("reload lock poisoned");
+        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
         if *loaded == stamp {
             return Ok(false);
         }
@@ -474,7 +474,7 @@ impl TlsListener {
                 // The lock is never held across a spawn, an abort or an `.await`:
                 // either can drop a task's future (and its `Slot`) inline.
                 let admitted = {
-                    let mut h = handshakes.lock().expect("handshake lock poisoned");
+                    let mut h = handshakes.lock().unwrap_or_else(PoisonError::into_inner);
                     match h.pending.admit(source_key(peer.ip())) {
                         None => {
                             h.warn_throttled("per source");
@@ -514,7 +514,7 @@ impl TlsListener {
                 });
                 handshakes
                     .lock()
-                    .expect("handshake lock poisoned")
+                    .unwrap_or_else(PoisonError::into_inner)
                     .register(id, task.abort_handle());
             }
         });

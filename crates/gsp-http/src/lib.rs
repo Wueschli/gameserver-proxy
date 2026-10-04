@@ -16,6 +16,9 @@ pub mod policy;
 #[cfg(feature = "server")]
 pub mod tls;
 
+#[cfg(feature = "server")]
+pub mod server;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

@@ -5,15 +5,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::{is_stale, now_secs, AddressBook, ClaimError, Network, Rejection};
+use super::{is_stale, unix_secs, AddressBook, ClaimError, Network, Rejection};
 use crate::ha::cluster_state::ClusterState;
 
 #[derive(Clone)]
@@ -55,26 +54,10 @@ pub fn router(state: AddressesState) -> Router {
     Router::new()
         .route("/tunnel/addresses", get(list))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::peers::api::require_bearer`, typed against this state.
-async fn require_bearer(State(state): State<AddressesState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -133,7 +116,7 @@ async fn list(State(state): State<AddressesState>) -> Response {
         Ok(e) => e,
         Err(e) => return claim_error_response(&e),
     };
-    let now = now_secs();
+    let now = unix_secs();
     let network = state.network();
     let out = ListOut {
         network: network.map(|n| n.to_string()),
@@ -219,7 +202,7 @@ pub async fn stale_warning_loop(
     let mut tick = tokio::time::interval(Duration::from_secs(24 * 3600));
     loop {
         tick.tick().await; // the first tick is immediate
-        if let Some(message) = stale_warning_due(is_leader(), &book, stale_after, now_secs()) {
+        if let Some(message) = stale_warning_due(is_leader(), &book, stale_after, unix_secs()) {
             tracing::warn!("{message}");
         }
     }
@@ -266,7 +249,8 @@ mod tests {
     async fn the_table_lists_owners_with_counts_and_the_stale_flag() {
         let (s, book, _d) = state(None);
         // One fresh, one last seen long ago.
-        book.claim(Role::Origin, "fresh", None, now_secs()).unwrap();
+        book.claim(Role::Origin, "fresh", None, unix_secs())
+            .unwrap();
         book.claim(Role::Proxy, "old", None, 1).unwrap();
         let (status, body) = get_json(router(s), None).await;
         assert_eq!(status, StatusCode::OK);
