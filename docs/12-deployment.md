@@ -58,7 +58,7 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
-`hostNetwork` DaemonSet). Both are reference only (the images themselves are published to GHCR on version tags by `.github/workflows/release.yml`). CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
+`hostNetwork` DaemonSet, plus the RBAC its `kubernetes` sources need). Both are reference only (the images themselves are published to GHCR on version tags by `.github/workflows/release.yml`). CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
 job, blocking since 2026-10-02; first green run 2026-10-01). Aggregator intent fan-out (drain etc.) goes to the `admin_url`
 each `gsp` reports, by default `http(s)://<settings.admin.listen>`; when that
 address is not reachable from the aggregator (`0.0.0.0`, loopback, a container
@@ -221,9 +221,9 @@ gsp-controller --listen 0.0.0.0:8443 \
   new connection is still accepted and the oldest pending handshake is dropped, so a
   flood of idle connects cannot lock real clients out. A source may also open at most 20
   new connections a second on average (bursts of 64), so it cannot cycle connects under
-  its pending cap. A limit being hit logs a warning (at most once a minute) and, on
-  `gsp`, counts into `gsp_tls_handshakes_refused_total` / `gsp_tls_handshakes_evicted_total`
-  (docs/06). The limits are flags: `--tls-max-pending` (512),
+  its pending cap. A limit being hit logs a warning (at most once a minute) and
+  counts into `gsp_tls_handshakes_refused_total` / `gsp_tls_handshakes_evicted_total` on
+  every binary's `/metrics` (docs/06). The limits are flags: `--tls-max-pending` (512),
   `--tls-max-pending-per-source` (16), `--tls-new-per-source-per-sec` (20; `0` turns the
   rate limit off) and `--tls-new-per-source-burst` (64); raise the per-source ones for
   a fleet that reaches the service from behind one NAT. No client certificates (mTLS).

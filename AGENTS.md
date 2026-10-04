@@ -75,7 +75,9 @@ crates/
     main.rs                 CLI, tracing, runtime bring-up, shutdown
     admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
-    discovery.rs            DnsSrvSource / ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
+    discovery.rs            ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from gsp-controller's backend-peers registry, pinned to a configured pubkey
+    dns_srv.rs              DnsSrvSource (Phase 8) — behind the `dns-srv` feature (`hickory-resolver`), `dns_srv_disabled.rs` stands in without it
+    grpc_resolver.rs        GrpcResolver (tonic) — behind the `grpc-resolver` feature (`tonic`/`prost`, and `protoc` in `build.rs`), `grpc_resolver_disabled.rs` stands in without it
     sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
     procinfo.rs             gsp_build_info / gsp_fd_open / gsp_fd_limit — build identity + fd sampling
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
@@ -120,7 +122,7 @@ crates/
     register.rs             `POST /peers` client — registers once, then re-registers on a fixed interval
     proxy_subscribe.rs      phase 14 slice 7 (`docs/11`): subscribes to `gsp-controller`'s proxy-peers registry and reconciles every registered proxy onto this origin's interface — the mirror image of `gsp`'s `tunnel_client.rs`
     live_interface.rs       the running WireGuard interface behind a lock; `readdress` rebuilds it on a new controller-assigned address, keeping key, port and peers (`docs/11` "Address changes"). Mirrored in `gsp`
-  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `sse` (`EventBuffer`, which every `/…/subscribe` client reassembles events with: it keeps only the unterminated tail and refuses one past 16 MiB), and, in `server` (the one constant-time `--auth-token` bearer middleware, `require_bearer`, shared by every fleet HTTP server) and `tls` (cargo feature `server`, which every serving binary enables), the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`, `TlsArgs` + `serve`); test-only CA/cert fixtures in `tests/fixtures/`
+  gsp-http/                  the one place production HTTP clients are built (`builder()`/`client()`, with `--ca-file`'s extra roots, set once from each binary's `main`) and, in `sse` (`EventBuffer`, which every `/…/subscribe` client reassembles events with: it keeps only the unterminated tail and refuses one past 16 MiB), and, in `server` (the one constant-time `--auth-token` bearer middleware, `require_bearer`, shared by every fleet HTTP server), in `metrics` (`install()` + the `GET /metrics` route the controller, aggregator and UI mount behind that gate) and `tls` (cargo feature `server`, which every serving binary enables), the native-TLS server side (`TlsListener` for `axum::serve`, hot-reloading `ReloadingCert`, `TlsArgs` + `serve`); test-only CA/cert fixtures in `tests/fixtures/`
   gsp-bench/                 latency / load harness vs. NFR N1/N2 (`make bench`)
   gsp-fleet-tests/            phase 10+11 slice 12 integration tests — spawns real
                               gsp/gsp-controller/gsp-aggregator/gsp-ui binaries as
@@ -152,7 +154,7 @@ client from `crates/gsp/proto/resolver.proto`.
 | Format | `make fmt` (writes) / `cargo fmt --all --check` (verify) |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
 | Test | `cargo test --all` |
-| Minimal edge build | `make test-minimal` (`gsp` with `--no-default-features`: clippy + tests; also in `make check` and the `test` CI job). Optional `gsp` cargo features, issue #62: `wasm-sniffers` (wasmtime). Build it with `cargo build --release -p gsp --no-default-features` |
+| Minimal edge build | `make test-minimal` (`gsp` with `--no-default-features`: clippy + tests; also in `make check` and the `test` CI job). Optional `gsp` cargo features, issue #62: `wasm-sniffers` (wasmtime), `grpc-resolver` (tonic/prost, `protoc`), `dns-srv` (hickory). Build it with `cargo build --release -p gsp --no-default-features` |
 | Tunnel e2e | `make tunnel-e2e` (rootless; needs `unshare`, `ip`, `nsenter`; `TUNNEL_BACKEND=kernel\|userspace`, default kernel; also the `tunnel` CI job) |
 | Deploy images | `make deploy-images` (needs Docker; builds the five `deploy/Dockerfile` targets and runs `--version` on each; `BIN_SOURCE=prebuilt` uses binaries from `deploy/prebuilt/`) |
 | Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the five images (OS packages, embedded Rust crates, secrets) and `Cargo.lock` / the UI's `package-lock.json`, HIGH/CRITICAL with a fix; exits 1 on findings, reports in `target/trivy/`. In CI it is the separate, **informational** `trivy` job after `deploy` (non-blocking; scans `deploy`'s images from a `docker save` artifact; run summary + warnings + `trivy-reports` artifact; the official `aquasec/trivy` image pinned by digest, not `trivy-action`). Rust coverage is GHSA only — `cargo audit` (the `audit` CI job, `make audit`) covers RustSec. Accepted findings: `.trivyignore` |

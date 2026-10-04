@@ -93,8 +93,8 @@
   connections to the admin API closed at the door: the source already had its cap
   of handshakes in flight, or was opening connections faster than its rate.
   Counted in `gsp-http` (its name lives in `gsp_http::tls`, not `metrics_defs.rs`,
-  which `gsp-http` cannot depend on); only `gsp` installs a recorder, so the fleet
-  binaries (`gsp-controller`, `gsp-aggregator`, `gsp-ui`: no `/metrics` yet, tracked in #44) emit the counters to no recorder, so nothing is exposed there. Present only with `settings.admin.tls`.
+  which `gsp-http` cannot depend on). Exposed on `gsp`'s `/metrics` and on the
+  fleet binaries' (below). Present only when that listener serves TLS.
 - `gsp_tls_handshakes_evicted_total` (counter, no labels) — pending handshakes
   dropped to make room at the global cap (same notes).
 - `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this
@@ -273,9 +273,18 @@ Three additional, independent binaries. Originally a single-tier PoC
 (phase 10+11); the `docs/10` `standalone`/`slave` hierarchy, intra-tier HA,
 adoption, staged/canary rollout, RBAC, and moving operator intent into the
 controller's revision log are phase 12 — **all built**, documented per-flag in
-the subsections below. None of them expose `GET /metrics`; the Prometheus
-surface stays per-`gsp`-instance as above. All three serve unauthenticated
+the subsections below. All three serve unauthenticated
 `GET /healthz` for liveness regardless of their auth settings below.
+
+**`GET /metrics` on the fleet binaries.** Each serves a Prometheus endpoint
+(`gsp_http::metrics`) with `gsp_build_info{component,version}` and the TLS handshake
+counters above. It is gated like the rest of the binary's API: on `gsp-controller` and
+`gsp-aggregator` by `--auth-token` (`Authorization: Bearer`, open when no token is set),
+on `gsp-ui` by its own `--metrics-token` (at least 16 bytes), because a scraper cannot
+hold the UI's browser session. A `gsp-ui` with a login configured and no
+`--metrics-token` does not serve `/metrics` at all; an open UI (no login) serves it
+open. Per-request or per-store metrics for these binaries are not built; the
+per-instance proxy surface stays on each `gsp`.
 
 ### `gsp-controller` — structural config distribution
 

@@ -6,6 +6,7 @@ spec:
   template:
     metadata: { labels: { app: gsp } }
     spec:
+      serviceAccountName: gsp                # 45-gsp-rbac.yaml: reads EndpointSlices
       hostNetwork: true                      # docs/12 default for an edge proxy
       dnsPolicy: ClusterFirstWithHostNet     # else gsp-aggregator below won't resolve
       containers:

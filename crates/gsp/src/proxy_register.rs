@@ -222,6 +222,7 @@ pub async fn run(
     interval: Duration,
     sync: AddressSync,
 ) {
+    let sync = Arc::new(sync);
     loop {
         match register_once(&client, &controller_url, token.as_deref(), &reg).await {
             Ok(r) => {
@@ -229,13 +230,21 @@ pub async fn run(
                     revision = r.revision,
                     "registered as a proxy peer with the controller"
                 );
-                let from = sync.live.address();
-                match sync.apply(&r) {
-                    Ok(true) => tracing::warn!(
+                // Moving the interface holds a lock and sleeps between bring-up
+                // attempts: keep it off the async workers.
+                let s = sync.clone();
+                let moved = tokio::task::spawn_blocking(move || {
+                    let from = s.live.address();
+                    s.apply(&r).map(|moved| moved.then_some(from))
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("address change task failed: {e}")));
+                match moved {
+                    Ok(Some(from)) => tracing::warn!(
                         from = %from, to = %sync.live.address(),
                         "the controller assigned a new tunnel address; moved the interface"
                     ),
-                    Ok(false) => {}
+                    Ok(None) => {}
                     Err(e) => {
                         tracing::error!(error = %format!("{e:#}"), "could not apply the controller's tunnel address; will retry")
                     }

@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    let prometheus = gsp_http::metrics::install("gsp-controller", env!("CARGO_PKG_VERSION"))?;
     gsp_http::policy::check_exposure(
         "gsp-controller",
         args.listen,
@@ -521,6 +522,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .merge(gsp_http::metrics::router(
+            prometheus,
+            gsp_http::server::BearerAuth::new(admin_token.as_deref()),
+        ))
         .merge(api::router((*state).clone()))
         .merge(gsp_controller::intent::api::router((*intent_state).clone()))
         .merge(gsp_controller::peers::api::router(peers_state))

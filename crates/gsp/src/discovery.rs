@@ -5,9 +5,10 @@
 //! resolvers. Each adapter answers one question — "what is the current backend
 //! address set for this pool?" — and `gsp-core` diffs it against the live set.
 //!
-//! - [`DnsSrvSource`] resolves an SRV record (port from the record).
+//! - [`DnsSrvSource`] (`dns_srv.rs`, the `dns-srv` cargo feature) resolves an
+//!   SRV record (port from the record).
 //! - [`ConsulSource`] lists passing instances of a Consul service.
-//! - [`KubernetesSource`] reads the Endpoints of a Kubernetes service and
+//! - [`KubernetesSource`] reads the EndpointSlices of a Kubernetes service and
 //!   watches them, so a pod change lands in a fetch immediately; the polling
 //!   interval remains as the resync safety net.
 
@@ -16,13 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::dns_srv::DnsSrvSource;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use gsp_config::{Config, SourceConfig, SourceKind};
 use gsp_core::{BackendSource, SourceError, SourceFactory};
-use hickory_resolver::config::ResolverConfig;
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use serde::Deserialize;
 use tokio::sync::Notify;
 
@@ -134,112 +133,6 @@ impl SourceFactory for DiscoveryFactory {
     fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError> {
         build_one(pool, cfg, &self.kube_auth, self.tunnel_registry.as_ref())
             .map_err(SourceError::build)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DNS SRV
-// ---------------------------------------------------------------------------
-
-pub struct DnsSrvSource {
-    pool: String,
-    record: String,
-    interval: Duration,
-    resolver: TokioResolver,
-}
-
-impl DnsSrvSource {
-    pub fn new(pool: String, record: String, interval: Duration) -> anyhow::Result<Self> {
-        // Prefer the host resolver config; fall back to a default (public) one
-        // so a missing /etc/resolv.conf doesn't abort startup.
-        let resolver = TokioResolver::builder_tokio()
-            .and_then(hickory_resolver::ResolverBuilder::build)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "dns_srv: system resolver config unavailable; using defaults");
-                TokioResolver::builder_with_config(
-                    ResolverConfig::default(),
-                    TokioRuntimeProvider::default(),
-                )
-                .build()
-                .expect("building a resolver from a default config never fails")
-            });
-        Ok(Self {
-            pool,
-            record,
-            interval,
-            resolver,
-        })
-    }
-
-    /// Test constructor: resolve via a specific nameserver `ip:port` (UDP).
-    #[cfg(test)]
-    pub fn with_nameserver(
-        pool: String,
-        record: String,
-        interval: Duration,
-        nameserver: SocketAddr,
-    ) -> Self {
-        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
-        let mut ns = NameServerConfig::udp(nameserver.ip());
-        ns.connections[0].port = nameserver.port();
-        let cfg = ResolverConfig::from_parts(None, vec![], vec![ns]);
-        Self {
-            pool,
-            record,
-            interval,
-            resolver: TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
-                .build()
-                .expect("building a resolver from a fixed nameserver never fails"),
-        }
-    }
-}
-
-#[async_trait]
-impl BackendSource for DnsSrvSource {
-    fn pool(&self) -> &str {
-        &self.pool
-    }
-    fn kind(&self) -> &'static str {
-        "dns_srv"
-    }
-    fn refresh_interval(&self) -> Duration {
-        self.interval
-    }
-
-    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
-        let lookup =
-            self.resolver
-                .srv_lookup(&self.record)
-                .await
-                .map_err(|e| SourceError::Unreachable {
-                    context: format!("SRV lookup for {}", self.record),
-                    cause: e.to_string(),
-                })?;
-
-        let mut out = Vec::new();
-        for record in lookup.answers() {
-            let hickory_resolver::proto::rr::RData::SRV(srv) = &record.data else {
-                continue;
-            };
-            let port = srv.port;
-            let target = srv.target.to_utf8();
-            let target = target.trim_end_matches('.');
-            match target.parse() {
-                Ok(ip) => out.push(SocketAddr::new(ip, port)),
-                Err(_) => {
-                    let ips = self.resolver.lookup_ip(target).await.map_err(|e| {
-                        SourceError::Unreachable {
-                            context: format!("A/AAAA lookup for SRV target {target}"),
-                            cause: e.to_string(),
-                        }
-                    })?;
-                    for ip in ips.iter() {
-                        out.push(SocketAddr::new(ip, port));
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 }
 
@@ -357,7 +250,7 @@ impl BackendSource for ConsulSource {
 }
 
 // ---------------------------------------------------------------------------
-// Kubernetes Endpoints (poll + watch)
+// Kubernetes EndpointSlices (poll + watch)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
@@ -393,7 +286,7 @@ pub struct KubernetesSource {
     /// Same credentials, but no total-request timeout: a watch is a long-lived
     /// response, bounded by [`WATCH_READ_TIMEOUT`] between chunks instead.
     watch_client: reqwest::Client,
-    /// `metadata.resourceVersion` of the newest Endpoints state seen: set by
+    /// `metadata.resourceVersion` of the newest EndpointSlice state seen: set by
     /// every `fetch` and every watch event, cleared when the API server
     /// reports it expired. A watch resumes from it, so it only ever delivers
     /// changes made after the last fetch.
@@ -416,12 +309,13 @@ const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Longest unterminated watch-event line we buffer.
 const WATCH_LINE_MAX: usize = 16 * 1024 * 1024;
 
+/// `discovery.k8s.io/v1` `EndpointSliceList`: every slice of the service.
 #[derive(Deserialize)]
-struct Endpoints {
+struct EndpointSliceList {
     #[serde(default)]
     metadata: ObjectMeta,
     #[serde(default)]
-    subsets: Vec<Subset>,
+    items: Vec<EndpointSlice>,
 }
 
 #[derive(Deserialize, Default)]
@@ -460,23 +354,37 @@ enum WatchEnd {
 }
 
 #[derive(Deserialize)]
-struct Subset {
+struct EndpointSlice {
+    /// `IPv4`, `IPv6` or `FQDN`.
+    #[serde(default, rename = "addressType")]
+    address_type: String,
     #[serde(default)]
-    addresses: Vec<EndpointAddress>,
+    endpoints: Vec<SliceEndpoint>,
     #[serde(default)]
-    ports: Vec<EndpointPort>,
+    ports: Vec<SlicePort>,
 }
 
 #[derive(Deserialize)]
-struct EndpointAddress {
-    ip: String,
+struct SliceEndpoint {
+    #[serde(default)]
+    addresses: Vec<String>,
+    #[serde(default)]
+    conditions: SliceConditions,
+}
+
+#[derive(Deserialize, Default)]
+struct SliceConditions {
+    /// Absent means "unknown", which consumers must treat as ready.
+    #[serde(default)]
+    ready: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct EndpointPort {
+struct SlicePort {
     #[serde(default)]
     name: Option<String>,
-    port: u16,
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 impl KubernetesSource {
@@ -526,11 +434,16 @@ impl KubernetesSource {
         })
     }
 
-    fn endpoints_url(&self) -> String {
+    fn slices_url(&self) -> String {
         format!(
-            "{}/api/v1/namespaces/{}/endpoints",
+            "{}/apis/discovery.k8s.io/v1/namespaces/{}/endpointslices",
             self.api, self.namespace
         )
+    }
+
+    /// Selects the slices the EndpointSlice controller made for the service.
+    fn slice_selector(&self) -> String {
+        format!("kubernetes.io/service-name={}", self.service)
     }
 
     fn version(&self) -> Option<String> {
@@ -554,9 +467,9 @@ impl KubernetesSource {
     /// One watch request from `version`: returns when an event reports a
     /// change, the server closes the stream, or the version has expired.
     async fn watch_once(&self, version: &str) -> anyhow::Result<WatchEnd> {
-        let mut req = self.watch_client.get(self.endpoints_url()).query(&[
+        let mut req = self.watch_client.get(self.slices_url()).query(&[
             ("watch", "true"),
-            ("fieldSelector", &format!("metadata.name={}", self.service)),
+            ("labelSelector", &self.slice_selector()),
             ("resourceVersion", version),
             ("allowWatchBookmarks", "true"),
             ("timeoutSeconds", &WATCH_TIMEOUT_SECS.to_string()),
@@ -671,12 +584,14 @@ impl BackendSource for KubernetesSource {
     }
 
     async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
-        let url = format!("{}/{}", self.endpoints_url(), self.service);
-        let mut req = self.client.get(&url);
+        let mut req = self
+            .client
+            .get(self.slices_url())
+            .query(&[("labelSelector", self.slice_selector())]);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
-        let ep: Endpoints = req
+        let list: EndpointSliceList = req
             .send()
             .await
             .map_err(|e| SourceError::Unreachable {
@@ -691,28 +606,41 @@ impl BackendSource for KubernetesSource {
             .json()
             .await
             .map_err(|e| SourceError::BadResponse {
-                context: "decode Kubernetes Endpoints".into(),
+                context: "decode Kubernetes EndpointSlices".into(),
                 cause: gsp_http::error_chain(&e),
             })?;
 
-        self.set_version(ep.metadata.resource_version.clone());
+        // The list's own version is the point a watch resumes from.
+        self.set_version(list.metadata.resource_version.clone());
 
         let mut out = Vec::new();
-        for subset in &ep.subsets {
+        for slice in &list.items {
+            if slice.address_type == "FQDN" {
+                continue; // not an address: the proxy dials IPs
+            }
             let port = match &self.port_name {
-                Some(want) => subset
-                    .ports
-                    .iter()
-                    .find(|p| p.name.as_deref() == Some(want)),
-                None => subset.ports.first(),
+                Some(want) => slice.ports.iter().find(|p| p.name.as_deref() == Some(want)),
+                None => slice.ports.first(),
             };
-            let Some(port) = port else { continue };
-            for addr in &subset.addresses {
-                let ip = addr.ip.parse().map_err(|_| SourceError::BadResponse {
-                    context: "Kubernetes Endpoints".into(),
-                    cause: format!("endpoint address {:?} is not an IP", addr.ip),
-                })?;
-                out.push(SocketAddr::new(ip, port.port));
+            let Some(port) = port.and_then(|p| p.port) else {
+                continue;
+            };
+            for ep in slice
+                .endpoints
+                .iter()
+                .filter(|e| e.conditions.ready != Some(false))
+            {
+                for addr in &ep.addresses {
+                    let ip = addr.parse().map_err(|_| SourceError::BadResponse {
+                        context: "Kubernetes EndpointSlices".into(),
+                        cause: format!("endpoint address {addr:?} is not an IP"),
+                    })?;
+                    let sa = SocketAddr::new(ip, port);
+                    // A service can list one address in several slices.
+                    if !out.contains(&sa) {
+                        out.push(sa);
+                    }
+                }
             }
         }
         Ok(out)
@@ -1010,64 +938,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_srv_source_resolves_targets_to_addresses() {
-        use hickory_server::proto::rr::rdata::{A, SRV};
-        use hickory_server::proto::rr::{LowerName, Name, RData, Record};
-        use hickory_server::server::Server;
-        use hickory_server::store::in_memory::InMemoryZoneHandler;
-        use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneType};
-        use std::sync::Arc;
-
-        let origin = Name::from_ascii("example.com.").unwrap();
-        let mut auth: InMemoryZoneHandler =
-            InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
-        auth.upsert_mut(
-            Record::from_rdata(
-                Name::from_ascii("_game._udp.example.com.").unwrap(),
-                60,
-                RData::SRV(SRV::new(
-                    0,
-                    0,
-                    7777,
-                    Name::from_ascii("host1.example.com.").unwrap(),
-                )),
-            ),
-            0,
-        );
-        auth.upsert_mut(
-            Record::from_rdata(
-                Name::from_ascii("host1.example.com.").unwrap(),
-                60,
-                RData::A(A::new(127, 0, 0, 1)),
-            ),
-            0,
-        );
-
-        let mut catalog = Catalog::new();
-        catalog.upsert(LowerName::from(origin), vec![Arc::new(auth)]);
-
-        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let ns = udp.local_addr().unwrap();
-        let mut server = Server::new(catalog);
-        server.register_socket(udp);
-        tokio::spawn(async move {
-            let _ = server.block_until_done().await;
-        });
-
-        let src = DnsSrvSource::with_nameserver(
-            "p".into(),
-            "_game._udp.example.com.".into(),
-            Duration::from_secs(10),
-            ns,
-        );
-        let got = src.fetch().await.unwrap();
-        assert_eq!(got, vec!["127.0.0.1:7777".parse().unwrap()]);
-    }
-
-    #[tokio::test]
     async fn kubernetes_source_selects_named_port() {
-        let body = r#"{"subsets":[
-          {"addresses":[{"ip":"10.2.0.1"},{"ip":"10.2.0.2"}],
+        let body = r#"{"items":[
+          {"addressType":"IPv4",
+           "endpoints":[{"addresses":["10.2.0.1"]},{"addresses":["10.2.0.2"]}],
            "ports":[{"name":"metrics","port":9000},{"name":"game","port":7777}]}
         ]}"#;
         let server = mock_http::serve_json(body).await;
@@ -1092,6 +966,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn kubernetes_source_merges_slices_and_skips_unready_endpoints() {
+        // Two slices (one per address family, as for a dual-stack service),
+        // a duplicate across slices, an unready and a terminating endpoint,
+        // an FQDN slice, and a slice without the wanted port.
+        let body = r#"{"items":[
+          {"addressType":"IPv4",
+           "endpoints":[
+             {"addresses":["10.2.0.1"]},
+             {"addresses":["10.2.0.2"],"conditions":{"ready":true}},
+             {"addresses":["10.2.0.3"],"conditions":{"ready":false}},
+             {"addresses":["10.2.0.4"],"conditions":{"ready":false,"terminating":true}}],
+           "ports":[{"name":"game","port":7777}]},
+          {"addressType":"IPv4",
+           "endpoints":[{"addresses":["10.2.0.1"]},{"addresses":["10.2.0.5"]}],
+           "ports":[{"name":"game","port":7777}]},
+          {"addressType":"IPv6",
+           "endpoints":[{"addresses":["fd00::1"]}],
+           "ports":[{"name":"game","port":7777}]},
+          {"addressType":"FQDN",
+           "endpoints":[{"addresses":["db.example.com"]}],
+           "ports":[{"name":"game","port":7777}]},
+          {"addressType":"IPv4",
+           "endpoints":[{"addresses":["10.2.0.9"]}],
+           "ports":[{"name":"other","port":1}]}
+        ]}"#;
+        let server = mock_http::serve_json(body).await;
+        let src = KubernetesSource::new(
+            "p".into(),
+            "games".into(),
+            "match".into(),
+            Some("game".into()),
+            format!("http://{}", server.addr),
+            Duration::from_secs(10),
+            KubeAuth::default(),
+        )
+        .unwrap();
+        let mut got = src.fetch().await.unwrap();
+        got.sort();
+        let mut want: Vec<SocketAddr> = [
+            "10.2.0.1:7777",
+            "10.2.0.2:7777",
+            "10.2.0.5:7777",
+            "[fd00::1]:7777",
+        ]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn kubernetes_source_lists_the_services_slices_by_label() {
+        let server = mock_http::serve_k8s(LIST_V10, vec![]).await;
+        let src = watching_source(server.addr);
+        src.fetch().await.unwrap();
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert!(
+            reqs[0].starts_with("GET /apis/discovery.k8s.io/v1/namespaces/games/endpointslices?"),
+            "{}",
+            reqs[0]
+        );
+        assert!(
+            reqs[0].contains("labelSelector=kubernetes.io%2Fservice-name%3Dmatch"),
+            "{}",
+            reqs[0]
+        );
+    }
+
     fn watching_source(addr: SocketAddr) -> KubernetesSource {
         KubernetesSource::new(
             "p".into(),
@@ -1105,8 +1050,9 @@ mod tests {
         .unwrap()
     }
 
-    const LIST_V10: &str = r#"{"metadata":{"resourceVersion":"10"},"subsets":[
-      {"addresses":[{"ip":"10.2.0.1"}],"ports":[{"port":7777}]}]}"#;
+    const LIST_V10: &str = r#"{"metadata":{"resourceVersion":"10"},"items":[
+      {"addressType":"IPv4","endpoints":[{"addresses":["10.2.0.1"]}],
+       "ports":[{"port":7777}]}]}"#;
 
     fn event(kind: &str, version: &str) -> String {
         format!(r#"{{"type":"{kind}","object":{{"metadata":{{"resourceVersion":"{version}"}}}}}}"#)
@@ -1137,7 +1083,7 @@ mod tests {
         assert!(reqs[0].contains("watch=true"), "{}", reqs[0]);
         assert!(reqs[0].contains("resourceVersion=10"), "{}", reqs[0]);
         assert!(
-            reqs[0].contains("fieldSelector=metadata.name%3Dmatch"),
+            reqs[0].contains("labelSelector=kubernetes.io%2Fservice-name%3Dmatch"),
             "{}",
             reqs[0]
         );
@@ -1349,6 +1295,11 @@ mod tests {
         }
 
         impl K8sServer {
+            /// Request lines of every request so far.
+            pub fn requests(&self) -> Vec<String> {
+                self.requests.lock().unwrap().clone()
+            }
+
             /// Request lines of every watch request so far.
             pub fn watch_requests(&self) -> Vec<String> {
                 let log = self.requests.lock().unwrap();
