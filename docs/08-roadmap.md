@@ -238,12 +238,12 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Config: top-level `backend_sources:` list referenced by `pools[].source`
   (exactly one of `targets` / `source`). `static` is folded into the pool's
   targets at load time.
-- ✅ k8s uses **polling** (`GET .../endpoints/<svc>` with the in-pod SA token +
-  CA). Deferred: a watch-based informer (fewer API calls, faster convergence).
+- ✅ k8s reads `GET .../endpoints/<svc>` with the in-pod SA token + CA, and
+  (post-phase-8) **watches** it from the fetched `resourceVersion`: a pod change
+  triggers a fetch at once, while the poll interval stays as the resync safety net.
 - ✅ HA operations chapter in `docs/06` — anycast vs. L4 LB, capacity planning
   per instance, dashboards & alerts.
 - **Result**: dynamic backend fleets, horizontal scaling.
-- Deferred: k8s watch informer.
 - ✅ `backend_sources:` live reload (`SourceManager`) — landed in the
   data-plane-completion pass; see Phase 4's post-phase note.
 
@@ -332,7 +332,7 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
   measured inside NFR N1; `regex` first-bytes matching lives in an optional
   plugin, never in core. Known follow-ups, not blocking:
-  per-source cap LRU eviction, a k8s discovery watch informer — see
+  per-source cap LRU eviction — see
   `HANDOVER.md`. (`GET /sessions` since landed — data-plane completion.)
 - ✅ **Post-phase-9 (data-plane completion)**: per-plugin config. ADR 16a
   widens the guest ABI to

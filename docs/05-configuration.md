@@ -271,12 +271,12 @@ backend_sources:
     type: static
     targets: ["10.1.0.11:7777", "10.1.0.12:7777"]
   - name: k8s-match
-    type: kubernetes            # polls GET .../endpoints/<service>
+    type: kubernetes            # GET .../endpoints/<service>, plus a watch for instant updates
     service: "match-server"
     namespace: "games"          # default: "default"
     port_name: "game"           # optional; else the subset's first port
     api: "https://kubernetes.default.svc"   # default; SA token + CA read in-pod
-    refresh_interval_sec: 10
+    refresh_interval_sec: 10   # k8s: resync interval; changes arrive via the watch
   - name: consul-eu
     type: consul               # GET /v1/health/service/<service>?passing=true
     service: "match-server"
@@ -417,6 +417,15 @@ listeners:
       - match: { type: port, ports: [30002] }
         action: { pool: match-us }
 ```
+
+A `kubernetes` source reads the Endpoints with `get` and watches them with
+`watch` (a collection watch narrowed to the service by a field selector), so
+its service account needs both verbs on `endpoints` in the namespace. Without
+`watch` the source logs one warning per outage and keeps converging on the poll
+interval, so a missing grant slows updates but never breaks discovery. The watch
+resumes from the version of the last read and reopens itself when the API server
+ends it; a `410 Gone` triggers an immediate read, which renews the version. A failing
+watch retries every 5 s, doubling up to 60 s.
 
 ## Validation rules (excerpt)
 

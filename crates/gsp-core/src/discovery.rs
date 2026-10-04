@@ -44,6 +44,19 @@ pub trait BackendSource: Send + Sync {
     /// diffs this against the live set. An `Err` (or an empty `Ok`) leaves the
     /// last-known-good set untouched.
     async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError>;
+
+    /// Resolves when the source has reason to believe its set changed, so
+    /// [`refresh_loop`] fetches right away instead of waiting out the
+    /// interval. A push-capable source (a Kubernetes watch) overrides this;
+    /// the default never resolves, which leaves pure interval polling.
+    ///
+    /// The interval tick stays as a resync safety net either way, so a
+    /// missed or spurious signal only costs latency or one extra fetch.
+    /// Must be cancel-safe: [`refresh_loop`] drops the future whenever the
+    /// interval fires first, and calls it again after every fetch.
+    async fn changed(&self) {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Last-known-good discovered address set per pool.
@@ -98,7 +111,8 @@ impl Discovery {
     }
 }
 
-/// Poll one source on its interval; on a change, store it and wake the reload
+/// Poll one source on its interval, and again whenever it signals
+/// [`BackendSource::changed`]; on a change, store it and wake the reload
 /// task. Returns when `shutdown` flips to `true`.
 pub async fn refresh_loop(
     source: Arc<dyn BackendSource>,
@@ -114,6 +128,7 @@ pub async fn refresh_loop(
     loop {
         tokio::select! {
             _ = tick.tick() => {}
+            () = source.changed() => {}
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     return;

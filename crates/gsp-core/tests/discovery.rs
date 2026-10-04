@@ -165,6 +165,65 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
+/// A source whose `changed()` fires on demand, with an interval far longer
+/// than the test: only the push signal can explain a second fetch.
+struct PushSource {
+    set: Mutex<Vec<SocketAddr>>,
+    signal: Notify,
+}
+
+#[async_trait::async_trait]
+impl BackendSource for PushSource {
+    fn pool(&self) -> &str {
+        "game"
+    }
+    fn kind(&self) -> &'static str {
+        "kubernetes"
+    }
+    fn refresh_interval(&self) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+        Ok(self.set.lock().unwrap().clone())
+    }
+    async fn changed(&self) {
+        self.signal.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn a_changed_signal_triggers_a_fetch_without_waiting_for_the_interval() {
+    let discovery = Arc::new(Discovery::new());
+    let reload = Arc::new(Notify::new());
+    let (sd_tx, mut sd_rx) = watch::channel(false);
+    let source = Arc::new(PushSource {
+        set: Mutex::new(vec![addr("10.0.0.1:7777")]),
+        signal: Notify::new(),
+    });
+    let (src, d, r) = (source.clone(), discovery.clone(), reload.clone());
+    let task = tokio::spawn(async move {
+        refresh_loop(src, d, r, &mut sd_rx).await;
+    });
+
+    // The interval's immediate first tick populates the pool.
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("first set notified");
+
+    *source.set.lock().unwrap() = vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")];
+    source.signal.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("push signal must fetch before the hour-long interval");
+    assert_eq!(
+        discovery.get("game").unwrap(),
+        vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")]
+    );
+
+    let _ = sd_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
 #[tokio::test]
 async fn a_withdrawn_source_clears_the_pool_but_an_error_does_not() {
     let discovery = Arc::new(Discovery::new());

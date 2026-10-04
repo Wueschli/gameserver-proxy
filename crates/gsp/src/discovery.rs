@@ -7,12 +7,13 @@
 //!
 //! - [`DnsSrvSource`] resolves an SRV record (port from the record).
 //! - [`ConsulSource`] lists passing instances of a Consul service.
-//! - [`KubernetesSource`] polls the Endpoints of a Kubernetes service
-//!   (a watch-based informer is a deferred optimisation — see `docs/08`).
+//! - [`KubernetesSource`] reads the Endpoints of a Kubernetes service and
+//!   watches them, so a pod change lands in a fetch immediately; the polling
+//!   interval remains as the resync safety net.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
@@ -23,6 +24,7 @@ use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use serde::Deserialize;
+use tokio::sync::Notify;
 
 /// In-pod service-account paths for the Kubernetes API.
 const K8S_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -355,7 +357,7 @@ impl BackendSource for ConsulSource {
 }
 
 // ---------------------------------------------------------------------------
-// Kubernetes Endpoints (polling)
+// Kubernetes Endpoints (poll + watch)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
@@ -388,12 +390,73 @@ pub struct KubernetesSource {
     interval: Duration,
     token: Option<String>,
     client: reqwest::Client,
+    /// Same credentials, but no total-request timeout: a watch is a long-lived
+    /// response, bounded by [`WATCH_READ_TIMEOUT`] between chunks instead.
+    watch_client: reqwest::Client,
+    /// `metadata.resourceVersion` of the newest Endpoints state seen: set by
+    /// every `fetch` and every watch event, cleared when the API server
+    /// reports it expired. A watch resumes from it, so it only ever delivers
+    /// changes made after the last fetch.
+    resource_version: Mutex<Option<String>>,
+    /// Permit stored by `fetch` when it sets `resource_version`; wakes a
+    /// `changed()` that was waiting for one.
+    version_ready: Notify,
 }
+
+/// Server-side lifetime of one watch request; it is reopened afterwards.
+const WATCH_TIMEOUT_SECS: u64 = 300;
+/// Client-side cap on silence from the API server (it sends bookmarks and
+/// closes at [`WATCH_TIMEOUT_SECS`]), so a dead connection cannot hang the watch.
+const WATCH_READ_TIMEOUT: Duration = Duration::from_secs(WATCH_TIMEOUT_SECS + 30);
+/// Minimum time between two watch requests: backs off a failing or
+/// immediately-closing watch while the poll tick keeps the set fresh. Failures
+/// double it up to [`WATCH_RETRY_MAX`] (e.g. a missing `watch` grant).
+const WATCH_RETRY: Duration = Duration::from_secs(5);
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
+/// Longest unterminated watch-event line we buffer.
+const WATCH_LINE_MAX: usize = 16 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Endpoints {
     #[serde(default)]
+    metadata: ObjectMeta,
+    #[serde(default)]
     subsets: Vec<Subset>,
+}
+
+#[derive(Deserialize, Default)]
+struct ObjectMeta {
+    #[serde(default, rename = "resourceVersion")]
+    resource_version: Option<String>,
+}
+
+/// One line of a watch response (`{"type": ..., "object": ...}`). For an
+/// `ERROR` event the object is a `Status`, whose `code` says why.
+#[derive(Deserialize)]
+struct WatchEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    object: WatchObject,
+}
+
+#[derive(Deserialize)]
+struct WatchObject {
+    #[serde(default)]
+    metadata: ObjectMeta,
+    #[serde(default)]
+    code: Option<u16>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// How one watch request ended.
+enum WatchEnd {
+    /// The set may have changed: fetch it.
+    Changed,
+    /// The server closed the stream (its timeout); reopen from the last version.
+    Closed,
+    /// The resource version is too old (`410 Gone`); a fetch must renew it.
+    Expired,
 }
 
 #[derive(Deserialize)]
@@ -428,11 +491,19 @@ impl KubernetesSource {
         interval: Duration,
         auth: KubeAuth,
     ) -> anyhow::Result<Self> {
-        let mut builder = gsp_http::builder().timeout(Duration::from_secs(5));
-        if let Some(ca) = &auth.ca_pem {
-            let cert = reqwest::Certificate::from_pem(ca).context("parse Kubernetes CA cert")?;
-            builder = builder.add_root_certificate(cert);
-        }
+        let cert = auth
+            .ca_pem
+            .as_deref()
+            .map(reqwest::Certificate::from_pem)
+            .transpose()
+            .context("parse Kubernetes CA cert")?;
+        let builder = || {
+            let b = gsp_http::builder();
+            match &cert {
+                Some(cert) => b.add_root_certificate(cert.clone()),
+                None => b,
+            }
+        };
         Ok(Self {
             pool,
             namespace,
@@ -441,8 +512,105 @@ impl KubernetesSource {
             api: api.trim_end_matches('/').to_string(),
             interval,
             token: auth.token,
-            client: builder.build().context("build Kubernetes HTTP client")?,
+            client: builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .context("build Kubernetes HTTP client")?,
+            watch_client: builder()
+                .connect_timeout(Duration::from_secs(5))
+                .read_timeout(WATCH_READ_TIMEOUT)
+                .build()
+                .context("build Kubernetes watch client")?,
+            resource_version: Mutex::new(None),
+            version_ready: Notify::new(),
         })
+    }
+
+    fn endpoints_url(&self) -> String {
+        format!(
+            "{}/api/v1/namespaces/{}/endpoints",
+            self.api, self.namespace
+        )
+    }
+
+    fn version(&self) -> Option<String> {
+        self.resource_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_version(&self, version: Option<String>) {
+        let ready = version.is_some();
+        *self
+            .resource_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = version;
+        if ready {
+            self.version_ready.notify_one();
+        }
+    }
+
+    /// One watch request from `version`: returns when an event reports a
+    /// change, the server closes the stream, or the version has expired.
+    async fn watch_once(&self, version: &str) -> anyhow::Result<WatchEnd> {
+        let mut req = self.watch_client.get(self.endpoints_url()).query(&[
+            ("watch", "true"),
+            ("fieldSelector", &format!("metadata.name={}", self.service)),
+            ("resourceVersion", version),
+            ("allowWatchBookmarks", "true"),
+            ("timeoutSeconds", &WATCH_TIMEOUT_SECS.to_string()),
+        ]);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("Kubernetes watch request: {}", gsp_http::error_chain(&e)))?;
+        if resp.status() == reqwest::StatusCode::GONE {
+            return Ok(WatchEnd::Expired);
+        }
+        let mut resp = resp
+            .error_for_status()
+            .map_err(|e| anyhow!("Kubernetes watch status: {}", gsp_http::error_chain(&e)))?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| anyhow!("Kubernetes watch stream: {}", gsp_http::error_chain(&e)))?
+        {
+            buf.extend_from_slice(&chunk);
+            while let Some(end) = buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=end).collect();
+                if line.trim_ascii().is_empty() {
+                    continue;
+                }
+                let ev: WatchEvent = serde_json::from_slice(&line)
+                    .map_err(|e| anyhow!("decode Kubernetes watch event: {e}"))?;
+                match ev.kind.as_str() {
+                    "BOOKMARK" => self.set_version(ev.object.metadata.resource_version),
+                    "ERROR" if ev.object.code == Some(410) => return Ok(WatchEnd::Expired),
+                    "ERROR" => {
+                        return Err(anyhow!(
+                            "Kubernetes watch error: {}",
+                            ev.object.message.unwrap_or_default()
+                        ))
+                    }
+                    _ => {
+                        self.set_version(ev.object.metadata.resource_version);
+                        return Ok(WatchEnd::Changed);
+                    }
+                }
+            }
+            if buf.len() > WATCH_LINE_MAX {
+                return Err(anyhow!(
+                    "Kubernetes watch event exceeds {WATCH_LINE_MAX} bytes"
+                ));
+            }
+        }
+        Ok(WatchEnd::Closed)
     }
 }
 
@@ -458,11 +626,52 @@ impl BackendSource for KubernetesSource {
         self.interval
     }
 
+    async fn changed(&self) {
+        let mut warned = false;
+        let mut retry = WATCH_RETRY;
+        loop {
+            // Nothing to resume from until a fetch has run (or after expiry).
+            let Some(version) = self.version() else {
+                self.version_ready.notified().await;
+                continue;
+            };
+            let started = tokio::time::Instant::now();
+            match self.watch_once(&version).await {
+                Ok(WatchEnd::Changed) => return,
+                Ok(WatchEnd::Closed) => {
+                    warned = false;
+                    retry = WATCH_RETRY;
+                }
+                Ok(WatchEnd::Expired) => {
+                    // The version is too old to resume from: have `refresh_loop`
+                    // fetch now, which also renews it. Cleared first, so a
+                    // failing fetch makes the next call wait instead of spin.
+                    tracing::debug!(pool = self.pool, "Kubernetes watch version expired");
+                    self.set_version(None);
+                    return;
+                }
+                Err(e) => {
+                    // The poll tick still converges the set; say so once per outage.
+                    if warned {
+                        tracing::debug!(pool = self.pool, error = %e, "Kubernetes watch failed again");
+                    } else {
+                        tracing::warn!(
+                            pool = self.pool, error = %e,
+                            "Kubernetes watch failed; falling back to polling until it recovers"
+                        );
+                        warned = true;
+                    }
+                }
+            }
+            tokio::time::sleep_until(started + retry).await;
+            if warned {
+                retry = (retry * 2).min(WATCH_RETRY_MAX);
+            }
+        }
+    }
+
     async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
-        let url = format!(
-            "{}/api/v1/namespaces/{}/endpoints/{}",
-            self.api, self.namespace, self.service
-        );
+        let url = format!("{}/{}", self.endpoints_url(), self.service);
         let mut req = self.client.get(&url);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
@@ -485,6 +694,8 @@ impl BackendSource for KubernetesSource {
                 context: "decode Kubernetes Endpoints".into(),
                 cause: gsp_http::error_chain(&e),
             })?;
+
+        self.set_version(ep.metadata.resource_version.clone());
 
         let mut out = Vec::new();
         for subset in &ep.subsets {
@@ -881,6 +1092,102 @@ mod tests {
         );
     }
 
+    fn watching_source(addr: SocketAddr) -> KubernetesSource {
+        KubernetesSource::new(
+            "p".into(),
+            "games".into(),
+            "match".into(),
+            None,
+            format!("http://{addr}"),
+            Duration::from_secs(3600),
+            KubeAuth::default(),
+        )
+        .unwrap()
+    }
+
+    const LIST_V10: &str = r#"{"metadata":{"resourceVersion":"10"},"subsets":[
+      {"addresses":[{"ip":"10.2.0.1"}],"ports":[{"port":7777}]}]}"#;
+
+    fn event(kind: &str, version: &str) -> String {
+        format!(r#"{{"type":"{kind}","object":{{"metadata":{{"resourceVersion":"{version}"}}}}}}"#)
+    }
+
+    async fn pending(src: &KubernetesSource) -> bool {
+        tokio::time::timeout(Duration::from_millis(300), src.changed())
+            .await
+            .is_err()
+    }
+
+    #[tokio::test]
+    async fn kubernetes_watch_resumes_from_the_fetched_version_and_signals_an_event() {
+        let server = mock_http::serve_k8s(LIST_V10, vec![event("MODIFIED", "11")]).await;
+        let src = watching_source(server.addr);
+
+        // Nothing to resume from before the first fetch: no watch is opened.
+        assert!(pending(&src).await);
+        assert!(server.watch_requests().is_empty());
+
+        src.fetch().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), src.changed())
+            .await
+            .expect("an event ends the wait");
+
+        let reqs = server.watch_requests();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert!(reqs[0].contains("watch=true"), "{}", reqs[0]);
+        assert!(reqs[0].contains("resourceVersion=10"), "{}", reqs[0]);
+        assert!(
+            reqs[0].contains("fieldSelector=metadata.name%3Dmatch"),
+            "{}",
+            reqs[0]
+        );
+        assert_eq!(
+            src.version().as_deref(),
+            Some("11"),
+            "events advance the version"
+        );
+    }
+
+    #[tokio::test]
+    async fn kubernetes_watch_bookmarks_advance_the_version_without_signalling() {
+        let server = mock_http::serve_k8s(LIST_V10, vec![event("BOOKMARK", "12")]).await;
+        let src = watching_source(server.addr);
+        src.fetch().await.unwrap();
+
+        assert!(pending(&src).await, "a bookmark is not a change");
+        assert_eq!(src.version().as_deref(), Some("12"));
+    }
+
+    #[tokio::test]
+    async fn kubernetes_watch_asks_for_a_fetch_when_the_version_expires() {
+        let gone = r#"{"type":"ERROR","object":{"kind":"Status","code":410,"message":"too old"}}"#;
+        let server = mock_http::serve_k8s(LIST_V10, vec![gone.to_string()]).await;
+        let src = watching_source(server.addr);
+        src.fetch().await.unwrap();
+
+        // Expiry resolves at once, so the loop refetches without the tick.
+        tokio::time::timeout(Duration::from_secs(2), src.changed())
+            .await
+            .expect("expiry asks for a fetch");
+        assert_eq!(src.version(), None);
+
+        // Until that fetch renews the version, no watch is opened.
+        assert!(pending(&src).await);
+        assert_eq!(
+            server.watch_requests().len(),
+            1,
+            "no retry on a stale version"
+        );
+
+        // The fetch renews the version and the watch resumes (the mock expires
+        // it again, which asks for another fetch).
+        src.fetch().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), src.changed())
+            .await
+            .expect("a renewed version is watched again");
+        assert_eq!(server.watch_requests().len(), 2);
+    }
+
     #[tokio::test]
     async fn tunnel_source_returns_the_registered_backends_when_the_pubkey_matches() {
         let body = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["10.60.0.2:1","10.60.0.2:2"]}"#;
@@ -983,7 +1290,7 @@ mod tests {
     pub(super) mod mock_http {
         use std::net::SocketAddr;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1034,6 +1341,67 @@ mod tests {
                 }
             });
             Server { addr }
+        }
+
+        pub struct K8sServer {
+            pub addr: SocketAddr,
+            requests: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl K8sServer {
+            /// Request lines of every watch request so far.
+            pub fn watch_requests(&self) -> Vec<String> {
+                let log = self.requests.lock().unwrap();
+                log.iter()
+                    .filter(|r| r.contains("watch=true"))
+                    .cloned()
+                    .collect()
+            }
+        }
+
+        /// A Kubernetes API stand-in: a plain `GET` answers with `list`; a
+        /// `watch=true` request streams `events` (one JSON line each) and then
+        /// holds the connection open.
+        pub async fn serve_k8s(list: &str, events: Vec<String>) -> K8sServer {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = requests.clone();
+            let list = list.to_string();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let (log, list, events) = (log.clone(), list.clone(), events.clone());
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let line = head.lines().next().unwrap_or_default().to_string();
+                        log.lock().unwrap().push(line.clone());
+                        if line.contains("watch=true") {
+                            let _ = sock
+                                .write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
+                                .await;
+                            for ev in &events {
+                                let _ = sock.write_all(format!("{ev}\n").as_bytes()).await;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        } else {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                 content-length: {}\r\nconnection: close\r\n\r\n{}",
+                                list.len(),
+                                list
+                            );
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                        }
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            K8sServer { addr, requests }
         }
     }
 }
