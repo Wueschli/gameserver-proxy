@@ -50,7 +50,8 @@ impl Default for LabOptions {
 /// `--tunnel-network <network>` followed by `extra`, unless `extra` names its
 /// own network.
 fn controller_args(network: &str, extra: &[&str]) -> Vec<String> {
-    let mut args = Vec::new();
+    // The lab controller binds the wildcard address and the lab agents carry no token.
+    let mut args = vec!["--insecure-no-auth".to_string()];
     if !extra.contains(&"--tunnel-network") {
         args.extend(["--tunnel-network".to_string(), network.to_string()]);
     }

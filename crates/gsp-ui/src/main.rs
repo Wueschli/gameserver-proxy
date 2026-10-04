@@ -33,9 +33,9 @@ struct Args {
     listen: SocketAddr,
 
     /// Password required to log in — one shared secret, implicitly `admin`.
-    /// Omit to leave the UI open (no login required) — network-boundary-only
-    /// auth, same posture every other optional-auth surface in this fleet
-    /// has. Mutually exclusive with `--users-file`.
+    /// Omit to leave the UI open (no login required), which is only accepted
+    /// on a loopback `--listen` (or with `--insecure-no-auth`). Mutually
+    /// exclusive with `--users-file`.
     #[arg(long)]
     ui_password: Option<String>,
 
@@ -45,6 +45,12 @@ struct Args {
     /// Mutually exclusive with `--ui-password`.
     #[arg(long)]
     users_file: Option<PathBuf>,
+
+    /// Allow a non-loopback `--listen` with neither `--ui-password` nor
+    /// `--users-file` (an open UI). Only for deployments where the network
+    /// boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
 
     /// Print an argon2 hash for a password read from stdin, then exit —
     /// does not start the server. The intended way to populate a
@@ -113,6 +119,13 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    gsp_http::policy::check_exposure(
+        "gsp-ui",
+        args.listen,
+        args.ui_password.is_some() || args.users_file.is_some(),
+        args.insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(path) = &args.ca_file {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");

@@ -12,6 +12,8 @@
 //! keep their existing connection and timeout semantics.
 
 #[cfg(feature = "server")]
+pub mod policy;
+#[cfg(feature = "server")]
 pub mod tls;
 
 use std::path::{Path, PathBuf};

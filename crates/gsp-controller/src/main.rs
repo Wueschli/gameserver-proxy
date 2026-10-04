@@ -38,10 +38,10 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9901")]
     listen: SocketAddr,
 
-    /// Bearer token required on every /config* request. Omit to leave the
-    /// API open — network-boundary-only auth, the same posture `gsp`'s own
-    /// admin API has today. Not a full RBAC/identity story, just a shared
-    /// secret (see `crate::auth`).
+    /// Bearer token required on every /config* request, at least 16 bytes.
+    /// Omit to leave the API open, which is only accepted on a loopback
+    /// `--listen` (or with `--insecure-no-auth`). Not a full RBAC/identity
+    /// story, just a shared secret (see `crate::auth`).
     #[arg(long)]
     auth_token: Option<String>,
 
@@ -92,6 +92,12 @@ struct Args {
     /// credential in this fleet.
     #[arg(long)]
     ha_token: Option<String>,
+
+    /// Allow a non-loopback `--listen` with no `--auth-token`. Without it the
+    /// controller refuses that combination at startup. Only for deployments
+    /// where the network boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
 
     /// Build a Raft snapshot (and let the log be purged) every this many
     /// log entries. Test-only: fleet tests lower it to exercise catch-up by
@@ -149,6 +155,13 @@ async fn main() -> anyhow::Result<()> {
         args.role == Role::Slave,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+    ha::check_ha_token(
+        !args.ha_peers.is_empty() || args.ha_join,
+        args.ha_token.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
     let (tunnel_network, stale_after) = gsp_controller::addresses::resolve_flags(
         args.tunnel_network.as_deref(),
         &args.tunnel_stale_after,
@@ -162,6 +175,13 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    gsp_http::policy::check_exposure(
+        "gsp-controller",
+        args.listen,
+        args.auth_token.is_some(),
+        args.insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(path) = &args.ca_file {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
