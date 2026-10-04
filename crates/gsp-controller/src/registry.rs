@@ -40,7 +40,6 @@ use tracing::Instrument;
 
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, unix_secs, AddressBook, ClaimError, Rejection, Role};
-use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
 mod ha;
@@ -423,7 +422,7 @@ async fn register<R: Registration>(
             )
                 .into_response()
         }
-        Ok(Applied::AlreadyApplied) => unreachable!("a write without a Raft index never skips"),
+        Ok(Applied::AlreadyApplied) => store_error_response(words.log, StoreError::UnexpectedSkip),
         Err(e) => store_error_response(words.log, e),
     }
 }
@@ -486,7 +485,9 @@ async fn delete_one<R: Registration>(
     }
     let revision = match state.remove_applied(&name, None) {
         Ok(Applied::Written(r)) => r,
-        Ok(Applied::AlreadyApplied) => unreachable!("a write without a Raft index never skips"),
+        Ok(Applied::AlreadyApplied) => {
+            return store_error_response(words.log, StoreError::UnexpectedSkip)
+        }
         Err(e) => return store_error_response(words.log, e),
     };
     let released = match state.book.release(R::ROLE, &name) {
@@ -513,7 +514,7 @@ struct SubscribeParams {
 /// `GET {base}/subscribe?since=<revision>` — the exact catch-up-then-tail
 /// shape `crate::intent::api::subscribe` uses, applied to this registry's
 /// log. Every event is a full registration or a tombstone
-/// ([`crate::peers::event_payload`]); a subscriber keeps its own
+/// ([`event_payload`]); a subscriber keeps its own
 /// latest-by-name view, exactly like the `current` tree.
 async fn subscribe<R: Registration>(
     State(state): State<RegistryState<R>>,
@@ -548,24 +549,14 @@ pub(crate) async fn subscribe_worker(
     loop {
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {}
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        revision,
-                        "update notification for a registry revision the store lost"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing registry updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     skipped,
@@ -599,6 +590,25 @@ async fn catch_up(
         *last_sent = revision;
     }
     true
+}
+
+/// Log payload for a deleted registration. Deliberately not a
+/// [`Registration`]: `current` never points at a tombstone, so only
+/// subscribers (via [`event_payload`]) ever read one.
+pub(crate) fn tombstone_bytes(name: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "removed": name }))
+        .expect("a json! object always serializes")
+}
+
+/// The SSE `data:` payload for one log entry:
+/// `{"revision":N,"registration":{…}}` for a registration,
+/// `{"revision":N,"removed":{"name":"…"}}` for a tombstone.
+pub(crate) fn event_payload(revision: u64, bytes: &[u8]) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+    match value.get("removed").and_then(|v| v.as_str()) {
+        Some(name) => serde_json::json!({ "revision": revision, "removed": { "name": name } }),
+        None => serde_json::json!({ "revision": revision, "registration": value }),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // used as a `map_err` callback, which hands the error over by value
@@ -663,7 +673,7 @@ mod tests {
         assert_eq!(state.current_for("home").unwrap(), None);
         let tombstone = state.store.get(2).unwrap().unwrap();
         assert_eq!(
-            crate::peers::event_payload(2, &tombstone)["removed"]["name"],
+            crate::registry::event_payload(2, &tombstone)["removed"]["name"],
             "home"
         );
         assert_eq!(
@@ -708,5 +718,37 @@ mod tests {
             dst.register_applied(&reg("c"), Some(4)).unwrap(),
             Applied::Written(4)
         );
+    }
+
+    #[test]
+    fn event_payload_distinguishes_a_registration_from_a_tombstone() {
+        let reg = serde_json::to_vec(&reg("home-origin")).unwrap();
+        let p = event_payload(3, &reg);
+        assert_eq!(p["revision"], 3);
+        assert_eq!(p["registration"]["name"], "home-origin");
+        assert!(p.get("removed").is_none());
+
+        let p = event_payload(4, &tombstone_bytes("home-origin"));
+        assert_eq!(p["revision"], 4);
+        assert_eq!(p["removed"]["name"], "home-origin");
+        assert!(p.get("registration").is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_worker_replays_every_revision_behind_a_single_wake() {
+        // A snapshot install wakes subscribers once, for the newest
+        // revision; the ones before it must still reach the subscriber.
+        let (state, _d) = state();
+        state.register_applied(&reg("a"), None).unwrap();
+        let (wake, updates) = broadcast::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(subscribe_worker(state.store.clone(), updates, 0, tx));
+        assert_eq!(rx.recv().await.unwrap().0, 1);
+
+        state.register_applied(&reg("b"), None).unwrap();
+        state.register_applied(&reg("c"), None).unwrap();
+        wake.send(3).unwrap();
+        assert_eq!(rx.recv().await.unwrap().0, 2);
+        assert_eq!(rx.recv().await.unwrap().0, 3);
     }
 }

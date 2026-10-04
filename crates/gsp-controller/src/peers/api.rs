@@ -493,11 +493,11 @@ mod tests {
             .expect("channel closed before event 2");
         assert!(r2 > r1);
         assert_eq!(
-            crate::peers::event_payload(r1, &b1)["registration"]["name"],
+            crate::registry::event_payload(r1, &b1)["registration"]["name"],
             "home"
         );
         assert_eq!(
-            crate::peers::event_payload(r2, &b2)["removed"]["name"],
+            crate::registry::event_payload(r2, &b2)["removed"]["name"],
             "home"
         );
     }
