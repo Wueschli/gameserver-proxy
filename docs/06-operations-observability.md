@@ -79,9 +79,11 @@
 
 ### Proxy internals
 - `gsp_config_reload_total{result}` / `gsp_config_version` (gauge, timestamp)
-- `gsp_build_info{version,commit}` (gauge, always `1`) — set once at startup;
-  `commit` is a 12-char git SHA baked in at build time (`crates/gsp/build.rs`,
-  `"unknown"` if `.git` isn't available, e.g. a source tarball).
+- `gsp_build_info{component,version,commit}` (gauge, always `1`) — set once at
+  startup; the same label set on `gsp` (`component="gsp"`) and every fleet
+  binary. `commit` is a 12-char git SHA baked in at build time
+  (`crates/gsp-http/build.rs`, `"unknown"` if `.git` isn't available, e.g. a
+  source tarball).
 - `gsp_fd_open` (gauge, no labels) — this process's open file descriptor count
   (`/proc/self/fd` on Linux; absent elsewhere), sampled every 5 s by a small
   background task (`crates/gsp/src/procinfo.rs`), independent of the
@@ -277,11 +279,13 @@ the subsections below. All three serve unauthenticated
 `GET /healthz` for liveness regardless of their auth settings below.
 
 **`GET /metrics` on the fleet binaries.** Each serves a Prometheus endpoint
-(`gsp_http::metrics`) with `gsp_build_info{component,version}` and the TLS handshake
+(`gsp_http::metrics`) with `gsp_build_info{component,version,commit}` and the TLS handshake
 counters above. It is gated like the rest of the binary's API: on `gsp-controller` and
 `gsp-aggregator` by `--auth-token` (`Authorization: Bearer`, open when no token is set),
-on `gsp-ui` by its own `--metrics-token` (at least 16 bytes), because a scraper cannot
-hold the UI's browser session. A `gsp-ui` with a login configured and no
+unless a dedicated `--metrics-token` (at least 16 bytes) is given: then `/metrics`
+accepts only that token (not the admin token) and the token opens nothing else, so
+Prometheus never holds the admin secret. `gsp-ui` has only `--metrics-token`, because a
+scraper cannot hold the UI's browser session. A `gsp-ui` with a login configured and no
 `--metrics-token` does not serve `/metrics` at all; an open UI (no login) serves it
 open. Per-request or per-store metrics for these binaries are not built; the
 per-instance proxy surface stays on each `gsp`.

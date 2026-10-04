@@ -35,6 +35,13 @@ struct Args {
     #[arg(long)]
     auth_token: Option<String>,
 
+    /// Bearer token `GET /metrics` accepts instead of `--auth-token`, at least
+    /// 16 bytes, so a Prometheus scraper need not hold the admin token. It
+    /// unlocks only `/metrics`. Omitted: `/metrics` is gated by `--auth-token`
+    /// like the rest of the API.
+    #[arg(long)]
+    metrics_token: Option<String>,
+
     /// Allow a non-loopback `--listen` with no `--auth-token`. Only for
     /// deployments where the network boundary is the sole access control.
     #[arg(long)]
@@ -86,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
     }
     gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -134,7 +143,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(gsp_http::metrics::router(
             prometheus,
-            gsp_http::server::BearerAuth::new(args.auth_token.as_deref()),
+            gsp_http::server::BearerAuth::new(
+                args.metrics_token.as_deref().or(args.auth_token.as_deref()),
+            ),
         ))
         .merge(api::router(state));
 

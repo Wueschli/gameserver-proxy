@@ -99,11 +99,6 @@ pub const SNIFFER_CALLS: &str = "gsp_sniffer_calls_total";
 /// through the WASM loader, instantiation included.
 pub const SNIFFER_CALL_SECONDS: &str = "gsp_sniffer_call_seconds";
 
-/// Gauge. Labels: `version`, `commit`. Always `1`; set once at startup so the
-/// labels themselves carry the build identity for correlating a metric shift
-/// with a deploy.
-pub const BUILD_INFO: &str = "gsp_build_info";
-
 /// Gauge, no labels. The process's own open file descriptor count, sampled on
 /// the health-check sweep interval (`/proc/self/fd` on Linux; absent
 /// elsewhere).

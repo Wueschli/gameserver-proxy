@@ -13,6 +13,7 @@ use reqwest::{Client, StatusCode};
 use tokio::net::TcpSocket;
 
 const TOKEN: &str = "fleet-metrics-test-token";
+const SCRAPE_TOKEN: &str = "fleet-scrape-only-token";
 
 async fn scrape(client: &Client, url: &str, token: Option<&str>) -> Result<(StatusCode, String)> {
     let mut req = client.get(url);
@@ -50,8 +51,51 @@ async fn controller_and_aggregator_serve_metrics_behind_their_auth_token() -> Re
         let (status, body) = scrape(&client, &url, Some(TOKEN)).await?;
         ensure!(status.is_success(), "{name}: /metrics {status}");
         ensure!(
-            body.contains(&format!("gsp_build_info{{component=\"{name}\"")),
+            body.contains(&format!("gsp_build_info{{component=\"{name}\",version=")),
             "{name}: no build info in:\n{body}"
+        );
+        ensure!(
+            body.contains(",commit=\""),
+            "{name}: no commit label:\n{body}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_metrics_token_unlocks_only_metrics_on_controller_and_aggregator() -> Result<()> {
+    build_fleet_bins()?;
+    let dir = tempfile::tempdir()?;
+    let (cport, aport) = (free_port()?, free_port()?);
+    let extra = args(&["--auth-token", TOKEN, "--metrics-token", SCRAPE_TOKEN]);
+    let _controller = spawn_controller_with(dir.path(), &format!("127.0.0.1:{cport}"), &extra)?;
+    let _aggregator = spawn_aggregator_with(aport, &extra)?;
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    for (name, port, api) in [
+        ("gsp-controller", cport, "config"),
+        ("gsp-aggregator", aport, "fleet/pools"),
+    ] {
+        let base = format!("http://127.0.0.1:{port}");
+        wait_http_up(&format!("{base}/healthz"), Duration::from_secs(30)).await?;
+        let url = format!("{base}/metrics");
+        ensure!(scrape(&client, &url, None).await?.0 == StatusCode::UNAUTHORIZED);
+        // The admin token is not the scrape token once one is configured.
+        ensure!(
+            scrape(&client, &url, Some(TOKEN)).await?.0 == StatusCode::UNAUTHORIZED,
+            "{name}: admin token still unlocks /metrics"
+        );
+        ensure!(
+            scrape(&client, &url, Some(SCRAPE_TOKEN))
+                .await?
+                .0
+                .is_success(),
+            "{name}: scrape token refused on /metrics"
+        );
+        // ... and the scrape token opens nothing else.
+        let (status, _) = scrape(&client, &format!("{base}/{api}"), Some(SCRAPE_TOKEN)).await?;
+        ensure!(
+            status == StatusCode::UNAUTHORIZED,
+            "{name}: scrape token reached /{api}: {status}"
         );
     }
     Ok(())
