@@ -27,7 +27,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use foca::{AccumulatingRuntime, Config as FocaConfig, Foca, Invalidates, PostcardCodec, Timer};
 use gsp_config::GossipConfig;
@@ -90,7 +90,7 @@ impl foca::BroadcastHandler<SocketAddr> for BroadcastMerger {
             addr: reg.addr,
             changed_at: reg.changed_at,
         };
-        let mut domain = self.domain.lock().unwrap();
+        let mut domain = self.domain.lock().unwrap_or_else(PoisonError::into_inner);
         let per_origin = domain.entry(reg.addr).or_default();
         let is_new = per_origin
             .get(&reg.origin)
@@ -160,7 +160,7 @@ impl GossipHandle {
     /// `(up_votes, down_votes)`. `(0, 0)` if nobody (including this
     /// instance) has ever published about it.
     pub fn domain_votes(&self, addr: SocketAddr) -> (usize, usize) {
-        let domain = self.domain.lock().unwrap();
+        let domain = self.domain.lock().unwrap_or_else(PoisonError::into_inner);
         match domain.get(&addr) {
             None => (0, 0),
             Some(regs) => {
@@ -270,7 +270,7 @@ pub async fn run(
                 let reg = BackendHealthRegister {
                     addr,
                     up,
-                    changed_at: crate::util::now_ms(),
+                    changed_at: crate::util::mono_ms(),
                     origin: identity,
                 };
                 // `add_broadcast` itself runs `data` through
@@ -519,7 +519,7 @@ mod tests {
         let addr: SocketAddr = "10.0.0.1:1".parse().unwrap();
         let voter = |n: u16| -> SocketAddr { format!("10.0.0.{n}:1").parse().unwrap() };
 
-        let mut domain = handle.domain.lock().unwrap();
+        let mut domain = handle.domain.lock().unwrap_or_else(PoisonError::into_inner);
         domain.entry(addr).or_default().insert(
             voter(2),
             BackendHealthRegister {

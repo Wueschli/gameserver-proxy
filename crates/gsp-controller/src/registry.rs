@@ -23,11 +23,10 @@
 use std::convert::Infallible;
 use std::marker::PhantomData;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
-use axum::extract::{OriginalUri, Path, Query, Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{OriginalUri, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -40,7 +39,7 @@ use tokio_stream::{Stream, StreamExt};
 use tracing::Instrument;
 
 use crate::addresses::api::claim_error_response;
-use crate::addresses::{expand_backends, now_secs, AddressBook, ClaimError, Rejection, Role};
+use crate::addresses::{expand_backends, unix_secs, AddressBook, ClaimError, Rejection, Role};
 use crate::peers::{event_payload, tombstone_bytes};
 use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
@@ -127,7 +126,7 @@ pub struct RegistryState<R: Registration> {
     /// keeps today's direct claim-and-register path.
     ha: Option<ha::RegistryHa>,
     /// The clock (unix seconds) a write proposed here is stamped with —
-    /// [`now_secs`] outside tests.
+    /// [`unix_secs`] outside tests.
     now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
     registration: PhantomData<R>,
 }
@@ -147,7 +146,7 @@ impl<R: Registration> RegistryState<R> {
             book,
             write_lock: Arc::new(std::sync::Mutex::new(())),
             ha: None,
-            now_fn: Arc::new(now_secs),
+            now_fn: Arc::new(unix_secs),
             registration: PhantomData,
         }
     }
@@ -319,31 +318,10 @@ pub fn router<R: Registration>(state: RegistryState<R>, base: &str) -> Router {
             get(get_one::<R>).delete(delete_one::<R>),
         )
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer::<R>,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::intent::api::require_bearer` exactly, typed against
-/// `RegistryState` — a distinct `axum` state needs its own instance.
-async fn require_bearer<R: Registration>(
-    State(state): State<RegistryState<R>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -396,11 +374,14 @@ async fn register<R: Registration>(
         return ha::register(&state, ha, reg, uri.path(), body).await;
     }
 
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let assignment =
         match state
             .book
-            .claim(R::ROLE, reg.name(), reg.requested_address(), now_secs())
+            .claim(R::ROLE, reg.name(), reg.requested_address(), unix_secs())
         {
             Ok(a) => a,
             Err(e) => return claim_error_response(&e),
@@ -484,7 +465,10 @@ async fn delete_one<R: Registration>(
         return ha::release::<R>(ha, name, uri.path()).await;
     }
     let words = wording(R::ROLE);
-    let guard = state.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let has_current = match state.current.contains_key(name.as_bytes()) {
         Ok(b) => b,
         Err(e) => return store_error_response(words.log, StoreError::from(e)),

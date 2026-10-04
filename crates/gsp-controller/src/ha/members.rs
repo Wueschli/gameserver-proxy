@@ -22,9 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
-use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -83,25 +82,10 @@ pub fn router(ha: Arc<HaHandle>, auth_token: Option<Arc<str>>) -> Router {
         .route("/admin/ha/members", get(list).post(add))
         .route("/admin/ha/members/{id}", delete(remove).put(readdress))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-async fn require_bearer(State(state): State<MembersState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if gsp_http::token_eq(token, expected) => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]

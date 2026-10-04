@@ -18,7 +18,7 @@
 //! supplies, exactly the seam resolvers and sniffers use.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -94,7 +94,7 @@ impl SourceManager {
     /// best-effort initial fetch); the pool then starts from its seed and the
     /// next reload can retry.
     pub fn start_all(&self, snap: &Snapshot) {
-        let mut groups = self.groups.lock().unwrap();
+        let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
         for (pool, cfg) in &snap.sources {
             match self.spawn_group(pool, cfg) {
                 Ok(g) => {
@@ -115,7 +115,7 @@ impl SourceManager {
     pub async fn reconcile(&self, snap: &Snapshot) -> (usize, usize) {
         // Phase 1 (lock held, no await): remove stale groups, spawn new ones.
         let stopped: Vec<(String, SourceGroup)> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
 
             let stale: Vec<String> = groups
                 .iter()
@@ -162,14 +162,18 @@ impl SourceManager {
                 self.discovery.forget(&pool);
             }
         }
-        let n_running = self.groups.lock().unwrap().len();
+        let n_running = self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
         (n_running, n_stopped)
     }
 
     /// Stop every refresh task and wait for them to finish.
     pub async fn stop_all(&self) {
         let drained: Vec<SourceGroup> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             groups.drain().map(|(_, g)| g).collect()
         };
         for g in drained {
@@ -180,7 +184,12 @@ impl SourceManager {
     /// Best-effort abort of any still-running refresh task (after a grace
     /// deadline expired).
     pub fn abort_all(&self) {
-        for g in self.groups.lock().unwrap().values() {
+        for g in self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
             g.abort();
         }
     }

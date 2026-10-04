@@ -1260,6 +1260,7 @@ dependencies = [
 name = "gsp-config"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_norway",
  "thiserror 2.0.21",
@@ -1340,6 +1341,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tower",
  "tracing",
 ]
 

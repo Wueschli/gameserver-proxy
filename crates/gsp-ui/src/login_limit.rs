@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Bucket shape: `burst` attempts at once, then one per `refill`.
@@ -154,7 +154,7 @@ impl LoginLimiter {
     fn check_at(&self, ip: IpAddr, username: Option<&str>, now: Instant) -> Result<(), Duration> {
         let ip = source_key(ip);
         let l = self.limits;
-        let mut g = self.inner.lock().expect("login limiter lock poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         g.ips.take(&ip, l.per_ip, l.max_keys, now)?;
         if let Some(name) = username {
             let name = name.to_lowercase();

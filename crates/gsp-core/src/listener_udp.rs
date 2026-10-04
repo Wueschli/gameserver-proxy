@@ -64,7 +64,7 @@ use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::sniff::Sniffers;
 use crate::src_conns::{SourceGuard, SourceLimiter};
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Max datagram we will relay in either direction.
 const MAX_DATAGRAM: usize = 64 * 1024;
@@ -198,7 +198,7 @@ pub async fn run_udp_listener(
                 }
             }
             _ = wheel_tick.tick() => {
-                let evicted = wheel.tick(&cfg.name, now_ms(), &mut sessions);
+                let evicted = wheel.tick(&cfg.name, mono_ms(), &mut sessions);
                 if evicted > 0 {
                     metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                         .decrement(evicted as f64);
@@ -239,7 +239,7 @@ pub async fn run_udp_listener(
 
                     // Existing session: forward and refresh liveness.
                     if let Some(s) = sessions.get(&key) {
-                        s.last_ms.store(now_ms(), Ordering::Relaxed);
+                        s.last_ms.store(mono_ms(), Ordering::Relaxed);
                         let up = s.upstream.clone();
                         if let Err(e) = up.send(data).await {
                             note_port_unreachable(&cfg.name, &s.health, &e);
@@ -318,7 +318,7 @@ pub async fn run_udp_listener(
                     };
                     match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, data).await {
                         Ok(session) => {
-                            let now = now_ms();
+                            let now = mono_ms();
                             wheel.schedule(key, now + session.idle_ms, now);
                             sessions.insert(key, session);
                             metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -802,7 +802,7 @@ async fn open_session(
     }
 
     let health = guard.as_ref().map(|g| g.backend());
-    let last_ms = Arc::new(AtomicU64::new(now_ms()));
+    let last_ms = Arc::new(AtomicU64::new(mono_ms()));
     let reply_task = spawn_reply(
         cfg.name.clone(),
         down.clone(),
@@ -913,7 +913,7 @@ fn spawn_reply(
         loop {
             match up.recv(&mut buf).await {
                 Ok(n) => {
-                    last_ms.store(now_ms(), Ordering::Relaxed);
+                    last_ms.store(mono_ms(), Ordering::Relaxed);
                     let sent = if reply_sock.is_some() {
                         out.send_to(&buf[..n], client).await
                     } else {

@@ -17,7 +17,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -559,7 +559,7 @@ impl AddressBook {
         readdress: bool,
         index: Option<u64>,
     ) -> Result<Outcome, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(index) = index {
             if self
                 .applied_index()?
@@ -666,7 +666,7 @@ impl AddressBook {
 
     /// Frees `(role, name)`'s address. `Ok(None)` if it held none.
     pub fn release(&self, role: Role, name: &str) -> Result<Option<IpAddr>, ClaimError> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(self.release_locked(role, name, None)?.flatten())
     }
 
@@ -680,7 +680,7 @@ impl AddressBook {
         name: &str,
         index: u64,
     ) -> Result<Option<Option<IpAddr>>, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         self.release_locked(role, name, Some(index))
     }
 
@@ -721,7 +721,7 @@ impl AddressBook {
         now: u64,
         index: u64,
     ) -> Result<Option<bool>, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         if self.already_applied(Some(index))? {
             return Ok(None);
         }
@@ -766,7 +766,7 @@ impl AddressBook {
     /// cluster has no recorded network yet). Writes `applied_index` and
     /// `last_outcome` only; `AlreadyApplied` when `index` was already applied.
     pub fn reject_at(&self, rejection: Rejection, index: u64) -> Result<Outcome, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let outcome = Outcome::Rejected(rejection);
         let bytes = serde_json::to_vec(&StoredOutcome {
             index,
@@ -783,14 +783,14 @@ impl AddressBook {
     /// release or touch entry refused before the book was consulted.
     /// `false` when `index` was already applied.
     pub fn mark_applied(&self, index: u64) -> Result<bool, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(self.commit(&[], Some((index, None)))? == Committed::Done)
     }
 
     /// An owned copy of the whole book (every entry, `applied_index` and
     /// `last_outcome`), for a Raft snapshot.
     pub fn snapshot(&self) -> Result<BookSnapshot, StorageFailure> {
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(BookSnapshot {
             entries: self.entries().map_err(|e| StorageFailure(e.to_string()))?,
             applied_index: self.applied_index()?,
@@ -802,7 +802,7 @@ impl AddressBook {
     /// three trees — a Raft snapshot install.
     pub fn replace(&self, snapshot: &BookSnapshot) -> Result<(), StorageFailure> {
         use sled::transaction::{ConflictableTransactionError, TransactionError};
-        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         // `sled` transactions cannot iterate: collect the stale keys first
         // (the guard keeps every other writer out meanwhile).
         let keys = |tree: &sled::Tree| {
@@ -1047,7 +1047,7 @@ pub fn is_stale(assignment: &Assignment, now: u64, after: Duration) -> bool {
     !after.is_zero() && now.saturating_sub(assignment.last_seen) > after.as_secs()
 }
 
-pub fn now_secs() -> u64 {
+pub fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

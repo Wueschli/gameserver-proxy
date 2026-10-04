@@ -9,7 +9,7 @@
 //! grow the map without limit.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
@@ -102,7 +102,7 @@ impl SessionStore {
         let mut bytes = [0u8; SESSION_ID_BYTES];
         rand::thread_rng().fill_bytes(&mut bytes);
         let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let mut map = self.sessions.lock().expect("session store lock poisoned");
+        let mut map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         if map.len() >= self.limits.max_sessions.max(1) {
             map.retain(|_, e| self.live(e, now));
         }
@@ -132,7 +132,7 @@ impl SessionStore {
     }
 
     fn get_at(&self, id: &str, now: Instant) -> Option<Session> {
-        let mut map = self.sessions.lock().expect("session store lock poisoned");
+        let mut map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = map.get_mut(id)?;
         if !self.live(entry, now) {
             map.remove(id);
@@ -149,13 +149,16 @@ impl SessionStore {
     pub fn revoke(&self, id: &str) {
         self.sessions
             .lock()
-            .expect("session store lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(id);
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
