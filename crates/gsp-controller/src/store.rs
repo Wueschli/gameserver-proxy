@@ -404,17 +404,19 @@ fn decode_rev(bytes: &[u8]) -> u64 {
     u64::from_be_bytes(buf)
 }
 
-/// Runs `open` until it stops failing on `sled`'s exclusive file lock, for
-/// tests that drop a database and reopen the same path in-process.
+/// Runs `open` until it stops failing on `sled`'s exclusive file lock.
 ///
 /// Dropping the last `sled::Db` handle does not release the lock
 /// synchronously: the locked `File` sits behind an `Arc` that `sled` 0.34's
 /// own threadpool jobs (async log writes, segment truncation) and
 /// epoch-deferred buffer drops also hold, so it is closed whenever the last
-/// of those finishes. An immediate reopen loses that race under load with
+/// of those finishes. Opening a path again right after dropping it in the
+/// same process (a test fixture, or the pre-HA import, which inspects a
+/// registry, renames it and reads it again) can lose that race with
 /// `WouldBlock` ("could not acquire lock"). Only that error is retried, and
-/// only for a bounded time; any other outcome, `Ok` or `Err`, is returned.
-#[cfg(test)]
+/// only for a bounded time; any other outcome, `Ok` or `Err`, is returned, as
+/// is the lock error itself once the time is up (a second process really
+/// holding the lock).
 pub(crate) fn retry_when_unlocked<T, E: std::fmt::Display>(
     mut open: impl FnMut() -> Result<T, E>,
 ) -> Result<T, E> {
@@ -424,10 +426,10 @@ pub(crate) fn retry_when_unlocked<T, E: std::fmt::Display>(
     loop {
         match open() {
             // `{e:#}` so a lock error under `anyhow` context still matches.
-            Err(e) if format!("{e:#}").contains("could not acquire lock") => {
-                if Instant::now() >= deadline {
-                    panic!("sled never released its file lock: {e:#}");
-                }
+            Err(e)
+                if format!("{e:#}").contains("could not acquire lock")
+                    && Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(10));
             }
             other => return other,
