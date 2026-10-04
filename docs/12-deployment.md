@@ -58,7 +58,7 @@ reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
 aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
-`hostNetwork` DaemonSet). Both are reference only. CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
+`hostNetwork` DaemonSet). Both are reference only (the images themselves are published to GHCR on version tags by `.github/workflows/release.yml`). CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
 job, blocking since 2026-10-02; first green run 2026-10-01). Aggregator intent fan-out (drain etc.) goes to the `admin_url`
 each `gsp` reports, by default `http(s)://<settings.admin.listen>`; when that
 address is not reachable from the aggregator (`0.0.0.0`, loopback, a container
@@ -428,9 +428,14 @@ leader imports exactly one node's copy, whichever node wins the first election.
   initialization.
 - Clients' pinned addresses that used to collide across nodes now get `409`: uniqueness
   is cluster-wide, where it was per node before.
-- Snapshots persisted by a build older than this feature (before 2026-10-03) install as
-  empty registries and an empty book: take the upgrade on a cluster whose nodes all run
-  this version, or let the cluster re-initialize as above.
+- Snapshots persisted by a build older than this feature (before 2026-10-03) are not
+  supported: a follower refuses to install one (`ERROR` naming the snapshot format) rather
+  than read it as empty registries and an empty book. Start such a node from empty
+  storage, or let the cluster re-initialize as above.
+- The registries compact their logs: each keeps one entry per name (its registration, or
+  the tombstone of a removed one), so a registry log and the Raft snapshot stay bounded by
+  the number of distinct names ever registered, not by how often they re-register.
+  Revision numbers have gaps afterwards; a subscriber's `since` cursor is unaffected.
 
 ### Limits (read these before relying on it)
 

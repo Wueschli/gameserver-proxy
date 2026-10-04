@@ -74,31 +74,32 @@ pub struct RevisionSnap {
 /// The full snapshot content: every revision of every log at its number,
 /// the registries' `current` maps, the address book, the cluster state and
 /// each store's `applied_index` — enough to replace every database the
-/// state machine drives exactly. The registry, book and cluster fields
-/// default to empty so a snapshot persisted before they existed still
-/// installs.
+/// state machine drives exactly. Every section is required: a snapshot
+/// persisted before the registries were replicated (before 2026-10-03)
+/// lacks some and is rejected on install, never read as empty
+/// ([`decode_snapshot`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotContent {
     pub config: Vec<RevisionSnap>,
     pub intent: Vec<(u64, Vec<u8>)>,
     pub config_applied: Option<u64>,
     pub intent_applied: Option<u64>,
-    #[serde(default)]
     pub peers: RegistrySnapshot,
-    #[serde(default)]
     pub proxy_peers: RegistrySnapshot,
-    #[serde(default = "empty_book")]
     pub book: BookSnapshot,
-    #[serde(default)]
     pub cluster: ClusterSnapshot,
 }
 
-fn empty_book() -> BookSnapshot {
-    BookSnapshot {
-        entries: Vec::new(),
-        applied_index: None,
-        last_outcome: None,
-    }
+/// Parses a received snapshot. One in an older format (a section missing)
+/// is an error naming that, so a follower never installs it as empty
+/// registries and an empty address book.
+fn decode_snapshot(bytes: &[u8]) -> Result<SnapshotContent, std::io::Error> {
+    serde_json::from_slice(bytes).map_err(|e| {
+        std::io::Error::other(format!(
+            "the snapshot format is not this build's (a snapshot written before \
+             2026-10-03 is not supported; start this node from empty storage): {e}"
+        ))
+    })
 }
 
 /// The registries and the shared address book the state machine applies
@@ -619,7 +620,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
         snapshot: Box<std::io::Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<NodeId>> {
-        let content: SnapshotContent = serde_json::from_slice(snapshot.get_ref())
+        let content = decode_snapshot(snapshot.get_ref())
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), &e))?;
 
         // Stores first, HA meta second: a crash in between leaves stores
@@ -1000,6 +1001,44 @@ mod tests {
         assert_eq!(want.len(), 2);
         assert_eq!(follower.config.store.all_revisions().unwrap(), want);
         assert_eq!(follower.config.store.current_revision().unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn install_rejects_a_snapshot_from_before_the_registries_were_replicated() {
+        let (mut leader, _l) = test_sm();
+        leader.apply(vec![config_entry(1, b"a")]).await.unwrap();
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        // The format before 2026-10-03 had only the config and intent
+        // sections.
+        let mut old: serde_json::Value =
+            serde_json::from_slice(snapshot.snapshot.get_ref()).unwrap();
+        for section in ["peers", "proxy_peers", "book", "cluster"] {
+            old.as_object_mut().unwrap().remove(section).unwrap();
+        }
+
+        let (mut follower, _f) = test_sm();
+        follower
+            .apply(vec![config_entry(1, b"mine")])
+            .await
+            .unwrap();
+        let err = follower
+            .install_snapshot(
+                &snapshot.meta,
+                Box::new(std::io::Cursor::new(serde_json::to_vec(&old).unwrap())),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("snapshot format"),
+            "the error names the cause: {err}"
+        );
+        // Nothing was replaced.
+        assert_eq!(follower.config.store.get(1).unwrap().unwrap(), b"mine");
     }
 
     #[tokio::test]
