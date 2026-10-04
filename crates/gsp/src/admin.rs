@@ -219,9 +219,10 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
                 Some(p) => format!("\tprefix={p:?}"),
                 None => String::new(),
             },
-            match &l.sniffer {
-                Some(n) => format!("\tsniffer={n}"),
-                None => String::new(),
+            if l.sniffers.is_empty() {
+                String::new()
+            } else {
+                format!("\tsniffers={}", l.sniffers.join(","))
             },
         ));
     }

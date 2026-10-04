@@ -59,7 +59,7 @@ pub async fn run_tcp_listener(
         cfg.freebind,
         cfg.transparent,
     )?)?;
-    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref(), &sniffers);
+    crate::sniff::warn_if_missing(&cfg.name, &cfg.sniffers, &sniffers);
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
@@ -186,17 +186,13 @@ pub async fn run_tcp_listener(
                     let mut peek_buf = vec![0u8; peek_n];
                     let first = peek_routing_bytes(&stream, &mut peek_buf, peek_n).await;
 
-                    let hint = cfg
-                        .sniffer
-                        .as_deref()
-                        .and_then(|n| sniffers.get(n))
-                        .and_then(|s| s.sniff(first));
+                    let hit = crate::sniff::sniff_first(&cfg.sniffers, &sniffers, first);
 
                     // A sniffer that positively rejects drops the connection
                     // outright — checked before the push-resolver hint so a
                     // spoofable src_ip hint can't override a content-based
                     // reject (same rule as the UDP first-packet gate).
-                    if hint.as_ref().is_some_and(|h| h.reject) {
+                    if hit.as_ref().is_some_and(|(_, h)| h.reject) {
                         metrics::counter!(
                             m::LISTENER_CONNECTIONS,
                             "listener" => listener_name.clone(),
@@ -213,7 +209,7 @@ pub async fn run_tcp_listener(
                         src: peer,
                         local,
                         first_bytes: first,
-                        sniff: hint.as_ref(),
+                        sniff: hit.as_ref().map(|(n, h)| (*n, h)),
                     };
                     let hinted = cfg
                         .route_hint

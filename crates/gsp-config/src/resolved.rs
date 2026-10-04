@@ -384,9 +384,12 @@ pub struct ListenerConfig {
     /// socket and a client-address-bound `IP_TRANSPARENT` upstream socket per
     /// connection. Needs `CAP_NET_ADMIN`.
     pub transparent: bool,
-    /// The single sniffer plugin this listener's routes use (`None` if no
-    /// `sniffer` route). `gsp-core` runs it once per connection before routing.
-    pub sniffer: Option<String>,
+    /// The distinct sniffer plugins this listener's routes use, in order of
+    /// first appearance (empty if no `sniffer` route). `gsp-core` runs them in
+    /// that order once per connection / first datagram before routing; the
+    /// first one that recognises the bytes wins and its hint is the only one
+    /// routing sees.
+    pub sniffers: Vec<String>,
     /// Check the `POST /route-hint` push-resolver table before the route list.
     pub route_hint: bool,
     /// UDP only: gate new sessions on positive first-datagram recognition.
@@ -446,7 +449,7 @@ impl ListenerConfig {
     /// route on this listener matches it? Only consulted when
     /// `first_packet_gate` is set.
     pub fn first_packet_recognised(&self, ctx: &MatchContext) -> bool {
-        if ctx.sniff.is_some_and(|h| !h.reject) {
+        if ctx.sniff.is_some_and(|(_, h)| !h.reject) {
             return true;
         }
         self.routes
