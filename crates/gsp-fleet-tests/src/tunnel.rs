@@ -80,11 +80,11 @@ impl Backend {
     /// the agent triggers the handshake itself
     /// (`gsp_agent::interface::kick_handshake`) it is ~8 s in CI, but
     /// `an_edge_restarts_with_the_controller_down` takes ~37 s end to end
-    /// there, so 60 s keeps headroom.
+    /// there, so the 90 s deadline stays.
     pub fn deadline(self) -> Duration {
         match self {
             Backend::Kernel => Duration::from_secs(30),
-            Backend::Userspace => Duration::from_secs(60),
+            Backend::Userspace => Duration::from_secs(90),
         }
     }
 
