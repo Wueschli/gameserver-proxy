@@ -275,12 +275,19 @@ fn reconcile_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), reg: &ProxyReg
                 );
             }
             match wg.configure_peer(&peer) {
-                Ok(()) => tracing::info!(
-                    proxy = %reg.name,
-                    endpoint = %reg.endpoint,
-                    address = ?reg.tunnel_address,
-                    "reconciled wireguard peer for edge proxy"
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        proxy = %reg.name,
+                        endpoint = %reg.endpoint,
+                        address = ?reg.tunnel_address,
+                        "reconciled wireguard peer for edge proxy"
+                    );
+                    // The proxy has no endpoint for us, so start the handshake
+                    // ourselves instead of waiting for the keepalive timer.
+                    if let Some(ip) = reg.tunnel_address.as_deref().and_then(|a| a.parse().ok()) {
+                        crate::interface::kick_handshake(ip);
+                    }
+                }
                 Err(e) => tracing::error!(
                     proxy = %reg.name, error = %e,
                     "failed to configure wireguard peer for edge proxy"

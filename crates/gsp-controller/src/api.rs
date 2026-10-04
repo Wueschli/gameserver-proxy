@@ -833,21 +833,14 @@ async fn subscribe_worker(
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {} // already sent by catch-up
             Ok(revision) if !is_visible(&stage, revision, group) => {} // not (yet) ours to see
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(revision, "update notification for a revision store lost");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing config updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "subscriber lagged; replaying from the store");
                 if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
