@@ -7,10 +7,12 @@
 # a pinned, checksum-verified release — see the deploy job).
 #
 # Reports a HIGH or CRITICAL vulnerability that has a fix available, or a secret:
-#   - in each image: its OS packages (the distroless base) and any secrets;
+#   - in each image: its OS packages (the distroless base), the Rust crates its
+#     binaries were built from (the binaries are built with `cargo auditable`,
+#     which embeds the dependency list; Trivy reads it) and any secrets;
 #   - in the lockfiles the images were built from: Cargo.lock (every binary is
-#     built --locked from it; a plain release binary carries no dependency list,
-#     so the image scan can't see its crates) and the UI's package-lock.json.
+#     built --locked from it; a cross-check that also catches a binary built
+#     without cargo-auditable) and the UI's package-lock.json.
 # JSON and SARIF reports land in $TRIVY_REPORT_DIR (default target/trivy).
 # With $TRIVY_IMAGE_DIR set, the images come from `docker save` tarballs there
 # (<target>.tar) instead of the Docker daemon — CI's trivy job runs that way.
