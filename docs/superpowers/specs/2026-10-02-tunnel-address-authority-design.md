@@ -38,7 +38,7 @@ and an operator can bring up an origin and a proxy without choosing any tunnel a
 
 ## Non-goals / Future work
 
-Recorded in `HANDOVER.md` "Known follow-ups" so they are not lost; the owner may want
+Recorded as GitHub issues (#40, #41) so they are not lost; the owner may want
 each later:
 
 - **IPv6** tunnel networks (v1 is IPv4 only).
