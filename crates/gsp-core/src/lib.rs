@@ -10,6 +10,7 @@
 
 pub mod discovery;
 pub mod drain;
+pub mod error;
 pub mod geo;
 pub mod gossip;
 pub mod health;
@@ -35,6 +36,7 @@ mod util;
 
 pub use discovery::{refresh_loop, BackendSource, Discovery};
 pub use drain::{ConnGuard, ConnTracker, Proto, SessionInfo, SessionMeta, DEFAULT_SHUTDOWN_GRACE};
+pub use error::{ListenerError, ProxyError, SourceError};
 pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
 pub use listeners::ListenerManager;
