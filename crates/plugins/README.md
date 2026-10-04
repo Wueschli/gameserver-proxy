@@ -36,6 +36,15 @@ installed.
   message type 1, three zero reserved bytes) and tags it `key: "wireguard"`.
   Later packets of the flow are not recognised; they ride the session the
   initiation opened.
+- `openvpn` — recognises an OpenVPN client hard reset (opcode 1, 7 or 10 with
+  key id 0, 14 to 2047 bytes), over UDP or with the TCP `u16` length prefix, and
+  tags it `key: "openvpn"`. A weak single-byte signal, so list it after the
+  stronger plugins on a multi-sniffer listener.
+- `raknet` — recognises the RakNet offline handshake (Unconnected Ping `0x01`/`0x02`,
+  Open Connection Request 1/2 `0x05`/`0x07`) by its 16-byte magic, which covers
+  Minecraft Bedrock and other RakNet games, and tags it `key: "raknet"`.
+- `teamspeak3` — recognises the TeamSpeak 3 voice server's `TS3INIT1` client init
+  packet (step 0, flags `0x88`) and tags it `key: "teamspeak3"`.
 - `regex-firstbytes` — a bounded, allocation-light, **runtime-configured**
   first-bytes matcher (no `regex` dependency). Its `settings.sniffers.modules[].config`
   string is a tiny pattern language:
@@ -64,10 +73,10 @@ Or directly:
 ```sh
 cd crates/plugins
 cargo test --workspace                                             # native unit tests
-cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard
+cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
 ```
 
-Output lands in `target/wasm32-unknown-unknown/release/{a2s,minecraft,quic,regex_firstbytes,wireguard}.wasm`
+Output lands in `target/wasm32-unknown-unknown/release/{a2s,minecraft,quic,regex_firstbytes,wireguard,openvpn,raknet,teamspeak3}.wasm`
 (cargo turns the `regex-firstbytes` crate name's `-` into `_` for the file
 name — the loaded sniffer's name is therefore `regex_firstbytes`, not
 `regex-firstbytes`, if you copy the file as-is).

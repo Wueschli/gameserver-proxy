@@ -111,9 +111,35 @@ impl Discovery {
     }
 }
 
+/// A pushed change is fetched once the source has been quiet this long.
+pub const CHANGE_QUIET: Duration = Duration::from_millis(500);
+/// Longest a steady stream of pushed changes can defer the fetch.
+pub const CHANGE_MAX_WAIT: Duration = Duration::from_secs(5);
+
+/// After a source's first [`BackendSource::changed`] signal, absorbs the
+/// signals that follow — a rolling update is dozens of them — until the source
+/// has been quiet for [`CHANGE_QUIET`] or [`CHANGE_MAX_WAIT`] has passed, so
+/// the burst costs one fetch. `fetch` is level-triggered, so nothing the burst
+/// carried is lost. Returns `false` if `shutdown` fired meanwhile.
+async fn coalesce(source: &dyn BackendSource, shutdown: &mut watch::Receiver<bool>) -> bool {
+    let deadline = tokio::time::Instant::now() + CHANGE_MAX_WAIT;
+    loop {
+        let quiet = (tokio::time::Instant::now() + CHANGE_QUIET).min(deadline);
+        tokio::select! {
+            () = source.changed() => {}
+            () = tokio::time::sleep_until(quiet) => return true,
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 /// Poll one source on its interval, and again whenever it signals
-/// [`BackendSource::changed`]; on a change, store it and wake the reload
-/// task. Returns when `shutdown` flips to `true`.
+/// [`BackendSource::changed`] (coalesced, see [`CHANGE_QUIET`]); on a change,
+/// store it and wake the reload task. Returns when `shutdown` flips to `true`.
 pub async fn refresh_loop(
     source: Arc<dyn BackendSource>,
     discovery: Arc<Discovery>,
@@ -128,7 +154,11 @@ pub async fn refresh_loop(
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            () = source.changed() => {}
+            () = source.changed() => {
+                if !coalesce(&*source, shutdown).await {
+                    return;
+                }
+            }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     return;
@@ -227,5 +257,109 @@ mod tests {
 
         assert!(d.store("p", vec![a("127.0.0.1:1")]));
         assert_eq!(d.get("p").unwrap(), vec![a("127.0.0.1:1")]);
+    }
+
+    /// Push-only source: `changed()` resolves once per `poke`; `fetch` counts.
+    struct Pushy {
+        poked: Notify,
+        fetches: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl BackendSource for Pushy {
+        fn pool(&self) -> &str {
+            "p"
+        }
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+        fn refresh_interval(&self) -> Duration {
+            Duration::from_secs(3600)
+        }
+        async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![a("127.0.0.1:1")])
+        }
+        async fn changed(&self) {
+            self.poked.notified().await;
+        }
+    }
+
+    fn fetches(src: &Pushy) -> usize {
+        src.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Runs `refresh_loop` on paused time; returns the source and a stop switch.
+    async fn spawn_pushy() -> (Arc<Pushy>, watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+        let src = Arc::new(Pushy {
+            poked: Notify::new(),
+            fetches: 0.into(),
+        });
+        let (tx, mut rx) = watch::channel(false);
+        let task = tokio::spawn({
+            let src = src.clone();
+            async move {
+                refresh_loop(
+                    src,
+                    Arc::new(Discovery::new()),
+                    Arc::new(Notify::new()),
+                    &mut rx,
+                )
+                .await;
+            }
+        });
+        // The interval's first tick is immediate: the initial fetch.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(fetches(&src), 1);
+        (src, tx, task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_changes_costs_one_fetch_after_it_goes_quiet() {
+        let (src, _tx, _task) = spawn_pushy().await;
+
+        // Ten signals, 100 ms apart: each lands inside the previous quiet window.
+        for _ in 0..10 {
+            src.poked.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(fetches(&src), 1, "no fetch while the burst runs");
+
+        tokio::time::sleep(CHANGE_QUIET).await;
+        assert_eq!(fetches(&src), 2, "one fetch once it went quiet");
+
+        // A later, separate change is fetched on its own.
+        src.poked.notify_one();
+        tokio::time::sleep(CHANGE_QUIET + Duration::from_millis(10)).await;
+        assert_eq!(fetches(&src), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_steady_stream_cannot_defer_the_fetch_past_the_max_wait() {
+        let (src, _tx, _task) = spawn_pushy().await;
+
+        // A signal every 100 ms, for far longer than CHANGE_MAX_WAIT.
+        for _ in 0..120 {
+            src.poked.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            fetches(&src) >= 2,
+            "the fetch must not starve under a continuous stream"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_ends_the_loop_while_a_burst_is_being_absorbed() {
+        let (src, tx, task) = spawn_pushy().await;
+        src.poked.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("loop stops")
+            .unwrap();
+        assert_eq!(fetches(&src), 1, "no fetch after shutdown");
     }
 }

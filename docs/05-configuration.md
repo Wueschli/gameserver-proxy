@@ -278,11 +278,12 @@ backend_sources:
     api: "https://kubernetes.default.svc"   # default; SA token + CA read in-pod
     refresh_interval_sec: 10   # k8s: resync interval; changes arrive via the watch
   - name: consul-eu
-    type: consul               # GET /v1/health/service/<service>?passing=true
+    type: consul               # GET /v1/health/service/<service>?passing=true, plus a blocking query for instant updates
     service: "match-server"
     consul_addr: "http://127.0.0.1:8500"    # default
     tag: "prod"                # optional
-    refresh_interval_sec: 10
+    consul_token_file: "/run/secrets/consul-token"   # optional ACL token (X-Consul-Token), re-read as it rotates
+    refresh_interval_sec: 10   # consul: resync interval; changes arrive via the blocking query
   - name: srv-us
     type: dns_srv              # resolves the SRV record; port from the record
     record: "_game._udp.us.internal.example.com"
@@ -428,13 +429,31 @@ ready-made Role. Without `watch` the source logs one warning per outage and keep
 converging on the poll interval, so a missing grant slows updates but never breaks
 discovery. The watch resumes from the version of the last list and reopens itself
 when the API server ends it; a `410 Gone` triggers an immediate list, which renews
-the version. A failing watch retries every 5 s, doubling up to 60 s.
+the version. A failing watch retries every 5 s, doubling up to 60 s. The
+service-account token is read from its file again every 60 s, so the kubelet's
+rotation of the bound token (about hourly) is followed without a restart.
+
+A `consul` source lists the passing instances of the service and then holds a
+blocking query (`?index=<X-Consul-Index>&wait=300s`) on the index of its last
+list; a new index triggers a list at once, and the poll interval stays as the
+resync net. An index that goes backwards, or a response without one, is treated as
+a reset and gets a fresh list. A failing query retries like the Kubernetes watch
+(5 s doubling to 60 s). With ACLs enabled, put the token in a file and point
+`consul_token_file` at it; the file (not the token) is what the YAML and
+`GET /config` carry, and it is read again every 60 s. The token needs
+`service:read` on the service and `node:read` on the nodes running it. The service
+name and the tag are URL-escaped.
+
+Both pushed signals are coalesced: after the first change the source is fetched
+once it has been quiet for 500 ms (at most 5 s after the first change), so a
+rolling update of many pods costs one fetch, not one per event.
 
 ## Validation rules (excerpt)
 
 - A pool needs exactly one of `targets:` / `source:`; `source` must point to a
   `backend_sources[].name`. `refresh_interval_sec >= 1`. `dns_srv` needs
-  `record`; `consul` / `kubernetes` need `service`; `tunnel` needs `pubkey`
+  `record`; `consul` / `kubernetes` need `service` (`consul_token_file`, if
+  given, must not be empty); `tunnel` needs `pubkey`
   (a base64-encoded 32-byte WireGuard key).
 - Every `action.pool` / `action.resolver` must exist.
 - Every listener needs at least one route. There is currently no warning for a

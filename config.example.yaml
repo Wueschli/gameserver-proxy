@@ -82,8 +82,9 @@ settings:
 # source gets one control-plane refresh task (never on the data path).
 #   type: static      — a fixed reusable list (folded into the pool at load time)
 #   type: dns_srv      — resolve an SRV record; port comes from the record
-#   type: consul       — passing instances of a Consul service (HTTP API)
-#   type: kubernetes   — Endpoints of a Service (watched + resynced; SA token + CA in-pod)
+#   type: consul       — passing instances of a Consul service (HTTP API; blocking-query
+#                         push + resync; optional consul_token_file for ACLs)
+#   type: kubernetes   — EndpointSlices of a Service (watched + resynced; SA token + CA in-pod)
 #   type: tunnel        — backend addresses a `gsp-agent`-managed origin behind
 #                         a WireGuard tunnel has registered with the controller
 #                         (phase 14; requires `gsp --tunnel-*` on this proxy —
