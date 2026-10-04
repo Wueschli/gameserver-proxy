@@ -234,8 +234,15 @@ path. This spec makes snapshots first-class, in build slice 1:
 - The misleading comments in `ha/state_machine.rs` and the "log grows unbounded" note in
   `docs/10` are corrected.
 
-Snapshot size is bounded by the registries' logs, which only grow by real changes;
-compacting a registry log down to its current entries is a non-goal for now.
+Snapshot size is bounded by the registries' logs. Each registry compacts its log
+(2026-10-04): every 1024 writes, and on the first write after a start, it drops each entry a later one for the same name
+supersedes, so the log holds one entry per name ever registered, its registration or the
+tombstone that removed it. Revision numbers are never reassigned, so the log has gaps and
+a `since` cursor still yields everything that changed after it. Tombstones stay because
+subscribers keep their view across reconnects and replay from `since=0`: one that missed a
+removal must still be told. Growth is bounded by distinct names, not by changes.
+Compaction is local to each replica (revision numbers are the same on every replica
+whether or not it has compacted yet), so it needs no Raft entry.
 
 ## Write path
 

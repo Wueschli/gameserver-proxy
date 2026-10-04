@@ -137,6 +137,44 @@ impl Store {
         self.revisions_after(0)
     }
 
+    /// Drops every revision whose key (`key_of` of its bytes) a later
+    /// revision repeats, keeping the newest per key; entries `key_of` gives
+    /// no key are always kept. Returns how many were dropped.
+    ///
+    /// Revision numbers are untouched, so the log gains gaps but never
+    /// renumbers: a subscriber's `since` cursor still yields every key that
+    /// changed after it, at its newest revision. Only `revisions` changes,
+    /// in one atomic batch, and the newest revision overall is always a
+    /// key's newest, so the `current` pointer needs no update. Only a
+    /// log whose entries are whole-key replacements may call this (the
+    /// config and intent logs are history and never do).
+    pub fn compact<K: Eq + std::hash::Hash>(
+        &self,
+        key_of: impl Fn(&[u8]) -> Option<K>,
+    ) -> Result<usize, StoreError> {
+        let mut newest: std::collections::HashMap<K, u64> = std::collections::HashMap::new();
+        let mut dropped = Vec::new();
+        for item in self.revisions.iter() {
+            let (k, v) = item?;
+            let revision = decode_rev(&k);
+            if let Some(key) = key_of(&v) {
+                if let Some(older) = newest.insert(key, revision) {
+                    dropped.push(older);
+                }
+            }
+        }
+        if dropped.is_empty() {
+            return Ok(0);
+        }
+        let mut batch = sled::Batch::default();
+        for revision in &dropped {
+            batch.remove(&encode_rev(*revision));
+        }
+        self.revisions.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(dropped.len())
+    }
+
     /// Accepts a new revision: assigns the next monotonic number, persists
     /// the bytes and moves the `current` pointer in one `sled` transaction
     /// (across both trees), then flushes — a crash can lose the very last
@@ -569,6 +607,34 @@ mod tests {
             store.put_applied(b"two".to_vec(), 8).unwrap(),
             Applied::Written(2)
         ));
+    }
+
+    #[test]
+    fn compact_keeps_the_newest_revision_per_key_and_every_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for entry in ["a:1", "b:1", "a:2", "opaque", "a:3", "b:2"] {
+            store.put(entry.as_bytes().to_vec()).unwrap();
+        }
+        let key_of = |bytes: &[u8]| {
+            std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|s| s.split_once(':'))
+                .map(|(k, _)| k.to_string())
+        };
+        assert_eq!(store.compact(key_of).unwrap(), 3);
+        // Revisions keep their numbers; an entry with no key is never dropped.
+        let kept: Vec<u64> = store
+            .all_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        assert_eq!(kept, vec![4, 5, 6]);
+        assert_eq!(store.current_revision().unwrap(), Some(6));
+        // Nothing left to drop, and the numbering carries on.
+        assert_eq!(store.compact(key_of).unwrap(), 0);
+        assert_eq!(store.put(b"c:1".to_vec()).unwrap(), 7);
     }
 
     #[test]

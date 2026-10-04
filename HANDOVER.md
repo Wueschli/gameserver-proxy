@@ -28,7 +28,7 @@ Owner decisions that still hold:
 | Question | Decision |
 |----------|----------|
 | Native TLS on the fleet HTTP servers | Built (2026-10-02): controller, aggregator and UI via `--tls-cert`/`--tls-key`, `gsp`'s admin API via `settings.admin.tls`. New client code must not hard-code `http://` and must build clients via `gsp_http::{client, builder}`. |
-| Publish the reference images | Deferred: "reference only" for now. Tracked in [#46](https://github.com/Wueschli/gameserver-proxy/issues/46). |
+| Publish the reference images | Docker only, amd64, to GHCR on `vX.Y.Z` tags (`.github/workflows/release.yml`, 2026-10-04). Multi-arch and Kubernetes packaging: [#88](https://github.com/Wueschli/gameserver-proxy/issues/88). |
 | Self-hosted CI runner | Not while the repo is public (GitHub advises against self-hosted runners on public repositories, since fork PRs can run code on them); the switch (PR #21) was closed. |
 
 **CI timings, measured** (2026-10-02). Cold (lockfile changed): `test` 8m15,
