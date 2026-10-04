@@ -76,14 +76,26 @@ pub fn build_one(
             addr,
             tag,
             token_file,
-        } => Arc::new(ConsulSource::new(
-            pool,
-            service.clone(),
-            addr,
-            tag.clone(),
-            token_file.as_ref().map(TokenFile::new),
-            sc.refresh_interval,
-        )?),
+        } => {
+            if let Some(path) = token_file
+                .as_ref()
+                .filter(|p| !std::path::Path::new(p).exists())
+            {
+                tracing::warn!(
+                    pool,
+                    path,
+                    "consul_token_file does not exist; Consul requests go out without a token"
+                );
+            }
+            Arc::new(ConsulSource::new(
+                pool,
+                service.clone(),
+                addr,
+                tag.clone(),
+                token_file.as_ref().map(TokenFile::new),
+                sc.refresh_interval,
+            )?)
+        }
         SourceKind::Kubernetes {
             namespace,
             service,
@@ -222,8 +234,9 @@ enum WatchEnd {
 /// double it up to [`WATCH_RETRY_MAX`] (e.g. a missing `watch` grant).
 const WATCH_RETRY: Duration = Duration::from_secs(5);
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
-/// Shortest gap between two successful, uneventful watch requests.
-const WATCH_REQUERY_MIN: Duration = Duration::from_millis(200);
+/// A watch that "times out" faster than this was not really waiting (a server
+/// that ignores `wait`): it is paced like a failing one.
+const WATCH_FAST_CLOSE: Duration = Duration::from_secs(1);
 
 /// Retry pacing and log noise for one source's watch: warns once per outage,
 /// and doubles the delay between attempts while it keeps failing.
@@ -248,6 +261,19 @@ impl<'a> WatchBackoff<'a> {
     fn recovered(&mut self) {
         self.warned = false;
         self.retry = WATCH_RETRY;
+    }
+
+    /// A request ended without an event before it should have, so a retry loop
+    /// would hammer the server: back off like a failure.
+    fn closed_early(&mut self) {
+        if !self.warned {
+            tracing::warn!(
+                pool = self.pool,
+                "{} watch ends before its wait runs out; backing off (polling still converges)",
+                self.what
+            );
+            self.warned = true;
+        }
     }
 
     /// A request failed. The poll tick still converges the set; say so once
@@ -387,7 +413,10 @@ impl ConsulSource {
         }
         let mut req = client.get(url);
         if let Some(token) = self.token.as_ref().and_then(TokenFile::get) {
-            req = req.header("X-Consul-Token", token);
+            let mut value = reqwest::header::HeaderValue::from_str(&token)
+                .map_err(|_| anyhow!("Consul token is not a valid header value"))?;
+            value.set_sensitive(true); // kept out of debug output
+            req = req.header("X-Consul-Token", value);
         }
         Ok(req)
     }
@@ -469,13 +498,13 @@ impl BackendSource for ConsulSource {
             let started = tokio::time::Instant::now();
             match self.watch_once(index).await {
                 Ok(WatchEnd::Changed) => return,
-                // Consul answered at the end of its wait: ask again, but never
-                // faster than `WATCH_REQUERY_MIN` (a server that ignores `wait`).
-                Ok(WatchEnd::Closed) => {
+                // Consul answered at the end of its wait: ask again at once, unless
+                // it answered long before that.
+                Ok(WatchEnd::Closed) if started.elapsed() >= WATCH_FAST_CLOSE => {
                     backoff.recovered();
-                    tokio::time::sleep_until(started + WATCH_REQUERY_MIN).await;
                     continue;
                 }
+                Ok(WatchEnd::Closed) => backoff.closed_early(),
                 Ok(WatchEnd::Expired) => {
                     tracing::debug!(pool = self.pool, "Consul index reset");
                     return;
@@ -1435,19 +1464,39 @@ mod tests {
         let server = mock_http::serve_consul(
             Some(5),
             CONSUL_BODY,
-            vec![(0, Some(5)), (0, Some(5)), (0, Some(7))],
+            vec![(1100, Some(5)), (1100, Some(5)), (0, Some(7))],
         )
         .await;
         let src = blocking_consul(server.addr);
         src.fetch().await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(5), src.changed())
+        tokio::time::timeout(Duration::from_secs(10), src.changed())
             .await
             .expect("the change after two quiet waits is signalled");
         let reqs = server.blocking_requests();
         assert_eq!(reqs.len(), 3, "{reqs:?}");
         assert!(reqs.iter().all(|r| r.contains("index=5")), "{reqs:?}");
         assert_eq!(src.index(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn consul_backs_off_when_the_wait_is_ignored() {
+        // Answers at once with the unchanged index, as a server ignoring `wait` would.
+        let server = mock_http::serve_consul(
+            Some(5),
+            CONSUL_BODY,
+            vec![(0, Some(5)), (0, Some(5)), (0, Some(7))],
+        )
+        .await;
+        let src = blocking_consul(server.addr);
+        src.fetch().await.unwrap();
+
+        assert!(consul_pending(&src).await, "no change to report");
+        assert_eq!(
+            server.blocking_requests().len(),
+            1,
+            "the next query is paced, not immediate"
+        );
     }
 
     #[tokio::test]
@@ -1582,6 +1631,28 @@ mod tests {
         let src = blocking_consul(server.addr);
         src.fetch().await.unwrap();
         assert!(!server.heads()[0].to_lowercase().contains("x-consul-token"));
+    }
+
+    #[test]
+    fn the_consul_token_header_is_marked_sensitive() {
+        let f = TempFile::new("consul-sensitive", "s3cret");
+        let src = ConsulSource::new(
+            "p".into(),
+            "game".into(),
+            "http://127.0.0.1:1",
+            None,
+            Some(TokenFile::new(&f.0)),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let req = src
+            .health_request(&src.client, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let value = req.headers().get("x-consul-token").unwrap();
+        assert!(value.is_sensitive());
+        assert!(!format!("{req:?}").contains("s3cret"));
     }
 
     #[tokio::test]
