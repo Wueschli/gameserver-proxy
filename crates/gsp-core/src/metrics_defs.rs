@@ -123,6 +123,11 @@ pub const GOSSIP_MESSAGES_TOTAL: &str = "gsp_gossip_messages_total";
 /// tag (phase 13) — never trusted, never a panic.
 pub const GOSSIP_AUTH_REJECTED_TOTAL: &str = "gsp_gossip_auth_rejected_total";
 
+/// Counter, no labels. Authentic gossip datagrams dropped because their sender
+/// timestamp is more than 30 s from this node's clock: a replay, or an
+/// instance with a badly skewed clock.
+pub const GOSSIP_STALE_REJECTED_TOTAL: &str = "gsp_gossip_stale_rejected_total";
+
 /// Gauge (0/1). Labels: `pool`, `backend`. Whether the Tier-2 domain quorum
 /// is currently overriding this backend to down (phase 13) — independent of
 /// (and never able to clear) the backend's own local `healthy` flag.

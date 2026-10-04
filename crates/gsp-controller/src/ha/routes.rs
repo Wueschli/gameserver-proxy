@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,19 +15,31 @@ use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 
 use super::{HaHandle, NodeId};
 
-/// The largest body a `/raft/*` request may carry.
-const MAX_RAFT_BODY: usize = 32 * 1024 * 1024;
+/// `/raft/vote` carries a term, a node id and a log id.
+const MAX_VOTE_BODY: usize = 64 * 1024;
+/// `/raft/snapshot` chunks are 256 KiB of bytes (`raft_config`), which JSON
+/// writes as a number array, a few times larger.
+const MAX_SNAPSHOT_BODY: usize = 4 * 1024 * 1024;
+/// `/raft/append` can carry a whole pre-HA import as one entry, so it keeps the
+/// big limit.
+const MAX_APPEND_BODY: usize = 32 * 1024 * 1024;
 
 pub fn router(ha: Arc<HaHandle>) -> Router {
     Router::new()
-        .route("/raft/append", post(append))
-        .route("/raft/vote", post(vote))
-        .route("/raft/snapshot", post(snapshot))
+        .route(
+            "/raft/append",
+            post(append).layer(DefaultBodyLimit::max(MAX_APPEND_BODY)),
+        )
+        .route(
+            "/raft/vote",
+            post(vote).layer(DefaultBodyLimit::max(MAX_VOTE_BODY)),
+        )
+        .route(
+            "/raft/snapshot",
+            post(snapshot).layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BODY)),
+        )
         .route("/raft/whoami", get(whoami))
         .route("/raft/pre-ha", get(pre_ha))
-        // A snapshot chunk or a pre-HA import is far past axum's 2 MB
-        // default; the routes are peer-token gated.
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_RAFT_BODY))
         .route_layer(axum::middleware::from_fn_with_state(
             gsp_http::server::BearerAuth::new(ha.ha_token.as_deref()),
             gsp_http::server::require_bearer,
@@ -89,4 +101,50 @@ async fn snapshot(
     Json(req): Json<InstallSnapshotRequest<super::TypeConfig>>,
 ) -> impl IntoResponse {
     Json(ha.raft.install_snapshot(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ha::test_support::single_node;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn post_bytes(app: &Router, path: &str, len: usize) -> StatusCode {
+        let body = format!("\"{}\"", "x".repeat(len));
+        app.clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn each_raft_route_has_its_own_body_limit() {
+        let (ha, _cluster, _dir) = single_node(1, "127.0.0.1:1").await;
+        let app = router(ha);
+        // Over the limit: refused before the body is parsed.
+        for (path, limit) in [
+            ("/raft/vote", MAX_VOTE_BODY),
+            ("/raft/snapshot", MAX_SNAPSHOT_BODY),
+            ("/raft/append", MAX_APPEND_BODY),
+        ] {
+            assert_eq!(
+                post_bytes(&app, path, limit + 1).await,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path}"
+            );
+        }
+        // Under the limit it is read (and then rejected as malformed JSON for the type).
+        assert_eq!(
+            post_bytes(&app, "/raft/vote", 1024).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
 }

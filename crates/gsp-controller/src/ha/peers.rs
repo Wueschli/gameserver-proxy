@@ -23,6 +23,37 @@ pub fn peer_url(addr: &str, path: &str) -> String {
     }
 }
 
+/// Whether traffic to the peer at `addr` crosses the network unencrypted: plain
+/// `http://` (or a bare `host:port`) to anything but a loopback host. Raft RPCs
+/// carry the `--ha-token` and all replicated state (security review N3).
+pub fn is_plain_remote(addr: &str) -> bool {
+    let Ok(url) = Url::parse(&peer_url(addr, "")) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(ip) => !ip.is_loopback(),
+        Err(_) => !host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// Logs a warning when `addr` is a [`is_plain_remote`] peer.
+pub fn warn_if_plain_remote(addr: &str) {
+    if is_plain_remote(addr) {
+        tracing::warn!(
+            %addr,
+            "HA peer is reached over plain http: the --ha-token and all replicated state \
+             cross the network in clear text; use an https:// peer address (see docs/12 \
+             \"HA over TLS\") and --ca-file"
+        );
+    }
+}
+
 /// Parse `--ha-peers` into the bootstrap membership.
 pub fn parse_peers(raw: &[String]) -> anyhow::Result<BTreeMap<NodeId, BasicNode>> {
     let mut peers = BTreeMap::new();
@@ -122,6 +153,27 @@ mod tests {
                 e.starts_with(&format!("--ha-peers entry {entry:?}: ")),
                 "{entry}: {e}"
             );
+        }
+    }
+
+    #[test]
+    fn only_non_loopback_plain_http_is_flagged() {
+        for plain in [
+            "10.0.0.5:9901",
+            "http://ctl.example:80",
+            "http://[2001:db8::1]:9",
+        ] {
+            assert!(is_plain_remote(plain), "{plain}");
+        }
+        for fine in [
+            "127.0.0.1:9901",
+            "[::1]:9911",
+            "localhost:9901",
+            "http://LOCALHOST:9901",
+            "https://ctl.example",
+            "https://10.0.0.5:8443",
+        ] {
+            assert!(!is_plain_remote(fine), "{fine}");
         }
     }
 

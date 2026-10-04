@@ -114,24 +114,17 @@ async fn an_ipv6_tunnel_network_allocates_ipv6_addresses_and_bracketed_backends(
     Ok(())
 }
 
-#[tokio::test]
-async fn tunnel_readdress_together_with_ha_is_refused_at_startup() -> Result<()> {
+/// `--tunnel-readdress` plus the given HA flags: the controller must exit
+/// non-zero and name `--tunnel-readdress`.
+async fn readdress_with_ha_is_refused(ha_flags: &[&str]) -> Result<()> {
     build_fleet_bins()?;
     let dir = tempfile::tempdir()?;
     let port = free_port()?;
-    let mut ctl = spawn_controller_with(
-        dir.path(),
-        &format!("127.0.0.1:{port}"),
-        &[
-            "--tunnel-network".into(),
-            "10.60.0.0/16".into(),
-            "--tunnel-readdress".into(),
-            "--ha-node-id".into(),
-            "1".into(),
-            "--ha-peers".into(),
-            "1=127.0.0.1:1".into(),
-        ],
-    )?;
+    let mut args: Vec<String> = ["--tunnel-network", "10.60.0.0/16", "--tunnel-readdress"]
+        .map(String::from)
+        .into();
+    args.extend(ha_flags.iter().map(|s| s.to_string()));
+    let mut ctl = spawn_controller_with(dir.path(), &format!("127.0.0.1:{port}"), &args)?;
     gsp_fleet_tests::wait_until(
         || {
             let code = ctl.exit_code();
@@ -147,6 +140,16 @@ async fn tunnel_readdress_together_with_ha_is_refused_at_startup() -> Result<()>
         ctl.log()
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn tunnel_readdress_together_with_ha_peers_is_refused_at_startup() -> Result<()> {
+    readdress_with_ha_is_refused(&["--ha-node-id", "1", "--ha-peers", "1=127.0.0.1:1"]).await
+}
+
+#[tokio::test]
+async fn tunnel_readdress_together_with_ha_join_is_refused_at_startup() -> Result<()> {
+    readdress_with_ha_is_refused(&["--ha-node-id", "1", "--ha-join"]).await
 }
 
 /// Starts a controller on `dir` and waits for it to serve.
