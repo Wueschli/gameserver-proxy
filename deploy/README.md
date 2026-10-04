@@ -14,7 +14,7 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 | `build-images.sh` | builds all five, runs `--version` in each, prints sizes |
 | `compose/` | runnable control-plane demo (+ `compose.tunnel.yml` WireGuard override) |
 | `smoke.sh` | the HTTP smoke test CI runs against the compose demo |
-| `k8s/` | plain manifests (namespace, secrets example, controller, aggregator, ui, gsp DaemonSet) |
+| `k8s/` | plain manifests (namespace, secrets example, controller, aggregator, ui, gsp RBAC, gsp DaemonSet) |
 
 ## Build
 
@@ -66,10 +66,13 @@ Retag/push the images to your registry and edit `image:` first, then:
 kubectl apply -f deploy/k8s/00-namespace.yaml
 # copy 10-secrets.example.yaml, change every value, apply it
 kubectl apply -f deploy/k8s/20-controller.yaml -f deploy/k8s/30-aggregator.yaml \
-  -f deploy/k8s/40-ui.yaml -f deploy/k8s/50-gsp-daemonset.yaml
+  -f deploy/k8s/40-ui.yaml -f deploy/k8s/45-gsp-rbac.yaml \
+  -f deploy/k8s/50-gsp-daemonset.yaml
 ```
 
-`gsp` runs as a `hostNetwork` DaemonSet. The UI Service is ClusterIP — put an
+`gsp` runs as a `hostNetwork` DaemonSet. `45-gsp-rbac.yaml` grants its service account
+`list`/`watch` on EndpointSlices in the `games` namespace (create it, or edit the
+Role and RoleBinding to the namespace your `kubernetes` source reads). The UI Service is ClusterIP — put an
 Ingress/LoadBalancer (with TLS) in front of it.
 
 ## Caveats

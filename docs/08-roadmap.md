@@ -238,8 +238,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Config: top-level `backend_sources:` list referenced by `pools[].source`
   (exactly one of `targets` / `source`). `static` is folded into the pool's
   targets at load time.
-- ✅ k8s reads `GET .../endpoints/<svc>` with the in-pod SA token + CA, and
-  (post-phase-8) **watches** it from the fetched `resourceVersion`: a pod change
+- ✅ k8s lists the service's **EndpointSlices** (`discovery.k8s.io/v1`) with the in-pod SA
+  token + CA, and (post-phase-8) **watches** them from the listed `resourceVersion`: a pod change
   triggers a fetch at once, while the poll interval stays as the resync safety net.
 - ✅ HA operations chapter in `docs/06` — anycast vs. L4 LB, capacity planning
   per instance, dashboards & alerts.

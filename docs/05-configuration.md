@@ -271,10 +271,10 @@ backend_sources:
     type: static
     targets: ["10.1.0.11:7777", "10.1.0.12:7777"]
   - name: k8s-match
-    type: kubernetes            # GET .../endpoints/<service>, plus a watch for instant updates
+    type: kubernetes            # LIST .../endpointslices for the service, plus a watch for instant updates
     service: "match-server"
     namespace: "games"          # default: "default"
-    port_name: "game"           # optional; else the subset's first port
+    port_name: "game"           # optional; else each slice's first port
     api: "https://kubernetes.default.svc"   # default; SA token + CA read in-pod
     refresh_interval_sec: 10   # k8s: resync interval; changes arrive via the watch
   - name: consul-eu
@@ -418,14 +418,17 @@ listeners:
         action: { pool: match-us }
 ```
 
-A `kubernetes` source reads the Endpoints with `get` and watches them with
-`watch` (a collection watch narrowed to the service by a field selector), so
-its service account needs both verbs on `endpoints` in the namespace. Without
-`watch` the source logs one warning per outage and keeps converging on the poll
-interval, so a missing grant slows updates but never breaks discovery. The watch
-resumes from the version of the last read and reopens itself when the API server
-ends it; a `410 Gone` triggers an immediate read, which renews the version. A failing
-watch retries every 5 s, doubling up to 60 s.
+A `kubernetes` source reads the service's EndpointSlices (`discovery.k8s.io/v1`,
+selected by the `kubernetes.io/service-name` label) and merges them: ready
+endpoints only (an unset `ready` counts as ready), duplicates across slices
+collapsed, `FQDN` slices skipped, and a slice without the wanted port ignored.
+Its service account needs `list` and `watch` on `endpointslices` in the
+namespace; [`deploy/k8s/45-gsp-rbac.yaml`](../deploy/k8s/45-gsp-rbac.yaml) is a
+ready-made Role. Without `watch` the source logs one warning per outage and keeps
+converging on the poll interval, so a missing grant slows updates but never breaks
+discovery. The watch resumes from the version of the last list and reopens itself
+when the API server ends it; a `410 Gone` triggers an immediate list, which renews
+the version. A failing watch retries every 5 s, doubling up to 60 s.
 
 ## Validation rules (excerpt)
 
