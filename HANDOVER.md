@@ -73,7 +73,7 @@ details are in `git log`.
 | 2026-10-03 | CI change detection from `cargo metadata` (`.github/scripts/changes.py`) | [spec](docs/superpowers/specs/2026-10-03-ci-change-detection-design.md), AGENTS.md "CI" |
 | 2026-10-03 | Edge restarts keep the tunnel up (`boot_id` on registrations) | `docs/11` "Edge restarts" |
 | 2026-10-03 | `gsp --aggregator-admin-url` (fan-out through NAT, port maps, TLS terminators) | `docs/12` |
-| 2026-10-03 | Tunnel addresses page in `gsp-ui` (read-only) | `docs/10` "The admin GUI" |
+| 2026-10-03 | Tunnel addresses page in `gsp-ui` (read-only; Release button added 2026-10-04) | `docs/10` "The admin GUI" |
 | 2026-10-03 | TLS handshake flood limits (`gsp_http::tls::HandshakeLimits`) | ADR 29, [spec](docs/superpowers/specs/2026-10-03-tls-handshake-limits-design.md) |
 | 2026-10-03 | HA write forwarding bounded by a 10 s timeout (`504` on a hung leader) | `docs/10` |
 | 2026-10-02 | `cargo audit` and Trivy scans in CI (informational) | ADR 28, AGENTS.md commands table |

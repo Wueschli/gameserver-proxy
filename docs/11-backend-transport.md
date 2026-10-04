@@ -254,8 +254,11 @@ IPv6 (built 2026-10-03):
   a stream of distinct names with bad backends can therefore use up the pool. The
   registration endpoints are bearer-gated, and `DELETE` plus the stale flag are the
   remedy.
-  `gsp-ui` shows the same table, read-only, on its Tunnel addresses page
-  (`GET /api/tunnel/addresses`, proxied with `--controller-url`/`--controller-token`).
+  `gsp-ui` shows the same table on its Tunnel addresses page (`GET /api/tunnel/addresses`,
+  proxied with `--controller-url`/`--controller-token`). Each row has a **Release**
+  button (admin role, behind a confirmation) that proxies the registry `DELETE`
+  (`DELETE /api/tunnel/origins/{name}` → `/peers/{name}`, `/api/tunnel/proxies/{name}` →
+  `/proxy-peers/{name}`).
 - **High availability (built 2026-10-03).** `--tunnel-network` works with `--ha-peers`:
   both registries and the address book are replicated through Raft, so every node
   serves the same registrations and addresses, and a registration or `DELETE` made on

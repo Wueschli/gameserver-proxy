@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { ApiError, getTunnelAddresses } from "../api";
+import { ApiError, getTunnelAddresses, releaseTunnelAddress } from "../api";
 import type { TunnelAddresses } from "../types";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 
 /** "2 min ago" / "3 h ago" / "20 d ago" from unix seconds; the exact time is the cell's tooltip. */
 function ago(unixSecs: number): string {
@@ -18,12 +19,15 @@ function exact(unixSecs: number): string {
 }
 
 // Read-only view of gsp-controller's tunnel address book (`GET /tunnel/addresses`,
-// docs/11 "Address authority"). Releasing an address is a registry DELETE, which
-// gsp-ui does not proxy; the page says how instead of offering a button.
+// docs/11 "Address authority"). Releasing an address is the registry DELETE,
+// proxied by gsp-ui behind a confirmation.
 export function TunnelAddressesPage() {
   const [table, setTable] = useState<TunnelAddresses | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   async function refresh() {
     setLoading(true);
@@ -36,6 +40,25 @@ export function TunnelAddressesPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleRelease(role: "origin" | "proxy", name: string, address: string) {
+    const ok = await confirm({
+      title: `Release ${address}?`,
+      description: `Removes ${role} ${name}'s registration and frees its address for reuse. A ${role} that is still running re-registers and may be given a different address.`,
+      confirmLabel: "Release address",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await releaseTunnelAddress(role, name);
+      setNotice(`released ${res.released ?? address} from ${name}`);
+    } catch (err) {
+      setNotice(`release ${name} failed: ${err instanceof ApiError ? err.message : err}`);
+    } finally {
+      setBusy(false);
+    }
+    await refresh();
   }
 
   useEffect(() => {
@@ -52,6 +75,10 @@ export function TunnelAddressesPage() {
           Refresh
         </Button>
       </div>
+
+      {notice && (
+        <p className="mb-4 rounded border border-line bg-surface px-3 py-2 text-sm text-ink-muted">{notice}</p>
+      )}
 
       {error && (
         <p className="mb-4 rounded border border-line bg-surface px-3 py-2 text-sm text-ink-muted">{error}</p>
@@ -79,9 +106,8 @@ export function TunnelAddressesPage() {
           {staleCount > 0 && (
             <p className="mb-4 rounded border border-line bg-surface px-3 py-2 text-sm text-ink-muted">
               A stale owner has not re-registered for longer than the controller's{" "}
-              <span className="font-mono">--tunnel-stale-after</span>. Nothing is freed automatically: to
-              release its address, <span className="font-mono">DELETE /peers/{"{name}"}</span> (origins) or{" "}
-              <span className="font-mono">DELETE /proxy-peers/{"{name}"}</span> (proxies) on the controller.
+              <span className="font-mono">--tunnel-stale-after</span>. Nothing is freed automatically: release
+              its address here once you know the owner is gone.
             </p>
           )}
 
@@ -98,6 +124,7 @@ export function TunnelAddressesPage() {
                     <th className="px-4 py-2 font-medium">first seen</th>
                     <th className="px-4 py-2 font-medium">last seen</th>
                     <th className="px-4 py-2 font-medium">status</th>
+                    <th className="px-4 py-2" />
                   </tr>
                 </thead>
                 <tbody>
@@ -115,6 +142,16 @@ export function TunnelAddressesPage() {
                       <td className="px-4 py-2">
                         {e.stale ? <Badge tone="warn">stale</Badge> : <Badge tone="good">active</Badge>}
                       </td>
+                      <td className="px-4 py-2 text-right">
+                        <Button
+                          variant="danger"
+                          disabled={busy}
+                          aria-label={`Release ${e.name}`}
+                          onClick={() => handleRelease(e.role, e.name, e.address)}
+                        >
+                          Release
+                        </Button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -123,6 +160,7 @@ export function TunnelAddressesPage() {
           </div>
         </>
       )}
+      {dialog}
     </div>
   );
 }

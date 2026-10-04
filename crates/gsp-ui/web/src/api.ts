@@ -176,8 +176,17 @@ export function rollbackTo(revision: number): Promise<{ revision: number }> {
   return requestJson(`/api/config/rollback/${revision}`, { method: "POST" });
 }
 
-// --- tunnel addresses (proxied to gsp-controller, read-only) ---
+// --- tunnel addresses (proxied to gsp-controller) ---
 
 export function getTunnelAddresses(): Promise<TunnelAddresses> {
   return requestJson("/api/tunnel/addresses");
+}
+
+/** Frees an owner's address: the controller's registry `DELETE /peers|/proxy-peers/{name}`. */
+export function releaseTunnelAddress(
+  role: "origin" | "proxy",
+  name: string,
+): Promise<{ revision: number; released: string | null }> {
+  const base = role === "origin" ? "origins" : "proxies";
+  return requestJson(`/api/tunnel/${base}/${encodeURIComponent(name)}`, { method: "DELETE" });
 }

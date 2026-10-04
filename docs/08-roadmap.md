@@ -1102,8 +1102,8 @@ slice 1.
 - **Phase 14 follow-ups** — the multi-proxy `AllowedIPs` fix and the controller-allocated
   tunnel address authority landed 2026-10-02 (`docs/11` "Address authority"); the
   CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Remaining pieces
-  (lease expiry, HA-replicated allocation, releasing from the UI) are tracked as
-  GitHub issues (#40); the read-only UI view landed 2026-10-03. IPv6 tunnel networks and
+  (lease expiry, live address change, pool pruning) are tracked as
+  GitHub issues (#40); the UI view landed 2026-10-03, releasing from it 2026-10-04. IPv6 tunnel networks and
   IPv6 underlays landed 2026-10-03 (`docs/11` "Address authority", spec
   `docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md`), with `--tunnel-readdress`
   for a changed network.
