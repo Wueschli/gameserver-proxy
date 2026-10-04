@@ -11,13 +11,17 @@ fn ctx<'a>(src: &str, local: &str, first_bytes: &'a [u8]) -> MatchContext<'a> {
     }
 }
 
-/// Like [`ctx`] but with a sniffer hint attached.
+/// Like [`ctx`] but with a sniffer hint (from sniffer `minecraft`) attached.
 fn ctx_sniff<'a>(hint: &'a RouteHint) -> MatchContext<'a> {
+    ctx_sniff_by("minecraft", hint)
+}
+
+fn ctx_sniff_by<'a>(name: &'a str, hint: &'a RouteHint) -> MatchContext<'a> {
     MatchContext {
         src: "9.9.9.9:1".parse().unwrap(),
         local: "1.1.1.1:25565".parse().unwrap(),
         first_bytes: &[],
-        sniff: Some(hint),
+        sniff: Some((name, hint)),
     }
 }
 
@@ -780,7 +784,7 @@ listeners:
 "#;
     let cfg = parse_str(yaml).unwrap();
     let l = &cfg.listeners[0];
-    assert_eq!(l.sniffer.as_deref(), Some("minecraft"));
+    assert_eq!(l.sniffers, ["minecraft"]);
     assert_eq!(l.peek_len(), PEEK_MAX);
 
     let hint = |host: Option<&str>, reject: bool| RouteHint {
@@ -819,14 +823,51 @@ fn rejects_bad_sniffer_matchers() {
         r#"routes: [{ match: { type: sniffer, host: ["a.example.com"] }, action: { pool: p } }]"#,
         // sniffer field on a non-sniffer matcher
         r#"routes: [{ match: { type: always, sniffer: sni }, action: { pool: p } }]"#,
-        // two different sniffers on one listener
-        r#"routes: [{ match: { type: sniffer, sniffer: minecraft }, action: { pool: p } }, { match: { type: sniffer, sniffer: a2s }, action: { pool: p } }]"#,
     ] {
         let yaml = format!(
             "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    {bad}\n"
         );
         assert!(parse_str(&yaml).is_err(), "should reject: {bad}");
     }
+}
+
+#[test]
+fn several_sniffers_per_listener_route_by_the_recognising_one() {
+    let yaml = r#"
+pools:
+  - name: quic
+    targets: ["127.0.0.1:1"]
+  - name: wg
+    targets: ["127.0.0.1:2"]
+  - name: other
+    targets: ["127.0.0.1:3"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:443"
+    protocol: udp
+    routes:
+      - match: { type: sniffer, sniffer: quic }
+        action: { pool: quic }
+      - match: { type: sniffer, sniffer: wireguard }
+        action: { pool: wg }
+      - match: { type: sniffer, sniffer: quic, host: ["x.example.net"] }
+        action: { pool: other }
+"#;
+    let l = &parse_str(yaml).unwrap().listeners[0];
+    // distinct, in order of first appearance
+    assert_eq!(l.sniffers, ["quic", "wireguard"]);
+    let h = RouteHint::default();
+    assert_eq!(l.route_for(&ctx_sniff_by("quic", &h)), Some("quic"));
+    assert_eq!(l.route_for(&ctx_sniff_by("wireguard", &h)), Some("wg"));
+    // a hit from a sniffer no route names matches nothing
+    assert_eq!(l.route_for(&ctx_sniff_by("a2s", &h)), None);
+    // a wireguard hit never satisfies the quic host route
+    let hh = RouteHint {
+        host: Some("x.example.net".into()),
+        ..Default::default()
+    };
+    assert_eq!(l.route_for(&ctx_sniff_by("wireguard", &hh)), Some("wg"));
+    assert!(l.first_packet_recognised(&ctx_sniff_by("wireguard", &h)));
 }
 
 #[test]
