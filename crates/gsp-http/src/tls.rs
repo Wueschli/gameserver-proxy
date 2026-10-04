@@ -254,6 +254,7 @@ impl ReloadingCert {
     /// Load the pair (an error here is a startup error).
     pub fn new(files: TlsFiles) -> Result<Arc<Self>, TlsError> {
         let stamp = stamps(&files);
+        let checked_at = SystemTime::now();
         let (key, digest) = load_with_digest(&files)?;
         Ok(Arc::new(Self {
             files,
@@ -261,7 +262,7 @@ impl ReloadingCert {
             loaded: Mutex::new(Loaded {
                 stamp,
                 digest,
-                checked_at: SystemTime::now(),
+                checked_at,
             }),
         }))
     }
