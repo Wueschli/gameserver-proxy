@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use gsp_config::ListenerConfig;
 
 use crate::drain::ConnTracker;
+use crate::error::ListenerError;
 use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
 use crate::metrics_defs as m;
@@ -50,7 +51,7 @@ pub async fn run_tcp_listener(
     sniffers: Arc<Sniffers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> Result<(), ListenerError> {
     let cfg = Arc::new(cfg);
     let listener = TcpListener::from_std(bind_reuseport_tcp(
         cfg.bind,
