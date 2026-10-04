@@ -10,9 +10,15 @@
 //! answer carries this proxy's `tunnel_address`, which startup needs *before*
 //! the WireGuard interface can be brought up.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use defguard_wireguard_rs::net::IpAddrMask;
 use serde::{Deserialize, Serialize};
+
+use crate::live_interface::LiveInterface;
+use crate::tunnel_address;
 
 #[derive(Serialize)]
 struct ProxyRegistration<'a> {
@@ -143,30 +149,53 @@ pub async fn register_with_retry(
     }
 }
 
-/// `Some(message)` when the controller now reports a different address than
-/// the one this process is running with. Never fatal: a live interface must
-/// not be torn down over a registry change — a restart applies the new one.
-pub fn address_change(running: &str, reported: &str) -> Option<String> {
-    (running != reported).then(|| {
-        format!(
-            "the controller now assigns tunnel address {reported} but this process is running \
-             with {running}; keeping {running} — restart to apply the new address"
-        )
-    })
+/// What [`run`] needs to keep the live interface on the controller's address.
+pub struct AddressSync {
+    pub live: Arc<LiveInterface>,
+    /// The operator's pinned `--address`/`--tunnel-address` ip/prefix, if any;
+    /// supplies the prefix when the controller reports no network.
+    pub pinned_cidr: Option<String>,
+    /// Where the address is saved for a restart while the controller is down.
+    pub path: PathBuf,
+}
+
+impl AddressSync {
+    /// Applies the address the controller reported to the live interface:
+    /// moves it when the address (or the network prefix) changed, and records
+    /// the new address so a restart while the controller is down starts from
+    /// it. `Ok(true)` when the interface moved.
+    pub fn apply(&self, reported: &Registered) -> anyhow::Result<bool> {
+        let cidr = tunnel_address::interface_cidr(
+            &reported.tunnel_address,
+            reported.tunnel_network.as_deref(),
+            self.pinned_cidr.as_deref(),
+        )?;
+        let new: IpAddrMask = cidr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("tunnel address {cidr:?} is not a valid ip/cidr: {e}"))?;
+        if new == self.live.address() {
+            return Ok(false);
+        }
+        self.live.readdress(new)?;
+        tunnel_address::save(&self.path, &cidr)?;
+        Ok(true)
+    }
 }
 
 /// Re-registers every `interval` for as long as the process runs (a fixed
-/// refresh: there is no "did anything change" signal to key off yet).
-/// `running_address` is the bare IP the interface was brought up with.
+/// refresh: there is no "did anything change" signal to key off yet), and
+/// moves the live interface whenever the controller's answer changes the
+/// address — an operator released it and it was reallocated, say. The peers
+/// follow on their own: each proxy re-reads the new address from the
+/// registry. A failed move is retried on the next tick.
 pub async fn run(
     client: reqwest::Client,
     controller_url: String,
     token: Option<String>,
     reg: Registration,
     interval: Duration,
-    running_address: String,
+    sync: AddressSync,
 ) {
-    let mut warned = false;
     loop {
         match register_once(&client, &controller_url, token.as_deref(), &reg).await {
             Ok(r) => {
@@ -174,13 +203,16 @@ pub async fn run(
                     revision = r.revision,
                     "registered as a proxy peer with the controller"
                 );
-                match address_change(&running_address, &r.tunnel_address) {
-                    Some(msg) if !warned => {
-                        tracing::error!("{msg}");
-                        warned = true;
+                let from = sync.live.address();
+                match sync.apply(&r) {
+                    Ok(true) => tracing::warn!(
+                        from = %from, to = %sync.live.address(),
+                        "the controller assigned a new tunnel address; moved the interface"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::error!(error = %format!("{e:#}"), "could not apply the controller's tunnel address; will retry")
                     }
-                    Some(_) => {}
-                    None => warned = false,
                 }
             }
             Err(e) => {
@@ -193,6 +225,8 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn reg() -> Registration {
@@ -219,12 +253,81 @@ mod tests {
         assert!(json.contains("\"tunnel_address\":\"10.60.0.3\""));
     }
 
+    fn sync(live: &Arc<LiveInterface>, pinned: Option<&str>, path: &Path) -> AddressSync {
+        AddressSync {
+            live: live.clone(),
+            pinned_cidr: pinned.map(str::to_string),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn reported(ip: &str) -> Registered {
+        Registered {
+            revision: 1,
+            tunnel_address: ip.into(),
+            tunnel_network: Some("10.60.0.0/24".into()),
+        }
+    }
+
     #[test]
-    fn address_change_reports_only_a_real_difference() {
-        assert_eq!(address_change("10.60.0.5", "10.60.0.5"), None);
-        let msg = address_change("10.60.0.5", "10.60.0.9").unwrap();
-        assert!(msg.contains("10.60.0.5") && msg.contains("10.60.0.9"));
-        assert!(msg.contains("restart"));
+    fn a_changed_address_moves_the_interface_and_is_saved() {
+        use crate::live_interface::testing::{live, peer, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&peer(), &[], &log));
+        assert!(sync(&live, None, &path)
+            .apply(&reported("10.60.0.7"))
+            .unwrap());
+        assert_eq!(live.address().to_string(), "10.60.0.7/24");
+        assert_eq!(tunnel_address::load(&path).as_deref(), Some("10.60.0.7/24"));
+    }
+
+    #[test]
+    fn an_unchanged_address_touches_nothing() {
+        use crate::live_interface::testing::{live, peer, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&peer(), &[], &log));
+        assert!(!sync(&live, None, &path)
+            .apply(&reported("10.60.0.2"))
+            .unwrap());
+        assert!(log.lock().unwrap().is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_failed_move_saves_nothing() {
+        use crate::live_interface::testing::{live, peer, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&peer(), &["10.60.0.7/24"], &log));
+        assert!(sync(&live, None, &path)
+            .apply(&reported("10.60.0.7"))
+            .is_err());
+        assert!(
+            !path.exists(),
+            "a restart must not start from an address that never came up"
+        );
+        assert_eq!(live.address().to_string(), "10.60.0.2/24");
+    }
+
+    #[test]
+    fn pin_only_mode_keeps_the_pinned_prefix() {
+        use crate::live_interface::testing::{live, peer, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&peer(), &[], &log));
+        let r = Registered {
+            revision: 1,
+            tunnel_address: "10.60.0.9".into(),
+            tunnel_network: None,
+        };
+        assert!(sync(&live, Some("10.60.0.9/24"), &path).apply(&r).unwrap());
+        assert_eq!(live.address().to_string(), "10.60.0.9/24");
     }
 
     /// A one-shot HTTP server answering every request with a canned response.

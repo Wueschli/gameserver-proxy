@@ -9,6 +9,7 @@ mod aggregator_client;
 mod controller_client;
 mod discovery;
 mod intent_client;
+mod live_interface;
 mod procinfo;
 mod proxy_register;
 mod reload;
@@ -446,14 +447,24 @@ async fn run(
                 .cidr
                 .parse()
                 .map_err(|e| anyhow::anyhow!("tunnel address {:?} is invalid: {e}", start.cidr))?;
-            let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> =
-                Arc::from(tunnel_client::bring_up(
-                    &tc.iface,
-                    &private_key,
+            // A changed tunnel address rebuilds the interface (see
+            // `live_interface`), so keep what that needs to bring it up again.
+            let bring_up: live_interface::BringUp = {
+                let (iface, key, port, userspace) = (
+                    tc.iface.clone(),
+                    private_key.clone(),
                     tc.listen_port,
-                    address,
                     tc.userspace,
-                )?);
+                );
+                Box::new(move |address, peers| {
+                    tunnel_client::bring_up(&iface, &key, port, address, peers, userspace)
+                })
+            };
+            let wg = Arc::new(live_interface::LiveInterface::new(
+                bring_up(address.clone(), Vec::new())?,
+                address,
+                bring_up,
+            ));
             tracing::info!(
                 iface = %tc.iface,
                 port = tc.listen_port,
@@ -475,7 +486,11 @@ async fn run(
                 tc.controller_token,
                 reg,
                 tc.register_interval,
-                tunnel_address::ip_of(&start.cidr).to_string(),
+                proxy_register::AddressSync {
+                    live: wg.clone(),
+                    pinned_cidr,
+                    path: addr_path,
+                },
             ));
             Some((task, register_task, wg))
         }
@@ -602,7 +617,7 @@ async fn run(
     if let Some((task, register_task, wg)) = tunnel {
         task.abort();
         register_task.abort();
-        if let Err(e) = wg.remove_interface() {
+        if let Err(e) = wg.remove() {
             tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
         }
     }

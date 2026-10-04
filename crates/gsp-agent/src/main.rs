@@ -23,6 +23,7 @@
 mod address_store;
 mod interface;
 mod keypair;
+mod live_interface;
 mod proxy_subscribe;
 mod register;
 
@@ -220,17 +221,24 @@ async fn main() -> anyhow::Result<()> {
         peers.push(peer);
     }
 
-    let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> = Arc::from(
-        interface::bring_up_with(
-            &args.iface,
-            &private_key,
+    // A changed tunnel address rebuilds the interface (see `live_interface`),
+    // so keep what that needs to bring it up again.
+    let bring_up: live_interface::BringUp = {
+        let (iface, key, port, userspace) = (
+            args.iface.clone(),
+            private_key.clone(),
             args.listen_port,
-            address,
-            peers,
             args.userspace,
-        )
-        .context("bringing up the local WireGuard interface")?,
-    );
+        );
+        Box::new(move |address, peers| {
+            interface::bring_up_with(&iface, &key, port, address, peers, userspace)
+        })
+    };
+    let wg = Arc::new(live_interface::LiveInterface::new(
+        bring_up(address.clone(), peers).context("bringing up the local WireGuard interface")?,
+        address,
+        bring_up,
+    ));
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
 
     tokio::spawn(register::run(
@@ -239,7 +247,11 @@ async fn main() -> anyhow::Result<()> {
         args.controller_token.clone(),
         reg,
         Duration::from_secs(args.register_interval_sec),
-        address_store::ip_of(&start.cidr).to_string(),
+        register::AddressSync {
+            live: wg.clone(),
+            pinned_cidr: pinned_cidr.map(str::to_string),
+            path: addr_path,
+        },
     ));
     // Phase 14 slice 7: learn about every edge proxy, not just a manually
     // pinned one — see `proxy_subscribe`'s module doc.
@@ -254,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         .context("waiting for a shutdown signal")?;
     tracing::info!("shutting down, removing the wireguard interface");
     subscribe_task.abort();
-    if let Err(e) = wg.remove_interface() {
+    if let Err(e) = wg.remove() {
         tracing::warn!(error = %e, "failed to remove the wireguard interface cleanly");
     }
     Ok(())

@@ -400,6 +400,124 @@ impl TunnelLab {
             .to_string())
     }
 
+    /// The tunnel address the controller assigned to the origin.
+    pub async fn origin_address(&self) -> Result<String> {
+        let body: serde_json::Value =
+            reqwest::get(self.registry_url(&format!("/peers/{ORIGIN_NAME}")))
+                .await?
+                .json()
+                .await?;
+        Ok(body["tunnel_address"]
+            .as_str()
+            .context("no tunnel_address in the origin's registration")?
+            .to_string())
+    }
+
+    /// Makes the controller give `name` a different tunnel address, the way an
+    /// operator release followed by a busy pool would: `DELETE`s its
+    /// registration and immediately parks a placeholder on the freed address,
+    /// so the registrant's next (1 s) re-registration cannot get it back.
+    /// `kind` is `peers` (an origin) or `proxy-peers` (an edge). Returns
+    /// `(old, new)` once the registry shows the new address. If the registrant
+    /// re-registers between the two calls the placeholder is refused and the
+    /// whole step is repeated.
+    pub async fn move_address(&self, kind: &str, name: &str) -> Result<(String, String)> {
+        let client = reqwest::Client::new();
+        let entry = self.registry_url(&format!("/{kind}/{name}"));
+        let old = {
+            let body: serde_json::Value = client.get(&entry).send().await?.json().await?;
+            body["tunnel_address"]
+                .as_str()
+                .context("no tunnel_address in the registration")?
+                .to_string()
+        };
+        for attempt in 0..10 {
+            client
+                .delete(&entry)
+                .send()
+                .await?
+                .error_for_status()
+                .context("releasing the registration")?;
+            // 32 zero bytes but for a distinct first one: a valid, unique key.
+            let key = format!(
+                "{}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                (b'B' + attempt) as char
+            );
+            let body = if kind == "peers" {
+                serde_json::json!({
+                    "name": format!("squatter-{attempt}"), "pubkey": key,
+                    "backends": [format!("{old}:1")], "tunnel_address": old,
+                })
+            } else {
+                serde_json::json!({
+                    "name": format!("squatter-{attempt}"), "pubkey": key,
+                    "endpoint": "203.0.113.1:51820", "tunnel_address": old,
+                })
+            };
+            let resp = client
+                .post(self.registry_url(&format!("/{kind}")))
+                .json(&body)
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                let after = self.address_when_changed(&client, &entry, &old).await?;
+                return Ok((old, after));
+            }
+        }
+        anyhow::bail!("{name} kept getting its address {old} back")
+    }
+
+    async fn address_when_changed(
+        &self,
+        client: &reqwest::Client,
+        entry: &str,
+        old: &str,
+    ) -> Result<String> {
+        let found = std::sync::Mutex::new(String::new());
+        {
+            let found = &found;
+            wait_until(
+                || async move {
+                    let Ok(resp) = client.get(entry).send().await else {
+                        return Ok(false);
+                    };
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    match body["tunnel_address"].as_str() {
+                        Some(a) if a != old => {
+                            *found.lock().unwrap() = a.to_string();
+                            Ok(true)
+                        }
+                        _ => Ok(false),
+                    }
+                },
+                Duration::from_secs(20),
+                "the registrant to re-register under a new address",
+            )
+            .await?;
+        }
+        Ok(found.into_inner().unwrap())
+    }
+
+    /// `ip -4 addr show <iface>` inside the origin's namespace.
+    pub fn origin_iface_addrs(&self) -> Result<String> {
+        let origin = self.origin.as_ref().context("start_origin first")?;
+        origin.ns.run(&["ip", "-4", "addr", "show", "gsp-agent0"])
+    }
+
+    /// `ip -4 addr show <iface>` inside an edge's namespace.
+    pub fn edge_iface_addrs(&self, edge: usize) -> Result<String> {
+        self.edges[edge]
+            .ns
+            .run(&["ip", "-4", "addr", "show", "gsp-tunnel0"])
+    }
+
+    pub fn edge_alive(&mut self, edge: usize) -> bool {
+        self.edges[edge]
+            .gsp
+            .as_mut()
+            .is_some_and(|g| g.exit_code().is_none())
+    }
+
     /// When the controller last heard from a proxy (unix seconds), from the
     /// address table.
     pub async fn proxy_last_seen(&self, name: &str) -> Result<u64> {

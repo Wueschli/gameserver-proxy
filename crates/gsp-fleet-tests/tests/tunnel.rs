@@ -401,3 +401,85 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
     t.pass();
     Ok(())
 }
+
+/// Scenario 9 — a live origin's address changes without a restart. The
+/// controller hands the origin a different address (its old one was released
+/// and taken); the agent must re-address its interface in place, the edge
+/// must follow the new route, and traffic must flow to the new address.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn an_origin_changes_its_address_without_a_restart() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+
+    let (old, new) = t.move_address("peers", "origin-a").await?;
+    assert_ne!(old, new);
+    {
+        let t = &t;
+        let new = new.clone();
+        wait_until(
+            || {
+                let new = new.clone();
+                async move {
+                    Ok(t.origin_iface_addrs()?.contains(&format!("inet {new}/"))
+                        && t.pools(edge).await?.contains(&format!("{new}:7000")))
+                }
+            },
+            Duration::from_secs(30),
+            "the agent to move its interface and the edge to follow",
+        )
+        .await?;
+    }
+    let addrs = t.origin_iface_addrs()?;
+    assert!(
+        !addrs.contains(&format!("inet {old}/")),
+        "the old address must be gone:\n{addrs}"
+    );
+    t.wait_roundtrip(edge).await?;
+    t.wait_backends(edge, true).await?;
+    assert!(t.agent_alive(), "the agent must not have restarted");
+    t.pass();
+    Ok(())
+}
+
+/// Scenario 10 — the same for an edge: its address changes live, the interface
+/// moves, every origin re-peers with the new address, and traffic recovers.
+#[tokio::test]
+#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]
+async fn an_edge_changes_its_address_without_a_restart() -> Result<()> {
+    ensure_built();
+    let mut t = TunnelLab::new().await?;
+    t.start_origin(true).await?;
+    let edge = t.start_edge("edge-1", None).await?;
+    t.wait_roundtrip(edge).await?;
+
+    let (old, new) = t.move_address("proxy-peers", "edge-1").await?;
+    assert_ne!(old, new);
+    {
+        let t = &t;
+        let new = new.clone();
+        wait_until(
+            || {
+                let new = new.clone();
+                async move { Ok(t.edge_iface_addrs(edge)?.contains(&format!("inet {new}/"))) }
+            },
+            Duration::from_secs(30),
+            "the edge to move its interface",
+        )
+        .await?;
+    }
+    let addrs = t.edge_iface_addrs(edge)?;
+    assert!(
+        !addrs.contains(&format!("inet {old}/")),
+        "the old address must be gone:\n{addrs}"
+    );
+    // The agent re-peers with the proxy's new address; a fresh handshake is
+    // needed, which userspace takes a while to start.
+    t.wait_roundtrip(edge).await?;
+    assert!(t.edge_alive(edge), "the edge must not have restarted");
+    t.pass();
+    Ok(())
+}
