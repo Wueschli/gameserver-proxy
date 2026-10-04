@@ -31,6 +31,8 @@ pub enum StoreError {
     CounterOverflow,
     #[error("revision counter moved during a Raft apply (concurrent writer)")]
     ConcurrentWrite,
+    #[error("a write without a Raft index was skipped as already applied")]
+    UnexpectedSkip,
 }
 
 const CURRENT_KEY: &[u8] = b"current";

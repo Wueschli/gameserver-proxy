@@ -131,25 +131,6 @@ impl Registration for PeerRegistration {
     }
 }
 
-/// Log payload for a deleted registration. Deliberately not a
-/// [`PeerRegistration`]: `current` never points at a tombstone, so only
-/// subscribers (via [`event_payload`]) ever read one.
-pub(crate) fn tombstone_bytes(name: &str) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({ "removed": name }))
-        .expect("a json! object always serializes")
-}
-
-/// The SSE `data:` payload for one log entry:
-/// `{"revision":N,"registration":{…}}` for a registration,
-/// `{"revision":N,"removed":{"name":"…"}}` for a tombstone.
-pub(crate) fn event_payload(revision: u64, bytes: &[u8]) -> serde_json::Value {
-    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
-    match value.get("removed").and_then(|v| v.as_str()) {
-        Some(name) => serde_json::json!({ "revision": revision, "removed": { "name": name } }),
-        None => serde_json::json!({ "revision": revision, "registration": value }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,19 +222,5 @@ mod tests {
         assert_eq!(reg.endpoint, None);
         assert!(reg.backends.is_empty());
         assert!(reg.validate().is_ok());
-    }
-
-    #[test]
-    fn event_payload_distinguishes_a_registration_from_a_tombstone() {
-        let reg = serde_json::to_vec(&valid()).unwrap();
-        let p = event_payload(3, &reg);
-        assert_eq!(p["revision"], 3);
-        assert_eq!(p["registration"]["name"], "home-origin");
-        assert!(p.get("removed").is_none());
-
-        let p = event_payload(4, &tombstone_bytes("home-origin"));
-        assert_eq!(p["revision"], 4);
-        assert_eq!(p["removed"]["name"], "home-origin");
-        assert!(p.get("registration").is_none());
     }
 }
