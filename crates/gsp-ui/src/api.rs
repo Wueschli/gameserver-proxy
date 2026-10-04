@@ -89,6 +89,10 @@ pub struct AppState {
     pub verify_permits: Arc<tokio::sync::Semaphore>,
 }
 
+/// Longest username accepted at login; longer is rejected before any
+/// bookkeeping.
+const MAX_USERNAME_BYTES: usize = 256;
+
 /// Concurrent Argon2 verifications allowed at once.
 const MAX_CONCURRENT_VERIFIES: usize = 4;
 
@@ -227,6 +231,11 @@ async fn login(
     // Throttle before any password work. In legacy/open mode there is no
     // username, so only the per-address bucket applies.
     let username = state.users.as_ref().and(req.username.as_deref());
+    // Usernames key the limiter's map, so bound their size (no real
+    // username comes close).
+    if username.is_some_and(|u| u.len() > MAX_USERNAME_BYTES) {
+        return bad_credentials();
+    }
     if let Err(wait) = state.login_limiter.check(ip, username) {
         return too_many_attempts(wait);
     }
@@ -744,13 +753,13 @@ mod tests {
     async fn an_expired_session_is_rejected_like_no_session() {
         let app = router(
             AppState::new(Some("secret".into())).with_session_limits(SessionLimits {
-                idle_timeout: std::time::Duration::from_millis(30),
+                idle_timeout: std::time::Duration::from_millis(50),
                 ..SessionLimits::default()
             }),
         );
         let resp = post_login(&app, r#"{"password":"secret"}"#).await;
         let cookie = cookie_header_from(&set_cookie_value(&resp));
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let resp = app
             .oneshot(
                 HttpRequest::get("/ui/session")
@@ -829,5 +838,17 @@ mod tests {
         };
         assert_eq!(post().send().await.unwrap().status(), 401);
         assert_eq!(post().send().await.unwrap().status(), 429);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_username_is_rejected_without_touching_the_limiter() {
+        let app = router(users_state().with_login_limits(tight_login_limits(1, 1)));
+        let body = format!(r#"{{"username":"{}","password":"x"}}"#, "a".repeat(5000));
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        // Twice: a 401 both times (not 429) shows no limiter token was spent.
+        for _ in 0..2 {
+            let resp = post_login(&app, body).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 }
