@@ -288,7 +288,7 @@ pub(crate) struct RawBackendSource {
     /// `kubernetes` only: the namespace (default `default`).
     #[serde(default)]
     pub(crate) namespace: Option<String>,
-    /// `kubernetes` only: pick this named port from the Endpoints subset;
+    /// `kubernetes` only: pick this named port from each EndpointSlice;
     /// absent ⇒ the first port.
     #[serde(default)]
     pub(crate) port_name: Option<String>,
