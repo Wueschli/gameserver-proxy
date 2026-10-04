@@ -2389,7 +2389,7 @@ fn validate_group(g: String) -> Result<String, ConfigError> {
             "settings.group must not be empty or start/end with '/'".into(),
         ));
     }
-    if g.split('/').any(|segment| segment.is_empty()) {
+    if g.split('/').any(str::is_empty) {
         return Err(Invalid(
             "settings.group must not contain empty segments (e.g. \"a//b\")".into(),
         ));

@@ -235,6 +235,23 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   background thread); it now retries the open. **The other ~30 `sleep(150ms)` +
   connect tests in `crates/gsp-core/tests/tcp_forward.rs` have the same shape** —
   if one flakes, reuse `connect_when_listening` there rather than lengthening the sleep.
+- **sled lock flake (fixed 2026-10-04)**: `ha::import::tests::set_aside_moves_only_unmarked_non_empty_dirs`
+  (and its siblings) failed now and then with `WouldBlock` ("could not acquire lock").
+  Same cause as above: the fixtures drop a `Store`, then `set_aside_pre_ha` reopens the
+  same path in-process before sled's background threads let go of the lock (production
+  opens each path once, in a fresh process). The tests now go through
+  `store::retry_when_unlocked` / `reopen_when_unlocked`, which also recognise the error
+  under `anyhow` context. Not reproduced locally (100 runs under load), so the fix
+  follows from the documented sled behaviour. Another flake seen once under a full
+  `make check`: `an_active_session_survives_past_its_idle_window_then_expires`
+  (`gsp-core/tests/udp_forward.rs`, timing-based; passes alone).
+- **Lints and CI pins (2026-10-04)**: the root `Cargo.toml` has a curated
+  `[workspace.lints.clippy]` (`redundant_closure_for_method_calls`, `needless_pass_by_value`,
+  `items_after_statements`, `manual_let_else`, `default_trait_access`); every workspace
+  crate opts in. `cast_possible_truncation` is left out: ~30 of its hits are test code, and
+  the production ones are the vetted `u128` millis casts. Every third-party action in
+  `.github/` is pinned to a commit SHA with the tag in a trailing comment (the `stable` and
+  `nightly` toolchain branches of `dtolnay/rust-toolchain` too); bump them by hand.
 - **A config file directly under `/tmp`** triggers continuous ~200 ms
   `configuration reloaded source=file` log spam (a `notify` / tmpfs
   mtime-granularity interaction). Harmless — `reload.rs` only swaps the `Snapshot` —

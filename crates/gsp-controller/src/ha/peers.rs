@@ -70,7 +70,10 @@ mod tests {
     use super::*;
 
     fn raw(entries: &[&str]) -> Vec<String> {
-        entries.iter().map(|s| s.to_string()).collect()
+        entries
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect()
     }
 
     fn err(entry: &str) -> String {

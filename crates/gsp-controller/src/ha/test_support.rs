@@ -72,7 +72,7 @@ pub(crate) async fn single_node(
         node_id,
         ha_token: None,
         forward: client::forward_client(client::FORWARD_TIMEOUT),
-        pre_ha: Default::default(),
+        pre_ha: crate::ha::import::LocalPreHa::default(),
     });
     (handle, cluster, dir)
 }

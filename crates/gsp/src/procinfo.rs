@@ -9,7 +9,9 @@ use std::time::Duration;
 /// `/proc/self/fd`. `None` off Linux (no such directory).
 #[cfg(target_os = "linux")]
 pub fn open_fd_count() -> Option<usize> {
-    std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count())
+    std::fs::read_dir("/proc/self/fd")
+        .ok()
+        .map(std::iter::Iterator::count)
 }
 
 #[cfg(not(target_os = "linux"))]

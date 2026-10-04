@@ -248,7 +248,7 @@ async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
     let logs = c
         .procs
         .iter()
-        .map(|p| p.log())
+        .map(gsp_fleet_tests::Proc::log)
         .collect::<String>()
         .to_lowercase();
     ensure!(

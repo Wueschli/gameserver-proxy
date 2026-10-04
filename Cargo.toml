@@ -79,6 +79,15 @@ rand = "0.8"
 # earns a shared workspace entry rather than two independently-pinned copies.
 defguard_wireguard_rs = "0.12"
 
+# A curated pedantic subset (docs/tech-debt P12); the documentation lints
+# (`missing_errors_doc`, `must_use_candidate`, ...) are deliberately left out.
+[workspace.lints.clippy]
+redundant_closure_for_method_calls = "warn"
+needless_pass_by_value = "warn"
+items_after_statements = "warn"
+manual_let_else = "warn"
+default_trait_access = "warn"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

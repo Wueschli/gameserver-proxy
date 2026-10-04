@@ -8,7 +8,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
-    middleware::{self},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -39,7 +39,7 @@ struct AdminState {
 
 /// The admin API route table. Split out from [`serve`] so integration tests can
 /// mount it on their own ephemeral listener. `/healthz` alone stays outside
-/// the [`require_bearer`] gate — plain liveness-probe convention, same
+/// the [`gsp_http::server::require_bearer`] gate — plain liveness-probe convention, same
 /// choice `gsp-controller`/`gsp-aggregator` made for their own `/healthz`.
 fn router(state: AdminState) -> Router {
     let gated = Router::new()
@@ -127,11 +127,11 @@ async fn undrain(State(s): State<AdminState>) -> (StatusCode, &'static str) {
 
 /// `GET /config` — a plaintext view of the active snapshot (listeners + pools).
 async fn config(State(s): State<AdminState>) -> impl IntoResponse {
-    let snap = s.runtime.snapshot();
-    let mut out = String::new();
     fn opt(v: Option<impl std::fmt::Display>) -> String {
         v.map_or_else(|| "-".to_string(), |n| n.to_string())
     }
+    let snap = s.runtime.snapshot();
+    let mut out = String::new();
     let lim = &snap.limits;
     out.push_str(&format!(
         "draining={}\tactive_conns={}\tlimits=conn:{},udp:{},new_rate:{}\tgeo_db={}\n\nlisteners:\n",
@@ -607,7 +607,7 @@ mod tests {
         sniffers_dir: Option<std::path::PathBuf>,
     ) -> (String, Runtime) {
         let cfg = gsp_config::parse_str(yaml).unwrap();
-        let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
         let prometheus = PrometheusBuilder::new().build_recorder().handle();
         let app = router(AdminState {
             runtime: runtime.handle(),

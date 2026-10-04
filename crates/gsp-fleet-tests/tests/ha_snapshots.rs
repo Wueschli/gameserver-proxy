@@ -47,11 +47,11 @@ async fn revisions(client: &reqwest::Client, base: &str) -> Result<serde_json::V
 }
 
 fn spawn_node(dir: &tempfile::TempDir, port: u16, extra: &[&str]) -> Result<Proc> {
-    let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    let mut args: Vec<String> = extra.iter().map(std::string::ToString::to_string).collect();
     args.extend(
         ["--ha-token", HA_TOKEN, "--ha-snapshot-after", "10"]
             .iter()
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
     );
     spawn_controller_with(dir.path(), &format!("127.0.0.1:{port}"), &args)
 }
@@ -161,6 +161,21 @@ async fn a_node_that_joins_after_a_purge_catches_up_by_snapshot() -> Result<()> 
         "node 4 to hold the leader's revisions",
     )
     .await?;
+
+    // The revisions alone don't prove how node 4 got them. A node that caught
+    // up from the log has nothing purged; installing a snapshot sets its
+    // `purged_index` (its own Raft metrics, via `GET /admin/ha/members`).
+    let on_node4: serde_json::Value = client
+        .get(format!("{base4}/admin/ha/members"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        on_node4["purged_index"].as_u64().is_some_and(|p| p > 0),
+        "node 4 caught up without installing a snapshot: {on_node4}"
+    );
 
     for p in &mut procs {
         ensure!(p.exit_code().is_none(), "a node exited:\n{}", p.log());

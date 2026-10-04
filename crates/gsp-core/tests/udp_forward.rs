@@ -52,7 +52,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -80,6 +80,7 @@ listeners:
 }
 
 #[tokio::test]
+#[allow(clippy::items_after_statements)] // test-local items sit next to their only use
 async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
     let b1 = echo_backend(1).await;
     let proxy_addr = free_udp_addr();
@@ -96,7 +97,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -149,7 +150,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -200,7 +201,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let roundtrip = |src_port_marker: &'static [u8]| async move {
@@ -254,7 +255,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -323,7 +324,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let recv_tag = |payload: &'static [u8]| async move {
@@ -371,7 +372,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let tag = |bytes: Vec<u8>| async move {
@@ -423,7 +424,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The client `connect`s to the sub-address, so it only accepts a reply whose
@@ -468,7 +469,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -539,7 +540,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -606,7 +607,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Unrecognised first datagram: no session, no reply.
@@ -658,7 +659,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let backend = runtime

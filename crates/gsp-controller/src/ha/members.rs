@@ -514,7 +514,7 @@ mod tests {
                 Json(Whoami {
                     node_id,
                     log_empty,
-                    pre_ha: Default::default(),
+                    pre_ha: crate::ha::import::PreHaSummary::default(),
                 })
             }),
         );

@@ -143,6 +143,7 @@ impl Store {
     ///
     /// Callers (the slice-2 submit API) run `gsp_config::validate` *before*
     /// calling this — the store itself does not parse or validate `bytes`.
+    #[allow(clippy::needless_pass_by_value)] // owns what it writes; callers hand the buffers over
     pub fn put(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
         let next = self.next_revision()?;
 
@@ -240,6 +241,7 @@ impl Store {
     /// optional revision, the `applied_index` and the sibling writes.
     /// `true` = written, `false` = skipped. `index: None` (a non-Raft
     /// write) never skips and leaves `applied_index` untouched.
+    #[allow(clippy::needless_pass_by_value)] // owns what it writes; callers hand the buffers over
     fn apply_at(
         &self,
         index: Option<u64>,
@@ -411,31 +413,58 @@ fn decode_rev(bytes: &[u8]) -> u64 {
 /// epoch-deferred buffer drops also hold, so it is closed whenever the last
 /// of those finishes. An immediate reopen loses that race under load with
 /// `WouldBlock` ("could not acquire lock"). Only that error is retried, and
-/// only for a bounded time; any other error fails the test at once.
+/// only for a bounded time; any other outcome, `Ok` or `Err`, is returned.
 #[cfg(test)]
-pub(crate) fn reopen_when_unlocked<T, E: std::fmt::Display>(
+pub(crate) fn retry_when_unlocked<T, E: std::fmt::Display>(
     mut open: impl FnMut() -> Result<T, E>,
-) -> T {
+) -> Result<T, E> {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match open() {
-            Ok(v) => return v,
-            Err(e) if e.to_string().contains("could not acquire lock") => {
+            // `{e:#}` so a lock error under `anyhow` context still matches.
+            Err(e) if format!("{e:#}").contains("could not acquire lock") => {
                 if Instant::now() >= deadline {
-                    panic!("sled never released its file lock: {e}");
+                    panic!("sled never released its file lock: {e:#}");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(e) => panic!("reopen failed: {e}"),
+            other => return other,
         }
+    }
+}
+
+/// [`retry_when_unlocked`] for an open that must succeed.
+#[cfg(test)]
+pub(crate) fn reopen_when_unlocked<T, E: std::fmt::Display>(
+    open: impl FnMut() -> Result<T, E>,
+) -> T {
+    match retry_when_unlocked(open) {
+        Ok(v) => v,
+        Err(e) => panic!("reopen failed: {e:#}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopen_retries_a_lock_error_wrapped_in_context() {
+        // `anyhow` context hides the cause from plain `Display`; the helper
+        // must still recognise sled's lock error underneath it.
+        let mut calls = 0;
+        let v = reopen_when_unlocked(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(anyhow::anyhow!("could not acquire lock").context("opening \"peers\""))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(v, 3);
+    }
 
     #[test]
     fn empty_store_has_no_current_revision() {

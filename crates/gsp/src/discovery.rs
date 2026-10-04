@@ -149,7 +149,7 @@ impl DnsSrvSource {
         // Prefer the host resolver config; fall back to a default (public) one
         // so a missing /etc/resolv.conf doesn't abort startup.
         let resolver = TokioResolver::builder_tokio()
-            .and_then(|b| b.build())
+            .and_then(hickory_resolver::ResolverBuilder::build)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "dns_srv: system resolver config unavailable; using defaults");
                 TokioResolver::builder_with_config(
@@ -271,6 +271,7 @@ struct ConsulService {
 }
 
 impl ConsulSource {
+    #[allow(clippy::needless_pass_by_value)] // constructors take ownership of their settings
     pub fn new(
         pool: String,
         service: String,
@@ -404,6 +405,7 @@ struct EndpointPort {
 
 impl KubernetesSource {
     #[allow(clippy::too_many_arguments)] // one call site (build_sources)
+    #[allow(clippy::needless_pass_by_value)] // constructors take ownership of their settings
     pub fn new(
         pool: String,
         namespace: String,
@@ -638,6 +640,7 @@ mod tests {
 
     /// A failed request's error text must carry its cause: `refresh_loop`
     /// logs it with `%e`, which for anyhow is only the outermost message.
+    #[allow(clippy::needless_pass_by_value)] // constructors take ownership of their settings
     fn assert_names_the_cause(e: anyhow::Error) {
         let text = e.to_string().to_lowercase();
         assert!(text.contains("connection refused"), "{text}");

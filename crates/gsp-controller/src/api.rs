@@ -205,6 +205,7 @@ impl AppState {
     /// own direct writes, `actor` from `X-Actor`) and by
     /// `crate::ha::state_machine` (a committed Raft entry, which already
     /// carries whatever stage/actor the original submission specified).
+    #[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
     pub fn apply_revision_with_stage_and_actor(
         &self,
         bytes: RevisionBytes,
@@ -223,6 +224,7 @@ impl AppState {
     /// transaction, and a step whose `index` this database has already
     /// absorbed (a replay after a crash lost `last_applied_log`) writes
     /// nothing. `Ok(None)` = already applied.
+    #[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
     pub fn apply_entry(
         &self,
         index: u64,
@@ -901,6 +903,7 @@ fn is_visible(stage: &sled::Tree, revision: u64, group: Option<&str>) -> bool {
         .visible_to(group)
 }
 
+#[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
 fn store_error_response(e: StoreError) -> Response {
     tracing::error!(error = %e, "store error serving the config API");
     (

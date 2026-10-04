@@ -210,7 +210,7 @@ async fn subscribe_once(
     }
     tracing::info!(controller = %base_url, "subscribed to proxy-peers updates");
 
-    let mut buf = String::new();
+    let mut buf = gsp_http::sse::EventBuffer::new();
     loop {
         let chunk = resp.chunk().await.map_err(|e| {
             anyhow::anyhow!(
@@ -221,11 +221,10 @@ async fn subscribe_once(
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push(&bytes)
+            .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
-        while let Some(end) = buf.find("\n\n") {
-            let event = buf[..end].to_string();
-            buf.drain(..end + 2);
+        while let Some(event) = buf.next_event() {
             if let Some(ev) = parse_sse_event(&event) {
                 match plan(last_applied, &ev) {
                     Action::Skip => {}

@@ -13,6 +13,7 @@
 
 #[cfg(feature = "server")]
 pub mod policy;
+pub mod sse;
 #[cfg(feature = "server")]
 pub mod tls;
 

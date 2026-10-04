@@ -161,6 +161,7 @@ impl WasmSniffer {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // `map_err` callback, which hands the error over by value
 fn classify(e: wasmtime::Error) -> CallError {
     if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
         if *trap == wasmtime::Trap::Interrupt {
@@ -718,6 +719,7 @@ mod tests {
     /// unoptimised).
     #[test]
     #[ignore = "needs `make plugins` to have built crates/plugins first; run --release for real numbers"]
+    #[allow(clippy::items_after_statements)] // test-local items sit next to their only use
     fn wasm_boundary_latency_vs_nfr_n1() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../plugins/target/wasm32-unknown-unknown/release");
@@ -850,6 +852,7 @@ mod tests {
 
         // Two backends, each writing an identifying byte on connect — same
         // shape as the native-sniffer test this mirrors.
+        #[allow(clippy::items_after_statements)] // test-local items sit next to their only use
         async fn marker(tag: u8) -> std::net::SocketAddr {
             let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = l.local_addr().unwrap();
@@ -897,7 +900,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = gsp_core::Runtime::start_with_sniffers(
             gsp_core::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             sniffers,
             1,

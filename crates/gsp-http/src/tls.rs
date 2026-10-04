@@ -160,9 +160,9 @@ struct FileStamp {
 }
 
 fn stamp(path: &Path) -> Option<FileStamp> {
-    let m = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(path).ok()?;
     Some(FileStamp {
         mtime: m.modified().ok(),
         len: m.len(),

@@ -291,6 +291,7 @@ pub(super) fn apply_import(
 mod tests {
     use super::*;
     use crate::addresses::{Assignment, Role};
+    use crate::store::{reopen_when_unlocked, retry_when_unlocked};
     use std::sync::Arc;
 
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -342,10 +343,12 @@ mod tests {
             .unwrap()
             .put_applied(b"{}".to_vec(), 7)
             .unwrap();
-        assert!(!is_pre_ha_store(&marked).unwrap());
-        assert!(!is_pre_ha_store(&dir.path().join("proxy-peers")).unwrap());
+        assert!(!reopen_when_unlocked(|| is_pre_ha_store(&marked)));
+        assert!(!reopen_when_unlocked(|| is_pre_ha_store(
+            &dir.path().join("proxy-peers")
+        )));
 
-        let summary = set_aside_pre_ha(dir.path()).unwrap();
+        let summary = reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
         assert_eq!(
             summary,
             PreHaSummary {
@@ -362,17 +365,22 @@ mod tests {
 
         // A second start (fresh dirs in place) still reports the set-aside data.
         drop(Store::open(&dir.path().join("peers")).unwrap());
-        assert_eq!(set_aside_pre_ha(dir.path()).unwrap(), summary);
+        assert_eq!(
+            reopen_when_unlocked(|| set_aside_pre_ha(dir.path())),
+            summary
+        );
     }
 
     #[test]
     fn set_aside_refuses_to_overwrite_an_earlier_set_aside() {
         let dir = pre_ha_dir();
-        set_aside_pre_ha(dir.path()).unwrap();
+        reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
         // The old controller ran again and wrote new data.
         let again = pre_ha_dir();
         std::fs::rename(again.path().join("peers"), dir.path().join("peers")).unwrap();
-        let e = set_aside_pre_ha(dir.path()).unwrap_err().to_string();
+        let e = retry_when_unlocked(|| set_aside_pre_ha(dir.path()))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("already exists"), "{e}");
     }
 
@@ -381,11 +389,11 @@ mod tests {
         let dir = pre_ha_dir();
         let net = Some(Network::parse("10.60.0.0/24").unwrap());
         assert!(
-            read_pre_ha(dir.path(), net, 1).unwrap().is_none(),
+            reopen_when_unlocked(|| read_pre_ha(dir.path(), net, 1)).is_none(),
             "nothing set aside yet"
         );
-        set_aside_pre_ha(dir.path()).unwrap();
-        let content = read_pre_ha(dir.path(), net, 1).unwrap().unwrap();
+        reopen_when_unlocked(|| set_aside_pre_ha(dir.path()));
+        let content = reopen_when_unlocked(|| read_pre_ha(dir.path(), net, 1)).unwrap();
         let names: Vec<_> = content.origins.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["a", "b", "c"]);
         assert_eq!(content.origins_last_revision, 4);

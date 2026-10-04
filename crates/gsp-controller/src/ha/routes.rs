@@ -1,10 +1,8 @@
 //! `/raft/append`, `/raft/vote`, `/raft/snapshot` (plus `/raft/whoami` and
 //! `/raft/pre-ha`, read-only) — the inbound side of
 //! `crate::ha::network`'s outbound calls. Gated by the same peer-only
-//! `--ha-token` `crate::ha::HaHandle` carries, via a small `require_bearer`
-//! mirroring every other one in this crate (see
-//! `crate::intent::api::require_bearer`'s doc comment for why each `axum`
-//! state gets its own copy rather than a shared generic).
+//! `--ha-token` `crate::ha::HaHandle` carries, via the shared
+//! [`gsp_http::server::require_bearer`] middleware.
 
 use std::sync::Arc;
 
