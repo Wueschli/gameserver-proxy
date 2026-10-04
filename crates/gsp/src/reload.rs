@@ -18,8 +18,26 @@ use gsp_core::{Resolvers, RuntimeHandle, Snapshot};
 
 use crate::sniffer_loader::SnifferLoader;
 
-/// Debounce window to coalesce a burst of editor writes into one reload.
+/// Quiet period the trigger must stay silent for before a reload runs.
 const DEBOUNCE: Duration = Duration::from_millis(200);
+/// Upper bound on how long a continuous stream of triggers can postpone a reload.
+const MAX_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Trailing-edge debounce: waits until `trigger` has been quiet for `quiet`, so
+/// a burst of file events spaced wider than one window still coalesces into a
+/// single reload. `max` caps the total wait so a steady stream can't starve it.
+async fn settle(trigger: &Notify, quiet: Duration, max: Duration) {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let wait = quiet.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        if tokio::time::timeout(wait, trigger.notified())
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
 
 pub async fn run(
     path: PathBuf,
@@ -47,10 +65,7 @@ pub async fn run(
                 _ = trigger.notified() => {}
                 _ = admin.notified() => {}
             }
-            tokio::time::sleep(DEBOUNCE).await;
-            // Coalesce a burst: swallow any trigger that landed during the
-            // debounce window so it doesn't cause a second redundant reload.
-            let _ = tokio::time::timeout(Duration::ZERO, trigger.notified()).await;
+            settle(&trigger, DEBOUNCE, MAX_DEBOUNCE).await;
             apply(
                 &path,
                 &handle,
@@ -70,10 +85,7 @@ pub async fn run(
                 _ = trigger.notified() => {}
                 _ = admin.notified() => {}
             }
-            tokio::time::sleep(DEBOUNCE).await;
-            // Coalesce a burst: swallow any trigger that landed during the
-            // debounce window so it doesn't cause a second redundant reload.
-            let _ = tokio::time::timeout(Duration::ZERO, trigger.notified()).await;
+            settle(&trigger, DEBOUNCE, MAX_DEBOUNCE).await;
             apply(
                 &path,
                 &handle,
@@ -239,4 +251,41 @@ pub fn unix_now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as f64)
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_coalesces_events_spaced_inside_the_quiet_period() {
+        let n = Arc::new(Notify::new());
+        let n2 = n.clone();
+        tokio::spawn(async move {
+            // Events 150 ms apart: each is within one 200 ms window of the last.
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                n2.notify_one();
+            }
+        });
+        let start = tokio::time::Instant::now();
+        settle(&n, Duration::from_millis(200), Duration::from_secs(2)).await;
+        // Last event at 600 ms, then 200 ms of quiet.
+        assert_eq!(start.elapsed(), Duration::from_millis(800));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_is_capped_by_max() {
+        let n = Arc::new(Notify::new());
+        let n2 = n.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                n2.notify_one();
+            }
+        });
+        let start = tokio::time::Instant::now();
+        settle(&n, Duration::from_millis(200), Duration::from_secs(1)).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
 }
