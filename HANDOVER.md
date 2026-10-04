@@ -270,9 +270,13 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   `nsenter`; the userspace backend also needs `/run/wireguard`
   (the make target mounts a tmpfs on `/run` for it). Traps it taught:
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
-  up — wait for a real round trip); **userspace (`boringtun`) first handshake takes
-  ~25 s** (the proxy has no endpoint for the origin, so it waits for the agent's
-  25 s persistent keepalive; kernel is ~2 s) — tracked in
+  up — wait for a real round trip); **userspace (`boringtun`) first handshake used to take
+  ~25 s** (the proxy has no endpoint for the origin, and `boringtun` arms a peer's
+  persistent keepalive only 25 s after the peer is created, while the kernel sends one
+  at once; kernel is ~2 s). The agent now sends one empty UDP datagram through the
+  tunnel right after configuring a proxy peer (`interface::kick_handshake`), which
+  starts the handshake immediately — fix written 2026-10-04, to be confirmed by the
+  `tunnel (userspace)` CI leg (the lab's 90 s userspace deadline is unchanged until then); tracked in
   [#67](https://github.com/Wueschli/gameserver-proxy/issues/67);
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
