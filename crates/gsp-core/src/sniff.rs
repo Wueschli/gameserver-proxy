@@ -169,7 +169,7 @@ pub(crate) mod tests {
     }
 
     fn names(n: &[&str]) -> Vec<String> {
-        n.iter().map(|s| s.to_string()).collect()
+        n.iter().map(ToString::to_string).collect()
     }
 
     #[test]
@@ -357,7 +357,7 @@ listeners:
         assert_eq!(cfg.listeners[0].sniffers, ["test-host", "test-tag"]);
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,

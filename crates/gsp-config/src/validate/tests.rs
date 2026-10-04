@@ -836,22 +836,22 @@ fn several_sniffers_per_listener_route_by_the_recognising_one() {
     let yaml = r#"
 pools:
   - name: quic
-targets: ["127.0.0.1:1"]
+    targets: ["127.0.0.1:1"]
   - name: wg
-targets: ["127.0.0.1:2"]
+    targets: ["127.0.0.1:2"]
   - name: other
-targets: ["127.0.0.1:3"]
+    targets: ["127.0.0.1:3"]
 listeners:
   - name: l
-bind: "0.0.0.0:443"
-protocol: udp
-routes:
-  - match: { type: sniffer, sniffer: quic }
-    action: { pool: quic }
-  - match: { type: sniffer, sniffer: wireguard }
-    action: { pool: wg }
-  - match: { type: sniffer, sniffer: quic, host: ["x.example.net"] }
-    action: { pool: other }
+    bind: "0.0.0.0:443"
+    protocol: udp
+    routes:
+      - match: { type: sniffer, sniffer: quic }
+        action: { pool: quic }
+      - match: { type: sniffer, sniffer: wireguard }
+        action: { pool: wg }
+      - match: { type: sniffer, sniffer: quic, host: ["x.example.net"] }
+        action: { pool: other }
 "#;
     let l = &parse_str(yaml).unwrap().listeners[0];
     // distinct, in order of first appearance
