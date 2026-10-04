@@ -19,6 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 defguard_wireguard_rs = { workspace = true }
+netlink-packet-core = { workspace = true }
+netlink-packet-route = { workspace = true }
+netlink-sys = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

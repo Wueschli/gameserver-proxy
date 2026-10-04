@@ -23,6 +23,8 @@
 mod address_store;
 mod interface;
 mod keypair;
+mod live_interface;
+mod netlink_addr;
 mod proxy_subscribe;
 mod register;
 
@@ -234,12 +236,17 @@ async fn main() -> anyhow::Result<()> {
             &args.iface,
             &private_key,
             args.listen_port,
-            address,
+            address.clone(),
             peers,
             args.userspace,
         )
         .context("bringing up the local WireGuard interface")?,
     );
+    let live = Arc::new(live_interface::LiveInterface::new(
+        wg,
+        address,
+        netlink_addr::deleter(args.iface.clone()),
+    ));
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
     if let Some(ip) = args.peer_address.as_deref().and_then(|a| a.parse().ok()) {
         interface::kick_handshake(ip);
@@ -251,14 +258,18 @@ async fn main() -> anyhow::Result<()> {
         args.controller_token.clone(),
         reg,
         Duration::from_secs(args.register_interval_sec),
-        address_store::ip_of(&start.cidr).to_string(),
+        register::AddressSync {
+            live: live.clone(),
+            pinned_cidr: pinned_cidr.map(str::to_string),
+            path: addr_path,
+        },
     ));
     // Phase 14 slice 7: learn about every edge proxy, not just a manually
     // pinned one — see `proxy_subscribe`'s module doc.
     let subscribe_task = tokio::spawn(proxy_subscribe::run(
         args.controller_url.clone(),
         args.controller_token.clone(),
-        wg.clone(),
+        live.api(),
     ));
 
     tokio::signal::ctrl_c()
@@ -266,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
         .context("waiting for a shutdown signal")?;
     tracing::info!("shutting down, removing the wireguard interface");
     subscribe_task.abort();
-    if let Err(e) = wg.remove_interface() {
+    if let Err(e) = live.remove() {
         tracing::warn!(error = %e, "failed to remove the wireguard interface cleanly");
     }
     Ok(())

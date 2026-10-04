@@ -70,6 +70,7 @@ details are in `git log`.
 
 | Date | Feature | Where it is documented |
 |------|---------|------------------------|
+| 2026-10-04 | Live tunnel address change (agent and `gsp` re-address the interface without a restart) | `docs/11` "Address authority" ("Address changes") |
 | 2026-10-03 | CI change detection from `cargo metadata` (`.github/scripts/changes.py`) | [spec](docs/superpowers/specs/2026-10-03-ci-change-detection-design.md), AGENTS.md "CI" |
 | 2026-10-03 | Edge restarts keep the tunnel up (`boot_id` on registrations) | `docs/11` "Edge restarts" |
 | 2026-10-03 | `gsp --aggregator-admin-url` (fan-out through NAT, port maps, TLS terminators) | `docs/12` |

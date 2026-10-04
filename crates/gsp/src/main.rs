@@ -19,6 +19,8 @@ mod grpc_resolver;
 #[path = "grpc_resolver_disabled.rs"]
 mod grpc_resolver;
 mod intent_client;
+mod live_interface;
+mod netlink_addr;
 mod procinfo;
 mod proxy_register;
 mod reload;
@@ -515,9 +517,14 @@ async fn run(
                     &tc.iface,
                     &private_key,
                     tc.listen_port,
-                    address,
+                    address.clone(),
                     tc.userspace,
                 )?);
+            let live = Arc::new(live_interface::LiveInterface::new(
+                wg,
+                address,
+                netlink_addr::deleter(tc.iface.clone()),
+            ));
             tracing::info!(
                 iface = %tc.iface,
                 port = tc.listen_port,
@@ -529,7 +536,7 @@ async fn run(
             let task = tokio::spawn(tunnel_client::run(
                 tc.controller_url.clone(),
                 tc.controller_token.clone(),
-                wg.clone(),
+                live.api(),
             ));
             // Register ourselves (periodically) so every origin's `gsp-agent`
             // can peer with us — the mirror image of `task` above.
@@ -539,9 +546,13 @@ async fn run(
                 tc.controller_token,
                 reg,
                 tc.register_interval,
-                tunnel_address::ip_of(&start.cidr).to_string(),
+                proxy_register::AddressSync {
+                    live: live.clone(),
+                    pinned_cidr,
+                    path: addr_path,
+                },
             ));
-            Some((task, register_task, wg))
+            Some((task, register_task, live))
         }
         None => None,
     };
@@ -659,10 +670,10 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
-    if let Some((task, register_task, wg)) = tunnel {
+    if let Some((task, register_task, live)) = tunnel {
         task.abort();
         register_task.abort();
-        if let Err(e) = wg.remove_interface() {
+        if let Err(e) = live.remove() {
             tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
         }
     }

@@ -78,6 +78,9 @@ rand = "0.8"
 # so — unlike a single-crate dependency such as `foca`/`openraft` — this one
 # earns a shared workspace entry rather than two independently-pinned copies.
 defguard_wireguard_rs = "0.12"
+netlink-packet-core = "0.9"
+netlink-packet-route = "0.33"
+netlink-sys = "0.9"
 
 # A curated pedantic subset (docs/tech-debt P12); the documentation lints
 # (`missing_errors_doc`, `must_use_candidate`, ...) are deliberately left out.
