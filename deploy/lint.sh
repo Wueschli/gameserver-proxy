@@ -30,6 +30,7 @@ errs << "seed passes --opt=value args to curl: #{bad.inspect}" unless bad.empty?
 errs << "compose gsp lacks --aggregator-instance" unless base["gsp"]["command"].any? { |a| a.start_with?("--aggregator-instance=") }
 ds = YAML.load_stream(File.read("deploy/k8s/50-gsp-daemonset.yaml")).find { |d| d["kind"] == "DaemonSet" }
 c = ds["spec"]["template"]["spec"]["containers"][0]
+errs << "k8s gsp DaemonSet lacks serviceAccountName gsp (45-gsp-rbac.yaml)" unless ds.dig("spec", "template", "spec", "serviceAccountName") == "gsp"
 errs << "k8s gsp lacks --aggregator-instance=$(NODE_NAME)" unless c["args"].include?("--aggregator-instance=$(NODE_NAME)")
 errs << "k8s gsp lacks NODE_NAME from spec.nodeName" unless c["env"].any? { |e| e["name"] == "NODE_NAME" && e.dig("valueFrom", "fieldRef", "fieldPath") == "spec.nodeName" }
 
