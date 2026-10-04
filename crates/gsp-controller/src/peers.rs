@@ -31,10 +31,13 @@
 
 pub mod api;
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use gsp_config::base64_decode_32;
 use serde::{Deserialize, Serialize};
+
+use crate::addresses::Role;
+use crate::registry::Registration;
 
 /// One origin's current registration — the whole of what `gsp-agent` submits
 /// and what a `tunnel` `BackendSource` (phase 14 slice 5) will read back.
@@ -56,7 +59,7 @@ pub struct PeerRegistration {
     /// the registration (spec: Backends).
     #[serde(default)]
     pub backends: Vec<String>,
-    /// This origin's tunnel-internal IPv4 address. Optional on request (omit to
+    /// This origin's tunnel-internal IP address (IPv4 or IPv6). Optional on request (omit to
     /// be allocated one, or give one to claim it); always set once stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_address: Option<String>,
@@ -64,7 +67,7 @@ pub struct PeerRegistration {
 
 impl PeerRegistration {
     /// The address this registration asks for, if it names one.
-    pub fn requested_address(&self) -> Option<Ipv4Addr> {
+    pub fn requested_address(&self) -> Option<IpAddr> {
         self.tunnel_address.as_deref().and_then(|a| a.parse().ok())
     }
 
@@ -88,11 +91,43 @@ impl PeerRegistration {
             }
         }
         if let Some(a) = &self.tunnel_address {
-            if a.parse::<Ipv4Addr>().is_err() {
-                return Err(format!("tunnel_address {a:?} is not an IPv4 address"));
+            if a.parse::<IpAddr>().is_err() {
+                return Err(format!("tunnel_address {a:?} is not an IP address"));
             }
         }
         Ok(())
+    }
+}
+
+impl Registration for PeerRegistration {
+    const ROLE: Role = Role::Origin;
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn requested_address(&self) -> Option<IpAddr> {
+        PeerRegistration::requested_address(self)
+    }
+
+    fn backends_mut(&mut self) -> Option<&mut Vec<String>> {
+        Some(&mut self.backends)
+    }
+
+    fn set_tunnel_address(&mut self, a: IpAddr) {
+        self.tunnel_address = Some(a.to_string());
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        PeerRegistration::validate(self)
+    }
+
+    fn endpoint_mut(&mut self) -> Option<&mut String> {
+        self.endpoint.as_mut()
+    }
+
+    fn register_request(self, now: u64) -> crate::ha::WriteRequest {
+        crate::ha::WriteRequest::RegisterOrigin { reg: self, now }
     }
 }
 
@@ -146,6 +181,11 @@ mod tests {
         reg.tunnel_address = Some("10.60.0.9".into());
         assert!(reg.validate().is_ok());
         assert_eq!(reg.requested_address(), Some("10.60.0.9".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::2".into());
+        assert!(reg.validate().is_ok());
+        assert_eq!(reg.requested_address(), Some("fd49::2".parse().unwrap()));
+        reg.tunnel_address = Some("fd49::zz".into());
+        assert!(reg.validate().is_err());
     }
 
     #[test]

@@ -26,11 +26,11 @@
 pub mod addresses;
 pub mod adopt;
 pub mod api;
-pub mod auth;
 pub mod ha;
 pub mod intent;
 pub mod parent_client;
 pub mod peers;
 pub mod proxy_peers;
+pub mod registry;
 pub mod role;
 pub mod store;

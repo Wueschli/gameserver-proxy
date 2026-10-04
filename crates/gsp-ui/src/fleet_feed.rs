@@ -6,7 +6,7 @@
 //! chunked-body loop splitting on blank lines) — the same reasoning applies:
 //! this is control-plane, human-paced traffic, not worth a dependency.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
@@ -36,7 +36,7 @@ impl FleetFeed {
     pub fn latest(&self) -> Option<String> {
         self.latest
             .read()
-            .expect("fleet feed lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
@@ -44,7 +44,7 @@ impl FleetFeed {
     /// production, but `crate::ws`'s tests drive it directly too, to exercise
     /// the browser-facing side without needing a real aggregator connection.
     pub(crate) fn set_latest(&self, view: String) {
-        *self.latest.write().expect("fleet feed lock poisoned") = Some(view.clone());
+        *self.latest.write().unwrap_or_else(PoisonError::into_inner) = Some(view.clone());
         // No subscribers connected right now is not an error — `latest`
         // still holds it for whoever connects next.
         let _ = self.updates.send(view);
@@ -97,7 +97,7 @@ async fn subscribe_once(
     }
     tracing::info!(aggregator = %base_url, "subscribed to aggregator fleet updates");
 
-    let mut buf = String::new();
+    let mut buf = gsp_http::sse::EventBuffer::new();
     loop {
         let chunk = resp.chunk().await.map_err(|e| {
             anyhow::anyhow!(
@@ -108,11 +108,10 @@ async fn subscribe_once(
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push(&bytes)
+            .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
-        while let Some(end) = buf.find("\n\n") {
-            let event = buf[..end].to_string();
-            buf.drain(..end + 2);
+        while let Some(event) = buf.next_event() {
             if let Some(data) = parse_sse_data(&event) {
                 feed.set_latest(data);
             }

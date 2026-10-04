@@ -6,15 +6,45 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The one place the fleet binaries build outbound HTTP clients (`--ca-file`).
-# Deliberately reqwest-only: gsp-aggregator and gsp-ui depend on it and must
-# stay free of gsp-core / gsp-config.
+# The one place the fleet binaries build outbound HTTP clients (`--ca-file`) and,
+# behind the `server` feature, the native-TLS HTTPS listener (`tls`).
+# No gsp-core / gsp-config: gsp-aggregator and gsp-ui depend on it and must stay
+# free of them.
+
+[features]
+# On by default so `cargo test -p gsp-http` covers `tls`. The workspace dependency
+# turns defaults off: every fleet binary that serves HTTP asks for `server`, and
+# gsp-agent, a client only, doesn't build axum/rustls-server through here.
+default = ["server"]
+server = ["dep:axum", "dep:tokio", "dep:tokio-rustls", "dep:arc-swap", "dep:tracing", "dep:clap"]
+
+[lints]
+workspace = true
 
 [dependencies]
 reqwest.workspace = true
 thiserror.workspace = true
+# `http2`: TlsListener offers ALPN h2, so axum must be able to serve it (not
+# only when another crate in the build happens to switch it on).
+axum = { workspace = true, features = ["http2"], optional = true }
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+arc-swap = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# `TlsArgs`: the shared `--tls-cert`/`--tls-key` flags.
+clap = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+
+# The TLS tests need the (default) `server` feature; skip them without it.
+[[test]]
+name = "tls_certs"
+required-features = ["server"]
+
+[[test]]
+name = "tls_server"
+required-features = ["server"]

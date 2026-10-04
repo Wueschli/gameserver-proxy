@@ -157,11 +157,7 @@ async fn run_latency(args: &Args) -> Result<bool> {
             "pools:\n  - {{ name: p, targets: [\"{backend}\"] }}\n\
              listeners:\n  - {{ name: l, bind: \"{proxy_addr}\", protocol: tcp, pool: p }}\n"
         ))?;
-        let rt = Runtime::start(
-            Snapshot::from_config(&cfg),
-            Default::default(),
-            args.workers,
-        );
+        let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), args.workers);
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let stop = Arc::new(tokio::sync::Notify::new());
@@ -204,11 +200,7 @@ async fn run_latency(args: &Args) -> Result<bool> {
             "pools:\n  - {{ name: p, targets: [\"{backend}\"] }}\n\
              listeners:\n  - {{ name: l, bind: \"{proxy_addr}\", protocol: udp, pool: p }}\n"
         ))?;
-        let rt = Runtime::start(
-            Snapshot::from_config(&cfg),
-            Default::default(),
-            args.workers,
-        );
+        let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), args.workers);
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let direct = Stats::of(udp_rtt(backend, args.iterations, args.payload).await?);

@@ -20,6 +20,7 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 
 ```sh
 make deploy-images                      # all five, with a --version check each
+make deploy-scan                        # then Trivy over them (needs `trivy` on PATH)
 docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .   # one
 ```
 
@@ -55,7 +56,7 @@ WireGuard transport. It needs `NET_ADMIN`, `/dev/net/tun`, **root in the contain
 (the override sets `user: "0"` — a capability is useless to uid 65532) and a
 `GSP_TUNNEL_ENDPOINT` (the public `ip:port` origins dial). The demo `agent` is opt-in
 (`--profile origin-demo`; it listens on 51821 so it does not clash with `gsp`'s 51820). Not smoke-tested
-in CI; `make tunnel-e2e` covers the logic. The controller allocates tunnel addresses from `--tunnel-network` (`10.60.0.0/16` here), so no `--address` / `--tunnel-address` is given; pin one only to keep a specific address (see docs/11 "Address authority"). See docs/12.
+in CI; `make tunnel-e2e` covers the logic. The controller allocates tunnel addresses from `--tunnel-network` (the IPv6 ULA `fd49:89c1:4b5e:60::/64` here; an IPv4 network such as `10.60.0.0/16` works too, for game servers that bind `0.0.0.0` only), so no `--address` / `--tunnel-address` is given; pin one only to keep a specific address (see docs/11 "Address authority"). See docs/12.
 
 ## Kubernetes
 
@@ -76,14 +77,23 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Reference only; no published images, no multi-arch.
 - Tokens are visible in `docker inspect` / the Pod spec env — fine for a demo;
   use real secret management in production.
-- `gsp-controller` serves **plain HTTP**: bearer tokens and registrations
-  cross the network in the clear. Terminate TLS in front of it — see
-  [`gsp-controller` behind TLS](../docs/12-deployment.md#gsp-controller-behind-tls),
-  including its limits (public CAs only; HA traffic stays plain HTTP).
+- These examples run every service on **plain HTTP**: bearer tokens and
+  registrations cross the network in the clear. Every service can serve TLS
+  itself (`--tls-cert`/`--tls-key`; `settings.admin.tls` for `gsp`'s admin API) — see
+  [TLS for the fleet services](../docs/12-deployment.md#tls-for-the-fleet-services).
 - One standalone controller; no HA (see docs/10).
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
   overrides it. Fleet *reads* (pools, sessions) work.
+- `make deploy-scan` runs Trivy over the five images (OS packages, secrets, and the
+  Rust crates each binary embeds — they're built with `cargo auditable`) and over
+  `Cargo.lock` and the UI's `package-lock.json`. It reports
+  HIGH/CRITICAL findings that have a fix available, writes JSON + SARIF to
+  `target/trivy/`, and exits 1 if it found anything. **Informational:** CI's separate `trivy`
+  job (after `deploy`, and nightly) shows the results on the run's summary page and as
+  warnings, and never fails on them. For crates it sees GHSA advisories only —
+  RustSec ones come from `make audit` (`cargo audit`), also an informational CI job. Accepted findings go in
+  `.trivyignore` (repo root), each with a reason.
 - `make deploy-lint` runs daemon-free static checks; `make deploy-smoke` uses its own
   compose project (`gsp-smoke`) so it never tears down a demo you started by hand.
 
@@ -95,3 +105,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - `GLIBC_… not found` at container start — builder and runtime base are on
   different Debian releases; keep them on the same one.
 - `required variable … is missing` — `.env` is missing or a value is empty.
+
+## Authentication at startup
+
+The image defaults bind `0.0.0.0` without a token, and the services now refuse that: a bare `docker run` of the controller, aggregator or UI image exits with an explanation. Pass a token (`--auth-token`, `--ui-password`, at least 16 bytes) as the compose and k8s examples do, or `--insecure-no-auth` if the network boundary is your only control. See `docs/12-deployment.md`.

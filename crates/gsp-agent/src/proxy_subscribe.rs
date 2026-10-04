@@ -23,6 +23,7 @@
 //! proxy that predates the registry or a deployment too small to bother
 //! with it.
 
+use defguard_wireguard_rs::net::IpAddrMask;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,10 +45,19 @@ struct ProxyRegistration {
     endpoint: String,
     #[serde(default)]
     tunnel_address: Option<String>,
+    /// Changes on every proxy restart. Part of the equality [`plan`] checks,
+    /// so a restarted proxy is reconciled (peer removed and re-added) even
+    /// when nothing else about it changed: that drops the WireGuard session
+    /// the restarted proxy no longer has, and the re-added peer's persistent
+    /// keepalive starts a fresh handshake at once. Without it the kernel
+    /// backend kept the dead session until its 120 s rekey (~2.5 min outage).
+    /// `None` from a proxy or controller that predates it.
+    #[serde(default)]
+    boot_id: Option<String>,
 }
 
 /// Builds the WireGuard peer this registration implies: a **host route to the
-/// proxy's own tunnel address** (`/32`) — never `0.0.0.0/0`, which let the
+/// proxy's own tunnel address** (`/32` or `/128`) — never `0.0.0.0/0`, which let the
 /// last-registered proxy steal every earlier proxy's route — with a keepalive,
 /// since a proxy's endpoint is stable but this origin may still be behind NAT.
 fn to_wg_peer(reg: &ProxyRegistration) -> anyhow::Result<Peer> {
@@ -59,16 +69,15 @@ fn to_wg_peer(reg: &ProxyRegistration) -> anyhow::Result<Peer> {
             reg.name
         )
     })?;
-    let ip: std::net::Ipv4Addr = addr.parse().map_err(|e| {
+    let ip: std::net::IpAddr = addr.parse().map_err(|e| {
         anyhow::anyhow!(
             "proxy {:?} tunnel_address {addr:?} is invalid: {e}",
             reg.name
         )
     })?;
     let mut peer = Peer::new(key);
-    peer.set_allowed_ips(vec![format!("{ip}/32")
-        .parse()
-        .expect("an IPv4 /32 always parses")]);
+    // `/32` for IPv4, `/128` for IPv6.
+    peer.set_allowed_ips(vec![IpAddrMask::host(ip)]);
     peer.set_endpoint(&reg.endpoint).map_err(|e| {
         anyhow::anyhow!(
             "proxy {:?} endpoint {:?} is invalid: {e}",
@@ -125,6 +134,20 @@ fn plan<'a>(applied: &HashMap<String, ProxyRegistration>, event: &'a Event) -> A
             None => Action::Skip,
         },
     }
+}
+
+/// The pubkey of a peer that `reg` supersedes: the same name now registered
+/// under a different key. `reconcile_peer` only touches the new key's peer, so
+/// without removing this one the old key would stay a live peer (with its
+/// routes) until the interface is torn down.
+fn replaced_pubkey<'a>(
+    applied: &'a HashMap<String, ProxyRegistration>,
+    reg: &ProxyRegistration,
+) -> Option<&'a str> {
+    applied
+        .get(&reg.name)
+        .map(|old| old.pubkey.as_str())
+        .filter(|old| *old != reg.pubkey)
 }
 
 fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubkey: &str) {
@@ -201,7 +224,7 @@ async fn subscribe_once(
     }
     tracing::info!(controller = %base_url, "subscribed to proxy-peers updates");
 
-    let mut buf = String::new();
+    let mut buf = gsp_http::sse::EventBuffer::new();
     loop {
         let chunk = resp.chunk().await.map_err(|e| {
             anyhow::anyhow!(
@@ -212,15 +235,17 @@ async fn subscribe_once(
         let Some(bytes) = chunk else {
             return Ok(()); // server closed the stream
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push(&bytes)
+            .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
-        while let Some(end) = buf.find("\n\n") {
-            let event = buf[..end].to_string();
-            buf.drain(..end + 2);
+        while let Some(event) = buf.next_event() {
             if let Some(ev) = parse_sse_event(&event) {
                 match plan(last_applied, &ev) {
                     Action::Skip => {}
                     Action::Reconcile(reg) => {
+                        if let Some(old) = replaced_pubkey(last_applied, reg) {
+                            remove_peer(wg, &reg.name, old);
+                        }
                         reconcile_peer(wg, reg);
                         last_applied.insert(reg.name.clone(), reg.clone());
                     }
@@ -286,7 +311,50 @@ mod tests {
             pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
             endpoint: "203.0.113.9:51820".into(),
             tunnel_address: addr.map(str::to_string),
+            boot_id: Some("boot-1".into()),
         }
+    }
+
+    #[test]
+    fn a_restarted_proxy_is_reconciled_even_when_nothing_else_changed() {
+        // Kernel WireGuard keeps the old session to a restarted edge, which
+        // has no endpoint for this origin and so cannot re-handshake itself:
+        // a new boot id must re-set the peer (dropping that session).
+        let mut applied = HashMap::new();
+        let before = reg(Some("10.60.0.3"));
+        applied.insert(before.name.clone(), before.clone());
+        let mut after = before.clone();
+        after.boot_id = Some("boot-2".into());
+        assert_eq!(
+            plan(&applied, &Event::Registered(after.clone())),
+            Action::Reconcile(&after)
+        );
+    }
+
+    #[test]
+    fn a_registration_without_a_boot_id_still_parses() {
+        // From a controller or an edge that predates boot ids.
+        let event = r#"data: {"revision":1,"registration":{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820","tunnel_address":"10.60.0.3"}}"#;
+        match parse_sse_event(event).unwrap() {
+            Event::Registered(r) => assert_eq!(r.boot_id, None),
+            other => panic!("{other:?}"),
+        }
+        let with = r#"data: {"revision":2,"registration":{"name":"edge-1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"203.0.113.9:51820","tunnel_address":"10.60.0.3","boot_id":"abc"}}"#;
+        match parse_sse_event(with).unwrap() {
+            Event::Registered(r) => assert_eq!(r.boot_id.as_deref(), Some("abc")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ipv6_proxy_is_routed_as_a_slash_128_over_an_ipv6_endpoint() {
+        let mut r = reg(Some("fd49::3"));
+        r.endpoint = "[2001:db8::9]:51820".into();
+        let peer = to_wg_peer(&r).unwrap();
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.allowed_ips[0].cidr, 128);
+        assert_eq!(peer.allowed_ips[0].address.to_string(), "fd49::3");
+        assert_eq!(peer.endpoint, Some("[2001:db8::9]:51820".parse().unwrap()));
     }
 
     #[test]
@@ -390,5 +458,16 @@ mod tests {
         let mut r = reg(Some("10.60.0.3"));
         r.endpoint = "not-an-addr".into();
         assert!(to_wg_peer(&r).is_err());
+    }
+    #[test]
+    fn a_name_re_registered_under_a_new_key_replaces_the_old_keys_peer() {
+        let mut applied = HashMap::new();
+        let old = reg(Some("10.60.0.3"));
+        assert_eq!(replaced_pubkey(&applied, &old), None, "first sight");
+        applied.insert(old.name.clone(), old.clone());
+        assert_eq!(replaced_pubkey(&applied, &old), None, "same key");
+        let mut new = old.clone();
+        new.pubkey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into();
+        assert_eq!(replaced_pubkey(&applied, &new), Some(old.pubkey.as_str()));
     }
 }

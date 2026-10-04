@@ -5,15 +5,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::{is_stale, now_secs, AddressBook, ClaimError};
+use super::{is_stale, unix_secs, AddressBook, ClaimError, Network, Rejection};
+use crate::ha::cluster_state::ClusterState;
 
 #[derive(Clone)]
 pub struct AddressesState {
@@ -21,6 +21,9 @@ pub struct AddressesState {
     /// Same posture as the registries: `None` leaves the API open.
     auth_token: Option<Arc<str>>,
     stale_after: Duration,
+    /// Under HA the network is the one the cluster recorded, not the book's
+    /// (the state machine hands the book the network with each entry).
+    cluster: Option<Arc<ClusterState>>,
 }
 
 impl AddressesState {
@@ -29,6 +32,20 @@ impl AddressesState {
             book,
             auth_token: auth_token.map(Arc::from),
             stale_after,
+            cluster: None,
+        }
+    }
+
+    /// Reports the cluster's recorded network instead of the book's own.
+    pub fn with_cluster(mut self, cluster: Arc<ClusterState>) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+
+    fn network(&self) -> Option<Network> {
+        match &self.cluster {
+            Some(cluster) => cluster.network().ok().flatten().flatten(),
+            None => self.book.network(),
         }
     }
 }
@@ -37,26 +54,10 @@ pub fn router(state: AddressesState) -> Router {
     Router::new()
         .route("/tunnel/addresses", get(list))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::peers::api::require_bearer`, typed against this state.
-async fn require_bearer(State(state): State<AddressesState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -64,15 +65,23 @@ struct ErrorBody {
     error: String,
 }
 
-/// `409` address held / owner has a different one, `422` invalid address or no
-/// network configured, `503` network exhausted, `500` storage.
+/// `409` address held / owner has a different one, `422` invalid address, no
+/// network configured, backends off the claimed address or an unparsable
+/// replicated network, `503` network
+/// exhausted, book full or registries still initializing, `500` storage.
 pub fn claim_error_response(e: &ClaimError) -> Response {
     let status = match e {
-        ClaimError::Held { .. } | ClaimError::OwnerHasDifferent { .. } => StatusCode::CONFLICT,
-        ClaimError::OutsideNetwork { .. } | ClaimError::NotHost(_) | ClaimError::NoNetwork => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        ClaimError::Exhausted { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        ClaimError::Rejected(r) => match r {
+            Rejection::Held { .. } | Rejection::OwnerHasDifferent { .. } => StatusCode::CONFLICT,
+            Rejection::OutsideNetwork { .. }
+            | Rejection::NotHost(_)
+            | Rejection::NoNetwork
+            | Rejection::BackendHost(_)
+            | Rejection::InvalidNetwork(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Rejection::Exhausted { .. } | Rejection::Full { .. } | Rejection::NotInitialized => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        },
         ClaimError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
@@ -107,11 +116,12 @@ async fn list(State(state): State<AddressesState>) -> Response {
         Ok(e) => e,
         Err(e) => return claim_error_response(&e),
     };
-    let now = now_secs();
+    let now = unix_secs();
+    let network = state.network();
     let out = ListOut {
-        network: state.book.network().map(|n| n.to_string()),
+        network: network.map(|n| n.to_string()),
         allocated: entries.len(),
-        capacity: state.book.network().map(|n| n.capacity()),
+        capacity: network.map(|n| n.capacity()),
         entries: entries
             .into_iter()
             .map(|e| EntryOut {
@@ -127,37 +137,74 @@ async fn list(State(state): State<AddressesState>) -> Response {
     Json(out).into_response()
 }
 
-/// Logs one `WARN` naming up to ten stale owners; returns how many there are.
-pub fn warn_stale(book: &AddressBook, stale_after: Duration, now: u64) -> usize {
-    let Ok(entries) = book.entries() else {
-        return 0;
+/// The `role/name (address)` of every owner not re-registered for over
+/// `stale_after`.
+fn stale_owners(book: &AddressBook, stale_after: Duration, now: u64) -> Vec<String> {
+    let entries = match book.entries() {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the tunnel address book to check for stale owners");
+            return Vec::new();
+        }
     };
-    let stale: Vec<String> = entries
+    entries
         .iter()
         .filter(|e| is_stale(&e.assignment, now, stale_after))
         .map(|e| format!("{}/{} ({})", e.role, e.name, e.assignment.address))
-        .collect();
+        .collect()
+}
+
+fn stale_message(stale: &[String], stale_after: Duration) -> String {
+    format!(
+        "{} tunnel address(es) not re-registered for over {:?}; DELETE the registration to \
+         free one: {:?}",
+        stale.len(),
+        stale_after,
+        stale.iter().take(10).collect::<Vec<_>>()
+    )
+}
+
+/// Logs one `WARN` naming up to ten stale owners; returns how many there are.
+pub fn warn_stale(book: &AddressBook, stale_after: Duration, now: u64) -> usize {
+    let stale = stale_owners(book, stale_after, now);
     if !stale.is_empty() {
-        tracing::warn!(
-            count = stale.len(),
-            owners = ?stale.iter().take(10).collect::<Vec<_>>(),
-            "tunnel addresses not re-registered for over {:?}; DELETE the registration to free one",
-            stale_after
-        );
+        tracing::warn!("{}", stale_message(&stale, stale_after));
     }
     stale.len()
 }
 
-/// Logs the stale warning now and then every 24 h. Does nothing when
-/// `stale_after` is zero.
-pub async fn stale_warning_loop(book: Arc<AddressBook>, stale_after: Duration) {
+/// The stale warning, if one is due: only the HA leader warns (every replica
+/// holds the same book, so one `WARN` per cluster is enough), and only when
+/// some owner is stale.
+pub fn stale_warning_due(
+    is_leader: bool,
+    book: &AddressBook,
+    stale_after: Duration,
+    now: u64,
+) -> Option<String> {
+    if !is_leader {
+        return None;
+    }
+    let stale = stale_owners(book, stale_after, now);
+    (!stale.is_empty()).then(|| stale_message(&stale, stale_after))
+}
+
+/// Logs the stale warning now and then every 24 h while `is_leader` says so
+/// (always `true` without HA). Does nothing when `stale_after` is zero.
+pub async fn stale_warning_loop(
+    book: Arc<AddressBook>,
+    stale_after: Duration,
+    is_leader: impl Fn() -> bool,
+) {
     if stale_after.is_zero() {
         return;
     }
     let mut tick = tokio::time::interval(Duration::from_secs(24 * 3600));
     loop {
         tick.tick().await; // the first tick is immediate
-        warn_stale(&book, stale_after, now_secs());
+        if let Some(message) = stale_warning_due(is_leader(), &book, stale_after, unix_secs()) {
+            tracing::warn!("{message}");
+        }
     }
 }
 
@@ -202,7 +249,8 @@ mod tests {
     async fn the_table_lists_owners_with_counts_and_the_stale_flag() {
         let (s, book, _d) = state(None);
         // One fresh, one last seen long ago.
-        book.claim(Role::Origin, "fresh", None, now_secs()).unwrap();
+        book.claim(Role::Origin, "fresh", None, unix_secs())
+            .unwrap();
         book.claim(Role::Proxy, "old", None, 1).unwrap();
         let (status, body) = get_json(router(s), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -228,12 +276,12 @@ mod tests {
 
     #[test]
     fn claim_errors_map_to_the_documented_statuses() {
-        use std::net::Ipv4Addr;
-        let a: Ipv4Addr = "10.60.0.1".parse().unwrap();
+        use std::net::IpAddr;
+        let a: IpAddr = "10.60.0.1".parse().unwrap();
         let net = Network::parse("10.60.0.0/24").unwrap();
-        let status = |e: ClaimError| claim_error_response(&e).status();
+        let status = |r: Rejection| claim_error_response(&ClaimError::Rejected(r)).status();
         assert_eq!(
-            status(ClaimError::Held {
+            status(Rejection::Held {
                 address: a,
                 role: Role::Origin,
                 name: "x".into()
@@ -241,7 +289,7 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            status(ClaimError::OwnerHasDifferent {
+            status(Rejection::OwnerHasDifferent {
                 role: Role::Origin,
                 name: "x".into(),
                 have: a,
@@ -250,22 +298,22 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            status(ClaimError::OutsideNetwork {
+            status(Rejection::OutsideNetwork {
                 address: a,
                 network: net
             }),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::NotHost(a)),
+            status(Rejection::NotHost(a)),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::NoNetwork),
+            status(Rejection::NoNetwork),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            status(ClaimError::Exhausted {
+            status(Rejection::Exhausted {
                 network: net,
                 allocated: 254,
                 capacity: 254
@@ -273,7 +321,23 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(ClaimError::Storage("x".into())),
+            status(Rejection::Full { allocated: 3 }),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Rejection::BackendHost("backend is elsewhere".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status(Rejection::InvalidNetwork("bad".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status(Rejection::NotInitialized),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            claim_error_response(&ClaimError::Storage("x".into())).status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
@@ -285,5 +349,20 @@ mod tests {
         book.claim(Role::Origin, "old", None, 1).unwrap();
         assert_eq!(warn_stale(&book, Duration::from_secs(86400), 100_000), 1);
         assert_eq!(warn_stale(&book, Duration::ZERO, 100_000), 0);
+    }
+
+    #[test]
+    fn the_stale_warning_is_leader_only() {
+        let (_s, book, _d) = state(None);
+        book.claim(Role::Origin, "old", None, 1).unwrap();
+        let stale_after = Duration::from_secs(86400);
+        assert_eq!(stale_warning_due(false, &book, stale_after, 100_000), None);
+        let due = stale_warning_due(true, &book, stale_after, 100_000).unwrap();
+        assert!(due.contains("origin/old"), "{due}");
+        // A leader with nothing stale has nothing to say.
+        assert_eq!(
+            stale_warning_due(true, &book, Duration::ZERO, 100_000),
+            None
+        );
     }
 }

@@ -33,9 +33,9 @@ struct Args {
     listen: SocketAddr,
 
     /// Password required to log in — one shared secret, implicitly `admin`.
-    /// Omit to leave the UI open (no login required) — network-boundary-only
-    /// auth, same posture every other optional-auth surface in this fleet
-    /// has. Mutually exclusive with `--users-file`.
+    /// Omit to leave the UI open (no login required), which is only accepted
+    /// on a loopback `--listen` (or with `--insecure-no-auth`). Mutually
+    /// exclusive with `--users-file`.
     #[arg(long)]
     ui_password: Option<String>,
 
@@ -45,6 +45,25 @@ struct Args {
     /// Mutually exclusive with `--ui-password`.
     #[arg(long)]
     users_file: Option<PathBuf>,
+
+    /// Allow a non-loopback `--listen` with neither `--ui-password` nor
+    /// `--users-file` (an open UI). Only for deployments where the network
+    /// boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
+
+    /// A browser session ends after this many seconds without a request.
+    #[arg(long, default_value_t = 1800)]
+    session_idle_timeout_secs: u64,
+
+    /// A browser session ends this many seconds after login, however
+    /// active; also the session cookie's `Max-Age`.
+    #[arg(long, default_value_t = 43200)]
+    session_max_age_secs: u64,
+
+    /// Most browser sessions held at once; at the cap the oldest is evicted.
+    #[arg(long, default_value_t = 1000)]
+    max_sessions: usize,
 
     /// Print an argon2 hash for a password read from stdin, then exit —
     /// does not start the server. The intended way to populate a
@@ -87,6 +106,9 @@ struct Args {
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
 }
 
 #[tokio::main]
@@ -110,13 +132,28 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    gsp_http::policy::check_exposure(
+        "gsp-ui",
+        args.listen,
+        args.ui_password.is_some() || args.users_file.is_some(),
+        args.insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(path) = &args.ca_file {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
+    // Load (and validate) the serving certificate before anything else starts.
+    let tls_cert = args.tls.load()?;
 
     let login_required = args.ui_password.is_some() || args.users_file.is_some();
-    let mut state = AppState::new(args.ui_password);
+    let mut state = AppState::new(args.ui_password)
+        .with_secure_cookie(tls_cert.is_some())
+        .with_session_limits(gsp_ui::session::SessionLimits {
+            idle_timeout: std::time::Duration::from_secs(args.session_idle_timeout_secs),
+            max_age: std::time::Duration::from_secs(args.session_max_age_secs),
+            max_sessions: args.max_sessions,
+        });
     if let Some(users_file) = &args.users_file {
         let users = gsp_ui::users::load(users_file)?;
         tracing::info!(
@@ -153,9 +190,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(api::router(state))
         .fallback_service(ServeDir::new(&args.static_dir));
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(listen = %args.listen, "gsp-ui listening");
-    axum::serve(listener, app).await?;
+    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-ui").await?;
 
     if let Some(task) = feed_task {
         task.abort();

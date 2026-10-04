@@ -116,7 +116,8 @@ struct Args {
     #[arg(long, requires = "peer_pubkey")]
     peer_endpoint: Option<String>,
 
-    /// The pinned proxy's tunnel address (bare IPv4), routed as a `/32`.
+    /// The pinned proxy's tunnel address (bare IPv4 or IPv6), routed as a
+    /// `/32` or `/128`.
     #[arg(long, requires = "peer_pubkey")]
     peer_address: Option<String>,
 
@@ -159,9 +160,8 @@ async fn main() -> anyhow::Result<()> {
     // exists, because the answer is the interface's address.
     let pinned_cidr = args.address.as_deref();
     if let Some(c) = pinned_cidr {
-        address_store::ip_of(c)
-            .parse::<std::net::Ipv4Addr>()
-            .with_context(|| format!("--address {c:?} must be an IPv4 ip/prefix"))?;
+        address_store::tunnel_ip(address_store::ip_of(c))
+            .map_err(|e| anyhow::anyhow!("--address {c:?} must be an ip/prefix: {e}"))?;
     }
     let reg = register::Registration {
         name: args.name.clone(),
@@ -184,10 +184,19 @@ async fn main() -> anyhow::Result<()> {
         address_store::resolve_startup(outcome, pinned_cidr, address_store::load(&addr_path))?;
     match start.source {
         address_store::Source::Controller => address_store::save(&addr_path, &start.cidr)?,
-        address_store::Source::Saved => tracing::warn!(
-            address = %start.cidr,
-            "controller unreachable; starting with the last saved tunnel address"
-        ),
+        address_store::Source::Saved {
+            ref cause,
+            ref pin_ignored,
+        } => {
+            tracing::warn!(
+                address = %start.cidr,
+                error = %cause,
+                "controller unreachable; starting with the last saved tunnel address"
+            );
+            if let Some(msg) = pin_ignored {
+                tracing::warn!("{msg}");
+            }
+        }
     }
     tracing::info!(address = %start.cidr, "tunnel address ready");
     let address: IpAddrMask = start.cidr.parse().map_err(|e| {
@@ -207,14 +216,14 @@ async fn main() -> anyhow::Result<()> {
         let endpoint: SocketAddr = peer_endpoint
             .parse()
             .with_context(|| format!("--peer-endpoint {peer_endpoint:?} is not a valid ip:port"))?;
-        let peer_ip: std::net::Ipv4Addr = peer_address
-            .parse()
-            .with_context(|| format!("--peer-address {peer_address:?} is not an IPv4 address"))?;
+        let peer_ip = address_store::tunnel_ip(peer_address)
+            .map_err(|e| anyhow::anyhow!("--peer-address: {e}"))?;
         let mut peer = Peer::new(public_key);
         peer.endpoint = Some(endpoint);
-        // A host route to the pinned proxy's own tunnel address — never
-        // 0.0.0.0/0, which would collide with every other proxy's route.
-        peer.allowed_ips = vec![format!("{peer_ip}/32").parse().unwrap()];
+        // A host route (`/32` or `/128`) to the pinned proxy's own tunnel
+        // address — never 0.0.0.0/0, which would collide with every other
+        // proxy's route.
+        peer.allowed_ips = vec![IpAddrMask::host(peer_ip)];
         peer.persistent_keepalive_interval = Some(25);
         tracing::info!(pubkey = %peer_pubkey, endpoint = %endpoint, "peering with the edge proxy");
         peers.push(peer);

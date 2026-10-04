@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 gsp-config = { path = "../gsp-config" }
 
@@ -17,7 +20,6 @@ nix.workspace = true
 async-trait.workspace = true
 lru.workspace = true
 maxminddb.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 # Phase 13 (Tier-2 regional health fabric, docs/10). `foca` needs its own

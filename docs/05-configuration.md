@@ -216,6 +216,17 @@
 > boundary, which today means `gsp-aggregator`'s intent-verb fan-out
 > (`docs/10` "The aggregator"), given the same token to present.
 >
+> **Admin API TLS** (2026-10-02): `settings.admin.tls: { cert, key }` (PEM chain,
+> leaf first; PEM private key — both required) serves the admin API over HTTPS.
+> Startup-only like `listen`; the files are re-read every 30 s, so a renewed
+> certificate needs no restart. `gsp --check` loads the pair; errors name
+> `settings.admin.tls.cert`/`.key`. The admin URL reported to `--aggregator` becomes
+> `https://<listen>`, so the certificate must be valid for the `listen` address
+> (an IP SAN), and the aggregator needs `--ca-file` for a private CA. With
+> `--controller` every instance gets the same YAML, so the paths are the same on every
+> host while each host's file must hold a certificate for **its own** `listen`
+> address. See docs/12 "TLS for the fleet services".
+>
 > The full schema below is the target.
 
 ```yaml
@@ -419,7 +430,10 @@ listeners:
   for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
 - A resolver's `timeout_ms`, `target_connect_timeout_ms` and
   `target_idle_timeout_sec` must all be `> 0`.
-- `transparent: true` (TCP or UDP) may not be combined with `prefix`.
+- `transparent: true` (TCP or UDP) may not be combined with `prefix`, and may not be set
+  on a listener whose `pool:` or a route's pool action uses a `tunnel` backend source (the
+  client and tunnel address families can differ). A resolver route can still return such a
+  pool at runtime; there the proxy connects without the client's source address.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
   `rate >= 1`.
@@ -478,6 +492,7 @@ listeners:
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
+| `settings.admin.*` changed (`listen`, `auth_token`, `tls`) | requires a restart — the admin API is bound once at startup; a reload silently keeps the old values. With `tls` set, the certificate **files** are still re-read every 30 s, so renewal needs no restart |
 | `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
 | `settings.sniffers.dir` contents changed (module added / removed / recompiled), or a `modules[].config` string changed | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
 | `settings.sniffers` block added / removed, or `call_timeout_ms` / `max_memory_bytes` changed | requires a restart — the `wasmtime::Engine` and its epoch-ticker thread are built once at startup, like `settings.workers` |

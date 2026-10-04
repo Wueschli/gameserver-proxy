@@ -95,6 +95,9 @@
 - `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
   datagrams dropped for a missing/invalid HMAC tag; never trusted, never
   forwarded to the SWIM state machine.
+- `gsp_gossip_stale_rejected_total` (counter, no labels) — authentic gossip
+  datagrams dropped because their sender timestamp is more than 30 s from this
+  node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `gsp_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.
   Independent of, and unable to clear, the backend's own local `healthy`
@@ -418,7 +421,9 @@ Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
 that couldn't be reached; a broadcast never fails or blocks on one bad
 instance. A `gsp` instance opts in with `--aggregator <url>` (+
 `--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
-default 10s) — independent of `--controller`, pushing state and pulling
+default 10s, and `--aggregator-admin-url`, the base URL the aggregator should
+fan out to when `http(s)://<settings.admin.listen>` is not reachable from it,
+e.g. in a container, behind NAT or a TLS terminator) — independent of `--controller`, pushing state and pulling
 config are unrelated axes.
 
 ### `gsp-ui` — the operator dashboard's BFF
@@ -454,6 +459,11 @@ two login modes, mutually exclusive.
 
 With neither flag, the UI is fully open and every session is implicitly
 `admin` — same posture every other optional-auth surface in this fleet has.
+
+Sessions expire: `--session-idle-timeout-secs` (default 1800) and
+`--session-max-age-secs` (default 43200, also the cookie's `Max-Age`), with at
+most `--max-sessions` (default 1000) held at once. `POST /ui/login` is
+rate-limited per client address and per username (`429` + `Retry-After`).
 
 Three roles gate three route groups: `viewer` (every `GET` — fleet reads,
 config/revision reads/diffs, `GET /ws/fleet`), `operator` (+ the phase-5
