@@ -85,9 +85,9 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - Aggregator intent fan-out (drain etc.) cannot reach `gsp` from these examples: the
   `admin_url` a `gsp` reports is derived from `settings.admin.listen` and no flag
   overrides it. Fleet *reads* (pools, sessions) work.
-- `make deploy-scan` runs Trivy over the five images (OS packages, secrets) and over
-  `Cargo.lock` and the UI's `package-lock.json` — a plain release binary carries no
-  dependency list, so an image scan alone can't see its Rust crates. It reports
+- `make deploy-scan` runs Trivy over the five images (OS packages, secrets, and the
+  Rust crates each binary embeds — they're built with `cargo auditable`) and over
+  `Cargo.lock` and the UI's `package-lock.json`. It reports
   HIGH/CRITICAL findings that have a fix available, writes JSON + SARIF to
   `target/trivy/`, and exits 1 if it found anything. **Informational:** CI's separate `trivy`
   job (after `deploy`, and nightly) shows the results on the run's summary page and as
