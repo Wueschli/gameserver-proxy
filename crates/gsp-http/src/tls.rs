@@ -325,6 +325,24 @@ const READY_BACKLOG: usize = 64;
 /// At most one "handshake limit reached" warning per this long.
 const LIMIT_WARN_EVERY: Duration = Duration::from_secs(60);
 
+/// Counter. Label `reason`: `per_source` (the source already had its cap of
+/// handshakes in flight) or `rate` (it was opening connections faster than its
+/// rate allows). One increment per connection closed at the door.
+pub const HANDSHAKES_REFUSED: &str = "gsp_tls_handshakes_refused_total";
+
+/// Counter, no labels. One increment per pending handshake dropped to make room
+/// at the global cap.
+pub const HANDSHAKES_EVICTED: &str = "gsp_tls_handshakes_evicted_total";
+
+impl Refused {
+    fn reason(self) -> &'static str {
+        match self {
+            Refused::Cap => "per_source",
+            Refused::Rate => "rate",
+        }
+    }
+}
+
 /// Bounds on handshakes in flight (accepted, not yet finished), so a flood of
 /// connects that never finish cannot use up the process's fds.
 ///
@@ -621,6 +639,8 @@ impl TlsListener {
                     let mut h = handshakes.lock().unwrap_or_else(PoisonError::into_inner);
                     match h.pending.admit(source_key(peer.ip())) {
                         Err(why) => {
+                            metrics::counter!(HANDSHAKES_REFUSED, "reason" => why.reason())
+                                .increment(1);
                             h.warn_throttled(match why {
                                 Refused::Cap => "per source, too many pending",
                                 Refused::Rate => "per source, too many new connections",
@@ -630,6 +650,7 @@ impl TlsListener {
                         Ok((id, evicted)) => {
                             let evicted = evicted.and_then(|old| h.tasks.remove(&old));
                             if evicted.is_some() {
+                                metrics::counter!(HANDSHAKES_EVICTED).increment(1);
                                 h.warn_throttled("global, dropping the oldest");
                             }
                             Some((id, evicted))
@@ -751,9 +772,66 @@ pub struct TlsArgs {
     /// PEM private key for `--tls-cert`.
     #[arg(long, requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
+
+    /// With TLS: most TLS handshakes in flight in total (default 512). At the
+    /// cap a new connection is accepted and the oldest pending handshake dropped.
+    #[arg(long, value_name = "N", value_parser = nonzero::<usize>)]
+    pub tls_max_pending: Option<usize>,
+
+    /// With TLS: most handshakes in flight per source, an IPv4 address or an
+    /// IPv6 /64 (default 16). More are closed at once.
+    #[arg(long, value_name = "N", value_parser = nonzero::<usize>)]
+    pub tls_max_pending_per_source: Option<usize>,
+
+    /// With TLS: new connections a source may open per second on average
+    /// (default 20); `0` turns the rate limit off. Raise it for a fleet behind
+    /// one NAT.
+    #[arg(long, value_name = "PER_SEC", value_parser = rate)]
+    pub tls_new_per_source_per_sec: Option<f64>,
+
+    /// With TLS: how many connections a source may open in a burst (default 64).
+    #[arg(long, value_name = "N", value_parser = nonzero::<u32>)]
+    pub tls_new_per_source_burst: Option<u32>,
+}
+
+fn nonzero<T: std::str::FromStr + Default + PartialEq>(s: &str) -> Result<T, String>
+where
+    T::Err: fmt::Display,
+{
+    match s.parse::<T>() {
+        Ok(v) if v == T::default() => Err("must be at least 1".into()),
+        Ok(v) => Ok(v),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn rate(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        Ok(_) => Err("must be a number of at least 0".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 impl TlsArgs {
+    /// The handshake limits: the defaults, with each `--tls-*` flag given on top.
+    pub fn limits(&self) -> HandshakeLimits {
+        let d = HandshakeLimits::default();
+        HandshakeLimits {
+            max_pending: self.tls_max_pending.unwrap_or(d.max_pending),
+            max_pending_per_source: self
+                .tls_max_pending_per_source
+                .unwrap_or(d.max_pending_per_source),
+            new_per_source_per_sec: self
+                .tls_new_per_source_per_sec
+                .unwrap_or(d.new_per_source_per_sec),
+            new_per_source_burst: self
+                .tls_new_per_source_burst
+                .unwrap_or(d.new_per_source_burst),
+            ..d
+        }
+    }
+
     /// Load and validate the pair, if given (a bad file is a startup error).
     /// Only one of the two is an error, never a silent fall-back to plain HTTP.
     pub fn load(&self) -> Result<Option<Arc<ReloadingCert>>, TlsError> {
@@ -794,17 +872,19 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpL
 
 /// Serve `app` on `addr` until the server fails: HTTPS through [`TlsListener`]
 /// (with the files re-read every [`RELOAD_EVERY`]) when `cert` is set, plain
-/// HTTP otherwise. `name` is the binary, for the startup log line. Handlers can
+/// HTTP otherwise (`limits` bound the TLS handshakes). `name` is the binary, for
+/// the startup log line. Handlers can
 /// read the peer address through `axum::extract::ConnectInfo<PeerAddr>`.
 pub async fn serve(
     addr: SocketAddr,
     app: axum::Router,
     cert: Option<Arc<ReloadingCert>>,
+    limits: HandshakeLimits,
     name: &str,
 ) -> io::Result<()> {
     match cert {
         Some(cert) => {
-            let listener = TlsListener::bind(addr, cert.clone()).await?;
+            let listener = TlsListener::bind_with(addr, cert.clone(), limits).await?;
             let _reloader = AbortOnDrop(spawn_reloader(cert, RELOAD_EVERY));
             tracing::info!(listen = %addr, "{name} serving HTTPS");
             axum::serve(
@@ -882,6 +962,68 @@ mod tests {
         // would carry a newer stamp, so an equal one means no change.
         cert.loaded.lock().unwrap().checked_at = SystemTime::now() + Duration::from_secs(3600);
         assert!(!cert.reload_if_changed().unwrap());
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tls: TlsArgs,
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        use clap::Parser;
+        Cli::try_parse_from(std::iter::once("bin").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn without_flags_the_limits_are_the_defaults() {
+        assert_eq!(parse(&[]).unwrap().tls.limits(), HandshakeLimits::default());
+    }
+
+    #[test]
+    fn the_tls_flags_override_the_limits() {
+        let l = parse(&[
+            "--tls-max-pending",
+            "100",
+            "--tls-max-pending-per-source",
+            "4",
+            "--tls-new-per-source-per-sec",
+            "2.5",
+            "--tls-new-per-source-burst",
+            "10",
+        ])
+        .unwrap()
+        .tls
+        .limits();
+        assert_eq!(
+            l,
+            HandshakeLimits {
+                max_pending: 100,
+                max_pending_per_source: 4,
+                new_per_source_per_sec: 2.5,
+                new_per_source_burst: 10,
+                ..HandshakeLimits::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_rate_turns_the_rate_limit_off_but_zero_caps_are_refused() {
+        let l = parse(&["--tls-new-per-source-per-sec", "0"])
+            .unwrap()
+            .tls
+            .limits();
+        assert_eq!(l.new_per_source_per_sec, 0.0);
+        for bad in [
+            ["--tls-max-pending", "0"],
+            ["--tls-max-pending-per-source", "0"],
+            ["--tls-new-per-source-burst", "0"],
+            ["--tls-new-per-source-per-sec", "-1"],
+            ["--tls-new-per-source-per-sec", "NaN"],
+            ["--tls-new-per-source-per-sec", "inf"],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?} was accepted");
+        }
     }
 
     fn ip(s: &str) -> IpAddr {

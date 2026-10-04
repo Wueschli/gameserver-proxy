@@ -133,7 +133,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router(state));
 
-    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-aggregator").await?;
+    gsp_http::tls::serve(
+        args.listen,
+        app,
+        tls_cert,
+        args.tls.limits(),
+        "gsp-aggregator",
+    )
+    .await?;
 
     Ok(())
 }

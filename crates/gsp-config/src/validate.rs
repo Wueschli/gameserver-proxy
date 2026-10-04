@@ -34,6 +34,26 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
     })?;
     let admin_auth_token = raw.settings.admin.auth_token.clone();
     let admin_tls = raw.settings.admin.tls.clone();
+    if let Some(t) = &admin_tls {
+        if t.max_pending == Some(0) || t.max_pending_per_source == Some(0) {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.max_pending and max_pending_per_source must be at least 1"
+                    .into(),
+            ));
+        }
+        if t.new_per_source_burst == Some(0) {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.new_per_source_burst must be at least 1".into(),
+            ));
+        }
+        if t.new_per_source_per_sec
+            .is_some_and(|r| !r.is_finite() || r < 0.0)
+        {
+            return Err(ConfigError::Invalid(
+                "settings.admin.tls.new_per_source_per_sec must be a number of at least 0".into(),
+            ));
+        }
+    }
 
     // Resolve `backend_sources`. A `static` source becomes a fixed address list;
     // the dynamic kinds become a `SourceConfig` for the runtime refresh task.

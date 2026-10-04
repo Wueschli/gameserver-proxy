@@ -533,7 +533,14 @@ async fn main() -> anyhow::Result<()> {
             .merge(ha::routes::router(handle));
     }
 
-    gsp_http::tls::serve(args.listen, app, tls_cert, "gsp-controller").await?;
+    gsp_http::tls::serve(
+        args.listen,
+        app,
+        tls_cert,
+        args.tls.limits(),
+        "gsp-controller",
+    )
+    .await?;
 
     Ok(())
 }

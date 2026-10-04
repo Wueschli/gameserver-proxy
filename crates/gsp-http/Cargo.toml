@@ -16,7 +16,7 @@ publish = false
 # turns defaults off: every fleet binary that serves HTTP asks for `server`, and
 # gsp-agent, a client only, doesn't build axum/rustls-server through here.
 default = ["server"]
-server = ["dep:axum", "dep:tokio", "dep:tokio-rustls", "dep:arc-swap", "dep:tracing", "dep:clap"]
+server = ["dep:axum", "dep:tokio", "dep:tokio-rustls", "dep:arc-swap", "dep:tracing", "dep:clap", "dep:metrics"]
 
 [lints]
 workspace = true
@@ -33,16 +33,23 @@ arc-swap = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 # `TlsArgs`: the shared `--tls-cert`/`--tls-key` flags.
 clap = { workspace = true, optional = true }
+# Handshake counters; a no-op unless the binary installs a recorder (only `gsp` does).
+metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tempfile = { workspace = true }
+metrics-exporter-prometheus.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 # The TLS tests need the (default) `server` feature; skip them without it.
 [[test]]
 name = "tls_certs"
+required-features = ["server"]
+
+[[test]]
+name = "tls_metrics"
 required-features = ["server"]
 
 [[test]]

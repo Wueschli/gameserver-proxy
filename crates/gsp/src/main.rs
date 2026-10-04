@@ -562,7 +562,7 @@ async fn run(
 
     let admin = tokio::spawn(admin::serve(
         cfg.admin_listen,
-        admin_tls,
+        admin_tls.map(|cert| (cert, admin::handshake_limits(cfg.admin_tls.as_ref()))),
         handle.clone(),
         prometheus,
         cfg.admin_auth_token.clone(),

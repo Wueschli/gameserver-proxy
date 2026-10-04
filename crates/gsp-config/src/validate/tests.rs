@@ -91,9 +91,44 @@ listeners:
         Some(AdminTls {
             cert: "/etc/gsp/tls/fullchain.pem".into(),
             key: "/etc/gsp/tls/privkey.pem".into(),
+            ..AdminTls::default()
         })
     );
     assert_eq!(parse_str(MINIMAL).unwrap().admin_tls, None);
+}
+
+#[test]
+fn admin_tls_takes_handshake_limits() {
+    let cfg = parse_str(
+        "settings:\n  admin:\n    tls:\n      cert: /c.pem\n      key: /k.pem\n      max_pending: 100\n      max_pending_per_source: 4\n      new_per_source_per_sec: 0\n      new_per_source_burst: 10\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n",
+    )
+    .expect("should parse");
+    let t = cfg.admin_tls.unwrap();
+    assert_eq!(
+        (
+            t.max_pending,
+            t.max_pending_per_source,
+            t.new_per_source_per_sec,
+            t.new_per_source_burst
+        ),
+        (Some(100), Some(4), Some(0.0), Some(10))
+    );
+}
+
+#[test]
+fn admin_tls_handshake_limits_are_validated() {
+    for bad in [
+        "max_pending: 0",
+        "max_pending_per_source: 0",
+        "new_per_source_burst: 0",
+        "new_per_source_per_sec: -1",
+        "new_per_source_per_sec: .nan",
+    ] {
+        let text = format!(
+            "settings:\n  admin:\n    tls:\n      cert: /c.pem\n      key: /k.pem\n      {bad}\npools:\n  - name: p\n    targets: [\"127.0.0.1:9001\"]\nlisteners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+        );
+        assert!(parse_str(&text).is_err(), "accepted:\n{text}");
+    }
 }
 
 #[test]

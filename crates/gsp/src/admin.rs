@@ -70,9 +70,26 @@ fn router(state: AdminState) -> Router {
         .with_state(state)
 }
 
+/// The admin API's TLS handshake limits: the defaults, with each
+/// `settings.admin.tls` limit that is set on top.
+pub fn handshake_limits(tls: Option<&gsp_config::AdminTls>) -> gsp_http::tls::HandshakeLimits {
+    let d = gsp_http::tls::HandshakeLimits::default();
+    let Some(t) = tls else { return d };
+    gsp_http::tls::HandshakeLimits {
+        max_pending: t.max_pending.unwrap_or(d.max_pending),
+        max_pending_per_source: t.max_pending_per_source.unwrap_or(d.max_pending_per_source),
+        new_per_source_per_sec: t.new_per_source_per_sec.unwrap_or(d.new_per_source_per_sec),
+        new_per_source_burst: t.new_per_source_burst.unwrap_or(d.new_per_source_burst),
+        ..d
+    }
+}
+
 pub async fn serve(
     addr: SocketAddr,
-    tls: Option<std::sync::Arc<gsp_http::tls::ReloadingCert>>,
+    tls: Option<(
+        std::sync::Arc<gsp_http::tls::ReloadingCert>,
+        gsp_http::tls::HandshakeLimits,
+    )>,
     runtime: RuntimeHandle,
     prometheus: PrometheusHandle,
     auth_token: Option<String>,
@@ -89,7 +106,11 @@ pub async fn serve(
 
     // HTTPS with `settings.admin.tls`, plain HTTP otherwise. A bind failure
     // lands here too and, as before, ends only this task (non-fatal).
-    if let Err(e) = gsp_http::tls::serve(addr, app, tls, "admin API").await {
+    let (cert, limits) = match tls {
+        Some((cert, limits)) => (Some(cert), limits),
+        None => (None, gsp_http::tls::HandshakeLimits::default()),
+    };
+    if let Err(e) = gsp_http::tls::serve(addr, app, cert, limits, "admin API").await {
         tracing::error!(%addr, error = %e, "admin API server error");
     }
 }

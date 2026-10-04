@@ -220,7 +220,10 @@
 > leaf first; PEM private key — both required) serves the admin API over HTTPS.
 > Startup-only like `listen`; the files are re-read every 30 s, so a renewed
 > certificate needs no restart. `gsp --check` loads the pair; errors name
-> `settings.admin.tls.cert`/`.key`. The admin URL reported to `--aggregator` becomes
+> `settings.admin.tls.cert`/`.key`.
+> Optional keys under `tls` bound the TLS handshakes: `max_pending` (512),
+> `max_pending_per_source` (16), `new_per_source_per_sec` (20; `0` = no rate limit),
+> `new_per_source_burst` (64); see docs/12 "Native TLS". The admin URL reported to `--aggregator` becomes
 > `https://<listen>`, so the certificate must be valid for the `listen` address
 > (an IP SAN), and the aggregator needs `--ca-file` for a private CA. With
 > `--controller` every instance gets the same YAML, so the paths are the same on every
