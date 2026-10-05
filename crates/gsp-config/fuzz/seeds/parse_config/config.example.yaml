@@ -85,8 +85,6 @@ listeners:
     bind: "0.0.0.0:27015"
     protocol: udp
     pool: realtime
-    affinity:
-      hash_on: src_ip             # src_ip (default for udp) | src_ip_port
     route_hint: true               # a launcher may POST /route-hint {src_ip,pool,ttl_sec}
                                     # before the player connects; that hint then wins
 

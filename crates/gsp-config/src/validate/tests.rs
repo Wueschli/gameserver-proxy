@@ -347,7 +347,7 @@ listeners:
 }
 
 #[test]
-fn accepts_udp_listener_with_default_affinity() {
+fn accepts_udp_listener() {
     let yaml = r#"
 pools:
   - name: local
@@ -360,23 +360,28 @@ listeners:
 "#;
     let cfg = parse_str(yaml).unwrap();
     assert_eq!(cfg.listeners[0].protocol, Protocol::Udp);
-    assert_eq!(cfg.listeners[0].affinity, Some(HashOn::SrcIp));
 }
 
 #[test]
-fn rejects_affinity_on_tcp_listener() {
-    let yaml = r#"
+fn rejects_the_removed_listener_affinity_key() {
+    // UDP affinity now comes from a `consistent_hash` pool's `hash_on`; the
+    // per-listener sticky table and its `affinity` key are gone.
+    for protocol in ["tcp", "udp"] {
+        let yaml = format!(
+            r#"
 pools:
   - name: local
     targets: ["127.0.0.1:9001"]
 listeners:
   - name: l
     bind: "0.0.0.0:7777"
-    protocol: tcp
+    protocol: {protocol}
     pool: local
-    affinity: { hash_on: src_ip }
-"#;
-    assert!(parse_str(yaml).is_err());
+    affinity: {{ hash_on: src_ip }}
+"#
+        );
+        assert!(parse_str(&yaml).is_err(), "{protocol} accepted `affinity`");
+    }
 }
 
 #[test]

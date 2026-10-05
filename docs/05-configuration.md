@@ -200,11 +200,13 @@
 > `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
 > one `first_bytes` route or a `sniffer` (else it would drop everything).
 >
-> UDP listeners
-> take
-> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
-> to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
-> when it is created. See `config.example.yaml`.
+> A UDP session reads the routed pool's `idle_timeout_sec` once when it is
+> created. UDP affinity (a client that comes back after its session was evicted
+> reaches the same backend) comes from the pool: use `balancer: consistent_hash`
+> with `hash_on: src_ip | src_ip_port`. There is no per-listener `affinity` key
+> and no sticky table (removed in #56: it was per worker, so `SO_REUSEPORT` kept
+> only ~34% of clients on 4 workers). A `round_robin` pool gives a returning
+> client a new backend. See `config.example.yaml`.
 >
 > **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
 > (a flat string, not the target schema's `auth: { mode, token }` object
@@ -402,7 +404,6 @@ listeners:
       # No `always`/catch-all route and no `reject` action — there isn't one;
       # an unmatched destination IP simply has no matching route and is
       # dropped (no_route).
-    affinity: { hash_on: src_ip }
 
   # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port.
   # One listener, one `bind: "host:lo-hi"` port range (F1.4) — one real socket

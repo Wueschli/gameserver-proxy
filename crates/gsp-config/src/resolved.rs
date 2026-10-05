@@ -372,8 +372,6 @@ pub struct ListenerConfig {
     /// Priority-ordered; the first matching route's pool wins. A listener with a
     /// bare `pool:` is normalised to one `always` route here.
     pub routes: Vec<Route>,
-    /// `Some` on UDP listeners (stickiness key); `None` on TCP.
-    pub affinity: Option<HashOn>,
     /// `Some` (UDP only) ⇒ prefix mode: wildcard-bind + `IP_PKTINFO` so one
     /// socket serves the whole routed prefix; datagrams to a destination outside
     /// it are dropped.
