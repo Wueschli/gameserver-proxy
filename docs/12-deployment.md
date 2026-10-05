@@ -12,11 +12,11 @@ shared `rust:1-trixie` builder and six runtime targets (the five binaries plus `
 `make deploy-images` builds all six; `make deploy-scan` runs an informational Trivy
 scan of them and of the lockfiles they're built from — CI's `deploy` and `trivy` jobs).
 `gsp-minimal` is `gsp` built with `--no-default-features` (issue #62): no WASM sniffer loader,
-gRPC resolver, `dns_srv` source or Tier-2 gossip fabric, so the binary is much
-smaller. It takes the same arguments as `gsp`; a config that needs a dropped feature
-(`settings.sniffers`, a `grpc` resolver, a `dns_srv` source, `settings.gossip`) is refused at
-startup, naming the cargo feature. The WireGuard tunnel client is still in it (that is the
-remaining slice of #62).
+gRPC resolver, `dns_srv` source, Tier-2 gossip fabric or WireGuard tunnel client, so the
+binary is much smaller. It takes the same arguments as `gsp`; a config or flag that needs a
+dropped feature (`settings.sniffers`, a `grpc` resolver, a `dns_srv` source, `settings.gossip`,
+a `tunnel` source, `--tunnel-iface`) is refused at startup and under `--check`, naming the
+cargo feature.
 
 None of these five binaries shell out to an
 external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
