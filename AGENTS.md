@@ -2,7 +2,8 @@
 
 Guidance for any AI coding agent working in this repository, following the
 [agents.md](https://agents.md) convention.
-Humans: this doubles as the contributor quick-reference.
+Humans: start with [`CONTRIBUTING.md`](CONTRIBUTING.md); this file is the agent working agreement
+and the full command table.
 
 Tool-specific entry points (e.g. `CLAUDE.md`) are thin pointers to this file — keep
 the guidance here, not in them.
@@ -270,6 +271,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
+| Release or version change | `RELEASING.md`, `CONTRIBUTING.md` (conventions), `deploy/README.md` |
 
 ---
 
