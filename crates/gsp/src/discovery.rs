@@ -14,11 +14,11 @@
 //!   interval remains as the resync safety net.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::dns_srv::DnsSrvSource;
+use crate::tunnel_source::TunnelRegistry;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use gsp_config::{Config, SourceConfig, SourceKind};
@@ -29,17 +29,6 @@ use tokio::sync::Notify;
 /// In-pod service-account paths for the Kubernetes API.
 const K8S_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const K8S_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-
-/// Which `gsp-controller` backend-peers registry a `tunnel` source resolves
-/// against (phase 14 slice 5, `docs/11`) — the identical registry `gsp`'s
-/// own `--tunnel-iface` reconcile task (`tunnel_client.rs`) subscribes to,
-/// so this is built from the same `--tunnel-controller-url`/
-/// `--tunnel-controller-token` flags rather than a second pair.
-#[derive(Debug, Clone)]
-pub struct TunnelRegistry {
-    pub controller_url: String,
-    pub token: Option<String>,
-}
 
 /// Build one [`BackendSource`] per pool that declares a dynamic `source`.
 /// Used at startup for the best-effort initial fetch; the live [`SourceManager`]
@@ -110,23 +99,13 @@ pub fn build_one(
             sc.refresh_interval,
             kube_auth.clone(),
         )?),
-        SourceKind::Tunnel { pubkey } => {
-            let registry = tunnel_registry.ok_or_else(|| {
-                anyhow!(
-                    "pool {pool}: backend_sources {} is type tunnel but \
-                     --tunnel-controller-url is not set",
-                    sc.name
-                )
-            })?;
-            Arc::new(TunnelSource::new(
-                pool,
-                sc.name.clone(),
-                pubkey.clone(),
-                registry.controller_url.clone(),
-                registry.token.clone(),
-                sc.refresh_interval,
-            )?)
-        }
+        SourceKind::Tunnel { pubkey } => crate::tunnel_source::build(
+            pool,
+            &sc.name,
+            pubkey,
+            tunnel_registry,
+            sc.refresh_interval,
+        )?,
     };
     Ok(src)
 }
@@ -943,146 +922,11 @@ async fn resolve_host_port(host: &str, port: u16) -> Result<Vec<SocketAddr>, Sou
     Ok(addrs)
 }
 
-// ---------------------------------------------------------------------------
-// Tunnel (phase 14 backend transport, docs/11) — resolves an origin's
-// currently-registered backends from gsp-controller's backend-peers
-// registry (phase 14 slice 2), the same registry gsp's own `--tunnel-iface`
-// reconcile task subscribes to (`tunnel_client.rs`).
-// ---------------------------------------------------------------------------
-
-pub struct TunnelSource {
-    pool: String,
-    /// The `backend_sources[].name` — also this origin's registered name in
-    /// the peers registry (`GET /peers/{origin}`); the two are the same
-    /// identifier by construction (a pool's `source:` already has to name
-    /// this entry, and this entry's `name` is what an operator points a
-    /// `gsp-agent --name` at).
-    origin: String,
-    /// The `backend_sources[].pubkey` this config pins — every fetch
-    /// verifies the registry's currently-registered pubkey still matches
-    /// before trusting its backend list, so a name later re-registered
-    /// under a different key is refused rather than silently trusted.
-    pubkey: String,
-    controller_url: String,
-    token: Option<String>,
-    interval: Duration,
-    client: reqwest::Client,
-    /// Whether the registry has served this origin since the last
-    /// withdrawal. A `404` after that is a deletion (or lease expiry), not
-    /// "not registered yet".
-    seen: AtomicBool,
-}
-
-impl TunnelSource {
-    pub fn new(
-        pool: String,
-        origin: String,
-        pubkey: String,
-        controller_url: String,
-        token: Option<String>,
-        interval: Duration,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            pool,
-            origin,
-            pubkey,
-            controller_url,
-            token,
-            interval,
-            client: gsp_http::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .context("build tunnel backend-peers HTTP client")?,
-            seen: AtomicBool::new(false),
-        })
-    }
-}
-
-/// Only the fields this source needs from `gsp-controller`'s `GET
-/// /peers/{name}` response — the full shape is `gsp_controller::peers::
-/// PeerRegistration`, duplicated here the same way every other cross-process
-/// wire shape in this codebase is (see `tunnel_client.rs`'s module doc).
-#[derive(Deserialize)]
-struct PeerRegistration {
-    pubkey: String,
-    #[serde(default)]
-    backends: Vec<String>,
-}
-
-#[async_trait]
-impl BackendSource for TunnelSource {
-    fn pool(&self) -> &str {
-        &self.pool
-    }
-    fn kind(&self) -> &'static str {
-        "tunnel"
-    }
-    fn refresh_interval(&self) -> Duration {
-        self.interval
-    }
-
-    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
-        let url = format!(
-            "{}/peers/{}",
-            self.controller_url.trim_end_matches('/'),
-            self.origin
-        );
-        let mut req = self.client.get(&url);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let resp = req.send().await.map_err(|e| SourceError::Unreachable {
-            context: format!("fetching {url}"),
-            cause: gsp_http::error_chain(&e),
-        })?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            // An origin this source has seen is gone (deleted, or its lease
-            // expired): say so once, so the pool is cleared instead of
-            // frozen. Otherwise the origin hasn't registered yet (or ever) —
-            // "no addresses known right now", and the level-triggered
-            // contract keeps the last-known-good set for an empty `Ok`.
-            if self.seen.swap(false, Ordering::Relaxed) {
-                return Err(SourceError::Withdrawn {
-                    origin: self.origin.clone(),
-                });
-            }
-            return Ok(Vec::new());
-        }
-        if !resp.status().is_success() {
-            return Err(SourceError::BadResponse {
-                context: format!("controller {url}"),
-                cause: format!("returned {}", resp.status()),
-            });
-        }
-
-        let reg: PeerRegistration = resp.json().await.map_err(|e| SourceError::BadResponse {
-            context: format!("parsing peer registration from {url}"),
-            cause: gsp_http::error_chain(&e),
-        })?;
-        if reg.pubkey != self.pubkey {
-            return Err(SourceError::PubkeyMismatch {
-                origin: self.origin.clone(),
-                expected: self.pubkey.clone(),
-                got: reg.pubkey,
-            });
-        }
-
-        self.seen.store(true, Ordering::Relaxed);
-        let mut out = Vec::with_capacity(reg.backends.len());
-        for b in &reg.backends {
-            out.push(b.parse().map_err(|_| SourceError::BadResponse {
-                context: format!("origin {:?}", self.origin),
-                cause: format!("backend {b:?} is not a valid ip:port"),
-            })?);
-        }
-        Ok(out)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tunnel")]
+    use crate::tunnel_source::TunnelSource;
 
     /// A failed request's error text must carry its cause: `refresh_loop`
     /// logs it with `%e`, which for anyhow is only the outermost message.
@@ -1157,6 +1001,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_decode_errors_name_the_cause() {
         let not_json = mock_http::serve_json("not json").await;
@@ -1173,6 +1018,7 @@ mod tests {
         assert!(e.contains("expected"), "{e}");
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_request_errors_name_the_cause() {
         let src = TunnelSource::new(
@@ -1731,6 +1577,7 @@ mod tests {
         assert_eq!(bearer(&heads[2]).as_deref(), Some("new-token"), "watch");
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_source_returns_the_registered_backends_when_the_pubkey_matches() {
         let body = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["10.60.0.2:1","10.60.0.2:2"]}"#;
@@ -1755,6 +1602,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_source_refuses_a_registration_under_a_different_pubkey() {
         let body = r#"{"name":"home","pubkey":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=","backends":["10.60.0.2:1"]}"#;
@@ -1771,6 +1619,7 @@ mod tests {
         assert!(src.fetch().await.is_err());
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_source_treats_a_never_registered_origin_as_no_addresses_not_an_error() {
         let server = mock_http::serve_status("404 Not Found", r#"{"error":"no peer"}"#).await;
@@ -1786,6 +1635,7 @@ mod tests {
         assert_eq!(src.fetch().await.unwrap(), Vec::new());
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_source_withdraws_an_origin_that_vanishes_after_being_seen() {
         let seen = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["10.60.0.2:1"]}"#;
@@ -1812,6 +1662,7 @@ mod tests {
         assert_eq!(src.fetch().await.unwrap(), Vec::new());
     }
 
+    #[cfg(feature = "tunnel")]
     #[tokio::test]
     async fn tunnel_source_rejects_a_malformed_backend_address() {
         let body = r#"{"name":"home","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","backends":["not-an-addr"]}"#;
