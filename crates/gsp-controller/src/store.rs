@@ -250,6 +250,43 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_put_with_keeps_side_entries_on_their_own_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+        let side = store.db().open_tree("side").unwrap();
+        const N: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let (store, side, barrier) = (store.clone(), side.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let tag = format!("tag-{i}").into_bytes();
+                    let rev = store
+                        .put_with(format!("config: {i}").into_bytes(), &[(&side, tag)])
+                        .unwrap();
+                    (rev, i)
+                })
+            })
+            .collect();
+        let mut revs = Vec::new();
+        for h in handles {
+            let (rev, i) = h.join().unwrap();
+            assert_eq!(
+                store.get(rev).unwrap().unwrap(),
+                format!("config: {i}").into_bytes()
+            );
+            assert_eq!(
+                side.get(encode_rev(rev)).unwrap().unwrap().to_vec(),
+                format!("tag-{i}").into_bytes()
+            );
+            revs.push(rev);
+        }
+        revs.sort_unstable();
+        assert_eq!(revs, (1..=N as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn current_pointer_survives_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let rev = {

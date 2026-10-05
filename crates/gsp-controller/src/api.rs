@@ -834,7 +834,7 @@ fn read_stage(stage: &sled::Tree, revision: u64) -> Stage {
             Stage::hidden()
         }),
         Ok(None) => {
-            tracing::error!(revision, "revision has no stage entry; hiding it");
+            tracing::warn!(revision, "revision has no stage entry; hiding it");
             Stage::hidden()
         }
         Err(e) => {
