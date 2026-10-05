@@ -339,18 +339,16 @@ mod tests {
         expect_policy_close(&mut ws).await;
     }
 
-    #[tokio::test]
-    async fn an_expired_session_closes_an_open_socket() {
-        use crate::session::SessionLimits;
+    /// Opens a socket on a fresh session under `limits`, past the initial view.
+    async fn connect_with_limits(
+        limits: crate::session::SessionLimits,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let feed = crate::fleet_feed::FleetFeed::new();
         feed.set_latest(r#"[{"instance":"a"}]"#.to_string());
         let state = crate::api::AppState::new(Some("secret".into()))
-            .with_session_limits(SessionLimits {
-                idle_timeout: std::time::Duration::from_secs(3600),
-                max_age: std::time::Duration::from_millis(300),
-                max_sessions: 10,
-            })
+            .with_session_limits(limits)
             .with_fleet_feed(feed)
             .with_ws_session_recheck(std::time::Duration::from_millis(50));
         let id = state.sessions.create(crate::session::Session {
@@ -374,6 +372,17 @@ mod tests {
         );
         let (mut ws, _resp) = tokio_tungstenite::connect_async(req).await.unwrap();
         let _ = ws.next().await.unwrap().unwrap(); // current view
+        ws
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_closes_an_open_socket() {
+        let mut ws = connect_with_limits(crate::session::SessionLimits {
+            idle_timeout: std::time::Duration::from_secs(3600),
+            max_age: std::time::Duration::from_secs(1),
+            max_sessions: 10,
+        })
+        .await;
         expect_policy_close(&mut ws).await; // max_age passes while it's open
     }
 
@@ -392,25 +401,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watching_the_socket_does_not_keep_an_idle_session_alive() {
-        // The recheck peeks; it must not reset the idle clock, or an open tab
-        // would defeat `--session-idle-timeout-secs` forever.
-        use crate::session::SessionLimits;
-        let state =
-            crate::api::AppState::new(Some("secret".into())).with_session_limits(SessionLimits {
-                idle_timeout: std::time::Duration::from_millis(200),
-                max_age: std::time::Duration::from_secs(3600),
-                max_sessions: 10,
-            });
-        let id = state.sessions.create(crate::session::Session {
-            role: crate::role::Role::Viewer,
-            username: None,
-        });
-        for _ in 0..8 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let _ = state.sessions.is_live(&id);
-        }
-        assert!(!state.sessions.is_valid(&id));
+    async fn an_open_socket_does_not_keep_an_idle_session_alive() {
+        // The recheck peeks; if it refreshed the idle clock instead, the open
+        // socket would defeat `--session-idle-timeout-secs` forever and this
+        // would time out rather than see the close.
+        let mut ws = connect_with_limits(crate::session::SessionLimits {
+            idle_timeout: std::time::Duration::from_secs(1),
+            max_age: std::time::Duration::from_secs(3600),
+            max_sessions: 10,
+        })
+        .await;
+        expect_policy_close(&mut ws).await;
     }
 
     #[tokio::test]
