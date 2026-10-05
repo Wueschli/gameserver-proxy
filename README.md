@@ -1,4 +1,5 @@
 > [!CAUTION]
+>
 > ## 🚧 Work in progress: not finished, not production-ready 🚧
 >
 > This project is under active development and is **definitely not finished yet**.
@@ -188,12 +189,12 @@ and point the listeners at your own backends; the full schema is in
 
 The admin API listens on `127.0.0.1:9900` by default:
 
-| Method   | Endpoints                                                                     |
-| -------- | ----------------------------------------------------------------------------- |
-| `GET`    | `/healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions`                |
-| `POST`   | `/route-hint` `/admin/drain` `/admin/undrain` `/pools/{pool}/backends`        |
-| `PATCH`  | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`)     |
-| `DELETE` | `/pools/{pool}/backends/{addr}`                                               |
+| Method   | Endpoints                                                                 |
+| -------- | ------------------------------------------------------------------------- |
+| `GET`    | `/healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions`            |
+| `POST`   | `/route-hint` `/admin/drain` `/admin/undrain` `/pools/{pool}/backends`    |
+| `PATCH`  | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`) |
+| `DELETE` | `/pools/{pool}/backends/{addr}`                                           |
 
 Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
@@ -207,21 +208,21 @@ The design documents in [`docs/`](docs/) are the source of truth for how the pro
 meant to work. Start with the overview and the architecture chapter; the rest can be
 read as needed. See [docs/README.md](docs/README.md) for a guided index.
 
-| Document | Contents |
-|----------|----------|
-| [00 Overview](docs/00-overview.md) | Goals, non-goals, use cases, glossary |
-| [01 Requirements](docs/01-requirements.md) | Functional and non-functional requirements |
-| [02 Architecture](docs/02-architecture.md) | Components, data plane / control plane, data flows |
-| [03 Routing](docs/03-routing.md) | Routing strategies in detail |
-| [04 Transport and client IP](docs/04-transport-and-client-ip.md) | TCP/UDP handling, client-IP preservation, PROXY protocol |
-| [05 Configuration](docs/05-configuration.md) | Configuration schema and examples |
-| [06 Operations and observability](docs/06-operations-observability.md) | Metrics, logging, health checks, draining, fleet endpoints |
-| [07 Security and DDoS](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
-| [08 Roadmap](docs/08-roadmap.md) | Phased implementation and milestones |
-| [09 Technology choices](docs/09-technology-choices.md) | Language, libraries, alternatives, decision records |
-| [10 Distributed control plane](docs/10-distributed-control-plane.md) | Controller, aggregator, admin GUI, regional health |
-| [11 Backend transport](docs/11-backend-transport.md) | WireGuard transport for origins on other networks |
-| [12 Deployment](docs/12-deployment.md) | Container images and many-port proxies under Docker/Kubernetes |
+| Document                                                               | Contents                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------- |
+| [00 Overview](docs/00-overview.md)                                     | Goals, non-goals, use cases, glossary                          |
+| [01 Requirements](docs/01-requirements.md)                             | Functional and non-functional requirements                     |
+| [02 Architecture](docs/02-architecture.md)                             | Components, data plane / control plane, data flows             |
+| [03 Routing](docs/03-routing.md)                                       | Routing strategies in detail                                   |
+| [04 Transport and client IP](docs/04-transport-and-client-ip.md)       | TCP/UDP handling, client-IP preservation, PROXY protocol       |
+| [05 Configuration](docs/05-configuration.md)                           | Configuration schema and examples                              |
+| [06 Operations and observability](docs/06-operations-observability.md) | Metrics, logging, health checks, draining, fleet endpoints     |
+| [07 Security and DDoS](docs/07-security-ddos.md)                       | Rate limiting, ACLs, DDoS mitigation                           |
+| [08 Roadmap](docs/08-roadmap.md)                                       | Phased implementation and milestones                           |
+| [09 Technology choices](docs/09-technology-choices.md)                 | Language, libraries, alternatives, decision records            |
+| [10 Distributed control plane](docs/10-distributed-control-plane.md)   | Controller, aggregator, admin GUI, regional health             |
+| [11 Backend transport](docs/11-backend-transport.md)                   | WireGuard transport for origins on other networks              |
+| [12 Deployment](docs/12-deployment.md)                                 | Container images and many-port proxies under Docker/Kubernetes |
 
 ## Project status
 

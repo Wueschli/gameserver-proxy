@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test test-minimal audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
+.PHONY: check fmt lint test test-minimal audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke docs-fmt docs-fmt-check docs-links help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test test-minimal
@@ -114,6 +114,18 @@ deploy-images:
 ## deploy-scan: Trivy over the deploy/ images and the lockfiles they're built from (after deploy-images; needs Docker + trivy)
 deploy-scan:
 	sh deploy/scan-images.sh
+
+## docs-fmt: format Markdown with Prettier (needs Node)
+docs-fmt:
+	npx --yes prettier@3.9.9 --write "**/*.md"
+
+## docs-fmt-check: verify Markdown formatting (what the `docs` CI job runs)
+docs-fmt-check:
+	npx --yes prettier@3.9.9 --check "**/*.md"
+
+## docs-links: check that relative Markdown links and anchors resolve
+docs-links:
+	python3 .github/scripts/check_md_links.py README.md CONTRIBUTING.md AGENTS.md HANDOVER.md RELEASING.md deploy/README.md
 
 ## deploy-lint: static checks on deploy/ (needs the docker CLI + ruby, no daemon)
 deploy-lint:

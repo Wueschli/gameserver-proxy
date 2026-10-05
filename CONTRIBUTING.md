@@ -21,32 +21,32 @@ edits.
 
 Other targets (`make help` lists all):
 
-| Target                    | What it does                                                         |
-| ------------------------- | -------------------------------------------------------------------- |
-| `make run`                | run the proxy against `config.example.yaml`                          |
-| `make plugins`            | build the WASM sniffer plugins (needs the `wasm32-unknown-unknown` target) |
-| `make ui` / `make ui-test` | build / test the admin GUI frontend (needs Node and npm)            |
-| `make bench` / `make fuzz` | latency harness / parser fuzzing (fuzz needs nightly and cargo-fuzz) |
-| `make docs-fmt-check`     | check Markdown formatting (needs Node; see below)                    |
+| Target                     | What it does                                                               |
+| -------------------------- | -------------------------------------------------------------------------- |
+| `make run`                 | run the proxy against `config.example.yaml`                                |
+| `make plugins`             | build the WASM sniffer plugins (needs the `wasm32-unknown-unknown` target) |
+| `make ui` / `make ui-test` | build / test the admin GUI frontend (needs Node and npm)                   |
+| `make bench` / `make fuzz` | latency harness / parser fuzzing (fuzz needs nightly and cargo-fuzz)       |
+| `make docs-fmt-check`      | check Markdown formatting (needs Node; see below)                          |
 
 The full command table (tunnel e2e, deploy images, audit, and so on) is in
 [`AGENTS.md`](AGENTS.md#commands).
 
 ### Repository layout
 
-| Crate                                                  | Responsibility                                                                   |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| [`crates/wayhouse-config`](crates/wayhouse-config)     | YAML config types, parsing and validation                                        |
-| [`crates/wayhouse-core`](crates/wayhouse-core)         | Data plane: config snapshot, backend pools, TCP and UDP listeners, session tables |
-| [`crates/wayhouse`](crates/wayhouse)                   | The proxy binary: CLI, admin API, controller/aggregator/tunnel clients           |
-| [`crates/wayhouse-controller`](crates/wayhouse-controller) | Config and intent distribution (revision store, SSE, Raft HA, canary rollout) |
-| [`crates/wayhouse-aggregator`](crates/wayhouse-aggregator) | Fleet-state fan-in and intent fan-out                                        |
-| [`crates/wayhouse-ui`](crates/wayhouse-ui)             | Admin GUI backend plus the React/Vite/TS frontend in `web/`                      |
-| [`crates/wayhouse-agent`](crates/wayhouse-agent)       | Origin-side WireGuard agent                                                      |
-| [`crates/wayhouse-http`](crates/wayhouse-http)         | Shared HTTP client and TLS server helpers                                        |
-| [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries                     |
-| [`crates/wayhouse-bench`](crates/wayhouse-bench)       | Latency / load harness                                                           |
-| [`crates/plugins`](crates/plugins)                     | First-party WASM sniffer plugins (standalone workspace)                          |
+| Crate                                                        | Responsibility                                                                    |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| [`crates/wayhouse-config`](crates/wayhouse-config)           | YAML config types, parsing and validation                                         |
+| [`crates/wayhouse-core`](crates/wayhouse-core)               | Data plane: config snapshot, backend pools, TCP and UDP listeners, session tables |
+| [`crates/wayhouse`](crates/wayhouse)                         | The proxy binary: CLI, admin API, controller/aggregator/tunnel clients            |
+| [`crates/wayhouse-controller`](crates/wayhouse-controller)   | Config and intent distribution (revision store, SSE, Raft HA, canary rollout)     |
+| [`crates/wayhouse-aggregator`](crates/wayhouse-aggregator)   | Fleet-state fan-in and intent fan-out                                             |
+| [`crates/wayhouse-ui`](crates/wayhouse-ui)                   | Admin GUI backend plus the React/Vite/TS frontend in `web/`                       |
+| [`crates/wayhouse-agent`](crates/wayhouse-agent)             | Origin-side WireGuard agent                                                       |
+| [`crates/wayhouse-http`](crates/wayhouse-http)               | Shared HTTP client and TLS server helpers                                         |
+| [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries                            |
+| [`crates/wayhouse-bench`](crates/wayhouse-bench)             | Latency / load harness                                                            |
+| [`crates/plugins`](crates/plugins)                           | First-party WASM sniffer plugins (standalone workspace)                           |
 
 ## Conventions
 

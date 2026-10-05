@@ -1,0 +1,13 @@
+target/
+node_modules/
+crates/*/node_modules/
+crates/*/web/node_modules/
+# Existing specs and plans are not churned in the first cut.
+docs/superpowers/**
+# First cut covers the files people read first. These are reformatted in a later pass
+# (wide tables would turn the diff into noise).
+AGENTS.md
+HANDOVER.md
+docs/[0-9]*.md
+docs/security-review-*.md
+crates/**/README.md

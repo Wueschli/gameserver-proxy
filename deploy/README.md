@@ -9,13 +9,13 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 
 ## What's here
 
-| Path | Purpose |
-|---|---|
-| `Dockerfile` | one file, six targets: `wayhouse`, `wayhouse-minimal`, `wayhouse-controller`, `wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent` |
-| `build-images.sh` | builds all six, runs `--version` in each, prints sizes |
-| `compose/` | runnable control-plane demo (+ `compose.tunnel.yml` WireGuard override) |
-| `smoke.sh` | the HTTP smoke test CI runs against the compose demo |
-| `k8s/` | plain manifests (namespace, secrets example, controller, aggregator, ui, wayhouse RBAC, wayhouse DaemonSet) |
+| Path              | Purpose                                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `Dockerfile`      | one file, six targets: `wayhouse`, `wayhouse-minimal`, `wayhouse-controller`, `wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent` |
+| `build-images.sh` | builds all six, runs `--version` in each, prints sizes                                                                               |
+| `compose/`        | runnable control-plane demo (+ `compose.tunnel.yml` WireGuard override)                                                              |
+| `smoke.sh`        | the HTTP smoke test CI runs against the compose demo                                                                                 |
+| `k8s/`            | plain manifests (namespace, secrets example, controller, aggregator, ui, wayhouse RBAC, wayhouse DaemonSet)                          |
 
 ## Build
 
@@ -105,7 +105,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
 - One standalone controller; no HA (see docs/10).
 - Aggregator intent fan-out (drain etc.) cannot reach `wayhouse` from these examples: the
   `admin_url` a `wayhouse` reports is derived from `settings.admin.listen` and no flag
-  overrides it. Fleet *reads* (pools, sessions) work.
+  overrides it. Fleet _reads_ (pools, sessions) work.
 - `make deploy-scan` runs Trivy over the six images (OS packages, secrets, and the
   Rust crates each binary embeds — they're built with `cargo auditable`) and over
   `Cargo.lock` and the UI's `package-lock.json`. It reports
