@@ -87,7 +87,13 @@ impl Snapshot {
                     pc.targets = targets;
                     pc
                 };
-                (pc.name.clone(), Arc::new(Pool::new(&pc, prev_pool)))
+                let pool = Pool::new(&pc, prev_pool);
+                for b in pool.backends() {
+                    if let Some(state) = overlay.take_pending_admin(&pc.name, b.addr) {
+                        b.set_admin_state(state);
+                    }
+                }
+                (pc.name.clone(), Arc::new(pool))
             })
             .collect();
         Arc::new(Self {
