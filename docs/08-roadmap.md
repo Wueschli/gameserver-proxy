@@ -30,8 +30,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ UDP listener with `SO_REUSEPORT`, one recv task per core, worker-local
   (lock-free) session table. Ingress batches — one `recvmmsg(2)` pulls up to
   `RECV_BATCH` datagrams per wakeup (perf pass, ADR 18). Idle expiry is a
-  single-level timing wheel (perf pass, ADR 19). `sendmmsg` egress batching is
-  still deferred.
+  single-level timing wheel (perf pass, ADR 19). Egress batches with
+  `sendmmsg(2)` on both legs (perf pass, ADR 31).
 - ✅ Per-session `connect(2)` upstream socket + a reply-pump task per session.
 - ✅ Session affinity: a `consistent_hash` pool (`hash_on: src_ip | src_ip_port`).
   The per-worker sticky table that first provided it was removed (#56): with

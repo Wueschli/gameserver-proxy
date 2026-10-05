@@ -357,10 +357,12 @@ per-connection or per-datagram task, hop, or allocation, add it here.**
 - **UDP ingress**: a share of one `recvmmsg` (≤16 datagrams/syscall on Linux;
   fresh `MultiHeaders` amortised over the batch), one `HashMap` lookup by client
   `SocketAddr`, one relaxed atomic store (liveness), one `send` upstream. No
-  lock, no alloc, no task spawn. Reply path is still one `recv` + one
-  `send`/`send_to` per datagram (`sendmmsg` egress deferred).
+  lock, no task spawn. Consecutive datagrams of one session go upstream in one
+  `sendmmsg` (one small `Vec` of slices per run). The reply path is one
+  `recvmmsg` + one `sendmmsg` per wakeup (ADR 31).
 - Recv buffers: `RECV_BATCH` (16) × 64 KB **per worker** (shared across that
-  worker's sessions) + one 64 KB buffer per reply task.
+  worker's sessions) + 16 × 64 KB per worker thread for the reply pumps
+  (`ReplyBatch`, thread-local; not per session).
 - Established UDP sessions skip the ACL / rate-limit / geo / gate checks
   entirely — those run only for datagrams that miss the session table.
 

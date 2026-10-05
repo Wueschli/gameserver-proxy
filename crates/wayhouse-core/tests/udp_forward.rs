@@ -158,6 +158,100 @@ listeners:
         .await;
 }
 
+/// Fire `n` numbered datagrams at `proxy` with no reads in between and assert
+/// they come back as the echo of each, exactly once and in order: the forward
+/// and reply legs both batch (`sendmmsg`), which must not reorder, drop or
+/// duplicate within a session.
+async fn assert_ordered_echo_burst(client: &UdpSocket, n: u16, tag: u8) {
+    for i in 0..n {
+        // Varying sizes so a batch mixes lengths.
+        let mut payload = i.to_be_bytes().to_vec();
+        payload.resize(2 + usize::from(i % 7) * 37, b'z');
+        client.send(&payload).await.unwrap();
+    }
+    let mut buf = [0u8; 512];
+    for i in 0..n {
+        let len = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("reply {i} timed out"))
+            .unwrap();
+        assert_eq!(buf[0], tag);
+        assert_eq!(&buf[1..3], &i.to_be_bytes(), "reply {i} out of order");
+        assert_eq!(len, 3 + usize::from(i % 7) * 37, "reply {i} length");
+    }
+}
+
+#[tokio::test]
+async fn a_burst_through_the_batched_forward_and_reply_paths_keeps_order() {
+    let b1 = echo_backend(1).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b1}"]
+    health_check:
+      type: none
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    // Establish the session first so the burst takes the existing-session path.
+    let mut buf = [0u8; 64];
+    first_reply(&client, b"hi", &mut buf).await;
+    for _ in 0..3 {
+        assert_ordered_echo_burst(&client, 100, 1).await;
+    }
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn a_prefix_mode_burst_replies_in_order_from_the_destination_address() {
+    let a = echo_backend(b'A').await;
+    let port = free_udp_addr().port();
+    let yaml = format!(
+        r#"
+pools:
+  - name: a
+    targets: ["{a}"]
+    health_check:
+      type: none
+listeners:
+  - name: l
+    bind: "0.0.0.0:{port}"
+    protocol: udp
+    prefix: "127.0.0.0/8"
+    pool: a
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // `connect`ed to the sub-address: only replies sourced from it are accepted.
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(format!("127.0.0.2:{port}")).await.unwrap();
+    let mut buf = [0u8; 64];
+    first_reply(&client, b"hi", &mut buf).await;
+    assert_ordered_echo_burst(&client, 100, b'A').await;
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
 #[tokio::test]
 async fn sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend() {
     let backend = echo_backend(9).await;

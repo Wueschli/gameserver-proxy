@@ -32,6 +32,8 @@ UDP has no connection — the proxy builds the "session" concept itself.
 - **Receive**: `recvmmsg()` in batches (fixed at 16 datagrams/syscall,
   `RECV_BATCH` — not config-exposed, ADR 18) on `SO_REUSEPORT` sockets, one loop
   per worker.
+- **Send**: `sendmmsg()` toward the backend for consecutive datagrams of one
+  session, and toward the client in the reply pump (up to 16 per syscall, ADR 31).
 - **Receiving on a whole prefix** (for `dst` routing for games with no protocol hint,
   see [03](03-routing.md)): the listener does **not** bind a socket per destination IP
   but one wildcard socket and enables `IP_PKTINFO` / `IPV6_RECVPKTINFO`. Per datagram
@@ -157,7 +159,7 @@ needed to override a kernel default.
 | `TCP_NODELAY` | on | – |
 | `SO_BUSY_POLL` | not used | not used |
 | `recvmmsg` ingress batch | – | 16 (`RECV_BATCH`, fixed) |
-| `sendmmsg` egress batch | – | not implemented yet — still one `send` per datagram (see `docs/08`/`HANDOVER.md` follow-ups) |
+| `sendmmsg` egress batch | – | up to 16 (`RECV_BATCH` forward run / `REPLY_BATCH_SIZE` reply pump, fixed, ADR 31) |
 | pipe size for `splice` | kernel default | – |
 
 `SO_REUSEPORT` lets any same-user socket join a port, so before binding a
