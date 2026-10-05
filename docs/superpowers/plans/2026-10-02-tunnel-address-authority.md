@@ -4,11 +4,11 @@
 
 > **Status (checked 2026-10-03):** all 46 steps done. Every step is ticked after checking `main` (`10a0113`) for the files, tests and commits it names. "Run it to verify it fails" steps are ticked on the strength of the history (each task's tests and implementation landed), not re-run.
 >
-> - Landed 2026-10-02 in `375599d`..`bc7dba2`, follow-ups `de55f1c`, `b536e11`, `acfb577`, `6287359` (per-registry POST/DELETE serialisation, address-book flush, a wrong `gsp` flag name, an HA pin-only warning).
+> - Landed 2026-10-02 in `375599d`..`bc7dba2`, follow-ups `de55f1c`, `b536e11`, `acfb577`, `6287359` (per-registry POST/DELETE serialisation, address-book flush, a wrong `wayhouse` flag name, an HA pin-only warning).
 >
 > - The deferred pieces of the address authority are tracked in HANDOVER's "Known follow-ups", not here.
 
-**Goal:** `gsp-controller` allocates unique tunnel addresses (or grants requested ones), publishes each peer's address, and `gsp-agent` / `gsp --tunnel-*` route each other with `/32`s — fixing the multi-proxy `AllowedIPs 0.0.0.0/0` bug.
+**Goal:** `wayhouse-controller` allocates unique tunnel addresses (or grants requested ones), publishes each peer's address, and `wayhouse-agent` / `wayhouse --tunnel-*` route each other with `/32`s — fixing the multi-proxy `AllowedIPs 0.0.0.0/0` bug.
 
 **Architecture:** One `AddressBook` (new `addresses` module, its own sled db) shared by the backend-peers and proxy-peers registries; `POST /peers` / `POST /proxy-peers` claim an address atomically with the registration and answer with it. Clients register *before* bringing their interface up, persist the answer, and build `/32` peers from the published addresses. `DELETE` releases an address and logs a tombstone subscribers act on.
 
@@ -43,14 +43,14 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 
 | File | Responsibility |
 |---|---|
-| `crates/gsp-controller/src/addresses.rs` (new) | `Network`, `AddressBook` (claim/release/entries), `expand_backends`, `parse_duration`, `resolve_flags`, `is_stale` |
-| `crates/gsp-controller/src/addresses/api.rs` (new) | `GET /tunnel/addresses`, `claim_error_response`, stale warning loop |
-| `crates/gsp-controller/src/{peers,proxy_peers}.rs` | registration types gain `tunnel_address`; backend shorthand validation; tombstone helpers |
-| `crates/gsp-controller/src/{peers,proxy_peers}/api.rs` | claim on `POST`, `DELETE`, tombstone event payload |
-| `crates/gsp-controller/src/main.rs` | `--tunnel-network`, `--tunnel-stale-after`, HA guard, wiring |
-| `crates/gsp-agent/src/{register,proxy_subscribe,address_store,main}.rs` | register-first startup, persisted address, `/32` proxy peers, tombstones |
-| `crates/gsp/src/{proxy_register,tunnel_client,tunnel_address,main}.rs` | same for the proxy |
-| `crates/gsp-fleet-tests/{src/lib.rs,src/tunnel.rs,tests/tunnel.rs,tests/tunnel_addresses.rs}` | harness + e2e scenarios |
+| `crates/wayhouse-controller/src/addresses.rs` (new) | `Network`, `AddressBook` (claim/release/entries), `expand_backends`, `parse_duration`, `resolve_flags`, `is_stale` |
+| `crates/wayhouse-controller/src/addresses/api.rs` (new) | `GET /tunnel/addresses`, `claim_error_response`, stale warning loop |
+| `crates/wayhouse-controller/src/{peers,proxy_peers}.rs` | registration types gain `tunnel_address`; backend shorthand validation; tombstone helpers |
+| `crates/wayhouse-controller/src/{peers,proxy_peers}/api.rs` | claim on `POST`, `DELETE`, tombstone event payload |
+| `crates/wayhouse-controller/src/main.rs` | `--tunnel-network`, `--tunnel-stale-after`, HA guard, wiring |
+| `crates/wayhouse-agent/src/{register,proxy_subscribe,address_store,main}.rs` | register-first startup, persisted address, `/32` proxy peers, tombstones |
+| `crates/wayhouse/src/{proxy_register,tunnel_client,tunnel_address,main}.rs` | same for the proxy |
+| `crates/wayhouse-fleet-tests/{src/lib.rs,src/tunnel.rs,tests/tunnel.rs,tests/tunnel_addresses.rs}` | harness + e2e scenarios |
 | `deploy/**`, `docs/**`, `HANDOVER.md`, `AGENTS.md`, `README.md`, `Makefile` | examples and documentation |
 
 ---
@@ -58,9 +58,9 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 ### Task 1: The address book and its HTTP module
 
 **Files:**
-- Create: `crates/gsp-controller/src/addresses.rs`
-- Create: `crates/gsp-controller/src/addresses/api.rs`
-- Modify: `crates/gsp-controller/src/lib.rs` (add `pub mod addresses;` before `pub mod adopt;`)
+- Create: `crates/wayhouse-controller/src/addresses.rs`
+- Create: `crates/wayhouse-controller/src/addresses/api.rs`
+- Modify: `crates/wayhouse-controller/src/lib.rs` (add `pub mod addresses;` before `pub mod adopt;`)
 
 **Interfaces:**
 - Produces (used by Tasks 2–4):
@@ -70,7 +70,7 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
 
 - [x] **Step 1: Write the failing tests**
 
-Add `pub mod addresses;` to `lib.rs`. Create `crates/gsp-controller/src/addresses.rs` containing only `pub mod api;` followed by this test module:
+Add `pub mod addresses;` to `lib.rs`. Create `crates/wayhouse-controller/src/addresses.rs` containing only `pub mod api;` followed by this test module:
 
 ```rust
 pub mod api;
@@ -365,7 +365,7 @@ mod tests {
 }
 ```
 
-Create `crates/gsp-controller/src/addresses/api.rs` containing only this test module:
+Create `crates/wayhouse-controller/src/addresses/api.rs` containing only this test module:
 
 ```rust
 #[cfg(test)]
@@ -498,16 +498,16 @@ mod tests {
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp-controller addresses 2>&1 | tail -20`
+Run: `cargo test -p wayhouse-controller addresses 2>&1 | tail -20`
 Expected: compile errors such as ``cannot find type `AddressBook` in this scope`` / ``cannot find function `router```. (That is the RED: the types do not exist yet.)
 
 - [x] **Step 3: Write the implementation**
 
-Insert this at the very top of `crates/gsp-controller/src/addresses.rs` (above the `pub mod api;` line and the test module from Step 1):
+Insert this at the very top of `crates/wayhouse-controller/src/addresses.rs` (above the `pub mod api;` line and the test module from Step 1):
 
 ```rust
 //! Phase 14 tunnel address authority (`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`):
-//! `gsp-controller` allocates the tunnel-internal addresses that origins and
+//! `wayhouse-controller` allocates the tunnel-internal addresses that origins and
 //! proxies used to pick (and self-report) by hand, and enforces that no two
 //! peers ever hold the same one.
 //!
@@ -955,7 +955,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 }
 ```
 
-Insert this at the very top of `crates/gsp-controller/src/addresses/api.rs` (above the test module):
+Insert this at the very top of `crates/wayhouse-controller/src/addresses/api.rs` (above the test module):
 
 ```rust
 //! `GET /tunnel/addresses` — the address table, with a staleness flag — plus
@@ -1124,15 +1124,15 @@ pub async fn stale_warning_loop(book: Arc<AddressBook>, stale_after: Duration) {
 
 - [x] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p gsp-controller addresses 2>&1 | tail -8`
+Run: `cargo test -p wayhouse-controller addresses 2>&1 | tail -8`
 Expected: `test result: ok. 23 passed; 0 failed`.
 
 - [x] **Step 5: Format, lint, commit**
 
 ```bash
 cargo fmt --all
-cargo clippy -p gsp-controller --all-targets -- -D warnings
-git add crates/gsp-controller/src/addresses.rs crates/gsp-controller/src/addresses crates/gsp-controller/src/lib.rs
+cargo clippy -p wayhouse-controller --all-targets -- -D warnings
+git add crates/wayhouse-controller/src/addresses.rs crates/wayhouse-controller/src/addresses crates/wayhouse-controller/src/lib.rs
 git commit -m "feat(controller): address book for tunnel address authority
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -1143,8 +1143,8 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ### Task 2: Allocate on registration (both registries)
 
 **Files:**
-- Modify: `crates/gsp-controller/src/peers.rs`, `crates/gsp-controller/src/proxy_peers.rs`
-- Modify: `crates/gsp-controller/src/peers/api.rs`, `crates/gsp-controller/src/proxy_peers/api.rs`
+- Modify: `crates/wayhouse-controller/src/peers.rs`, `crates/wayhouse-controller/src/proxy_peers.rs`
+- Modify: `crates/wayhouse-controller/src/peers/api.rs`, `crates/wayhouse-controller/src/proxy_peers/api.rs`
 
 **Interfaces:**
 - Consumes: Task 1's `AddressBook`, `Role`, `expand_backends`, `now_secs`, `claim_error_response`.
@@ -1459,7 +1459,7 @@ Update every existing proxy test: `let (state, _dir) = test_state();` → `let (
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp-controller peers 2>&1 | tail -25`
+Run: `cargo test -p wayhouse-controller peers 2>&1 | tail -25`
 Expected: compile errors — ``no field `tunnel_address` on type `PeerRegistration` `` and ``this function takes 2 arguments but 3 arguments were supplied``.
 
 - [x] **Step 3: Implement the registration types**
@@ -1672,15 +1672,15 @@ async fn register(State(state): State<ProxyPeersState>, body: String) -> Respons
 
 - [x] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p gsp-controller 2>&1 | tail -6`
-Expected: `test result: ok.` with no failures (the controller binary will not compile until Task 3 — if `cargo test -p gsp-controller` fails to build `main.rs` because `PeersState::new` gained an argument, do the minimal fix there now: open an `AddressBook` at `args.data_dir.join("tunnel-addresses")` with `None` network and pass `book.clone()`; Task 3 replaces it with the real wiring).
+Run: `cargo test -p wayhouse-controller 2>&1 | tail -6`
+Expected: `test result: ok.` with no failures (the controller binary will not compile until Task 3 — if `cargo test -p wayhouse-controller` fails to build `main.rs` because `PeersState::new` gained an argument, do the minimal fix there now: open an `AddressBook` at `args.data_dir.join("tunnel-addresses")` with `None` network and pass `book.clone()`; Task 3 replaces it with the real wiring).
 
 - [x] **Step 6: Format, lint, commit**
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
-git add -A crates/gsp-controller
+git add -A crates/wayhouse-controller
 git commit -m "feat(controller): allocate tunnel addresses on peer and proxy registration
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -1691,16 +1691,16 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ### Task 3: Controller flags, HA guard and wiring
 
 **Files:**
-- Modify: `crates/gsp-controller/src/addresses.rs` (add `resolve_flags`)
-- Modify: `crates/gsp-controller/src/main.rs`
-- Modify: `crates/gsp-fleet-tests/src/lib.rs` (add `spawn_controller_with`)
-- Create: `crates/gsp-fleet-tests/tests/tunnel_addresses.rs`
+- Modify: `crates/wayhouse-controller/src/addresses.rs` (add `resolve_flags`)
+- Modify: `crates/wayhouse-controller/src/main.rs`
+- Modify: `crates/wayhouse-fleet-tests/src/lib.rs` (add `spawn_controller_with`)
+- Create: `crates/wayhouse-fleet-tests/tests/tunnel_addresses.rs`
 
 **Interfaces:**
 - Consumes: Tasks 1–2.
 - Produces:
   - `addresses::resolve_flags(network: Option<&str>, stale_after: &str, ha_enabled: bool) -> Result<(Option<Network>, Duration), String>`
-  - `gsp_fleet_tests::spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) -> Result<Proc>` (`spawn_controller_on` delegates to it with `&[]`)
+  - `wayhouse_fleet_tests::spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) -> Result<Proc>` (`spawn_controller_on` delegates to it with `&[]`)
   - controller flags `--tunnel-network <CIDR>` and `--tunnel-stale-after <dur>` (default `14d`)
 
 - [x] **Step 1: Write the failing tests**
@@ -1733,7 +1733,7 @@ Append to the `tests` module in `addresses.rs`:
     }
 ```
 
-Create `crates/gsp-fleet-tests/tests/tunnel_addresses.rs`:
+Create `crates/wayhouse-fleet-tests/tests/tunnel_addresses.rs`:
 
 ```rust
 //! The controller's address-authority surface over real HTTP (spec: Controller).
@@ -1742,7 +1742,7 @@ Create `crates/gsp-fleet-tests/tests/tunnel_addresses.rs`:
 use std::time::Duration;
 
 use anyhow::Result;
-use gsp_fleet_tests::{build_fleet_bins, free_port, spawn_controller_with, wait_http_up, Proc};
+use wayhouse_fleet_tests::{build_fleet_bins, free_port, spawn_controller_with, wait_http_up, Proc};
 use serde_json::{json, Value};
 
 const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -1817,7 +1817,7 @@ async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
             "1=127.0.0.1:1".into(),
         ],
     )?;
-    gsp_fleet_tests::wait_until(
+    wayhouse_fleet_tests::wait_until(
         || {
             let code = ctl.exit_code();
             async move { Ok(code.is_some_and(|c| c != 0)) }
@@ -1837,8 +1837,8 @@ async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp-controller resolve_flags 2>&1 | tail -5` → ``cannot find function `resolve_flags` ``.
-Run: `cargo test -p gsp-fleet-tests --test tunnel_addresses 2>&1 | tail -5` → ``unresolved import `gsp_fleet_tests::spawn_controller_with` ``.
+Run: `cargo test -p wayhouse-controller resolve_flags 2>&1 | tail -5` → ``cannot find function `resolve_flags` ``.
+Run: `cargo test -p wayhouse-fleet-tests --test tunnel_addresses 2>&1 | tail -5` → ``unresolved import `wayhouse_fleet_tests::spawn_controller_with` ``.
 
 - [x] **Step 3: Implement `resolve_flags`**
 
@@ -1875,7 +1875,7 @@ pub fn resolve_flags(
 
 - [x] **Step 4: Implement the harness helper and the controller wiring**
 
-`crates/gsp-fleet-tests/src/lib.rs` — replace `spawn_controller_on` with:
+`crates/wayhouse-fleet-tests/src/lib.rs` — replace `spawn_controller_on` with:
 
 ```rust
 pub fn spawn_controller_on(data_dir: &Path, listen: &str) -> Result<Proc> {
@@ -1891,11 +1891,11 @@ pub fn spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) ->
         listen.to_string(),
     ];
     args.extend(extra.iter().cloned());
-    Proc::spawn_in(None, "gsp-controller", &args)
+    Proc::spawn_in(None, "wayhouse-controller", &args)
 }
 ```
 
-`crates/gsp-controller/src/main.rs`:
+`crates/wayhouse-controller/src/main.rs`:
 
 Add to `Args` (after `ha_token`):
 
@@ -1916,7 +1916,7 @@ Add to `Args` (after `ha_token`):
 After the existing `--ha-peers` / `--role slave` checks in `main()` (before `tracing_subscriber`), add:
 
 ```rust
-    let (tunnel_network, stale_after) = gsp_controller::addresses::resolve_flags(
+    let (tunnel_network, stale_after) = wayhouse_controller::addresses::resolve_flags(
         args.tunnel_network.as_deref(),
         &args.tunnel_stale_after,
         !args.ha_peers.is_empty(),
@@ -1931,7 +1931,7 @@ Replace the two registry-state constructions and the router merge. After the `pe
     // every other registry, shared by both peer registries below.
     let addresses_dir = args.data_dir.join("tunnel-addresses");
     let book = Arc::new(
-        gsp_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
+        wayhouse_controller::addresses::AddressBook::open(&addresses_dir, tunnel_network)
             .map_err(|e| anyhow::anyhow!("opening the address book at {addresses_dir:?}: {e}"))?,
     );
     match tunnel_network {
@@ -1952,24 +1952,24 @@ Replace the two registry-state constructions and the router merge. After the `pe
 Directly after the `proxy_peers_state` line (so it runs before `args.auth_token` is moved into `adopt_state` further down):
 
 ```rust
-    let addresses_state = gsp_controller::addresses::api::AddressesState::new(
+    let addresses_state = wayhouse_controller::addresses::api::AddressesState::new(
         book.clone(),
         args.auth_token.clone(),
         stale_after,
     );
-    tokio::spawn(gsp_controller::addresses::api::stale_warning_loop(
+    tokio::spawn(wayhouse_controller::addresses::api::stale_warning_loop(
         book.clone(),
         stale_after,
     ));
 ```
 
-and add `.merge(gsp_controller::addresses::api::router(addresses_state))` after the `proxy_peers` router merge in `let mut app = Router::new()…`.
+and add `.merge(wayhouse_controller::addresses::api::router(addresses_state))` after the `proxy_peers` router merge in `let mut app = Router::new()…`.
 
 - [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
-cargo test -p gsp-controller resolve_flags 2>&1 | tail -4
-cargo test -p gsp-fleet-tests --test tunnel_addresses 2>&1 | tail -6
+cargo test -p wayhouse-controller resolve_flags 2>&1 | tail -4
+cargo test -p wayhouse-fleet-tests --test tunnel_addresses 2>&1 | tail -6
 ```
 Expected: `resolve_flags` 3 passed; the fleet test file `2 passed`.
 
@@ -1988,8 +1988,8 @@ Expected: `make check` exits 0.
 ### Task 4: Release and tombstones (both registries)
 
 **Files:**
-- Modify: `crates/gsp-controller/src/peers.rs`, `crates/gsp-controller/src/peers/api.rs`
-- Modify: `crates/gsp-controller/src/proxy_peers/api.rs`
+- Modify: `crates/wayhouse-controller/src/peers.rs`, `crates/wayhouse-controller/src/peers/api.rs`
+- Modify: `crates/wayhouse-controller/src/proxy_peers/api.rs`
 
 **Interfaces:**
 - Consumes: Task 1's `AddressBook::{get, release}`, Task 2's states.
@@ -2220,7 +2220,7 @@ In `proxy_peers/api.rs` tests (uses the helpers from Task 2):
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp-controller 2>&1 | tail -15`
+Run: `cargo test -p wayhouse-controller 2>&1 | tail -15`
 Expected: ``cannot find function `event_payload` `` / ``cannot find function `tombstone_bytes` `` and the delete tests failing to compile or returning `405 Method Not Allowed`.
 
 - [x] **Step 3: Implement**
@@ -2388,14 +2388,14 @@ and in `subscribe` the same closure: `Ok(Event::default().data(event_payload(rev
 
 - [x] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p gsp-controller 2>&1 | tail -6`
+Run: `cargo test -p wayhouse-controller 2>&1 | tail -6`
 Expected: `test result: ok.`
 
 - [x] **Step 5: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
-git add -A crates/gsp-controller
+git add -A crates/wayhouse-controller
 git commit -m "feat(controller): DELETE a peer registration, free its address, log a tombstone
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -2403,11 +2403,11 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: `gsp-agent` — register first, persist, `/32` proxy peers, tombstones
+### Task 5: `wayhouse-agent` — register first, persist, `/32` proxy peers, tombstones
 
 **Files:**
-- Create: `crates/gsp-agent/src/address_store.rs`
-- Modify: `crates/gsp-agent/src/register.rs`, `crates/gsp-agent/src/proxy_subscribe.rs`, `crates/gsp-agent/src/main.rs`
+- Create: `crates/wayhouse-agent/src/address_store.rs`
+- Modify: `crates/wayhouse-agent/src/register.rs`, `crates/wayhouse-agent/src/proxy_subscribe.rs`, `crates/wayhouse-agent/src/main.rs`
 
 **Interfaces:**
 - Consumes: Task 2/4 wire shapes.
@@ -2419,7 +2419,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 - [x] **Step 1: Write the failing tests**
 
-Create `crates/gsp-agent/src/address_store.rs` with only this test module (and `use super::*;`-style access to the items Step 3 adds):
+Create `crates/wayhouse-agent/src/address_store.rs` with only this test module (and `use super::*;`-style access to the items Step 3 adds):
 
 ```rust
 #[cfg(test)]
@@ -2720,7 +2720,7 @@ In `proxy_subscribe.rs` tests, replace the `ProxyRegistration { … }` literals 
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp-agent 2>&1 | tail -20`
+Run: `cargo test -p wayhouse-agent 2>&1 | tail -20`
 Expected: compile errors — ``cannot find function `resolve_startup` ``, ``cannot find type `Registered` ``, ``no field `tunnel_address` ``.
 
 - [x] **Step 3: Implement `address_store.rs`**
@@ -2732,7 +2732,7 @@ Put this above the test module:
 //! so a restart can come up while the controller is unreachable (spec:
 //! "Persistence and offline behaviour"). The controller keeps an owner's
 //! address sticky, so the saved value is still valid unless an operator
-//! released it. Mirrored in `gsp::tunnel_address` rather than shared (the two
+//! released it. Mirrored in `wayhouse::tunnel_address` rather than shared (the two
 //! binaries have no common library; same precedent as `register.rs`).
 
 use std::path::Path;
@@ -2829,7 +2829,7 @@ pub fn resolve_startup(
 Replace everything above the test module with:
 
 ```rust
-//! Registers this origin with `gsp-controller`'s backend-peers registry
+//! Registers this origin with `wayhouse-controller`'s backend-peers registry
 //! (`POST /peers`) — the wire shape is duplicated here rather than shared as a
 //! library, the same precedent `controller_client`'s hand-parsed SSE and
 //! `aggregator_client`'s duplicated `IngestPayload` already established.
@@ -3016,7 +3016,7 @@ pub async fn run(
 Replace the struct, `to_wg_peer`, event parsing and the loop body:
 
 ```rust
-/// One proxy's registration, exactly as `gsp_controller::proxy_peers::
+/// One proxy's registration, exactly as `wayhouse_controller::proxy_peers::
 /// ProxyRegistration` serializes it (duplicated wire shape).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct ProxyRegistration {
@@ -3065,7 +3065,7 @@ enum Event {
 }
 
 /// Parses one SSE event block — identical shape to
-/// `gsp::tunnel_client::parse_sse_event`.
+/// `wayhouse::tunnel_client::parse_sse_event`.
 fn parse_sse_event(event: &str) -> Option<Event> {
     let data_line = event
         .split('\n')
@@ -3284,14 +3284,14 @@ Remove the now-unused `let client = reqwest::Client::new();` that preceded the o
 
 - [x] **Step 7: Run the tests to verify they pass**
 
-Run: `cargo test -p gsp-agent 2>&1 | tail -8`
+Run: `cargo test -p wayhouse-agent 2>&1 | tail -8`
 Expected: `test result: ok.` (all address_store, register and proxy_subscribe tests).
 
 - [x] **Step 8: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
-git add -A crates/gsp-agent
+git add -A crates/wayhouse-agent
 git commit -m "feat(agent): register for a tunnel address first, route proxies as /32, honour tombstones
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -3300,11 +3300,11 @@ Expected: `make check` exits 0 (the e2e lab is not part of it and is still red u
 
 ---
 
-### Task 6: `gsp --tunnel-*` — the same for the proxy
+### Task 6: `wayhouse --tunnel-*` — the same for the proxy
 
 **Files:**
-- Create: `crates/gsp/src/tunnel_address.rs`
-- Modify: `crates/gsp/src/proxy_register.rs`, `crates/gsp/src/tunnel_client.rs`, `crates/gsp/src/main.rs`, `crates/gsp/Cargo.toml` (`tempfile.workspace = true` under `[dev-dependencies]`)
+- Create: `crates/wayhouse/src/tunnel_address.rs`
+- Modify: `crates/wayhouse/src/proxy_register.rs`, `crates/wayhouse/src/tunnel_client.rs`, `crates/wayhouse/src/main.rs`, `crates/wayhouse/Cargo.toml` (`tempfile.workspace = true` under `[dev-dependencies]`)
 
 **Interfaces:**
 - Consumes: Task 2/4 wire shapes.
@@ -3312,7 +3312,7 @@ Expected: `make check` exits 0 (the e2e lab is not part of it and is still red u
 
 - [x] **Step 1: Write the failing tests**
 
-Create `crates/gsp/src/tunnel_address.rs` with only this test module:
+Create `crates/wayhouse/src/tunnel_address.rs` with only this test module:
 
 ```rust
 #[cfg(test)]
@@ -3593,19 +3593,19 @@ In `tunnel_client.rs` tests: add `tunnel_address: None` to the existing `PeerReg
 
 - [x] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p gsp tunnel 2>&1 | tail -15` and `cargo test -p gsp proxy_register 2>&1 | tail -10`
+Run: `cargo test -p wayhouse tunnel 2>&1 | tail -15` and `cargo test -p wayhouse proxy_register 2>&1 | tail -10`
 Expected: compile errors (missing `Registered`, `resolve_startup`, `Event`, the `tunnel_address` field).
 
 - [x] **Step 3: Implement the mirrors**
 
-`crates/gsp/src/tunnel_address.rs` — put this above the test module:
+`crates/wayhouse/src/tunnel_address.rs` — put this above the test module:
 
 ```rust
 //! The tunnel address this proxy was last assigned, persisted next to its key
 //! so a restart can come up while the controller is unreachable (spec:
 //! "Persistence and offline behaviour"). The controller keeps an owner's
 //! address sticky, so the saved value is still valid unless an operator
-//! released it. Mirrored from `gsp-agent::address_store` rather than shared (the two
+//! released it. Mirrored from `wayhouse-agent::address_store` rather than shared (the two
 //! binaries have no common library; same precedent as `proxy_register.rs`).
 
 use std::path::Path;
@@ -3697,15 +3697,15 @@ pub fn resolve_startup(
 }
 ```
 
-`crates/gsp/src/proxy_register.rs` — replace everything above the tests module with:
+`crates/wayhouse/src/proxy_register.rs` — replace everything above the tests module with:
 
 ```rust
-//! Registers this proxy with `gsp-controller`'s proxy-peers registry
-//! (`POST /proxy-peers`) — the mirror image of `gsp-agent::register`,
+//! Registers this proxy with `wayhouse-controller`'s proxy-peers registry
+//! (`POST /proxy-peers`) — the mirror image of `wayhouse-agent::register`,
 //! duplicated rather than shared for the same reason: no library crate sits
 //! between these two binaries.
 //!
-//! Exists so every origin's `gsp-agent` can learn about every edge proxy by
+//! Exists so every origin's `wayhouse-agent` can learn about every edge proxy by
 //! subscribing to that registry. The controller is also the tunnel address
 //! authority (spec
 //! `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`): the
@@ -3880,10 +3880,10 @@ pub async fn run(
 }
 ```
 
-`crates/gsp/src/tunnel_client.rs` — replace the `PeerRegistration` struct and `to_wg_peer`:
+`crates/wayhouse/src/tunnel_client.rs` — replace the `PeerRegistration` struct and `to_wg_peer`:
 
 ```rust
-/// One origin's registration, exactly as `gsp-controller::peers::
+/// One origin's registration, exactly as `wayhouse-controller::peers::
 /// PeerRegistration` serializes it (duplicated wire shape — same precedent
 /// `controller_client`'s hand-parsed SSE and `aggregator_client`'s duplicated
 /// `IngestPayload` already established).
@@ -3939,7 +3939,7 @@ enum Event {
 }
 
 /// Parses one SSE event block — identical shape to
-/// `gsp-agent::proxy_subscribe::parse_sse_event`.
+/// `wayhouse-agent::proxy_subscribe::parse_sse_event`.
 fn parse_sse_event(event: &str) -> Option<Event> {
     let data_line = event
         .split('\n')
@@ -4013,11 +4013,11 @@ In `subscribe_once`, replace the `if let Some(reg) = parse_sse_event(&event) { �
 
 `reconcile_peer`'s log line: replace `backends = ?reg.backends` with `address = ?reg.tunnel_address, backends = ?reg.backends`.
 
-`crates/gsp/Cargo.toml`: add `tempfile.workspace = true` under `[dev-dependencies]`.
+`crates/wayhouse/Cargo.toml`: add `tempfile.workspace = true` under `[dev-dependencies]`.
 
-`crates/gsp/src/main.rs`:
+`crates/wayhouse/src/main.rs`:
 
-`main.rs` (gsp): in the `Args` doc for `--tunnel-address` say it is optional (`ip/prefix` pins, omit to allocate); in `async_main` delete the `.ok_or_else(|| anyhow!("--tunnel-iface requires --tunnel-address"))?` and set `TunnelConfig.address: Option<String>`; add `mod tunnel_address;`. Replace the `Some(tc) => { … }` arm of `let tunnel = match tunnel_config` with:
+`main.rs` (wayhouse): in the `Args` doc for `--tunnel-address` say it is optional (`ip/prefix` pins, omit to allocate); in `async_main` delete the `.ok_or_else(|| anyhow!("--tunnel-iface requires --tunnel-address"))?` and set `TunnelConfig.address: Option<String>`; add `mod tunnel_address;`. Replace the `Some(tc) => { … }` arm of `let tunnel = match tunnel_config` with:
 
 ```rust
         Some(tc) => {
@@ -4095,7 +4095,7 @@ In `subscribe_once`, replace the `if let Some(reg) = parse_sse_event(&event) { �
                 tc.controller_token.clone(),
                 wg.clone(),
             ));
-            // Register ourselves (periodically) so every origin's `gsp-agent`
+            // Register ourselves (periodically) so every origin's `wayhouse-agent`
             // can peer with us — the mirror image of `task` above.
             let register_task = tokio::spawn(proxy_register::run(
                 client,
@@ -4111,15 +4111,15 @@ In `subscribe_once`, replace the `if let Some(reg) = parse_sse_event(&event) { �
 
 - [x] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p gsp 2>&1 | tail -8`
+Run: `cargo test -p wayhouse 2>&1 | tail -8`
 Expected: `test result: ok.`
 
 - [x] **Step 5: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
-git add -A crates/gsp
-git commit -m "feat(gsp): register for a tunnel address before bringing the tunnel up, route origins as /32
+git add -A crates/wayhouse
+git commit -m "feat(wayhouse): register for a tunnel address before bringing the tunnel up, route origins as /32
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ```
@@ -4129,11 +4129,11 @@ Expected: `make check` exits 0.
 ### Task 7: End-to-end — harness, the un-ignored bug test, and new scenarios
 
 **Files:**
-- Modify: `crates/gsp-fleet-tests/src/tunnel.rs`, `crates/gsp-fleet-tests/tests/tunnel.rs`
+- Modify: `crates/wayhouse-fleet-tests/src/tunnel.rs`, `crates/wayhouse-fleet-tests/tests/tunnel.rs`
 - Modify: `Makefile` (`tunnel-e2e`, `tunnel-e2e-ci`)
 
 **Interfaces:**
-- Consumes: Tasks 1–6 (a controller with `--tunnel-network`, agents/proxies that need no hand-picked addresses), `gsp_fleet_tests::{spawn_controller_with, port_is_down, wait_until, wait_http_up}`.
+- Consumes: Tasks 1–6 (a controller with `--tunnel-network`, agents/proxies that need no hand-picked addresses), `wayhouse_fleet_tests::{spawn_controller_with, port_is_down, wait_until, wait_http_up}`.
 - Produces on `TunnelLab`:
   - `start_edge(&mut self, name: &str, pinned_pubkey: Option<&str>) -> Result<usize>` (the `tunnel_last_octet` argument is gone)
   - `origin_ip(&self) -> Ipv4Addr`, `proxy_address(&self, name: &str) -> Result<String>`, `proxy_last_seen(&self, name: &str) -> Result<u64>`
@@ -4141,7 +4141,7 @@ Expected: `make check` exits 0.
 
 - [x] **Step 1: Write the failing scenarios**
 
-In `tests/tunnel.rs`: change the import to `use gsp_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};`; change **every** `t.start_edge("edge-N", <octet>, X)` call to `t.start_edge("edge-N", X)` (seven call sites); delete the sentence "(That the *first* proxy keeps working alongside it is NOT asserted here — it doesn't today; see `known_bug_two_proxies_cannot_share_one_origin`.)" from scenario 3's doc comment.
+In `tests/tunnel.rs`: change the import to `use wayhouse_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};`; change **every** `t.start_edge("edge-N", <octet>, X)` call to `t.start_edge("edge-N", X)` (seven call sites); delete the sentence "(That the *first* proxy keeps working alongside it is NOT asserted here — it doesn't today; see `known_bug_two_proxies_cannot_share_one_origin`.)" from scenario 3's doc comment.
 
 Rename `known_bug_two_proxies_cannot_share_one_origin` to `two_proxies_share_one_origin`, remove its `#[ignore = "KNOWN BUG …"]` attribute in favour of the standard `#[ignore = "needs a user+net namespace: run via `make tunnel-e2e`"]`, and replace its doc comment with:
 
@@ -4233,7 +4233,7 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
 }
 ```
 
-Run: `cargo test -p gsp-fleet-tests --test tunnel --no-run 2>&1 | tail -15`
+Run: `cargo test -p wayhouse-fleet-tests --test tunnel --no-run 2>&1 | tail -15`
 Expected: compile errors — ``this method takes 3 arguments but 2 arguments were supplied`` (`start_edge`) and ``no method named `origin_ip` ``, `proxy_address`, `proxy_last_seen`, `stop_controller`, `start_controller`, `restart_edge`, `wait_roundtrip_after_restart`, `agent_refused`.
 
 - [x] **Step 2: Implement the harness changes (`src/tunnel.rs`)**
@@ -4271,7 +4271,7 @@ struct Origin {
 
 struct Edge {
     /// `None` only transiently, while [`TunnelLab::restart_edge`] swaps it.
-    gsp: Option<Proc>,
+    wayhouse: Option<Proc>,
     ns: Ns,
     args: Vec<String>,
 }
@@ -4295,20 +4295,20 @@ and store `ip` in `Origin`.
 `start_edge`: new signature `(&mut self, name: &str, pinned_pubkey: Option<&str>)`; delete the `"--tunnel-address", &format!("10.60.0.{tunnel_last_octet}/24")` pair; after spawning:
 
 ```rust
-        let gsp = Proc::spawn_in(Some(&ns), "gsp", &args)?;
+        let wayhouse = Proc::spawn_in(Some(&ns), "wayhouse", &args)?;
         wait_http_up(
             &format!("http://{}:{ADMIN_PORT}/healthz", ns.underlay()),
             Duration::from_secs(20),
         )
         .await?;
         self.edges.push(Edge {
-            gsp: Some(gsp),
+            wayhouse: Some(wayhouse),
             ns,
             args,
         });
 ```
 
-`Drop`: `if let Some(c) = &self.controller { dump(c); }` and `if let Some(g) = &e.gsp { dump(g); }`.
+`Drop`: `if let Some(c) = &self.controller { dump(c); }` and `if let Some(g) = &e.wayhouse { dump(g); }`.
 
 New methods:
 
@@ -4388,17 +4388,17 @@ New methods:
         Err(last.expect("at least one attempt ran")).context("restarting the controller")
     }
 
-    /// Kill an edge's `gsp` and start it again with the same arguments in the
-    /// same namespace. A killed kernel-backend `gsp` leaves its WireGuard
+    /// Kill an edge's `wayhouse` and start it again with the same arguments in the
+    /// same namespace. A killed kernel-backend `wayhouse` leaves its WireGuard
     /// interface behind (and a killed boringtun its socket), so both are
     /// removed first — what a supervisor or an operator would do.
     pub async fn restart_edge(&mut self, idx: usize) -> Result<()> {
-        self.edges[idx].gsp = None;
+        self.edges[idx].wayhouse = None;
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = self.edges[idx].ns.run(&["ip", "link", "del", "gsp-tunnel0"]);
-        let _ = std::fs::remove_file("/run/wireguard/gsp-tunnel0.sock");
-        let gsp = Proc::spawn_in(Some(&self.edges[idx].ns), "gsp", &self.edges[idx].args)?;
-        self.edges[idx].gsp = Some(gsp);
+        let _ = self.edges[idx].ns.run(&["ip", "link", "del", "wayhouse-tun0"]);
+        let _ = std::fs::remove_file("/run/wireguard/wayhouse-tun0.sock");
+        let wayhouse = Proc::spawn_in(Some(&self.edges[idx].ns), "wayhouse", &self.edges[idx].args)?;
+        self.edges[idx].wayhouse = Some(wayhouse);
         wait_http_up(
             &format!(
                 "http://{}:{ADMIN_PORT}/healthz",
@@ -4436,7 +4436,7 @@ New methods:
             "--name",
             name,
             "--iface",
-            "gsp-agent1",
+            "wayhouse-agent1",
             "--listen-port",
             &WG_PORT.to_string(),
             "--address",
@@ -4450,7 +4450,7 @@ New methods:
         .map(|s| s.to_string())
         .collect();
         args.extend(self.backend.agent_flag().map(str::to_string));
-        let mut agent = Proc::spawn_in(Some(&ns), "gsp-agent", &args)?;
+        let mut agent = Proc::spawn_in(Some(&ns), "wayhouse-agent", &args)?;
         wait_until(
             || {
                 let code = agent.exit_code();
@@ -4471,7 +4471,7 @@ In `tunnel-e2e` remove `--skip known_bug_` from the test arguments. In `tunnel-e
 - [x] **Step 4: Run the scenarios — the whole tunnel suite on both backends**
 
 ```bash
-cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui
 TUNNEL_BACKEND=kernel make tunnel-e2e-ci 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E "^\s+(PASS|FAIL)|Summary"
 TUNNEL_BACKEND=userspace make tunnel-e2e-ci 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E "^\s+(PASS|FAIL)|Summary"
 ```
@@ -4483,7 +4483,7 @@ Also run the plain-`cargo test` path once: `TUNNEL_BACKEND=userspace make tunnel
 
 ```bash
 cargo fmt --all && make check
-git add -A crates/gsp-fleet-tests Makefile
+git add -A crates/wayhouse-fleet-tests Makefile
 git commit -m "test(fleet): tunnel e2e on controller-allocated addresses; the multi-proxy bug is fixed
 
 Un-ignores two_proxies_share_one_origin (was known_bug_…), drops --skip
@@ -4514,14 +4514,14 @@ In `deploy/lint.sh`'s ruby block, before the final `if errs.empty?`, add:
 ctl_cmd = tunnel["controller"]["command"]
 errs << "tunnel override: controller needs --tunnel-network=10.60.0.0/16" unless ctl_cmd.include?("--tunnel-network=10.60.0.0/16")
 errs << "tunnel override: controller lost the base flags" unless %w[--listen=0.0.0.0:9901 --data-dir=/data].all? { |f| ctl_cmd.include?(f) } && ctl_cmd.any? { |a| a.start_with?("--auth-token=") }
-errs << "tunnel override: gsp must not hand-pick --tunnel-address" if tunnel["gsp"]["command"].any? { |a| a.start_with?("--tunnel-address") }
+errs << "tunnel override: wayhouse must not hand-pick --tunnel-address" if tunnel["wayhouse"]["command"].any? { |a| a.start_with?("--tunnel-address") }
 agent_cmd = tunnel["agent"]["command"]
 errs << "tunnel override: agent must not hand-pick --address" if agent_cmd.any? { |a| a.start_with?("--address") }
 errs << "tunnel override: agent backends should use the :port shorthand" unless agent_cmd.include?("--backends=:25565")
 ```
 
 Run: `sh deploy/lint.sh`
-Expected: `LINT FAIL:` for the controller flag, the gsp `--tunnel-address`, the agent `--address` and the backends shorthand.
+Expected: `LINT FAIL:` for the controller flag, the wayhouse `--tunnel-address`, the agent `--address` and the backends shorthand.
 
 - [x] **Step 2: Update the compose tunnel override**
 
@@ -4539,25 +4539,25 @@ services:
     command:
       - --listen=0.0.0.0:9901
       - --data-dir=/data
-      - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
+      - --auth-token=${WAYHOUSE_CONTROLLER_TOKEN:?set WAYHOUSE_CONTROLLER_TOKEN in .env}
       - --tunnel-network=10.60.0.0/16
-  gsp:
+  wayhouse:
     user: "0"          # NET_ADMIN is only in the bounding set for non-root: run as root
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
-    volumes: ["gsp-tunnel-data:/data"]
+    volumes: ["wayhouse-tunnel-data:/data"]
     command:
       - --controller=http://127.0.0.1:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --aggregator=http://127.0.0.1:9902
-      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
-      - --tunnel-iface=gsp-tun0
-      - --tunnel-key-file=/data/gsp-tunnel.key
+      - --aggregator-token=${WAYHOUSE_AGGREGATOR_TOKEN}
+      - --tunnel-iface=wayhouse-tun0
+      - --tunnel-key-file=/data/wayhouse-tunnel.key
       - --tunnel-controller-url=http://127.0.0.1:9901
-      - --tunnel-controller-token=${GSP_CONTROLLER_TOKEN}
+      - --tunnel-controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --tunnel-name=demo-proxy
-      - --tunnel-endpoint=${GSP_TUNNEL_ENDPOINT:?public ip:port origins dial}
-      - --aggregator-instance=demo-gsp
+      - --tunnel-endpoint=${WAYHOUSE_TUNNEL_ENDPOINT:?public ip:port origins dial}
+      - --aggregator-instance=demo-wayhouse
   # An origin's agent normally runs next to the game server, on another host;
   # it is here only to show the flags, so it is opt-in:
   #   docker compose -f docker-compose.yml -f compose.tunnel.yml --profile origin-demo up -d
@@ -4569,8 +4569,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN_SOURCE: ${BIN_SOURCE:-builder}
-      target: gsp-agent
-    image: gsp-deploy/gsp-agent:local
+      target: wayhouse-agent
+    image: wayhouse-deploy/wayhouse-agent:local
     network_mode: host
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
@@ -4578,12 +4578,12 @@ services:
     command:
       - --data-dir=/data
       - --controller-url=http://127.0.0.1:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --name=demo-origin
       - --backends=:25565
-      - --listen-port=51821   # gsp already owns UDP 51820 on this shared host network
+      - --listen-port=51821   # wayhouse already owns UDP 51820 on this shared host network
 volumes:
-  gsp-tunnel-data:
+  wayhouse-tunnel-data:
   agent-data:
 ```
 
@@ -4601,7 +4601,7 @@ Expected: `deploy lint: ok` twice.
 ```markdown
 ## Address authority (built 2026-10-02)
 
-`gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
+`wayhouse-controller` allocates tunnel-internal addresses, so no operator chooses (or
 mis-chooses) one. Design and decisions:
 [`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md).
 
@@ -4611,7 +4611,7 @@ mis-chooses) one. Design and decisions:
   instead **pin** an address, which is granted only if free (`409` otherwise). One
   global address space is shared by origins and proxies. Without `--tunnel-network`
   the controller is pin-only: it enforces uniqueness but allocates nothing.
-- **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
+- **Startup.** `wayhouse-agent` and `wayhouse --tunnel-*` register *before* bringing their
   interface up (the answer is its address), persist the answer next to their key, and
   can start from it while the controller is down. A later, different answer is logged
   as an error and not applied until a restart.
@@ -4629,7 +4629,7 @@ mis-chooses) one. Design and decisions:
 
 Then grep `docs/11`, `docs/12`, `docs/08` and `README.md` for `--address`, `--tunnel-address`, `--backends`, `0.0.0.0/0` and `known bug` (`grep -n -- '--address\|--tunnel-address\|--backends\|0\.0\.0\.0/0\|known.bug' docs/11-backend-transport.md docs/12-deployment.md docs/08-roadmap.md README.md`) and update each hit to the new behaviour (addresses optional/allocated; `/32` peers). In `docs/08-roadmap.md` change the "Phase 14 follow-ups" bullet to record that the multi-proxy fix and the address authority landed.
 
-`AGENTS.md`: under `gsp-controller/` add `addresses.rs` ("tunnel address book: allocation, pinning, release; shared by both peer registries") and `addresses/api.rs`; under `gsp-agent/` add `address_store.rs`; under `gsp/` add `tunnel_address.rs`; in the Commands table's `make tunnel-e2e` row drop any mention of skipping a known bug.
+`AGENTS.md`: under `wayhouse-controller/` add `addresses.rs` ("tunnel address book: allocation, pinning, release; shared by both peer registries") and `addresses/api.rs`; under `wayhouse-agent/` add `address_store.rs`; under `wayhouse/` add `tunnel_address.rs`; in the Commands table's `make tunnel-e2e` row drop any mention of skipping a known bug.
 
 `HANDOVER.md`: (a) delete the "**KNOWN BUG — a second proxy steals the first one's route**" paragraph; (b) delete the "**Tunnel address authority** (phase 14, `docs/11` "Open questions")" bullet under "Deferred / not built"; (c) in "Current state"/"Remaining work" remove tunnel address authority from the remaining list and add a "most recent landings" bullet for it; (d) in the "Known follow-ups" row "Tunnel address authority — deferred pieces", change "Designed alongside item 3 (…, once written)" to "Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`"; (e) fix the tunnel e2e note that says the test is skipped by `make tunnel-e2e`; (f) update "Last updated".
 

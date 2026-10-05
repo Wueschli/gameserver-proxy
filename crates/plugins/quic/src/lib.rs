@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: QUIC Initial packets.
+//! `wayhouse` sniffer plugin: QUIC Initial packets.
 //!
 //! A client's first datagram on a new QUIC connection is an Initial packet in
 //! a *long header*: byte 0 has the header-form and fixed bits set
@@ -29,7 +29,7 @@ const MIN_INITIAL_DCID_LEN: u8 = 8;
 
 /// Recognise a QUIC Initial in `first`. Pure, so it is unit tested natively;
 /// `sniff` below is the ABI wrapper the host calls.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     let (&b0, rest) = first.split_first()?;
     if b0 & 0xc0 != 0xc0 {
         return None; // not a long header with the fixed bit set
@@ -58,7 +58,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     // SNI in the later one, a forged packet) is not a reason to drop the
     // recognition: the key-only hint stands.
     let host = initial::extract_sni(first).map(|h| &*Box::leak(h.into_boxed_str()));
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         host,
         key: Some("quic"),
         ..Default::default()
@@ -68,13 +68,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// QUIC recognition is a fixed structural check: no config, `cfg_*` ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note.
+/// See `wayhouse_sniffer_abi::input`'s safety note.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

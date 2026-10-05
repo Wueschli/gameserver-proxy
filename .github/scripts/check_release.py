@@ -2,7 +2,7 @@
 """Refuses a release tag that disagrees with the workspace version.
 
 The images are labelled and tagged from the git tag, but every binary reports
-`[workspace.package] version` from Cargo.toml (`--version`, `gsp_build_info`).
+`[workspace.package] version` from Cargo.toml (`--version`, `wayhouse_build_info`).
 `v0.1.0` on a tree that still says 0.0.1 would publish `:0.1.0` images whose
 binaries say 0.0.1, so release.yml runs this first.
 

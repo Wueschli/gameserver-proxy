@@ -11,7 +11,7 @@ Last updated: 2026-10-04.
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
-`make check`.** Remaining work is the [open GitHub issues](https://github.com/Wueschli/gameserver-proxy/issues). Every CI job
+`make check`.** Remaining work is the [open GitHub issues](https://github.com/wayhouse-proxy/wayhouse/issues). Every CI job
 blocks except the two informational security scans, `trivy` and `audit` (2026-10-02,
 owner's call).
 
@@ -27,8 +27,8 @@ Owner decisions that still hold:
 
 | Question | Decision |
 |----------|----------|
-| Native TLS on the fleet HTTP servers | Built (2026-10-02): controller, aggregator and UI via `--tls-cert`/`--tls-key`, `gsp`'s admin API via `settings.admin.tls`. New client code must not hard-code `http://` and must build clients via `gsp_http::{client, builder}`. |
-| Publish the reference images | Docker only, amd64, to GHCR on `vX.Y.Z` tags (`.github/workflows/release.yml`, 2026-10-04; gated on tag = workspace version, green CI on main, and a built + smoked image set before any push, #112). Multi-arch and Kubernetes packaging: [#88](https://github.com/Wueschli/gameserver-proxy/issues/88). |
+| Native TLS on the fleet HTTP servers | Built (2026-10-02): controller, aggregator and UI via `--tls-cert`/`--tls-key`, `wayhouse`'s admin API via `settings.admin.tls`. New client code must not hard-code `http://` and must build clients via `wayhouse_http::{client, builder}`. |
+| Publish the reference images | Docker only, amd64, to GHCR on `vX.Y.Z` tags (`.github/workflows/release.yml`, 2026-10-04; gated on tag = workspace version, green CI on main, and a built + smoked image set before any push, #112). Multi-arch and Kubernetes packaging: [#88](https://github.com/wayhouse-proxy/wayhouse/issues/88). |
 | Self-hosted CI runner | Not while the repo is public (GitHub advises against self-hosted runners on public repositories, since fork PRs can run code on them); the switch (PR #21) was closed. |
 
 **CI timings, measured** (2026-10-02). Cold (lockfile changed): `test` 8m15,
@@ -70,23 +70,23 @@ details are in `git log`.
 
 | Date | Feature | Where it is documented |
 |------|---------|------------------------|
-| 2026-10-04 | Live tunnel address change (agent and `gsp` re-address the interface without a restart) | `docs/11` "Address authority" ("Address changes") |
+| 2026-10-04 | Live tunnel address change (agent and `wayhouse` re-address the interface without a restart) | `docs/11` "Address authority" ("Address changes") |
 | 2026-10-03 | CI change detection from `cargo metadata` (`.github/scripts/changes.py`) | [spec](docs/superpowers/specs/2026-10-03-ci-change-detection-design.md), AGENTS.md "CI" |
 | 2026-10-03 | Edge restarts keep the tunnel up (`boot_id` on registrations) | `docs/11` "Edge restarts" |
-| 2026-10-03 | `gsp --aggregator-admin-url` (fan-out through NAT, port maps, TLS terminators) | `docs/12` |
-| 2026-10-03 | Tunnel addresses page in `gsp-ui` (read-only; Release button added 2026-10-04) | `docs/10` "The admin GUI" |
-| 2026-10-03 | TLS handshake flood limits (`gsp_http::tls::HandshakeLimits`) | ADR 29, [spec](docs/superpowers/specs/2026-10-03-tls-handshake-limits-design.md) |
+| 2026-10-03 | `wayhouse --aggregator-admin-url` (fan-out through NAT, port maps, TLS terminators) | `docs/12` |
+| 2026-10-03 | Tunnel addresses page in `wayhouse-ui` (read-only; Release button added 2026-10-04) | `docs/10` "The admin GUI" |
+| 2026-10-03 | TLS handshake flood limits (`wayhouse_http::tls::HandshakeLimits`) | ADR 29, [spec](docs/superpowers/specs/2026-10-03-tls-handshake-limits-design.md) |
 | 2026-10-03 | HA write forwarding bounded by a 10 s timeout (`504` on a hung leader) | `docs/10` |
 | 2026-10-02 | `cargo audit` and Trivy scans in CI (informational) | ADR 28, AGENTS.md commands table |
 | 2026-10-02 | Native TLS for every fleet HTTP server | ADR 27, `docs/12` "Native TLS", [spec](docs/superpowers/specs/2026-10-02-native-tls-other-servers-design.md) |
 | 2026-10-02 | TLS-capable HA peers (`--ha-peers id=https://…`) | `docs/12` "HA replicas over TLS", [spec](docs/superpowers/specs/2026-10-02-ha-tls-peers-design.md) |
-| 2026-10-02 | `--ca-file` on every binary; new crate `gsp-http` | ADR 26, `docs/12`, [spec](docs/superpowers/specs/2026-10-02-custom-ca-design.md) |
-| 2026-10-02 | Tunnel address authority (`gsp-controller --tunnel-network`) | `docs/11` "Address authority", [spec](docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md) |
+| 2026-10-02 | `--ca-file` on every binary; new crate `wayhouse-http` | ADR 26, `docs/12`, [spec](docs/superpowers/specs/2026-10-02-custom-ca-design.md) |
+| 2026-10-02 | Tunnel address authority (`wayhouse-controller --tunnel-network`) | `docs/11` "Address authority", [spec](docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md) |
 | 2026-10-01 | `deploy/`: reference images, Compose demo, k8s manifests | `docs/12`, [`deploy/README.md`](deploy/README.md) |
 
 ## What's built
 
-### Data plane — `gsp` + `gsp-core` + `gsp-config` (phases 0–9 + two follow-on passes)
+### Data plane — `wayhouse` + `wayhouse-core` + `wayhouse-config` (phases 0–9 + two follow-on passes)
 
 - TCP + UDP transparent forwarding, backend pools, active health checks, hot config
   reload (file watch / `SIGHUP` / admin-triggered).
@@ -105,11 +105,11 @@ details are in `git log`.
   (standalone workspace, `make plugins`). Per-plugin config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
   single-level timing-wheel UDP idle expiry.
-- Ops: `gsp_build_info{component,version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
+- Ops: `wayhouse_build_info{component,version,commit}`, `wayhouse_fd_open` / `wayhouse_fd_limit` sampling.
 
 ### Distributed control plane — phases 10–13 (fully built)
 
-- **`gsp-controller`** — Tier-1 config + operator-intent distribution. `sled`-backed
+- **`wayhouse-controller`** — Tier-1 config + operator-intent distribution. `sled`-backed
   revision logs, `GET /config/subscribe` (SSE) catch-up-then-tail,
   revisions / diff / rollback, optional `--auth-token` bearer gate. Fleet hierarchy
   (`standalone` / `slave` relay `--role`), post-install adoption
@@ -117,17 +117,17 @@ details are in `git log`.
   transparent leader HTTP-forwarding — clients stay HA-unaware), staged/canary
   rollout (`?stage=canary&group=`, `POST /config/promote/{rev}`), per-revision
   `actor` audit field.
-- **`gsp-aggregator`** — leaf→root fleet-state push (`POST /ingest` →
+- **`wayhouse-aggregator`** — leaf→root fleet-state push (`POST /ingest` →
   `GET /fleet/pools|sessions|healthz|subscribe`), aggregator-of-aggregators
   hierarchy (namespaced `tier/instance`), intent-verb fan-out (targeted
   drain/undrain + broadcast backend/route-hint edits), `--auth-token` (`/fleet/*`) /
   `--ingest-token` (`POST /ingest` only) / `--instance-token` (outbound) gates; a pushed
-  `admin_url` must be the pusher's own IP or match `--instance-url-allow`. No `gsp-core`/`gsp-config` dep; carries no durable state.
-- **`gsp-ui`** — dedicated BFF process (not hosted in controller/aggregator).
+  `admin_url` must be the pusher's own IP or match `--instance-url-allow`. No `wayhouse-core`/`wayhouse-config` dep; carries no durable state.
+- **`wayhouse-ui`** — dedicated BFF process (not hosted in controller/aggregator).
   Session-cookie auth, proxies both upstream APIs forwarding response headers,
   `GET /ws/fleet` live feed off one shared aggregator SSE subscription, RBAC
   (`viewer` < `operator` < `admin` via `--users-file` argon2 hashes; legacy
-  single `--ui-password` kept). React + Vite + TS frontend in `crates/gsp-ui/web/`
+  single `--ui-password` kept). React + Vite + TS frontend in `crates/wayhouse-ui/web/`
   (`make ui`, `--static-dir`) — redesigned in `d86c786` (Tailwind + Radix,
   react-router, grouped fleet tree via `settings.group`, schema-driven settings
   form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
@@ -137,15 +137,15 @@ details are in `git log`.
   vitest suite (`make ui-test`, CI `ui` job) pins that, a Playwright smoke test
   (`make ui-e2e`, same job, backend stubbed with `page.route`) drives the Settings
   confirm in a real browser, and
-  `gsp-ui`'s `header_contract` test pins that every proxied route forwards
+  `wayhouse-ui`'s `header_contract` test pins that every proxied route forwards
   status + response headers (**add new proxied routes to its `ROUTES` table**).
 - **Tier-2 regional health gossip** — embedded `foca` SWIM mesh over one HMAC-auth
   UDP socket, per-backend last-writer-wins health broadcast piggybacked on foca's
   own anti-entropy, quorum-based `Backend::domain_down` override (additive to the
   local `healthy` flag; only a local `rise` streak clears `healthy`). Spawned only
   when `settings.gossip` is set.
-- **`crates/gsp-fleet-tests`** — spawns the real `gsp` / `gsp-controller` /
-  `gsp-aggregator` binaries as child processes over real HTTP; part of `make check`
+- **`crates/wayhouse-fleet-tests`** — spawns the real `wayhouse` / `wayhouse-controller` /
+  `wayhouse-aggregator` binaries as child processes over real HTTP; part of `make check`
   (adds ~15–20 s).
 
 ### Backend transport — phase 14 (`docs/11`, ADR 25)
@@ -156,18 +156,18 @@ data plane (kernel module primary, `boringtun` userspace fallback). All 7 slices
 built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 --device=/dev/net/tun`).
 
-- **`gsp-agent`** — origin-side binary (own workspace crate). Brings up one local
+- **`wayhouse-agent`** — origin-side binary (own workspace crate). Brings up one local
   WireGuard interface via `defguard/wireguard-rs`, persists a stable keypair
   (`<data_dir>/private.key`, `0600`, never rotated by this code), registers its
   pubkey + fronted backend addresses with the controller's backend-peers registry
   on a fixed interval, and subscribes to the proxy-peers registry to reconcile every
   proxy onto its interface.
-- **`gsp-controller`** — two registries alongside the config/intent logs, each its
+- **`wayhouse-controller`** — two registries alongside the config/intent logs, each its
   own `sled` db: `peers` (backend-peers — origins register, proxies subscribe) and
   `proxy_peers` (the mirror — proxies register, agents subscribe). `POST` / `GET` /
   `GET …/subscribe` on each; validated (pubkey base64-decodes to 32 bytes, backends
   parse as `SocketAddr`) before the store.
-- **`gsp` `--tunnel-*`** — brings up the shared WireGuard interface *before* any
+- **`wayhouse` `--tunnel-*`** — brings up the shared WireGuard interface *before* any
   listener/source starts (an ordering bug fix — a failing `--tunnel-*` must leave
   zero listeners bound), subscribes to backend-peers and reconciles every origin
   onto the interface's peer list (add/update only, never remove — no "gone for
@@ -204,10 +204,10 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **Fixed-sleep test flakes (fixed 2026-10-01)**: `resolver_target_gets_a_proxy_protocol_header`
   and `acl_deny_drops_the_connection_before_routing` slept 150 ms then `connect().unwrap()`,
   which loses to listener startup under parallel load; they now retry the connect
-  until the listener is up. `gsp-controller`'s `seeded_entries_are_readable_and_persist_across_a_reopen`
+  until the listener is up. `wayhouse-controller`'s `seeded_entries_are_readable_and_persist_across_a_reopen`
   reopened `sled` immediately after dropping it (the file lock is released on a
   background thread); it now retries the open. **The other ~30 `sleep(150ms)` +
-  connect tests in `crates/gsp-core/tests/tcp_forward.rs` have the same shape** —
+  connect tests in `crates/wayhouse-core/tests/tcp_forward.rs` have the same shape** —
   if one flakes, reuse `connect_when_listening` there rather than lengthening the sleep.
 - **sled lock flake (fixed 2026-10-04)**: `ha::import::tests::set_aside_moves_only_unmarked_non_empty_dirs`
   failed now and then with `WouldBlock` ("could not acquire lock"). Same cause as above, and
@@ -220,7 +220,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   the lock for 300 ms and failed before the fix. The flake itself was not reproduced
   locally (100 runs under load), so the link to the CI failure follows from the cause.
 - **UDP idle-eviction test flake (fixed 2026-10-04)**: `an_active_session_survives_past_its_idle_window_then_expires`
-  (`gsp-core/tests/udp_forward.rs`). Two causes. The echo backend is UDP-only, so the pool's default
+  (`wayhouse-core/tests/udp_forward.rs`). Two causes. The echo backend is UDP-only, so the pool's default
   `tcp_connect` health check failed against it and (`fall: 3` every 2 s) marked it unhealthy about 4 s in;
   the test waits for an eviction right around then and got "no healthy backend" instead of the freed
   slot. And the first datagram raced listener startup after a fixed 150 ms sleep. The two idle tests
@@ -241,23 +241,23 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   (hit ≥3×: a pass-through proxy silently dropping every upstream response header;
   `JSON.parse("ok")` on a text body). A thin proxy needs an explicit test that a
   header survives the hop — status + body assertions don't catch it.
-- **`shutdown_grace_sec: 30`** in `config.example.yaml` means `timeout N gsp` does
+- **`shutdown_grace_sec: 30`** in `config.example.yaml` means `timeout N wayhouse` does
   not kill at `N` (SIGTERM starts a graceful drain that can run the full 30 s). Use
   `timeout -s KILL` and give helper processes a longer lifetime than the proxy in
   smoke scripts. Bare `kill`/`pkill` on background test processes has also produced
   a stray "Exit code 144" from the Bash tool in this environment — wrapping each
   process in `timeout -s KILL` instead avoids it. **Never `pkill -f <pattern>` from an
   agent shell:** the pattern also matches the shell's own command line and kills it; use
-  `pkill -KILL -x <exact-process-name>` (`gsp`, `gsp-controller`, `gsp-agent`, …).
-- **`--tunnel-*` / `gsp-agent` need `CAP_NET_ADMIN` + `/dev/net/tun`** (even
+  `pkill -KILL -x <exact-process-name>` (`wayhouse`, `wayhouse-controller`, `wayhouse-agent`, …).
+- **`--tunnel-*` / `wayhouse-agent` need `CAP_NET_ADMIN` + `/dev/net/tun`** (even
   `boringtun` userspace does, for the TUN device). In containers grant both
   (`docs/12`). The rootless tunnel e2e lab gets `CAP_NET_ADMIN` from a user namespace
   (`unshare -Urnm`), so it runs without root or Docker — including in the original dev
   sandbox. `TunnelSource` origin-name matching: `backend_sources[].name` must equal the
-  origin's `gsp-agent --name` (intentionally the same string).
-- **Phase 14 tunnel e2e** — `make tunnel-e2e` (`crates/gsp-fleet-tests/tests/tunnel.rs`,
-  CI job `tunnel`, kernel + userspace matrix) runs the real `gsp-controller` /
-  `gsp-agent` / `gsp --tunnel-*` binaries in rootless network namespaces
+  origin's `wayhouse-agent --name` (intentionally the same string).
+- **Phase 14 tunnel e2e** — `make tunnel-e2e` (`crates/wayhouse-fleet-tests/tests/tunnel.rs`,
+  CI job `tunnel`, kernel + userspace matrix) runs the real `wayhouse-controller` /
+  `wayhouse-agent` / `wayhouse --tunnel-*` binaries in rootless network namespaces
   (`unshare -Urnm`; no Docker, no root). It replaced the one-off Docker harness.
   The CI job is **blocking** since 2026-10-02. It is green on both backends on GitHub (`unshare -Urnm`
   + tmpfs on `/run` and the `wireguard` module work on the Ubuntu runners). The lab now has
@@ -280,7 +280,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   starts the handshake immediately — fix written 2026-10-04, confirmed by
   the `tunnel (userspace)` CI leg (scenario 1 passes in ~8 s, down from ≥25 s for the
   handshake alone; the lab's userspace deadline stays 90 s because `an_edge_restarts_with_the_controller_down` takes ~37 s there); tracked in
-  [#67](https://github.com/Wueschli/gameserver-proxy/issues/67);
+  [#67](https://github.com/wayhouse-proxy/wayhouse/issues/67);
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
   proxies carrying traffic at once.
@@ -288,14 +288,14 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 ## Open follow-ups
 
 Everything not built or not yet fixed is tracked as a
-[GitHub issue](https://github.com/Wueschli/gameserver-proxy/issues), not in this file.
+[GitHub issue](https://github.com/wayhouse-proxy/wayhouse/issues), not in this file.
 Check the issue list before starting new work, and file new follow-ups there rather
 than here. Where the items that used to live here went:
 
 - v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
-  discovery): [#65](https://github.com/Wueschli/gameserver-proxy/issues/65)
-- The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
-- Open design questions: [#69](https://github.com/Wueschli/gameserver-proxy/issues/69)
+  discovery): [#65](https://github.com/wayhouse-proxy/wayhouse/issues/65)
+- The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/wayhouse-proxy/wayhouse/issues/67)
+- Open design questions: [#69](https://github.com/wayhouse-proxy/wayhouse/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
 
@@ -339,7 +339,7 @@ ones with a subtlety.)
   `splice`) — all safe wrappers.
 - **UDP amplification guard**: the proxy never sends to a client without an
   established session; a dropped datagram (routing / ACL / rate / gate) gets no
-  reply. Covered by `crates/gsp-core/tests/amplification.rs`.
+  reply. Covered by `crates/wayhouse-core/tests/amplification.rs`.
 
 ---
 
@@ -431,52 +431,52 @@ rebuild reads `Discovery::get`).
 
 | File | Responsibility |
 |------|----------------|
-| `crates/gsp-config/src/` (`schema.rs` raw YAML types, `validate.rs` `validate()`, `parse.rs`, `resolved.rs`, `cidr.rs`, `matcher.rs`, `keys.rs`; `lib.rs` re-exports) | Raw YAML types, `validate()`, resolved `Config` / `PoolConfig` / `ListenerConfig` / `ResolverConfig` / `SniffersConfig` / `HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `CidrSet` trie, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`); filters (`Acl`, `GeoAcl`, `RateLimit`, `PerSourceLimit`, `GlobalLimits`). **All schema rules here.** |
-| `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools, sources, resolvers, limits, geo_db }`; `build` → `build_with_overlay` → `build_with_sources` carry health/admin-state over by address and apply overlay + discovered backends. |
-| `crates/gsp-core/src/pool.rs` | `Pool` (balancer, `rr` index, `hash_on`, `weights`; `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health / active / streaks / `check_kind` + `AdminState`), `BackendGuard` (RAII slot + passive health), `PickError`. |
-| `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does ACL/geo/rate/`per_source`/global-cap checks, first-bytes peek, route match, pool lookup. |
-| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
-| `crates/gsp-core/src/{ratelimit,src_conns,limits,geo}.rs` | Per-listener token bucket / per-source concurrent cap / process-wide caps / MaxMind country lookup. |
-| `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `Sniffers` `ArcSwap`-backed registry (`register` / `get` / `replace`) + `warn_if_missing`. **No built-in sniffers** — the seam the phase-9 loader fills. |
-| `crates/gsp-core/src/route_hint.rs` | `RouteHints` — `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`), lock-free read. |
-| `crates/gsp-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` (`ArcSwap`-backed) map, `resolve_route` (async route walk), `CachedResolver` (TTL LRU). Transports live in `gsp`. |
-| `crates/gsp-core/src/discovery.rs` + `sources.rs` | `trait BackendSource` + `Discovery` last-known-good cache + `refresh_loop`; `SourceManager` reconciles one refresh task per pool `source` on reload (discovery analogue of `ListenerManager`). |
-| `crates/gsp-core/src/drain.rs` | `ConnTracker` / `ConnGuard` — `watch<usize>` live count + an `id → {proto, listener, peer, local, pool, backend, since}` registry (`GET /sessions`); `wait_idle()`. |
-| `crates/gsp-core/src/overlay.rs` | `BackendOverlay` — runtime backend add/remove, layered on file `targets` at rebuild. |
-| `crates/gsp-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`splice` / buffered). Writes the PROXY protocol header before the pump. |
-| `crates/gsp-core/src/proxy_protocol.rs` | `header(mode, src, dst)` — PROXY protocol v1 (text) / v2 (binary, STREAM or DGRAM). Write-only. |
-| `crates/gsp-core/src/health.rs` | 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + `gsp_pool_backends` gauges. |
-| `crates/gsp-core/src/runtime.rs` | `Runtime::start*` builds `ListenerManager` + `SourceManager` + health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `Sniffers` / `reload_requested`. `shutdown_with_grace` = stop listeners + await health + `wait_idle` + `abort_all`. |
-| `crates/gsp-core/src/listeners.rs` | `ListenerManager` — one task `Group` (workers + `watch<bool>` stop) per listener; `start_all`, `reconcile(&Snapshot)` (diff by name), `stop_all` / `abort_all`. |
-| `crates/gsp-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind` / `transparent`), `bind_reuseport_udp` (`UdpMode`), `bind_transparent_udp`, `connect_tcp_from`, `set_ip_transparent` (v4 + v6). |
-| `crates/gsp-core/src/metrics_defs.rs` | **Every metric name** (`pub const`). |
-| `crates/gsp/src/main.rs` | CLI (`--config`, `--check`), tracing, runtime bring-up, shutdown. Opens `geo_db` + builds sniffers (fails `--check` / startup on a bad one). |
-| `crates/gsp/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions`; `POST /route-hint` `/admin/drain` `/admin/undrain`; `PATCH` backend state; `POST` / `DELETE` a backend. `router(state)` split out for the in-module HTTP tests. |
-| `crates/gsp/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers`. |
-| `crates/gsp/src/sniffer_loader.rs` | `SnifferLoader` (shared `wasmtime::Engine` + epoch-ticker thread) + `scan(&SniffersConfig)`; `WasmSniffer`; `build_sniffers` = `new` + one `scan`. |
-| `crates/gsp/src/discovery.rs` | `DnsSrvSource` (`hickory-resolver`), `ConsulSource` / `KubernetesSource` (`reqwest`), `DiscoveryFactory`. |
-| `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
-| `crates/gsp/src/procinfo.rs` | `gsp_fd_open` / `gsp_fd_limit` — a small detached `/proc/self/fd` sampling task. |
-| `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
-| `crates/gsp-controller/src/addresses.rs` + `addresses/api.rs` | Tunnel address authority: `Network`, `AddressBook` (claim / release / entries over two sled trees, one mutex, flush after each transaction), `expand_backends`, `resolve_flags`; `GET /tunnel/addresses`, `claim_error_response` (409 / 422 / 503 mapping), the daily stale warning. Shared by both peer registries. |
-| `crates/gsp-controller/src/lease.rs` | `--tunnel-lease-ttl` expiry: `sweep` (list the book, `RegistryState::expire` each owner unseen past the cutoff, re-checked where the write lands), `lease_loop` (leader-only, 1 h startup grace), `check_ttl` (min 2 h). Under HA the write is `WriteRequest::Expire`. |
-| `crates/gsp-controller/src/{peers,proxy_peers}.rs` + `{peers,proxy_peers}/api.rs` | The two mirrored registries (origins register in `peers`, proxies in `proxy_peers`): `POST` claims an address atomically with the registration (under a per-registry write lock), `DELETE` releases it and logs a tombstone, SSE `subscribe` replays registrations and tombstones. |
-| `crates/gsp-agent/src/{register,address_store,proxy_subscribe,interface,keypair,main}.rs` | Origin agent: register first (bounded `http_client()`), `resolve_startup` picks controller answer vs saved `<data_dir>/tunnel-address`, `/32` proxy peers, `plan()`/`Action` for events and tombstones. |
-| `crates/gsp/src/{proxy_register,tunnel_address,tunnel_client}.rs` (+ the `--tunnel-*` block in `main.rs`) | Proxy side of the same: register before bringing the interface up (before any listener binds), saved address at `<tunnel-key-file>.address`, `/32` origin peers, tombstones. |
-| `crates/plugins/` | Standalone workspace (own `[workspace]`): `gsp-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `gsp` / `gsp-core`. |
-| `crates/gsp-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `gsp` process, connection-count ramp, `/proc` RSS/fd sampling). |
-| `crates/gsp-fleet-tests/` | Phase 10+11 slice 12 (+ phase 14 `tests/tunnel.rs`, `#[ignore]`d, `make tunnel-e2e`, with `src/{netns,echo,tunnel}.rs` helpers): `cargo test -p gsp-fleet-tests` (part of `make check`) spawns real `gsp`/`gsp-controller`/`gsp-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
-| `crates/gsp-config/fuzz/` | Standalone workspace: `extract_sni` / `route_match` / `parse_config` `cargo-fuzz` targets. `make fuzz` (nightly). |
+| `crates/wayhouse-config/src/` (`schema.rs` raw YAML types, `validate.rs` `validate()`, `parse.rs`, `resolved.rs`, `cidr.rs`, `matcher.rs`, `keys.rs`; `lib.rs` re-exports) | Raw YAML types, `validate()`, resolved `Config` / `PoolConfig` / `ListenerConfig` / `ResolverConfig` / `SniffersConfig` / `HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `CidrSet` trie, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`); filters (`Acl`, `GeoAcl`, `RateLimit`, `PerSourceLimit`, `GlobalLimits`). **All schema rules here.** |
+| `crates/wayhouse-core/src/snapshot.rs` | `Snapshot { listeners, pools, sources, resolvers, limits, geo_db }`; `build` → `build_with_overlay` → `build_with_sources` carry health/admin-state over by address and apply overlay + discovered backends. |
+| `crates/wayhouse-core/src/pool.rs` | `Pool` (balancer, `rr` index, `hash_on`, `weights`; `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health / active / streaks / `check_kind` + `AdminState`), `BackendGuard` (RAII slot + passive health), `PickError`. |
+| `crates/wayhouse-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does ACL/geo/rate/`per_source`/global-cap checks, first-bytes peek, route match, pool lookup. |
+| `crates/wayhouse-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
+| `crates/wayhouse-core/src/{ratelimit,src_conns,limits,geo}.rs` | Per-listener token bucket / per-source concurrent cap / process-wide caps / MaxMind country lookup. |
+| `crates/wayhouse-core/src/sniff.rs` | `Sniffer` trait + `Sniffers` `ArcSwap`-backed registry (`register` / `get` / `replace`) + `warn_if_missing`. **No built-in sniffers** — the seam the phase-9 loader fills. |
+| `crates/wayhouse-core/src/route_hint.rs` | `RouteHints` — `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`), lock-free read. |
+| `crates/wayhouse-core/src/resolver.rs` | `trait Resolver`, `ResolveRequest` / `Resolution` / `ResolveError`, `Resolvers` (`ArcSwap`-backed) map, `resolve_route` (async route walk), `CachedResolver` (TTL LRU). Transports live in `wayhouse`. |
+| `crates/wayhouse-core/src/discovery.rs` + `sources.rs` | `trait BackendSource` + `Discovery` last-known-good cache + `refresh_loop`; `SourceManager` reconciles one refresh task per pool `source` on reload (discovery analogue of `ListenerManager`). |
+| `crates/wayhouse-core/src/drain.rs` | `ConnTracker` / `ConnGuard` — `watch<usize>` live count + an `id → {proto, listener, peer, local, pool, backend, since}` registry (`GET /sessions`); `wait_idle()`. |
+| `crates/wayhouse-core/src/overlay.rs` | `BackendOverlay` — runtime backend add/remove, layered on file `targets` at rebuild. |
+| `crates/wayhouse-core/src/proxy.rs` | `handle_tcp` (pool) / `handle_tcp_target` (resolver `target`, no guard) → `connect_backend` + `pump` (`splice` / buffered). Writes the PROXY protocol header before the pump. |
+| `crates/wayhouse-core/src/proxy_protocol.rs` | `header(mode, src, dst)` — PROXY protocol v1 (text) / v2 (binary, STREAM or DGRAM). Write-only. |
+| `crates/wayhouse-core/src/health.rs` | 500 ms sweep, probes due backends (`tcp_connect` / `udp_probe`), updates health + `wayhouse_pool_backends` gauges. |
+| `crates/wayhouse-core/src/runtime.rs` | `Runtime::start*` builds `ListenerManager` + `SourceManager` + health task; owns `RouteHints` / `ConnTracker` / `BackendOverlay` / `Sniffers` / `reload_requested`. `shutdown_with_grace` = stop listeners + await health + `wait_idle` + `abort_all`. |
+| `crates/wayhouse-core/src/listeners.rs` | `ListenerManager` — one task `Group` (workers + `watch<bool>` stop) per listener; `start_all`, `reconcile(&Snapshot)` (diff by name), `stop_all` / `abort_all`. |
+| `crates/wayhouse-core/src/net.rs` | `bind_reuseport_tcp` (+ `freebind` / `transparent`), `bind_reuseport_udp` (`UdpMode`), `bind_transparent_udp`, `connect_tcp_from`, `set_ip_transparent` (v4 + v6). |
+| `crates/wayhouse-core/src/metrics_defs.rs` | **Every metric name** (`pub const`). |
+| `crates/wayhouse/src/main.rs` | CLI (`--config`, `--check`), tracing, runtime bring-up, shutdown. Opens `geo_db` + builds sniffers (fails `--check` / startup on a bad one). |
+| `crates/wayhouse/src/admin.rs` | axum router: `GET /healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions`; `POST /route-hint` `/admin/drain` `/admin/undrain`; `PATCH` backend state; `POST` / `DELETE` a backend. `router(state)` split out for the in-module HTTP tests. |
+| `crates/wayhouse/src/resolver.rs` | `HttpResolver` (`reqwest`), `GrpcResolver` (`tonic`, `mod pb` from `build.rs`), `build_resolvers`. |
+| `crates/wayhouse/src/sniffer_loader.rs` | `SnifferLoader` (shared `wasmtime::Engine` + epoch-ticker thread) + `scan(&SniffersConfig)`; `WasmSniffer`; `build_sniffers` = `new` + one `scan`. |
+| `crates/wayhouse/src/discovery.rs` | `DnsSrvSource` (`hickory-resolver`), `ConsulSource` / `KubernetesSource` (`reqwest`), `DiscoveryFactory`. |
+| `crates/wayhouse/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
+| `crates/wayhouse/src/procinfo.rs` | `wayhouse_fd_open` / `wayhouse_fd_limit` — a small detached `/proc/self/fd` sampling task. |
+| `crates/wayhouse/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
+| `crates/wayhouse-controller/src/addresses.rs` + `addresses/api.rs` | Tunnel address authority: `Network`, `AddressBook` (claim / release / entries over two sled trees, one mutex, flush after each transaction), `expand_backends`, `resolve_flags`; `GET /tunnel/addresses`, `claim_error_response` (409 / 422 / 503 mapping), the daily stale warning. Shared by both peer registries. |
+| `crates/wayhouse-controller/src/lease.rs` | `--tunnel-lease-ttl` expiry: `sweep` (list the book, `RegistryState::expire` each owner unseen past the cutoff, re-checked where the write lands), `lease_loop` (leader-only, 1 h startup grace), `check_ttl` (min 2 h). Under HA the write is `WriteRequest::Expire`. |
+| `crates/wayhouse-controller/src/{peers,proxy_peers}.rs` + `{peers,proxy_peers}/api.rs` | The two mirrored registries (origins register in `peers`, proxies in `proxy_peers`): `POST` claims an address atomically with the registration (under a per-registry write lock), `DELETE` releases it and logs a tombstone, SSE `subscribe` replays registrations and tombstones. |
+| `crates/wayhouse-agent/src/{register,address_store,proxy_subscribe,interface,keypair,main}.rs` | Origin agent: register first (bounded `http_client()`), `resolve_startup` picks controller answer vs saved `<data_dir>/tunnel-address`, `/32` proxy peers, `plan()`/`Action` for events and tombstones. |
+| `crates/wayhouse/src/{proxy_register,tunnel_address,tunnel_client}.rs` (+ the `--tunnel-*` block in `main.rs`) | Proxy side of the same: register before bringing the interface up (before any listener binds), saved address at `<tunnel-key-file>.address`, `/32` origin peers, tombstones. |
+| `crates/plugins/` | Standalone workspace (own `[workspace]`): `wayhouse-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` plugins. `make plugins`. Never a dep of `wayhouse` / `wayhouse-core`. |
+| `crates/wayhouse-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `wayhouse` process, connection-count ramp, `/proc` RSS/fd sampling). |
+| `crates/wayhouse-fleet-tests/` | Phase 10+11 slice 12 (+ phase 14 `tests/tunnel.rs`, `#[ignore]`d, `make tunnel-e2e`, with `src/{netns,echo,tunnel}.rs` helpers): `cargo test -p wayhouse-fleet-tests` (part of `make check`) spawns real `wayhouse`/`wayhouse-controller`/`wayhouse-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
+| `crates/wayhouse-config/fuzz/` | Standalone workspace: `extract_sni` / `route_match` / `parse_config` `cargo-fuzz` targets. `make fuzz` (nightly). |
 
 ---
 
 ## Testing
 
 `make check` runs fmt + clippy `-D warnings` + `cargo test --all` (~520 tests across
-`gsp-config`, `gsp-core` (unit + `crates/gsp-core/tests/{tcp_forward,udp_forward,amplification}.rs`),
-`gsp` (incl. the `sniffer_loader` WAT-fixture end-to-end and the admin HTTP tests),
-`gsp-controller` / `gsp-aggregator` / `gsp-ui` / `gsp-agent` (in-module HTTP and unit
-tests) and `crates/gsp-fleet-tests`' real-multi-process tests (`fleet`, `gossip`,
+`wayhouse-config`, `wayhouse-core` (unit + `crates/wayhouse-core/tests/{tcp_forward,udp_forward,amplification}.rs`),
+`wayhouse` (incl. the `sniffer_loader` WAT-fixture end-to-end and the admin HTTP tests),
+`wayhouse-controller` / `wayhouse-aggregator` / `wayhouse-ui` / `wayhouse-agent` (in-module HTTP and unit
+tests) and `crates/wayhouse-fleet-tests`' real-multi-process tests (`fleet`, `gossip`,
 `tunnel_addresses`; they debug-build and spawn the real binaries, adding real wall-clock
 time). Needs `protoc` on `PATH`. Not part of `make check`:
 
@@ -510,7 +510,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 - Toolchain via `rustup` (`stable`). If `cargo` isn't found:
   `export PATH="$HOME/.cargo/bin:$PATH"`.
 - **`protoc` is a build requirement** (gRPC resolver codegen in
-  `crates/gsp/build.rs`). CI installs `protobuf-compiler`.
+  `crates/wayhouse/build.rs`). CI installs `protobuf-compiler`.
 - CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
   and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.py`, tested by
   `changes_test.py`, self-run in CI) decides which path-scoped jobs run from `cargo metadata`
@@ -535,7 +535,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   Verified: a cold run took test 8m41 / build-release 10m53 / deploy 11m25; the next run
   restored the previous commit's snapshot (build-release recompiled 7 crates, 4m02, the rest
   is the thin-LTO link) and test took 3m53, deploy 1m22. Re-measured 2026-10-02 after the
-  lockfile bump for `gsp-http`: cold `test` 8m15 / `build-release` 16.5 min, then warm
+  lockfile bump for `wayhouse-http`: cold `test` 8m15 / `build-release` 16.5 min, then warm
   `test` 4m41 / `build-release` 6m10 (see "Resume here").
   **Test reports:** CI runs Rust tests with `cargo nextest run --profile ci` (config:
   `.config/nextest.toml`; installed via a SHA-pinned `taiki-e/install-action`) and vitest with
@@ -546,8 +546,8 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   not listed in the JUnit XML. **Nextest runs every test in its own process** — anything that
   assumed one shared process breaks (found: the tunnel lab's in-process namespace counter,
   fixed by probing for a free index in `Lab::add_ns`).
-  `build-release` also runs `cargo test -p gsp --release --no-run`: cargo unifies features per
-  invocation, so the plugins job's `-p gsp` test build needs different dependency artifacts
+  `build-release` also runs `cargo test -p wayhouse --release --no-run`: cargo unifies features per
+  invocation, so the plugins job's `-p wayhouse` test build needs different dependency artifacts
   than the five-binary build, and it recompiled 293 crates even on an exact cache hit until
   the snapshot held both.
   **Shared release stage:** a `build-release` job compiles the five release binaries once
@@ -569,7 +569,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   downloads: `kubeconform -strict -summary deploy/k8s`). `docker compose ... config` renders
   the compose files without a daemon. The docs-only push filter means a pure `*.md` /
   `docs/**` change runs no CI; any other change runs at least `test`.
-- git remote `github.com/Wueschli/gameserver-proxy`, branch `main`; `git push`
+- git remote `github.com/wayhouse-proxy/wayhouse`, branch `main`; `git push`
   works, `origin/main` is current. The HTTPS credential helper logs a harmless
   "nonexistent Windows path" warning before falling back to a working credential.
 - `Cargo.toml` declares `MIT OR Apache-2.0` with `LICENSE-MIT` / `LICENSE-APACHE`
@@ -579,5 +579,5 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 
 ## Open questions
 
-Tracked in [#69](https://github.com/Wueschli/gameserver-proxy/issues/69). Cross-instance
+Tracked in [#69](https://github.com/wayhouse-proxy/wayhouse/issues/69). Cross-instance
 session failover is assumed **no** for v1 (ADR 4).

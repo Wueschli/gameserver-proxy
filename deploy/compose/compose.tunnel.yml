@@ -3,7 +3,7 @@
 # 65532). The controller allocates the tunnel addresses (--tunnel-network):
 # nothing here hand-picks one. The tunnel network is IPv6 (a random ULA /64,
 # see docs/12); use an IPv4 one such as 10.60.0.0/16 if a game server binds
-# 0.0.0.0 only. gsp and the agent use the host's network, so the host must not
+# 0.0.0.0 only. wayhouse and the agent use the host's network, so the host must not
 # have IPv6 disabled (a net.* sysctl cannot be set here: Docker refuses it under
 # host networking). Usage (from deploy/compose):
 #   docker compose -f docker-compose.yml -f compose.tunnel.yml up -d
@@ -13,25 +13,25 @@ services:
     command:
       - --listen=0.0.0.0:9901
       - --data-dir=/data
-      - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
+      - --auth-token=${WAYHOUSE_CONTROLLER_TOKEN:?set WAYHOUSE_CONTROLLER_TOKEN in .env}
       - --tunnel-network=fd49:89c1:4b5e:60::/64
-  gsp:
+  wayhouse:
     user: "0"          # NET_ADMIN is only in the bounding set for non-root: run as root
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
-    volumes: ["gsp-tunnel-data:/data"]
+    volumes: ["wayhouse-tunnel-data:/data"]
     command:
       - --controller=http://127.0.0.1:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --aggregator=http://127.0.0.1:9902
-      - --aggregator-token=${GSP_INGEST_TOKEN}
-      - --tunnel-iface=gsp-tun0
-      - --tunnel-key-file=/data/gsp-tunnel.key
+      - --aggregator-token=${WAYHOUSE_INGEST_TOKEN}
+      - --tunnel-iface=wayhouse-tun0
+      - --tunnel-key-file=/data/wayhouse-tunnel.key
       - --tunnel-controller-url=http://127.0.0.1:9901
-      - --tunnel-controller-token=${GSP_CONTROLLER_TOKEN}
+      - --tunnel-controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --tunnel-name=demo-proxy
-      - --tunnel-endpoint=${GSP_TUNNEL_ENDPOINT:?public ip:port origins dial}
-      - --aggregator-instance=demo-gsp
+      - --tunnel-endpoint=${WAYHOUSE_TUNNEL_ENDPOINT:?public ip:port origins dial}
+      - --aggregator-instance=demo-wayhouse
   # An origin's agent normally runs next to the game server, on another host;
   # it is here only to show the flags, so it is opt-in:
   #   docker compose -f docker-compose.yml -f compose.tunnel.yml --profile origin-demo up -d
@@ -43,8 +43,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN_SOURCE: ${BIN_SOURCE:-builder}
-      target: gsp-agent
-    image: gsp-deploy/gsp-agent:local
+      target: wayhouse-agent
+    image: wayhouse-deploy/wayhouse-agent:local
     network_mode: host
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
@@ -52,10 +52,10 @@ services:
     command:
       - --data-dir=/data
       - --controller-url=http://127.0.0.1:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --name=demo-origin
-      - --listen-port=51821   # gsp already owns UDP 51820 on this shared host network
+      - --listen-port=51821   # wayhouse already owns UDP 51820 on this shared host network
       - --backends=:25565
 volumes:
-  gsp-tunnel-data:
+  wayhouse-tunnel-data:
   agent-data:

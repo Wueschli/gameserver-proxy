@@ -1,36 +1,36 @@
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: gsp-aggregator, namespace: gsp }
+metadata: { name: wayhouse-aggregator, namespace: wayhouse }
 spec:
   replicas: 1
-  selector: { matchLabels: { app: gsp-aggregator } }
+  selector: { matchLabels: { app: wayhouse-aggregator } }
   template:
-    metadata: { labels: { app: gsp-aggregator } }
+    metadata: { labels: { app: wayhouse-aggregator } }
     spec:
       securityContext: { runAsNonRoot: true }
       containers:
         - name: aggregator
-          image: gsp-deploy/gsp-aggregator:local
-          # --instance-token is what intent fan-out presents to each gsp admin API.
-          # --ingest-token is what each gsp pushes with; it cannot call /fleet/*.
+          image: wayhouse-deploy/wayhouse-aggregator:local
+          # --instance-token is what intent fan-out presents to each wayhouse admin API.
+          # --ingest-token is what each wayhouse pushes with; it cannot call /fleet/*.
           # A pushed admin_url must name the pusher's own address (the node IP
           # here); if nodes reach the Service from another address, add
           # --instance-url-allow=<node CIDR>.
           args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)", "--ingest-token=$(INGEST_TOKEN)", "--instance-token=$(INSTANCE_TOKEN)"]
           env:
             - name: TOKEN
-              valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+              valueFrom: { secretKeyRef: { name: wayhouse-tokens, key: aggregator-token } }
             - name: INGEST_TOKEN
-              valueFrom: { secretKeyRef: { name: gsp-tokens, key: ingest-token } }
+              valueFrom: { secretKeyRef: { name: wayhouse-tokens, key: ingest-token } }
             - name: INSTANCE_TOKEN
-              valueFrom: { secretKeyRef: { name: gsp-tokens, key: admin-token } }
+              valueFrom: { secretKeyRef: { name: wayhouse-tokens, key: admin-token } }
           ports: [{ containerPort: 9902 }]
           readinessProbe: { httpGet: { path: /healthz, port: 9902 } }
           livenessProbe: { httpGet: { path: /healthz, port: 9902 }, initialDelaySeconds: 10 }
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: gsp-aggregator, namespace: gsp }
+metadata: { name: wayhouse-aggregator, namespace: wayhouse }
 spec:
-  selector: { app: gsp-aggregator }
+  selector: { app: wayhouse-aggregator }
   ports: [{ port: 9902, targetPort: 9902 }]

@@ -27,9 +27,9 @@ class StampTest(unittest.TestCase):
         return r, out
 
     def test_each_report_gets_its_own_category(self):
-        r, out = self.run_in({"image-gsp.sarif": sarif(), "lock-cargo.sarif": sarif()})
+        r, out = self.run_in({"image-wayhouse.sarif": sarif(), "lock-cargo.sarif": sarif()})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(out["image-gsp.sarif"]["runs"][0]["automationDetails"]["id"], "trivy/image-gsp/")
+        self.assertEqual(out["image-wayhouse.sarif"]["runs"][0]["automationDetails"]["id"], "trivy/image-wayhouse/")
         self.assertEqual(out["lock-cargo.sarif"]["runs"][0]["automationDetails"]["id"], "trivy/lock-cargo/")
 
     def test_keeps_the_rest_of_the_report(self):
@@ -38,9 +38,9 @@ class StampTest(unittest.TestCase):
             self.assertEqual(run["tool"]["driver"]["name"], "Trivy")
 
     def test_ignores_other_files_and_empty_dirs(self):
-        r, out = self.run_in({"image-gsp.json": {"x": 1}})
+        r, out = self.run_in({"image-wayhouse.json": {"x": 1}})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(out["image-gsp.json"], {"x": 1})
+        self.assertEqual(out["image-wayhouse.json"], {"x": 1})
 
     def test_needs_a_directory_argument(self):
         r = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True)

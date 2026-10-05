@@ -33,7 +33,7 @@ see `docs/08-roadmap.md`.
 **Phase 13 status (2026-09-05): fully built**, all 5 slices (config schema,
 SWIM membership via embedded `foca`, the per-backend health broadcast,
 `Backend`/`health.rs` integration, and multi-process live verification in
-`crates/gsp-fleet-tests`) — see "Mechanism (built)" under "Tier 2 —
+`crates/wayhouse-fleet-tests`) — see "Mechanism (built)" under "Tier 2 —
 regional health fabric" below, ADR 24 in `docs/09`, and
 `docs/08-roadmap.md` for the slice-by-slice build record.
 
@@ -214,7 +214,7 @@ audited crate for rather than reimplementing. `foca` is transport-agnostic (an
 application provides the socket and timers), which fits this codebase's
 existing preference for owning its own plain UDP socket (`net.rs`) rather than
 depending on a batteries-included clustering framework. One `foca::Foca`
-instance per `gsp` process when gossip is enabled, identified by
+instance per `wayhouse` process when gossip is enabled, identified by
 `(instance_name, gossip bind addr)`.
 
 **Application payload: a per-backend LWW register, piggybacked on foca's own
@@ -243,10 +243,10 @@ theory.
 
 **Wire format and auth.** `postcard` (new workspace dep) for a compact binary
 encoding of both foca's envelopes and the broadcast payload — no schema
-evolution concerns here the way `gsp-config`'s YAML has, since this is
+evolution concerns here the way `wayhouse-config`'s YAML has, since this is
 ephemeral wire state, not anything persisted. Every datagram carries an
 HMAC-SHA256 tag (new `hmac` dep; `sha2` is already a workspace dependency via
-`crates/gsp/Cargo.toml`, promoted to a `gsp-core` dependency too) computed over
+`crates/wayhouse/Cargo.toml`, promoted to a `wayhouse-core` dependency too) computed over
 a per-domain pre-shared key (`settings.gossip.psk`); a bad or missing tag is
 dropped silently and bumps a metric, the same "malformed input is discarded,
 never trusted, never a panic" posture `sniff.rs` already has for plugin
@@ -259,7 +259,7 @@ right amount of ceremony for what's at stake, not the maximum available.
 **Config schema** (built exactly as designed — `settings.gossip.psk` is a
 plain string, not env-substituted like the `${GOSSIP_PSK}` sketch below;
 this codebase has no env-substitution mechanism anywhere else in
-`gsp-config` either, so that stayed a design-stage placeholder, see
+`wayhouse-config` either, so that stayed a design-stage placeholder, see
 `config.example.yaml` for the real, commented-out syntax):
 
 ```yaml
@@ -282,7 +282,7 @@ children, which *is* a valid degenerate case for the controller).
 one new field, `domain_down: AtomicBool`, alongside the existing `healthy:
 AtomicBool` (untouched — still driven only by `observe()`'s local `rise`/
 `fall` streaks, exactly as today). `is_healthy()` becomes `healthy.load() &&
-!domain_down.load()`. A new `gsp-core::gossip` module (control-plane, sits
+!domain_down.load()`. A new `wayhouse-core::gossip` module (control-plane, sits
 next to `health.rs`, spawned by `runtime.rs` only when `settings.gossip` is
 present) owns the `foca` instance, maintains the merged per-backend register
 map, computes the domain-quorum verdict per backend on every membership
@@ -293,10 +293,10 @@ own `rise` streak" above word for word. `AdminState::Disabled` (Tier-1
 force-down) already gates selection independently of both flags, so "Tier-1
 force-down always wins" needs no new mechanism — it already does, today.
 
-**New metrics** (`metrics_defs.rs`, once built): `gsp_gossip_members` (gauge,
-per domain), `gsp_gossip_messages_total` (counter, sent/received), a per
-backend `gsp_backend_domain_down` (gauge 0/1 — whether the domain quorum is
-currently overriding to down), and `gsp_gossip_auth_rejected_total` (counter —
+**New metrics** (`metrics_defs.rs`, once built): `wayhouse_gossip_members` (gauge,
+per domain), `wayhouse_gossip_messages_total` (counter, sent/received), a per
+backend `wayhouse_backend_domain_down` (gauge 0/1 — whether the domain quorum is
+currently overriding to down), and `wayhouse_gossip_auth_rejected_total` (counter —
 bad HMAC or malformed datagram).
 
 **Rejected alternatives** (full reasoning in ADR 24, `docs/09`): hand-rolled
@@ -421,7 +421,7 @@ now:
 
 ---
 
-## The controller (`gsp-controller`)
+## The controller (`wayhouse-controller`)
 
 A **new, optional service**, deployed as one tier per the topology above (root
 `standalone`, or `slave` under a parent tier). Proxies never talk to each
@@ -454,7 +454,7 @@ the GUI's route to any fact in the fleet.
 
 ---
 
-## The aggregator (`gsp-aggregator`)
+## The aggregator (`wayhouse-aggregator`)
 
 A **new, optional, stateless service**, one instance (or a small horizontally-
 replicated group — no consensus needed, it holds no durable state) per tier.
@@ -472,7 +472,7 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
   route-hint, drain an instance) to every instance in its subtree at once,
   reporting partial success per instance rather than failing the whole call.
 - **Trust model.** Two credentials keep telemetry and control apart:
-  `--ingest-token` unlocks only `POST /ingest` (what every `gsp` and child tier
+  `--ingest-token` unlocks only `POST /ingest` (what every `wayhouse` and child tier
   pushes with), `--auth-token` gates `GET /fleet/*` and every fan-out verb;
   setting `--auth-token` without a different `--ingest-token` is refused at startup. A
   pusher can therefore report state but not drain or edit anyone. Each push's
@@ -496,7 +496,7 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
 
 ## Intra-tier HA (design)
 
-> **Status:** the `gsp-controller` half is **built** (phase 12 slice 6,
+> **Status:** the `wayhouse-controller` half is **built** (phase 12 slice 6,
 > `openraft`, `--ha-node-id`/`--ha-peers`/`--ha-token` — see `docs/06` and ADR
 > 21). The **aggregator** half below (stateless replicas behind one address)
 > stays design-only — it needs no code, just running N replicas. The heading
@@ -508,7 +508,7 @@ components, two very different designs:
 
 ### The aggregator: stateless replication, no consensus
 
-`gsp-aggregator` already carries no durable state (`IngestStore` is
+`wayhouse-aggregator` already carries no durable state (`IngestStore` is
 in-memory, latest-write-wins, deliberately unpersisted — see its own
 `lib.rs`). HA for a tier's aggregator is therefore **just running N
 identical, uncoordinated replicas behind one stable address** (a VIP, DNS
@@ -538,7 +538,7 @@ storage:
 
 ### The controller: Raft, replicated log, single leader accepts writes
 
-`gsp-controller` **does** hold durable, order-sensitive state (two revision
+`wayhouse-controller` **does** hold durable, order-sensitive state (two revision
 logs), so its HA needs an actual consensus protocol — a tier that must keep
 *accepting new writes* (`standalone`) or *stay live for its children*
 (`slave`) through a node loss needs agreement on "what got written and in
@@ -597,12 +597,12 @@ what order," which a stateless replica set cannot give.
   replica that receives a write it isn't the leader for forwards the request
   to the current leader over HTTP, or HTTPS for `https://` peers (`openraft` tracks the current
   leader; the follower proxies the request body byte-for-byte, same
-  `forwardable_headers` pattern `gsp-ui`'s proxies already use) and relays
+  `forwardable_headers` pattern `wayhouse-ui`'s proxies already use) and relays
   the leader's response back verbatim. The forward is bounded (10 s, then
   `504`: the write may still have been applied), so a half-open leader never
   hangs the follower's handler. **Rejected**: an HTTP redirect
-  (`307` + `Location`) — every existing client of this API (`gsp`,
-  `gsp-ui`, a human with `curl`) would need new leader-following logic; a
+  (`307` + `Location`) — every existing client of this API (`wayhouse`,
+  `wayhouse-ui`, a human with `curl`) would need new leader-following logic; a
   transparent forward means literally nothing downstream of this ADR needs
   to know HA exists. The one-hop latency cost only applies to writes (rare,
   human-paced), never to reads or to the data plane.
@@ -685,12 +685,12 @@ correctly scopes it as an explicit later slice, opted into per tier via
 > `POST /config?stage=canary&group=<name>`, `GET /config?group=<name>`,
 > `GET /config/subscribe?since=<rev>&group=<name>`, `POST
 > /config/promote/{revision}`, and the `{promoted, canary_groups}` `stage`
-> `sled` tree. See `docs/06` and ADR 22. **Not yet wired on the `gsp` side:**
-> a real `gsp --controller` instance has no way to enroll itself in a group
+> `sled` tree. See `docs/06` and ADR 22. **Not yet wired on the `wayhouse` side:**
+> a real `wayhouse --controller` instance has no way to enroll itself in a group
 > yet — there is no `settings.controller.canary_group` config field (the
 > design sketch below), and `controller_client` does not pass `&group=`. The
 > feature is exercisable today only with a manual `curl` subscribe. The
-> heading keeps "(design)" because `gsp-controller`'s module docs cite it by
+> heading keeps "(design)" because `wayhouse-controller`'s module docs cite it by
 > that name.
 
 A subset of a tier's instances take a config revision before the rest of the
@@ -699,8 +699,8 @@ Config API; this is the concrete mechanism.
 
 ### Instances self-report a rollout group
 
-*(Design as sketched; the `gsp`-side field below is not built — see the Status
-note above.)* Every `gsp` instance gains an optional
+*(Design as sketched; the `wayhouse`-side field below is not built — see the Status
+note above.)* Every `wayhouse` instance gains an optional
 `settings.controller.canary_group: <string>` (default: unset, meaning "not
 enrolled in any canary group" — the overwhelmingly common case, and the entire
 mechanism is invisible to an instance that never sets it). `controller_client`'s
@@ -759,7 +759,7 @@ match — accepted as an **O(revisions)** operation rather than adding an
 index, matching this codebase's general bias against building for a scale
 problem that doesn't exist yet: this runs at human-paced write rates against
 a log sized in the hundreds to low thousands of entries for any deployment
-this design targets, not a hot path and not `gsp-core`. Revisit with an
+this design targets, not a hot path and not `wayhouse-core`. Revisit with an
 index (e.g. a `sled` tree keyed by group, pointing at its latest visible
 revision) if a real fleet's revision count ever makes the scan measurable.
 
@@ -790,7 +790,7 @@ surfaces; not designed here.
 
 ## RBAC and audit (design)
 
-> **Status:** built (phase 12 slice 8) — `gsp-ui --users-file` (argon2 hashes,
+> **Status:** built (phase 12 slice 8) — `wayhouse-ui --users-file` (argon2 hashes,
 > `viewer`/`operator`/`admin`), `--ui-password` kept as legacy single-secret
 > mode, `X-Actor` on every proxied write, and the controller's per-revision
 > `actors` `sled` tree (`GET /config/revisions` gained an `actor` field). See
@@ -799,17 +799,17 @@ surfaces; not designed here.
 
 `docs/10`'s original text placed "Auth / RBAC / audit log" on the
 controller. The phase 10+11 slice-11 redesign (see `HANDOVER.md`) already
-diverged from that once, for a good reason that still holds: **`gsp-ui` is
+diverged from that once, for a good reason that still holds: **`wayhouse-ui` is
 the only place a *human* ever authenticates** — the controller and
 aggregator each still gate on one shared machine bearer token apiece, and
 that stays true here too. So this design keeps that split and completes
-it: **RBAC is enforced in `gsp-ui`**, the one place with human identity;
+it: **RBAC is enforced in `wayhouse-ui`**, the one place with human identity;
 the controller gains only what it's missing to make the resulting audit
 trail meaningful — knowing *who* (not just *that*) a revision came from.
 
 ### Multiple human identities, replacing the single shared password
 
-`gsp-ui --ui-password` (one shared secret for every operator) is replaced by
+`wayhouse-ui --ui-password` (one shared secret for every operator) is replaced by
 `--users-file <path>`, a YAML list:
 
 ```yaml
@@ -829,7 +829,7 @@ users:
   problem this codebase already defers to a maintained crate for, the same
   reasoning ADR 16's sniffer sandboxing and this session's HA `openraft`
   choice both use).
-- A companion `gsp-ui --hash-password` CLI mode (prints an argon2 hash for a
+- A companion `wayhouse-ui --hash-password` CLI mode (prints an argon2 hash for a
   password read from stdin) is the intended way an operator populates
   `users-file` — never handling plaintext passwords in a config file at
   rest.
@@ -854,11 +854,11 @@ users:
   gated at the top).
 
 Three roles, not a fully general permission-matrix model: every route in
-`gsp-ui`'s existing surface already falls cleanly into one of these three
+`wayhouse-ui`'s existing surface already falls cleanly into one of these three
 buckets (see `docs/06`'s "Fleet control plane" endpoint reference), so a
 richer model would be solving a problem this API surface doesn't yet have.
 Region/subtree-scoped roles ("operator, but only for region X") are
-explicitly deferred — `gsp-ui` only ever talks to the *root* tier (per the
+explicitly deferred — `wayhouse-ui` only ever talks to the *root* tier (per the
 existing "GUI served only by the topmost tier" rule) and today's intent
 verbs have no region selector to scope against (the same open question
 `docs/10` already tracks as "Region-scoped intent"); scoped RBAC is only
@@ -881,15 +881,15 @@ get `require_session` then `require_role(Operator)`, `admin`-level routes
 
 Every accepted revision (config or intent) already answers "what changed and
 when" via `GET /config/revisions`. It has never recorded **who** submitted
-it — `gsp-controller` only ever sees `gsp-ui`'s single shared
+it — `wayhouse-controller` only ever sees `wayhouse-ui`'s single shared
 `--controller-token`/`--aggregator-token`, identical for every human behind
 it. Closing this gap needs one addition at each hop:
 
-- `gsp-ui` sets a new `X-Actor: <username>` header on every write it
+- `wayhouse-ui` sets a new `X-Actor: <username>` header on every write it
   proxies to the controller or aggregator (`aggregator_proxy`/
   `controller_proxy`, using `proxy_util`'s existing header-forwarding path
   in reverse — an outbound header added, not an inbound one preserved).
-- `gsp-controller`'s `submit()`/intent `submit_intent()` read `X-Actor` (
+- `wayhouse-controller`'s `submit()`/intent `submit_intent()` read `X-Actor` (
   `Option<String>`, defaulting to `"unknown"` for a request that didn't
   carry one — e.g. a direct `curl` against the controller's own token,
   which stays valid break-glass access and simply produces a less specific
@@ -897,7 +897,7 @@ it. Closing this gap needs one addition at each hop:
   revision number, alongside `stage` — same pattern, another small
   parallel tree rather than widening `Store`'s core content-agnostic
   contract.
-- `GET /config/revisions` gains an `actor` field per entry. `gsp-aggregator`
+- `GET /config/revisions` gains an `actor` field per entry. `wayhouse-aggregator`
   does the same for the fan-out verbs it forwards, logging `(instance,
   actor, verb, timestamp)` — in-memory only, matching its existing
   "carries no durable state" design; a durable fleet-wide *audit log*
@@ -927,14 +927,14 @@ built to close: an operator not knowing *which* region's login is
 authoritative for a given action, and RBAC that must be kept consistent
 across every tier instead of living in one.
 
-**A dedicated `gsp-ui` process is the GUI's home — not the controller, not
+**A dedicated `wayhouse-ui` process is the GUI's home — not the controller, not
 the aggregator.** The GUI needs both: reads/operational verbs from the
 aggregator, config/revisions from the controller. Bolting human login onto
 either one taxes it with a concern that isn't its own: a session store *is*
 a form of authority ("who's allowed to act"), which sits wrong on the
 aggregator (deliberately "carries no authority"); and putting the browser's
 whole surface on the controller couples presentation to Tier-1's write path
-for no reason. `gsp-ui` is a pure BFF — human session auth in front, holding
+for no reason. `wayhouse-ui` is a pure BFF — human session auth in front, holding
 the controller's and aggregator's own machine credentials to call each on
 the operator's behalf, authority over neither. It's the one piece of this
 picture with no "real" state of its own (no store, no fleet data, nothing
@@ -972,11 +972,11 @@ schema-driven settings form over the same submitted YAML text (a raw-YAML
 panel stays underneath so every field — including ones the form has no
 control for yet — is always reachable), and a Plugins page for managing
 sniffer modules. (Later, 2026-10-03: a read-only Tunnel addresses page over
-the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Plugin management needed new backend surface: `gsp` gained
+the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Plugin management needed new backend surface: `wayhouse` gained
 `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into
 `settings.sniffers.dir`, then reuses the existing live rescan-on-reload
 mechanism — no new hot-reload path), fanned out fleet-wide via
-`gsp-aggregator`'s `POST/DELETE /fleet/sniffers[/{name}]` and a targeted
+`wayhouse-aggregator`'s `POST/DELETE /fleet/sniffers[/{name}]` and a targeted
 `GET /fleet/instances/{instance}/sniffers`. Turning `settings.sniffers` on
 from nothing is still startup-only, per its existing design.
 

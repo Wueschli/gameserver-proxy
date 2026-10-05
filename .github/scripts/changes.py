@@ -10,8 +10,8 @@ ROOTS), or something they depend on through path dependencies, transitively.
 A crate that gains a dependency is picked up with no edit here.
 
 A Cargo.lock only affects its own workspace's members: the root lockfile can't
-change what crates/gsp-config/fuzz (its own workspace and lockfile) builds,
-while the root Cargo.toml can (gsp-config inherits from it).
+change what crates/wayhouse-config/fuzz (its own workspace and lockfile) builds,
+while the root Cargo.toml can (wayhouse-config inherits from it).
 
 Deliberately conservative: a workflow edit runs everything; the root
 Cargo.toml, the toolchain file or .cargo/ runs every Rust area; a path under
@@ -19,8 +19,8 @@ crates/ that no package owns (a new or half-registered crate) runs every Rust
 area; if cargo metadata fails, or a ROOTS entry matches no package (a rename),
 everything runs. What metadata can't see: a crate reading another
 crate's files at compile or test time (include_bytes!, fixtures). Today that is
-gsp-fleet-tests reading gsp-http's test fixtures, and gsp-http is already in
-every job gsp-fleet-tests is. Keep ROOTS in sync with what each job in ci.yml
+wayhouse-fleet-tests reading wayhouse-http's test fixtures, and wayhouse-http is already in
+every job wayhouse-fleet-tests is. Keep ROOTS in sync with what each job in ci.yml
 builds or tests. Tested by changes_test.py.
 """
 import json
@@ -35,12 +35,12 @@ AREAS = ("ui", "plugins", "tunnel", "deploy", "fuzz", "release")
 # The packages each Rust job builds or tests. A name, or a directory ending in
 # "/" for every package under it.
 ROOTS = {
-    # crates/plugins (wasm) + `cargo nextest -p gsp` loading the built plugins.
-    "plugins": ["gsp", "crates/plugins/"],
-    # make tunnel-e2e-ci: debug-builds the five binaries, runs gsp-fleet-tests.
-    "tunnel": ["gsp", "gsp-agent", "gsp-controller", "gsp-aggregator", "gsp-ui", "gsp-fleet-tests"],
-    # crates/gsp-config/fuzz (its own workspace; depends on gsp-config).
-    "fuzz": ["gsp-config-fuzz"],
+    # crates/plugins (wasm) + `cargo nextest -p wayhouse` loading the built plugins.
+    "plugins": ["wayhouse", "crates/plugins/"],
+    # make tunnel-e2e-ci: debug-builds the five binaries, runs wayhouse-fleet-tests.
+    "tunnel": ["wayhouse", "wayhouse-agent", "wayhouse-controller", "wayhouse-aggregator", "wayhouse-ui", "wayhouse-fleet-tests"],
+    # crates/wayhouse-config/fuzz (its own workspace; depends on wayhouse-config).
+    "fuzz": ["wayhouse-config-fuzz"],
 }
 
 # The root manifest (inherited by members of every workspace), the toolchain and
@@ -49,20 +49,20 @@ RUSTWIDE = re.compile(r"^(Cargo\.toml|rust-toolchain\.toml)$|^\.cargo/")
 
 # Non-Cargo paths per area, on top of the package graph.
 EXTRA = {
-    "ui": re.compile(r"^crates/gsp-ui/web/"),
+    "ui": re.compile(r"^crates/wayhouse-ui/web/"),
     # .config/nextest.toml holds the `ci` profile both jobs run under.
     "plugins": re.compile(r"^\.config/"),
     "tunnel": re.compile(r"^Makefile$|^\.config/"),
-    # The UI's npm lockfile is here too: those packages end up in the gsp-ui
+    # The UI's npm lockfile is here too: those packages end up in the wayhouse-ui
     # image's bundle, and the deploy job's Trivy scan checks them.
     "deploy": re.compile(
         r"^deploy/|^\.dockerignore$|^Makefile$|^Cargo\.(toml|lock)$"
-        r"|^crates/gsp-ui/web/package-lock\.json$|^\.trivyignore$"
+        r"|^crates/wayhouse-ui/web/package-lock\.json$|^\.trivyignore$"
     ),
 }
 
 # Inside a crate's directory but not part of its build (standalone npm project).
-NOT_CARGO = ("crates/gsp-ui/web/",)
+NOT_CARGO = ("crates/wayhouse-ui/web/",)
 
 
 class Package(NamedTuple):

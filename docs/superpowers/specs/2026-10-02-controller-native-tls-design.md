@@ -1,4 +1,4 @@
-# Native TLS for `gsp-controller` — design
+# Native TLS for `wayhouse-controller` — design
 
 Date: 2026-10-02. Status: approved (owner asked for autonomous progress through the
 superpowers stages). Last piece of the "native TLS" umbrella in `HANDOVER.md`, after
@@ -6,14 +6,14 @@ superpowers stages). Last piece of the "native TLS" umbrella in `HANDOVER.md`, a
 
 ## Problem
 
-`gsp-controller` serves plain HTTP only. The supported way to encrypt its traffic is a
-reverse proxy in front of every replica (docs/12 "gsp-controller behind TLS"). That is an
+`wayhouse-controller` serves plain HTTP only. The supported way to encrypt its traffic is a
+reverse proxy in front of every replica (docs/12 "wayhouse-controller behind TLS"). That is an
 extra moving part per replica, and it is a trust boundary that sees every bearer token,
 config and registration in the clear.
 
 ## Goal and success criteria
 
-- `gsp-controller --tls-cert <chain.pem> --tls-key <key.pem>` serves HTTPS on `--listen`
+- `wayhouse-controller --tls-cert <chain.pem> --tls-key <key.pem>` serves HTTPS on `--listen`
   with no proxy. Every route works over it, including the SSE streams.
 - Fleet clients reach it with an `https://` URL; with a private CA they add `--ca-file`
   (built 2026-10-02). HA replicas reach each other with `--ha-peers id=https://…`.
@@ -21,17 +21,17 @@ config and registration in the clear.
   within 30 s. A broken replacement keeps the current certificate and logs an error.
 - Bad files at startup (missing, unreadable, no certificate, no/invalid key, key not
   matching the certificate) stop the controller with an error naming the file.
-- Proven end to end: `gsp --check` against a natively-TLS controller (fails without
+- Proven end to end: `wayhouse --check` against a natively-TLS controller (fails without
   `--ca-file`, passes with it), and a 3-replica HA cluster with native TLS on every
   replica replicates.
 
-Out of scope: TLS on `gsp-aggregator`, `gsp-ui` and `gsp`'s admin API (follow-up — the
+Out of scope: TLS on `wayhouse-aggregator`, `wayhouse-ui` and `wayhouse`'s admin API (follow-up — the
 serving code is shared, so each is a flag plus wiring); client certificates (mTLS);
 ACME; serving HTTP and HTTPS on the same port.
 
 ## Approaches considered
 
-1. **A TLS `axum::serve::Listener` in `gsp-http`, handshakes in background tasks
+1. **A TLS `axum::serve::Listener` in `wayhouse-http`, handshakes in background tasks
    (chosen).** `axum::serve(listener, app)` stays as is; only the listener type changes.
    Uses `tokio-rustls`/`rustls` (ring) already in the lockfile, so no new third-party
    crate.
@@ -43,7 +43,7 @@ ACME; serving HTTP and HTTPS on the same port.
 
 ## Design
 
-### `gsp_http::tls` (new module in `crates/gsp-http`)
+### `wayhouse_http::tls` (new module in `crates/wayhouse-http`)
 
 ```rust
 pub struct TlsFiles { pub cert: PathBuf, pub key: PathBuf }
@@ -82,10 +82,10 @@ pub fn spawn_reloader(cert: Arc<ReloadingCert>, every: Duration) -> JoinHandle<(
   source}, KeyMismatch{cert,key}}`; message text starts `--tls-cert <path>:` /
   `--tls-key <path>:`, cause via `source()` (the convention `CaError` now follows).
 
-`gsp-http` gains normal deps on `axum`, `tokio` (net, time), `tokio-rustls`,
-`arc-swap`, `tracing` — all workspace deps already. Still no `gsp-core`/`gsp-config`.
+`wayhouse-http` gains normal deps on `axum`, `tokio` (net, time), `tokio-rustls`,
+`arc-swap`, `tracing` — all workspace deps already. Still no `wayhouse-core`/`wayhouse-config`.
 
-### `gsp-controller`
+### `wayhouse-controller`
 
 `--tls-cert` / `--tls-key` (clap `requires` each other). When set: build
 `ReloadingCert` right after `--ca-file` (startup error on bad files), `TlsListener::bind`
@@ -95,7 +95,7 @@ choose `https://` by URL.
 
 ## Testing
 
-- `gsp-http` (`tests/tls_server.rs`), real loopback TLS:
+- `wayhouse-http` (`tests/tls_server.rs`), real loopback TLS:
   - a `TlsListener` + tiny axum app answers a client trusting the fixture CA;
   - a stalled client (TCP connect, no handshake) does not block a second client;
   - `load_certified_key`: missing cert, cert file without certificates, key file
@@ -103,16 +103,16 @@ choose `https://` by URL.
   - rotation: start on leaf A (CA A), overwrite the files with leaf B (CA B, new
     fixtures), `reload_if_changed()` → `true`, a client trusting only CA B connects;
     overwrite with garbage → `Err`, and a client trusting CA B still connects.
-- `gsp-fleet-tests`:
+- `wayhouse-fleet-tests`:
   - `controller_native_tls.rs`: controller with `--tls-cert/--tls-key` (fixture leaf);
-    `gsp --check --controller https://localhost:<port>` fails on the certificate without
+    `wayhouse --check --controller https://localhost:<port>` fails on the certificate without
     `--ca-file`, passes with it; `--tls-cert` without `--tls-key` exits non-zero.
   - `ha_tls.rs` gains `three_replicas_replicate_over_native_tls`: same cluster as the
     terminator test but each replica serves TLS itself.
 
 ## Docs
 
-docs/12: new "Native TLS" subsection at the top of "gsp-controller behind TLS" (flags,
+docs/12: new "Native TLS" subsection at the top of "wayhouse-controller behind TLS" (flags,
 rotation, the proxy pattern stays valid for the other services); HANDOVER (umbrella row →
 follow-up row for aggregator/UI/admin TLS); ADR 27 in docs/09; AGENTS layout line for
-`gsp-http`.
+`wayhouse-http`.

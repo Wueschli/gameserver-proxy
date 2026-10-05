@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 # Standalone workspace, deliberately outside the main one (same reason as
-# crates/gsp-config/fuzz): these crates build for wasm32-unknown-unknown, are
-# never a dependency of gsp / gsp-core, and `make check` on the main workspace
+# crates/wayhouse-config/fuzz): these crates build for wasm32-unknown-unknown, are
+# never a dependency of wayhouse / wayhouse-core, and `make check` on the main workspace
 # must not need the wasm target installed. Build them with `make plugins`.
-members = ["gsp-sniffer-abi", "a2s", "minecraft", "quic", "regex-firstbytes", "wireguard", "openvpn", "raknet", "teamspeak3"]
+members = ["wayhouse-sniffer-abi", "a2s", "minecraft", "quic", "regex-firstbytes", "wireguard", "openvpn", "raknet", "teamspeak3"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Wueschli/gameserver-proxy"
+repository = "https://github.com/wayhouse-proxy/wayhouse"
 
 [profile.release]
 opt-level = "z"

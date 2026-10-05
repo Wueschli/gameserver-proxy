@@ -1,4 +1,4 @@
-# gsp — annotated example config (`make run` starts the proxy with it).
+# wayhouse — annotated example config (`make run` starts the proxy with it).
 # The full target schema is documented in docs/05-configuration.md.
 
 settings:
@@ -12,7 +12,7 @@ settings:
     # Bearer token every admin API request (except GET /healthz) must
     # present. Omit for an open API (network-boundary-only auth, the
     # default). Needed once something calls in from outside that boundary —
-    # e.g. gsp-aggregator's intent-verb fan-out (phase 10+11, docs/10 "The
+    # e.g. wayhouse-aggregator's intent-verb fan-out (phase 10+11, docs/10 "The
     # aggregator"), which is given the same token to present.
     # auth_token: "change-me"
     # Serve the admin API over HTTPS (both required; startup-only like
@@ -20,8 +20,8 @@ settings:
     # --aggregator becomes https://<listen>, so the certificate must cover the
     # listen address. See docs/12 "TLS for the fleet services".
     # tls:
-    #   cert: /etc/gsp/tls/fullchain.pem
-    #   key: /etc/gsp/tls/privkey.pem
+    #   cert: /etc/wayhouse/tls/fullchain.pem
+    #   key: /etc/wayhouse/tls/privkey.pem
     #   # Optional TLS handshake limits (defaults shown; rate 0 = off):
     #   max_pending: 512
     #   max_pending_per_source: 16
@@ -29,7 +29,7 @@ settings:
     #   new_per_source_burst: 64
   # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
   # reload does not change these. Hitting a cap drops the new connection /
-  # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
+  # session silently + wayhouse_filter_blocked_total{filter="max_conn"|"max_udp"|
   # "max_new_rate"}; established ones are untouched.
   limits:
     max_connections: 200000        # live proxied TCP connections
@@ -45,7 +45,7 @@ settings:
   # doesn't match, is refused. A module's optional `config` string is handed
   # to that plugin on every call (the plugin parses it itself).
   # sniffers:
-  #   dir: "/etc/gsp/sniffers"
+  #   dir: "/etc/wayhouse/sniffers"
   #   call_timeout_ms: 20        # epoch-interrupted if a plugin overruns this
   #   max_memory_bytes: 16777216 # per-call instance memory ceiling
   #   modules:
@@ -68,7 +68,7 @@ settings:
   #   quorum_fraction: 0.66   # > 0.5, <= 1.0 — fraction of the domain that
   #                           # must report a backend down to override "up"
   #   psk: "change-me"        # every gossip datagram is HMAC-SHA256-tagged
-  # Self-reported fleet organization path, pushed to gsp-aggregator so the
+  # Self-reported fleet organization path, pushed to wayhouse-aggregator so the
   # admin GUI can render a grouped/tree view. Purely a display label — never
   # consulted by routing/forwarding. `/`-separated, non-empty segments, no
   # leading/trailing `/`.
@@ -78,16 +78,16 @@ settings:
 # instead of a static `targets:` list. Level-triggered: the adapter returns the
 # *current* address set and the runtime diffs it against the live one. A refresh
 # that errors or comes back empty keeps the last-known-good set (never clears the
-# pool) + gsp_discovery_refresh_total{result="error"|"empty"}. Each dynamic
+# pool) + wayhouse_discovery_refresh_total{result="error"|"empty"}. Each dynamic
 # source gets one control-plane refresh task (never on the data path).
 #   type: static      — a fixed reusable list (folded into the pool at load time)
 #   type: dns_srv      — resolve an SRV record; port comes from the record
 #   type: consul       — passing instances of a Consul service (HTTP API; blocking-query
 #                         push + resync; optional consul_token_file for ACLs)
 #   type: kubernetes   — EndpointSlices of a Service (watched + resynced; SA token + CA in-pod)
-#   type: tunnel        — backend addresses a `gsp-agent`-managed origin behind
+#   type: tunnel        — backend addresses a `wayhouse-agent`-managed origin behind
 #                         a WireGuard tunnel has registered with the controller
-#                         (phase 14; requires `gsp --tunnel-*` on this proxy —
+#                         (phase 14; requires `wayhouse --tunnel-*` on this proxy —
 #                         see docs/11-backend-transport.md)
 backend_sources:
   - name: local-static
@@ -218,12 +218,12 @@ listeners:
     protocol: tcp
     # Filter chain (phase 7): checked on the client source IP before routing.
     # `deny` wins; a non-empty `allow` makes the listener default-deny for
-    # anything it does not list. Blocked = silent drop + gsp_filter_blocked_total.
+    # anything it does not list. Blocked = silent drop + wayhouse_filter_blocked_total.
     allow: ["10.0.0.0/8", "192.168.0.0/16"]
     deny: ["10.6.6.6/32"]
     # Token-bucket rate limit on new connections / UDP sessions, keyed by source
     # IP and by /24 (v4) / /64 (v6). `rate` = permits/sec, `burst` = bucket cap
-    # (defaults to `rate`). Excess is dropped silently + gsp_filter_blocked_total
+    # (defaults to `rate`). Excess is dropped silently + wayhouse_filter_blocked_total
     # {filter="rate_ip"|"rate_net"}. Established UDP sessions are not re-checked.
     rate_limit:
       per_ip:  { rate: 20, burst: 40 }
@@ -231,14 +231,14 @@ listeners:
     # Cap on *concurrent* connections / UDP sessions from one source (vs.
     # rate_limit, which bounds the rate of new ones). By client IP and/or its
     # /24 (v4) / /64 (v6). Over the cap => dropped before allocation +
-    # gsp_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}.
+    # wayhouse_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}.
     per_source:
       max_per_ip: 256
       max_per_net: 2048
     # GeoIP country filter on the client source IP, checked after the CIDR ACL.
     # ISO 3166-1 alpha-2 codes; `deny` wins, a non-empty `allow` is default-deny.
     # Needs settings.geo_db. An IP not in the DB is admitted only when `allow` is
-    # empty. Blocked => gsp_filter_blocked_total{filter="geo"}. (Needs geo_db set
+    # empty. Blocked => wayhouse_filter_blocked_total{filter="geo"}. (Needs geo_db set
     # above to be active; left commented so this example validates as-is.)
     # geo:
     #   deny: ["KP", "RU"]
@@ -280,7 +280,7 @@ listeners:
     # First-packet gate (udp): open a session only if the first datagram is
     # positively recognised — matches a `first_bytes` route here (or a sniffer
     # hint). Generic spoof floods never reach the session table. Drops show up
-    # as gsp_datagrams_dropped_total{reason="first_packet_gate"}. Needs at least
+    # as wayhouse_datagrams_dropped_total{reason="first_packet_gate"}. Needs at least
     # one first_bytes route / sniffer (else it would drop everything).
     first_packet_gate: true
     routes:

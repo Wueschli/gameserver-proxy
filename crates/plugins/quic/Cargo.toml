@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "gsp sniffer plugin: recognises QUIC Initial packets (RFC 9000/9369)."
+description = "wayhouse sniffer plugin: recognises QUIC Initial packets (RFC 9000/9369)."
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }
 aes = { version = "0.8", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 hkdf = { version = "0.12", default-features = false }

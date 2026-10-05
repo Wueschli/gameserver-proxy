@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "gsp sniffer plugin: recognises OpenVPN client hard-reset packets (UDP and TCP framing)."
+description = "wayhouse sniffer plugin: recognises OpenVPN client hard-reset packets (UDP and TCP framing)."
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }

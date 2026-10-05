@@ -56,14 +56,14 @@ Success:
 
 - Changing `--tunnel-network` on a cluster that already has allocations (already a
   deferred minor of the address authority: stored addresses are not re-validated).
-- A CLI verb or a `gsp-ui` page for membership. The HTTP routes plus a `curl` recipe in
+- A CLI verb or a `wayhouse-ui` page for membership. The HTTP routes plus a `curl` recipe in
   `docs/12` cover it.
 - HA combined with `--role slave` (still refused; unchanged, see `crate::ha`'s module doc).
 - Tuning the snapshot policy beyond openraft's defaults. Snapshots become first-class
   here (see Snapshots); their thresholds stay at the library defaults.
 - Carrying over a tombstone the old single node wrote that an edge had not received yet
   (see Import, "Known gap").
-- Automatic lease expiry, release from `gsp-ui`, live address change of a *peer*
+- Automatic lease expiry, release from `wayhouse-ui`, live address change of a *peer*
   (agent/proxy) — unchanged deferred items of the address authority.
 
 ## Replicated state
@@ -347,7 +347,7 @@ Copying the full history would close it at the cost above; noted, not done.
 
 ### Joining
 
-`gsp-controller --ha-join --ha-node-id <id> --ha-token <t>` starts a node that **never
+`wayhouse-controller --ha-join --ha-node-id <id> --ha-token <t>` starts a node that **never
 calls `raft.initialize`**. It serves `/raft/*` and waits to be added. `--ha-join` and
 `--ha-peers` are mutually exclusive (startup error). Today every node with an empty log
 calls `initialize` with its `--ha-peers`, so a replacement node started with the original
@@ -404,7 +404,7 @@ Unchanged for registrations (`409`/`422`/`503`/`404` with `{"error": …}`). New
 
 ## Repository changes
 
-- Code (`gsp-controller`): `ha/mod.rs` (entries, response enum), `ha/state_machine.rs`
+- Code (`wayhouse-controller`): `ha/mod.rs` (entries, response enum), `ha/state_machine.rs`
   (registry + address-book apply, idempotent apply, snapshot), `ha/client.rs`
   (generic response mapping), new `ha/members.rs` (admin routes, whoami), `ha/routes.rs`
   (`/raft/whoami` with `pre_ha`, `/raft/pre-ha`), new shared registry core (extracted from
@@ -414,7 +414,7 @@ Unchanged for registrations (`409`/`422`/`503`/`404` with `{"error": …}`). New
   `resolve_flags` HA refusal and the pin-only warning, `--ha-join`, pre-HA set-aside,
   import source choice, `--ha-import-source`, network recording, a snapshot policy
   tests can lower).
-- Tests: `gsp-fleet-tests` (`tests/ha_tunnel_addresses.rs`, reusing the `ha_tls.rs`
+- Tests: `wayhouse-fleet-tests` (`tests/ha_tunnel_addresses.rs`, reusing the `ha_tls.rs`
   cluster helpers).
 - Docs: `docs/10` (registries join the replicated state; membership), `docs/11`
   ("Address authority": HA), `docs/12` (HA + allocation, `--ha-join`, membership recipe),
@@ -449,7 +449,7 @@ TDD throughout; each layer's test fails first.
    mismatch → `503`.
 5. **Membership (in-module + whoami):** id mismatch refused; last voter refused;
    `--ha-join` with `--ha-peers` is a startup error; a `--ha-join` node never initializes.
-6. **Fleet (`gsp-fleet-tests`, real processes):** three nodes with `--tunnel-network`:
+6. **Fleet (`wayhouse-fleet-tests`, real processes):** three nodes with `--tunnel-network`:
    register on node 1, subscribe on node 3, see it; kill the leader, register a new
    origin on a survivor, no duplicate address, and a subscriber reconnecting to another
    node with its cursor misses nothing; single node with allocations restarted as one

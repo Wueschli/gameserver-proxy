@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: wayhouse, namespace: wayhouse }
+spec:
+  selector: { matchLabels: { app: wayhouse } }
+  template:
+    metadata: { labels: { app: wayhouse } }
+    spec:
+      serviceAccountName: wayhouse                # 45-wayhouse-rbac.yaml: reads EndpointSlices
+      hostNetwork: true                      # docs/12 default for an edge proxy
+      dnsPolicy: ClusterFirstWithHostNet     # else wayhouse-aggregator below won't resolve
+      containers:
+        - name: wayhouse
+          image: wayhouse-deploy/wayhouse:local
+          args:
+            - --config=/etc/wayhouse/wayhouse.yaml
+            - --aggregator=http://wayhouse-aggregator.wayhouse.svc:9902
+            - --aggregator-token=$(INGEST_TOKEN)
+            # Default instance name is the admin listen addr (0.0.0.0:9900 on every
+            # node) — all nodes would overwrite one aggregator entry.
+            - --aggregator-instance=$(NODE_NAME)
+            # The reported default (http://0.0.0.0:9900) is unreachable from the
+            # aggregator; hostNetwork puts the admin API on the node IP (IPv4 here;
+            # an IPv6 node IP needs [brackets]). https:// with settings.admin.tls.
+            - --aggregator-admin-url=http://$(NODE_IP):9900
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - name: INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: wayhouse-tokens, key: ingest-token } }
+          # With settings.admin.tls set, add `scheme: HTTPS` to both probes.
+          readinessProbe: { httpGet: { path: /healthz, port: 9900 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 9900 }, initialDelaySeconds: 10 }
+          volumeMounts: [{ name: config, mountPath: /etc/wayhouse, readOnly: true }]
+          # Phase-14 tunnel (docs/12): uncomment, add the --tunnel-* args, and
+          # mount /dev/net/tun (hostPath volume).
+          # NET_ADMIN is only in the bounding set for a non-root user, so the
+          # tunnel also needs root:
+          # securityContext:
+          #   runAsUser: 0
+          #   runAsNonRoot: false
+          #   capabilities: { add: ["NET_ADMIN"] }
+          #
+          # Reserved-range alternative to hostNetwork (docs/12): drop
+          # hostNetwork/dnsPolicy, bind "0.0.0.0:30000-30999" in the config and
+          # publish that range with hostPort entries.
+      volumes:
+        - name: config
+          secret: { secretName: wayhouse-config }

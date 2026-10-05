@@ -6,7 +6,7 @@ superpowers stages). Second step of the "native TLS" umbrella in `HANDOVER.md`, 
 
 ## Problem
 
-1. **HA replica traffic is pinned to plain HTTP.** `gsp-controller` builds
+1. **HA replica traffic is pinned to plain HTTP.** `wayhouse-controller` builds
    `http://{addr}{path}` for Raft RPCs (`ha/network.rs`) and for forwarding a write to
    the leader (`ha/client.rs`), where `addr` is the `host:port` from `--ha-peers`. So
    replica-to-replica traffic cannot go through the TLS terminator docs/12 recommends —
@@ -26,7 +26,7 @@ superpowers stages). Second step of the "native TLS" umbrella in `HANDOVER.md`, 
 - A `--ha-peers` entry may be a base URL, `id=https://host[:port]` (or `http://…`), and
   every replica-to-replica call to that peer uses it. The old `id=host:port` form keeps
   meaning plain HTTP, byte-for-byte as today.
-- Proven end to end: three real `gsp-controller` replicas, each reachable by its peers
+- Proven end to end: three real `wayhouse-controller` replicas, each reachable by its peers
   **only** through a private-CA TLS terminator (`--ca-file` on every replica), elect a
   leader, accept a write sent to a **follower** (forwarded over HTTPS), and serve it from
   every replica.
@@ -51,7 +51,7 @@ an **already-bootstrapped** cluster (see Limits); mTLS between replicas.
 
 ## Design
 
-### Peer addresses (`gsp-controller`)
+### Peer addresses (`wayhouse-controller`)
 
 New `ha::peer_url(addr: &str, path: &str) -> String`:
 - `addr` contains `://` → `addr` with any trailing `/` trimmed, then `path`.
@@ -76,9 +76,9 @@ an existing cluster therefore does **not** change the addresses replicas use; mo
 running cluster from `host:port` to `https://` needs a membership change, which is not
 built. Documented in docs/12 and as a HANDOVER follow-up.
 
-### Readable errors (`gsp-http`)
+### Readable errors (`wayhouse-http`)
 
-New `gsp_http::error_chain(e: &(dyn std::error::Error + 'static)) -> String`: the
+New `wayhouse_http::error_chain(e: &(dyn std::error::Error + 'static)) -> String`: the
 error's `Display` followed by each `source()`, joined with `": "`, skipping a source
 whose text is already contained in the previous one (reqwest/hyper repeat themselves).
 Every place in the five binaries that turns a `reqwest::Error` into text (`anyhow!`
@@ -91,10 +91,10 @@ form (already chained).
   `https://h:8443` and `https://h:8443/` → `https://h:8443/raft/vote`.
 - `parse_ha_peers` unit tests: accepts both forms; rejects `ftp://`, a path, a query —
   each error names the entry.
-- `gsp_http::error_chain` unit test: a request to the private-CA fixture server with a
+- `wayhouse_http::error_chain` unit test: a request to the private-CA fixture server with a
   plain client yields text containing the certificate failure (e.g. `UnknownIssuer`),
   which plain `{e}` does not.
-- `gsp-fleet-tests` `ha_tls.rs`: three controllers on plain loopback ports, each with a
+- `wayhouse-fleet-tests` `ha_tls.rs`: three controllers on plain loopback ports, each with a
   `tls_front`; `--ha-peers 1=https://localhost:<f1>,2=…,3=…`, `--ca-file` = test CA;
   retry `POST /config` on replica 1's plain port until a leader exists (503 → 2xx), then
   `POST /config` once to **each** replica's plain port — at least two of the three are

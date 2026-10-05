@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: RakNet offline-handshake packets.
+//! `wayhouse` sniffer plugin: RakNet offline-handshake packets.
 //!
 //! RakNet (Minecraft Bedrock Edition and many other games) opens with
 //! "offline" messages that all carry a fixed 16-byte magic,
@@ -26,7 +26,7 @@ const ID_OPEN_CONNECTION_REQUEST_1: u8 = 0x05;
 const ID_OPEN_CONNECTION_REQUEST_2: u8 = 0x07;
 
 /// Recognise a RakNet offline handshake message in `first`.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     let (&id, rest) = first.split_first()?;
     let magic_at = match id {
         ID_UNCONNECTED_PING | ID_UNCONNECTED_PING_OPEN_CONNECTIONS => 8,
@@ -36,7 +36,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     if rest.get(magic_at..magic_at + MAGIC.len())? != MAGIC {
         return None;
     }
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         key: Some("raknet"),
         ..Default::default()
     })
@@ -45,13 +45,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// A fixed structural check: no config, `cfg_*` ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note.
+/// See `wayhouse_sniffer_abi::input`'s safety note.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

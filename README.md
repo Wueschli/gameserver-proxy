@@ -12,9 +12,9 @@
 >
 > Feel free to read, build and experiment. Please don't put real players behind it yet.
 
-# gameserver-proxy
+# wayhouse
 
-[![CI](https://github.com/Wueschli/gameserver-proxy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Wueschli/gameserver-proxy/actions/workflows/ci.yml)
+[![CI](https://github.com/wayhouse-proxy/wayhouse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wayhouse-proxy/wayhouse/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A **game-agnostic reverse proxy for game servers**, written in Rust. It is a single
@@ -121,12 +121,12 @@ examples) or from an external routing service you control.
 <details>
 <summary><b>Fleet control plane (optional)</b></summary>
 
-- **`gsp-controller`**: versioned config store with SSE push, revision
+- **`wayhouse-controller`**: versioned config store with SSE push, revision
   history/diff/rollback, staged/canary rollout, Raft HA, RBAC and audit. Proxies run
-  with `gsp --controller <url>` instead of a local file.
-- **`gsp-aggregator`**: fleet-wide reads (`GET /fleet/*`) and fan-out of operator
+  with `wayhouse --controller <url>` instead of a local file.
+- **`wayhouse-aggregator`**: fleet-wide reads (`GET /fleet/*`) and fan-out of operator
   actions to every instance.
-- **`gsp-ui`**: admin GUI (React/Vite/TS frontend behind a dedicated BFF, so the
+- **`wayhouse-ui`**: admin GUI (React/Vite/TS frontend behind a dedicated BFF, so the
   browser only ever holds a session cookie).
 - Regional health gossip: an authenticated SWIM mesh per `failure_domain` shares
   backend health as an advisory signal.
@@ -138,9 +138,9 @@ examples) or from an external routing service you control.
 <details>
 <summary><b>Backend transport over WireGuard (optional)</b></summary>
 
-- **`gsp-agent`** runs next to game servers that are not on a network the proxy can
+- **`wayhouse-agent`** runs next to game servers that are not on a network the proxy can
   reach. It brings up WireGuard (kernel module, `boringtun` userspace fallback) and
-  registers with `gsp-controller`, which allocates tunnel addresses from an IPv6
+  registers with `wayhouse-controller`, which allocates tunnel addresses from an IPv6
   (default) or IPv4 tunnel network; the WireGuard underlay may be either family.
 - Proxies peer with every registered origin automatically, and a
   `backend_sources[].type: tunnel` source turns an origin into ordinary backends.
@@ -156,11 +156,11 @@ and `protoc`, because the gRPC resolver client is generated at build time
 (`apt install protobuf-compiler` or `brew install protobuf`).
 
 ```sh
-git clone https://github.com/Wueschli/gameserver-proxy.git
-cd gameserver-proxy
+git clone https://github.com/wayhouse-proxy/wayhouse.git
+cd wayhouse
 
 make check                                                 # fmt check + clippy (-D warnings) + tests
-cargo run -p gsp -- --config config.example.yaml --check   # validate a config only
+cargo run -p wayhouse -- --config config.example.yaml --check   # validate a config only
 make run                                                   # run the proxy against config.example.yaml
 ```
 
@@ -176,7 +176,7 @@ The admin API listens on `127.0.0.1:9900` by default:
 | `PATCH` | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`) |
 | `DELETE` | `/pools/{pool}/backends/{addr}` |
 
-Set the log level with `GSP_LOG` (for example `GSP_LOG=debug`).
+Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
 Other useful targets:
 
@@ -190,24 +190,24 @@ make help      # list every target
 
 Container images (six targets in one `Dockerfile`), a Docker Compose demo
 and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
-publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-minimal`, `gsp-controller`,
-`gsp-aggregator`, `gsp-ui`, `gsp-agent`) via the `Release` workflow. The compose
+publishes the amd64 images to `ghcr.io/wayhouse-proxy/<name>` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
+`wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`) via the `Release` workflow. The compose
 demo and the manifests are reference material only.
 
 ## Workspace layout
 
 | Crate | Responsibility |
 |-------|----------------|
-| [`crates/gsp-config`](crates/gsp-config) | YAML config types, parsing and validation |
-| [`crates/gsp-core`](crates/gsp-core) | Data plane: config snapshot, backend pools, TCP and UDP listeners, byte pump, UDP session tables |
-| [`crates/gsp`](crates/gsp) | The proxy binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
-| [`crates/gsp-controller`](crates/gsp-controller) | Config and operator-intent distribution (revision store, SSE, Raft HA, canary rollout, peer registries) |
-| [`crates/gsp-aggregator`](crates/gsp-aggregator) | Fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent fan-out |
-| [`crates/gsp-ui`](crates/gsp-ui) | Admin GUI backend-for-frontend plus the React/Vite/TS frontend in `web/` |
-| [`crates/gsp-agent`](crates/gsp-agent) | Origin-side WireGuard agent |
-| [`crates/gsp-http`](crates/gsp-http) | Shared HTTP client and TLS server helpers |
-| [`crates/gsp-fleet-tests`](crates/gsp-fleet-tests) | Multi-process integration tests over the real binaries |
-| [`crates/gsp-bench`](crates/gsp-bench) | Latency / load harness |
+| [`crates/wayhouse-config`](crates/wayhouse-config) | YAML config types, parsing and validation |
+| [`crates/wayhouse-core`](crates/wayhouse-core) | Data plane: config snapshot, backend pools, TCP and UDP listeners, byte pump, UDP session tables |
+| [`crates/wayhouse`](crates/wayhouse) | The proxy binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
+| [`crates/wayhouse-controller`](crates/wayhouse-controller) | Config and operator-intent distribution (revision store, SSE, Raft HA, canary rollout, peer registries) |
+| [`crates/wayhouse-aggregator`](crates/wayhouse-aggregator) | Fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent fan-out |
+| [`crates/wayhouse-ui`](crates/wayhouse-ui) | Admin GUI backend-for-frontend plus the React/Vite/TS frontend in `web/` |
+| [`crates/wayhouse-agent`](crates/wayhouse-agent) | Origin-side WireGuard agent |
+| [`crates/wayhouse-http`](crates/wayhouse-http) | Shared HTTP client and TLS server helpers |
+| [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries |
+| [`crates/wayhouse-bench`](crates/wayhouse-bench) | Latency / load harness |
 | [`crates/plugins`](crates/plugins) | First-party WASM sniffer plugins (standalone workspace) |
 
 ## Documentation

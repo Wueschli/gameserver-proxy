@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: OpenVPN client hard-reset packets.
+//! `wayhouse` sniffer plugin: OpenVPN client hard-reset packets.
 //!
 //! An OpenVPN session starts with a *hard reset* from the client: byte 0 is
 //! `opcode << 3 | key_id`, with opcode 1 (`P_CONTROL_HARD_RESET_CLIENT_V1`),
@@ -35,7 +35,7 @@ fn is_hard_reset_opcode(b0: u8) -> bool {
 }
 
 /// Recognise an OpenVPN client hard reset in `first`, UDP or TCP framed.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     let udp = first.first().is_some_and(|&b0| is_hard_reset_opcode(b0))
         && (MIN_PACKET_LEN..=MAX_PACKET_LEN).contains(&first.len());
     // TCP: u16 length, then the packet. The peek may hold only a prefix of
@@ -50,7 +50,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
         }
         _ => false,
     };
-    (udp || tcp).then_some(gsp_sniffer_abi::Hint {
+    (udp || tcp).then_some(wayhouse_sniffer_abi::Hint {
         key: Some("openvpn"),
         ..Default::default()
     })
@@ -59,13 +59,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// A fixed structural check: no config, `cfg_*` ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note.
+/// See `wayhouse_sniffer_abi::input`'s safety note.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

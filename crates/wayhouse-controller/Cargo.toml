@@ -1,0 +1,42 @@
+[package]
+name = "wayhouse-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "wayhouse_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wayhouse-controller"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+wayhouse-http = { workspace = true, features = ["server"] }
+wayhouse-config = { path = "../wayhouse-config" }
+
+sled.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-stream.workspace = true
+similar.workspace = true
+reqwest.workspace = true
+openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = "0.5"

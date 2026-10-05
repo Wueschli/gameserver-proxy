@@ -33,12 +33,12 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with: { name: load-test }
       - name: Build
-        run: cargo build --release -p gsp -p gsp-bench
+        run: cargo build --release -p wayhouse -p wayhouse-bench
       - name: Sticky table (balancer round_robin) vs consistent_hash
         env:
           KEYS: ${{ inputs.keys }}
           RATE: ${{ inputs.rate }}
-        shell: bash   # -eo pipefail: a crashing gsp-bench must fail the step, not hide behind tee
+        shell: bash   # -eo pipefail: a crashing wayhouse-bench must fail the step, not hide behind tee
         run: |
           # The runner's default fd limit is far below the proxy's session
           # count at this rate; a hard limit may cap the raise.
@@ -46,8 +46,8 @@ jobs:
           for balancer in round-robin consistent-hash; do
             echo "::group::udp-affinity $balancer"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            ./target/release/gsp-bench --mode udp-affinity \
-              --gsp-bin target/release/gsp --balancer "$balancer" \
+            ./target/release/wayhouse-bench --mode udp-affinity \
+              --wayhouse-bin target/release/wayhouse --balancer "$balancer" \
               --keys "$KEYS" --rate "$RATE" | tee -a "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             echo "::endgroup::"

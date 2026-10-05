@@ -20,8 +20,8 @@ PoPs, one per region) in front of game servers that are **not** on those
 proxies' local network — a different DC, a different cloud, a rented box at
 a small hosting provider, sometimes behind a home NAT.
 
-Today `connect_backend` (`crates/gsp-core/src/proxy.rs:138`) and
-`connect_upstream` (`crates/gsp-core/src/listener_udp.rs:844`) do a plain
+Today `connect_backend` (`crates/wayhouse-core/src/proxy.rs:138`) and
+`connect_upstream` (`crates/wayhouse-core/src/listener_udp.rs:844`) do a plain
 `TcpStream::connect`/`UdpSocket::connect` to a bare `SocketAddr` — there is no
 seam between "route resolved to this address" and "dial it" for anything
 else to hook into. `health.rs`'s active checks dial the same way
@@ -72,7 +72,7 @@ prior art for?
   general-purpose product with its own protocol, unrelated to pools/health/
   routing) or reimplementing enough of its coordination protocol to be
   compatible — neither is smaller than extending the control plane this
-  project already runs (`gsp-controller`) with one narrow registry. Its
+  project already runs (`wayhouse-controller`) with one narrow registry. Its
   *idea* is reused; the software is not.
 
 **Conclusion**: nothing about the tunnel itself needs inventing. Real,
@@ -81,7 +81,7 @@ userspace implementation as a portable fallback) is the entire data plane.
 The only genuinely new code this project needs is (a) a small origin-side
 helper that manages a local WireGuard interface and registers itself, and
 (b) a narrow extension to the existing Tier-1 control plane
-(`gsp-controller`) that distributes peer configuration automatically instead
+(`wayhouse-controller`) that distributes peer configuration automatically instead
 of by hand — both thin, both specific to fitting this into pools/health/
 routing, neither a reimplementation of cryptography or tunnel framing.
 
@@ -89,7 +89,7 @@ routing, neither a reimplementation of cryptography or tunnel framing.
 
 ```
 ┌─────────────┐  WireGuard  ┌──────────────┐        ┌──────────────┐
-│  gsp (edge, │◄───────────►│  gsp-agent   │◄──────►│  game server │
+│  wayhouse (edge, │◄───────────►│  wayhouse-agent   │◄──────►│  game server │
 │  public IP) │   tunnel    │  (origin,    │ plain   │  process     │
 │             │             │  no public   │ local   │              │
 │  pool target│             │  IP needed)  │ traffic │              │
@@ -100,7 +100,7 @@ routing, neither a reimplementation of cryptography or tunnel framing.
         │ peer config (pubkeys, allowed IPs)
         ▼
 ┌───────────────────────┐
-│  gsp-controller        │  (existing Tier-1 store, ADR 20/21) —
+│  wayhouse-controller        │  (existing Tier-1 store, ADR 20/21) —
 │  + new "backend peers" │  new small registry, distributed the
 │  registry              │  same way config revisions already are
 └───────────────────────┘
@@ -110,67 +110,67 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   origin exists on the proxy host, that origin's backends are just IP
   addresses on that interface's subnet — `connect_backend`/
   `connect_upstream`/`health.rs`'s dials need **zero code changes**, because
-  from `gsp`'s point of view a tunneled backend looks exactly like any other
+  from `wayhouse`'s point of view a tunneled backend looks exactly like any other
   routable `SocketAddr`. This is the same reasoning that already lets this
   project's transparent-proxy mode (ADR 12) and every other listener option
   layer onto the existing pump without touching it.
-- **`gsp-agent`** (new, small binary, its own workspace crate — locked,
-  matching the `gsp-controller`/`gsp-aggregator`/`gsp-ui` precedent of one
+- **`wayhouse-agent`** (new, small binary, its own workspace crate — locked,
+  matching the `wayhouse-controller`/`wayhouse-aggregator`/`wayhouse-ui` precedent of one
   small process per concern, keeping WireGuard dependencies out of the
-  proxy-critical `gsp` binary entirely). Runs next to the actual game server
+  proxy-critical `wayhouse` binary entirely). Runs next to the actual game server
   process. Creates and maintains **one shared local WireGuard interface**
   with every proxy PoP it's paired with as a peer on that same interface
   (locked — the standard WireGuard shape: one interface, many peers, each
   scoped by its own `AllowedIPs`; per-origin interfaces would multiply
   routing-table entries for no isolation benefit `AllowedIPs` doesn't
   already give per peer). Registers its public key + which backend
-  address(es) it fronts with `gsp-controller`. It does not proxy or inspect
+  address(es) it fronts with `wayhouse-controller`. It does not proxy or inspect
   game traffic itself — the WireGuard interface does that, and the real
   game server binds normally on its own loopback/interface address, exactly
   as it would with zero knowledge that a proxy is involved.
 - **Interface management via `defguard/wireguard-rs`** (locked) — a
   multi-platform Rust library unifying kernel-netlink and `boringtun`-
-  userspace configuration behind one API, used by both `gsp-agent` (the
-  origin's interface) and `gsp`'s new reconcile task (the proxy's shared
+  userspace configuration behind one API, used by both `wayhouse-agent` (the
+  origin's interface) and `wayhouse`'s new reconcile task (the proxy's shared
   interface, all origins as peers). One abstraction instead of hand-rolling
   the kernel-vs-userspace branch ourselves on top of two separately-focused
   crates (`wireguard-uapi` + `boringtun`) — continues this project's own
   "prefer a maintained wrapper over hand-rolled plumbing" bias (`nix` for
   `recvmmsg`/TPROXY/`splice`, ADR 10/12).
-- **`gsp-controller` gains a "backend peers" registry** — a new resource
+- **`wayhouse-controller` gains a "backend peers" registry** — a new resource
   alongside the existing config-revision log and phase-12 intent log, not a
-  replacement for either. `gsp-agent` writes its own registration (pubkey,
-  allowed backend addresses, last-known endpoint); every edge `gsp` instance
+  replacement for either. `wayhouse-agent` writes its own registration (pubkey,
+  allowed backend addresses, last-known endpoint); every edge `wayhouse` instance
   subscribes to the resulting peer table the same way it already subscribes
   to config (`controller_client.rs`'s existing shape, ADR 13) and reconciles
-  its shared WireGuard interface's peer list to match (new `gsp` task, same
+  its shared WireGuard interface's peer list to match (new `wayhouse` task, same
   shape as `controller_client::run`, using `wireguard-rs` above). Revoking/
   rotating an origin's key is a controller-side removal that propagates the
   same way a config change does — no manual per-proxy key exchange, ever,
   for a fleet of N proxies × M origins.
 - **...and a mirror-image "proxy peers" registry, built in slice 7.** The
-  bullet above only solves proxy→origin discovery. `gsp-agent`'s "every
+  bullet above only solves proxy→origin discovery. `wayhouse-agent`'s "every
   proxy PoP it's paired with as a peer" premise two bullets up needs the
   other direction too: an origin has to learn about every proxy, including
   ones added after it was deployed, without being restarted. So every
-  `gsp --tunnel-*` instance also registers itself (pubkey + its own public
+  `wayhouse --tunnel-*` instance also registers itself (pubkey + its own public
   endpoint — always known, unlike an origin's) with a second registry, and
-  every `gsp-agent` subscribes to it and reconciles proxies onto its own
+  every `wayhouse-agent` subscribes to it and reconciles proxies onto its own
   interface, the exact mirror of the first bullet's mechanism run in the
-  other direction. `gsp-agent --peer-pubkey`/`--peer-endpoint` (a manual
+  other direction. `wayhouse-agent --peer-pubkey`/`--peer-endpoint` (a manual
   static pin, what slice 6's first end-to-end verification used before
   this existed) still work alongside it for a bootstrap proxy or a
   deployment too small to bother with the registry — they converge to the
   same interface state a registered proxy would reach anyway, so there's no
   conflict between the two paths.
 - **Edge restarts: a per-process `boot_id` (built 2026-10-03).** A restarted
-  `gsp --tunnel-*` has a fresh interface but no endpoint for any origin
+  `wayhouse --tunnel-*` has a fresh interface but no endpoint for any origin
   (origins may sit behind NAT), so only the origin can re-handshake — and with
   kernel WireGuard the origin's session to the old process still looks valid,
   so it used to wait for the 120 s rekey (~2.5 min outage). Every proxy
   registration therefore carries a random `boot_id` (128-bit hex, new per
   process start; the controller accepts 1–64 of `[A-Za-z0-9-]` and stores it
-  as-is). `gsp-agent` compares whole registrations, so a changed `boot_id`
+  as-is). `wayhouse-agent` compares whole registrations, so a changed `boot_id`
   re-sets the peer (remove + add), which drops the dead session; the re-added
   peer's persistent keepalive starts a new handshake at once. Optional on the
   wire in both directions: an older proxy sends none (no change from before),
@@ -192,13 +192,13 @@ routing, neither a reimplementation of cryptography or tunnel framing.
   from the backend-peers registry — no new schema *concept*, one new
   `BackendSource` implementation and one new `backend_sources[].type`
   variant. This also means an origin's backend address(es) can change
-  (the agent re-registers) without touching `gsp-config` at all, the same
+  (the agent re-registers) without touching `wayhouse-config` at all, the same
   "discovered set, not a static file list" property every other dynamic
   source already has.
 
 ## Address authority (built 2026-10-02)
 
-`gsp-controller` allocates tunnel-internal addresses, so no operator chooses (or
+`wayhouse-controller` allocates tunnel-internal addresses, so no operator chooses (or
 mis-chooses) one. Design and decisions:
 [`docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`](superpowers/specs/2026-10-02-tunnel-address-authority-design.md);
 IPv6 (built 2026-10-03):
@@ -231,9 +231,9 @@ IPv6 (built 2026-10-03):
   register again; `DELETE` the ones that will not come back. `--tunnel-readdress` is
   refused without a network and together with `--ha-peers` or `--ha-join`, and is
   harmless when nothing is outside the network.
-- **Startup.** `gsp-agent` and `gsp --tunnel-*` register *before* bringing their
+- **Startup.** `wayhouse-agent` and `wayhouse --tunnel-*` register *before* bringing their
   interface up (the answer is its address), persist the answer next to their key, and
-  can start from it while the controller is down. For `gsp --tunnel-*` that fallback
+  can start from it while the controller is down. For `wayhouse --tunnel-*` that fallback
   is not instant: with the controller down it first spends its ~30 s registration
   budget, then falls back to the saved address (`<tunnel-key-file>.address`), logging
   the last error and, if a pinned address differs from the saved one, that the pin
@@ -242,7 +242,7 @@ IPv6 (built 2026-10-03):
 - **Address changes.** Every re-registration (default every 30 s) answers with the
   address the controller currently holds. If it differs from the one the interface
   carries (an operator released it, or a lease expired and it was reallocated), the
-  agent or `gsp` moves the interface without a restart, keeping its key, listen port
+  agent or `wayhouse` moves the interface without a restart, keeping its key, listen port
   and peers, on both backends: it deletes the old address with a netlink call of its own
   and assigns the new one (`live_interface.rs` and `netlink_addr.rs` in both binaries).
   The library can add an address but not remove one, and its `remove_interface` cannot be
@@ -264,7 +264,7 @@ IPv6 (built 2026-10-03):
 - **Lease expiry.** With `--tunnel-lease-ttl` (at least `2h`; default `0` = off) an
   owner not re-registered for that long is released exactly like a `DELETE`:
   tombstone, address freed, and a pool's `tunnel` source clears the origin's backends
-  (`gsp_discovery_refresh_total{result="withdrawn"}`). The controller sweeps every
+  (`wayhouse_discovery_refresh_total{result="withdrawn"}`). The controller sweeps every
   tenth of the TTL (between 1 min and 1 h), starting an hour after it starts (or after
   a node becomes HA leader), so a controller that was down longer than the TTL does not
   expire everyone before they re-register. Under HA only the leader sweeps and each
@@ -278,7 +278,7 @@ IPv6 (built 2026-10-03):
   a stream of distinct names with bad backends can therefore use up the pool. The
   registration endpoints are bearer-gated, and `DELETE` plus the stale flag are the
   remedy.
-  `gsp-ui` shows the same table on its Tunnel addresses page (`GET /api/tunnel/addresses`,
+  `wayhouse-ui` shows the same table on its Tunnel addresses page (`GET /api/tunnel/addresses`,
   proxied with `--controller-url`/`--controller-token`). Each row has a **Release**
   button (admin role, behind a confirmation) that proxies the registry `DELETE`
   (`DELETE /api/tunnel/origins/{name}` → `/peers/{name}`, `/api/tunnel/proxies/{name}` →
@@ -325,4 +325,4 @@ IPv6 (built 2026-10-03):
   interface per origin.
 - Config schema: an origin is a `BackendSource` (`backend_sources[].type:
   tunnel`), not a new `origins:`/`pools[].origin` concept.
-- `gsp-agent`: its own workspace crate, not a `gsp --agent` mode.
+- `wayhouse-agent`: its own workspace crate, not a `wayhouse --agent` mode.

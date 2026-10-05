@@ -1,0 +1,13 @@
+settings:
+  admin:
+    listen: "127.0.0.1:9900"
+    tls:
+      cert: /etc/wayhouse/tls/fullchain.pem
+      key: /etc/wayhouse/tls/privkey.pem
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001"]
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p

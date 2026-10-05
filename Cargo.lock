@@ -1175,213 +1175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gsp"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "clap",
- "defguard_wireguard_rs",
- "gsp-config",
- "gsp-core",
- "gsp-http",
- "hickory-resolver",
- "hickory-server",
- "metrics",
- "metrics-exporter-prometheus",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
- "nix 0.29.0",
- "notify",
- "prost",
- "rand 0.8.8",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tracing",
- "tracing-subscriber",
- "wasmtime",
- "wat",
-]
-
-[[package]]
-name = "gsp-agent"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "defguard_wireguard_rs",
- "gsp-http",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsp-aggregator"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "gsp-http",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "gsp-bench"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "gsp-config",
- "gsp-core",
- "socket2",
- "tokio",
-]
-
-[[package]]
-name = "gsp-config"
-version = "0.0.1"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_norway",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "gsp-controller"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "clap",
- "gsp-config",
- "gsp-http",
- "openraft",
- "reqwest",
- "serde",
- "serde_json",
- "similar",
- "sled",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gsp-core"
-version = "0.0.1"
-dependencies = [
- "arc-swap",
- "async-trait",
- "bytes",
- "foca",
- "gsp-config",
- "hmac 0.12.1",
- "lru",
- "maxminddb",
- "metrics",
- "nix 0.29.0",
- "postcard",
- "rand 0.10.3",
- "serde",
- "sha2",
- "socket2",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gsp-fleet-tests"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "nix 0.29.0",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
-name = "gsp-http"
-version = "0.0.1"
-dependencies = [
- "arc-swap",
- "axum",
- "clap",
- "metrics",
- "metrics-exporter-prometheus",
- "reqwest",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "gsp-ui"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "argon2",
- "axum",
- "bytes",
- "clap",
- "futures-util",
- "gsp-http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "rand 0.8.8",
- "reqwest",
- "serde",
- "serde_json",
- "serde_norway",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4470,6 +4263,213 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7b4d1a49ea73a8f3326e74e3a05db667001b16bd1035ed3356fc1a0ed05ca7f"
 dependencies = [
  "wast",
+]
+
+[[package]]
+name = "wayhouse"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "defguard_wireguard_rs",
+ "hickory-resolver",
+ "hickory-server",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-sys",
+ "nix 0.29.0",
+ "notify",
+ "prost",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
+ "wasmtime",
+ "wat",
+ "wayhouse-config",
+ "wayhouse-core",
+ "wayhouse-http",
+]
+
+[[package]]
+name = "wayhouse-agent"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "defguard_wireguard_rs",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-sys",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wayhouse-http",
+]
+
+[[package]]
+name = "wayhouse-aggregator"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wayhouse-http",
+]
+
+[[package]]
+name = "wayhouse-bench"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "socket2",
+ "tokio",
+ "wayhouse-config",
+ "wayhouse-core",
+]
+
+[[package]]
+name = "wayhouse-config"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_norway",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "wayhouse-controller"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "openraft",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "sled",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "wayhouse-config",
+ "wayhouse-http",
+]
+
+[[package]]
+name = "wayhouse-core"
+version = "0.0.1"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "foca",
+ "hmac 0.12.1",
+ "lru",
+ "maxminddb",
+ "metrics",
+ "nix 0.29.0",
+ "postcard",
+ "rand 0.10.3",
+ "serde",
+ "sha2",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wayhouse-config",
+]
+
+[[package]]
+name = "wayhouse-fleet-tests"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "nix 0.29.0",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "wayhouse-http"
+version = "0.0.1"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "clap",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "wayhouse-ui"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "bytes",
+ "clap",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "wayhouse-http",
 ]
 
 [[package]]
