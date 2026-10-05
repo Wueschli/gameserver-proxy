@@ -31,9 +31,11 @@
 //! ## Bounds
 //! Two independent bounds keep a plugin from stalling or ballooning the
 //! process: a shared `wasmtime::Engine` with epoch interruption — a ticker
-//! thread bumps the engine's epoch every `call_timeout_ms`, and every call
-//! sets a one-tick deadline, so a call that hasn't returned by the next tick
-//! traps — and a per-call `StoreLimits` memory cap (`max_memory_bytes`). Every
+//! thread bumps the engine's epoch every `call_timeout_ms / 2`, and every call
+//! sets a two-tick deadline. The first tick can land anywhere after the call
+//! starts, so a call is guaranteed at least half of `call_timeout_ms` and is
+//! trapped by `call_timeout_ms` at the latest (a ceiling, not an exact limit)
+//! — and a per-call `StoreLimits` memory cap (`max_memory_bytes`). Every
 //! call gets a fresh `Store` + `Instance`; no state survives between
 //! connections (deliberate: simplicity over instance-reuse latency, revisited
 //! in slice 6 if the per-call instantiate cost misses NFR N1).
@@ -64,6 +66,12 @@ pub struct WasmSniffer {
     /// (empty when unset); marshalled into linear memory on every `sniff` call.
     config: Vec<u8>,
 }
+
+/// Epoch ticks a call may span before it traps. A deadline of one tick fires
+/// at the *next* tick, which may be arbitrarily soon after the call starts, so
+/// the ticker runs at `call_timeout / EPOCH_DEADLINE_TICKS` and a call gets
+/// between `call_timeout / 2` and `call_timeout`.
+const EPOCH_DEADLINE_TICKS: u64 = 2;
 
 enum CallError {
     /// The epoch deadline fired before the call returned.
@@ -113,7 +121,7 @@ impl WasmSniffer {
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
 
         let instance = Instance::new(&mut store, &self.module, &[]).map_err(classify)?;
         let memory = instance
@@ -216,9 +224,10 @@ pub struct SnifferLoader {
 
 impl SnifferLoader {
     /// Build the engine and spawn its epoch-ticker thread (bumps the epoch
-    /// every `call_timeout`, forever — one thread for the process, not one
+    /// every `call_timeout / 2`, forever — one thread for the process, not one
     /// per plugin or per call).
     pub fn new(call_timeout: std::time::Duration) -> Result<Self> {
+        let tick = call_timeout / EPOCH_DEADLINE_TICKS as u32;
         let mut engine_cfg = Config::new();
         engine_cfg.epoch_interruption(true);
         let engine = Arc::new(
@@ -230,7 +239,7 @@ impl SnifferLoader {
             std::thread::Builder::new()
                 .name("wayhouse-sniffer-epoch".into())
                 .spawn(move || loop {
-                    std::thread::sleep(call_timeout);
+                    std::thread::sleep(tick);
                     engine.increment_epoch();
                 })
                 .context("spawning the sniffer epoch-ticker thread")?;
@@ -501,6 +510,45 @@ mod tests {
         // Should return None (timeout counted as an error, not a hang) rather
         // than block forever.
         assert!(sniffer.sniff(b"anything").is_none());
+    }
+
+    #[test]
+    fn short_calls_never_time_out_under_the_shipped_ticker() {
+        // Regression (#173): a one-tick deadline traps at the *next* tick,
+        // anywhere from 0 to `call_timeout` after the call started, so a call
+        // far under the timeout was still killed ~duration/timeout of the time.
+        let wat = r#"
+            (module
+              (memory (export "memory") 2)
+              (func $alloc (export "alloc") (param i32) (result i32) (i32.const 0))
+              (func $sniff (export "sniff") (param i32 i32 i32 i32) (result i64)
+                (local $i i32)
+                (loop $spin
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if $spin (i32.lt_u (local.get $i) (i32.const 1000000))))
+                (i32.store8 (i32.const 65536) (i32.const 0x02))
+                (i32.store8 (i32.const 65537) (i32.const 1))
+                (i32.store8 (i32.const 65538) (i32.const 0))
+                (i32.store8 (i32.const 65539) (i32.const 0x61))
+                (i64.or (i64.shl (i64.const 65536) (i64.const 32)) (i64.const 4))))
+        "#;
+        let loader = SnifferLoader::new(Duration::from_millis(20)).unwrap();
+        let sniffer = wasm_sniffer("spinner", wat, &loader.engine);
+        let started = std::time::Instant::now();
+        let mut timed_out = 0;
+        let mut calls = 0;
+        while calls < 1500 {
+            if matches!(sniffer.call(b"x"), Err(CallError::Timeout)) {
+                timed_out += 1;
+            }
+            calls += 1;
+        }
+        let per_call = started.elapsed() / calls;
+        assert!(
+            per_call < Duration::from_millis(5),
+            "test premise: each call must be far under the 20 ms timeout, was {per_call:?}"
+        );
+        assert_eq!(timed_out, 0, "{timed_out}/{calls} short calls timed out");
     }
 
     #[test]
