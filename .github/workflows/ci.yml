@@ -67,6 +67,7 @@ jobs:
           python3 .github/scripts/trivy_summary_test.py
           python3 .github/scripts/audit_summary_test.py
           python3 .github/scripts/sarif_categories_test.py
+          python3 .github/scripts/check_release_test.py
       - name: Detect changed areas
         id: f
         env:

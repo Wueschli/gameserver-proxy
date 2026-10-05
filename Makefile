@@ -126,6 +126,7 @@ DEPLOY_COMPOSE := docker compose -p gsp-smoke --env-file deploy/compose/.env -f 
 deploy-smoke:
 	test -f deploy/compose/.env || cp deploy/compose/.env.example deploy/compose/.env
 	rc=0; \
+	sha="$${GSP_GIT_SHA:-$$(git rev-parse HEAD 2>/dev/null)}"; export GSP_GIT_SHA=$$(printf %.12s "$$sha"); \
 	$(DEPLOY_COMPOSE) up -d --build && sh deploy/smoke.sh || rc=$$?; \
 	[ $$rc -eq 0 ] || $(DEPLOY_COMPOSE) logs; \
 	$(DEPLOY_COMPOSE) down -v; \

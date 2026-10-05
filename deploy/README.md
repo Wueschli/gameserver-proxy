@@ -26,7 +26,19 @@ docker build -f deploy/Dockerfile --target gsp-controller -t gsp-controller .   
 ```
 
 Builder is `rust:1-trixie`, runtime is `gcr.io/distroless/cc-debian13:nonroot`
-(no shell, runs as uid 65532).
+(no shell, runs as uid 65532). Every base image is pinned by digest (the tag stays in
+the `FROM` line); the Dockerfile header says how to bump one.
+
+**Commit label.** The image has no `.git`, so `gsp_build_info{commit=...}` comes from the
+`GSP_GIT_SHA` build arg. `build-images.sh` and `make deploy-smoke` pass this checkout's
+HEAD, and `release.yml` the tagged commit; an `unknown` commit fails
+`deploy/check-image-commit.sh` (builder builds) and `deploy/smoke.sh`.
+
+**Releasing.** Set `[workspace.package] version` in `Cargo.toml` (and `Cargo.lock`) to the
+new version, merge to main, wait for CI, then push the tag `v<version>`. `release.yml`
+refuses a tag that is not `v` + the workspace version, a commit that is not on main or has
+no green CI run (run CI by hand for a docs-only commit), builds all six images, checks
+`--version` and the commit on each and runs the compose smoke test, and only then pushes.
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
 binaries you built yourself from `deploy/prebuilt/` (`gsp`, `gsp-minimal`, `gsp-controller`,
