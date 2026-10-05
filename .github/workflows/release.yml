@@ -1,19 +1,21 @@
 name: Release
 
-# Publishes the six reference images (deploy/Dockerfile) to GHCR, amd64 only,
-# when a version tag is pushed. Nothing else triggers it, so it costs one build
-# per release. Multi-arch and Kubernetes packaging: issue #88.
+# Publishes the six reference images (deploy/Dockerfile) to GHCR for linux/amd64
+# and linux/arm64 when a version tag is pushed. Nothing else triggers it, so it
+# costs one build per architecture per release. Kubernetes packaging: issue #88.
 #
 # Nothing is published until everything passed (issue #112):
 #   1. the tag is v<workspace version>, so the tag, the image tags and what
 #      `--version` / wayhouse_build_info report agree;
 #   2. the tagged commit is on main and CI succeeded on it;
-#   3. all six images build (self-contained, compiled in Docker like the nightly
-#      deploy job), each reports the version and carries the commit, and the
-#      compose smoke test passes on them;
-#   4. only then are they pushed, in one last step. A build or smoke failure
-#      therefore leaves nothing public; only a registry error mid-push can still
-#      leave a partial set (re-run the job: the pushes are idempotent).
+#   3. all six images build on a native runner of each architecture (no
+#      emulation, no cross-compiling), each reports the version and carries the
+#      commit, and the compose smoke test passes on them;
+#   4. only then does the `publish` job push them: first the per-architecture
+#      tags (`<version>-amd64`, `<version>-arm64`), then the multi-arch `<version>`
+#      (and `latest`) tags that point at both. A build or smoke failure on either
+#      architecture therefore leaves nothing public; only a registry error mid-push
+#      can still leave a partial set (re-run the workflow: the pushes are idempotent).
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -22,16 +24,14 @@ permissions:
   contents: read
 
 jobs:
-  images:
+  verify:
     runs-on: ubuntu-24.04   # pinned like ci.yml
-    timeout-minutes: 90
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read     # find CI's run for this commit
-      packages: write   # push to ghcr.io/<owner>/<image>
-    env:
-      REGISTRY: ghcr.io
-      IMAGES: wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -59,30 +59,102 @@ jobs:
             echo "::error::no successful CI run for $SHA. Wait for CI on main, or run CI by hand (Actions > CI > Run workflow on main) if the commit changed only docs, then re-run this job."
             exit 1
           }
+
+  # One native build per architecture. Builds, tests and labels the six images,
+  # then hands them to `publish` as a tarball; nothing is pushed from here.
+  images:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04      # pinned like ci.yml
+          - arch: arm64
+            runner: ubuntu-24.04-arm  # free for public repos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      REGISTRY: ghcr.io
+      IMAGES: wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Build all six images, check version and commit, run the compose smoke test
         env:
           WAYHOUSE_GIT_SHA: ${{ github.sha }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -eu
+          test "$(docker version --format '{{.Server.Arch}}')" = "$ARCH"
           BIN_SOURCE=builder sh deploy/build-images.sh
           for t in $IMAGES; do
             out=$(docker run --rm "wayhouse-deploy/$t:local" --version)
             case "$out" in *" $VERSION ("*")") ;; *) echo "::error::$t --version is '$out', expected version $VERSION"; exit 1 ;; esac
           done
           make deploy-smoke
+      # The images tested above, plus one metadata layer for the labels (same
+      # filesystem layers), named for their final registry path and architecture.
+      - name: Label and tag the images, save them for publish
+        env:
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          owner=$(echo "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
+          refs=""
+          for t in $IMAGES; do
+            ref="$REGISTRY/$owner/$t:$VERSION-$ARCH"
+            printf 'FROM wayhouse-deploy/%s:local\n' "$t" | docker build \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              --label "org.opencontainers.image.revision=$SHA" \
+              --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
+              -t "$ref" -
+            refs="$refs $ref"
+          done
+          mkdir -p "$RUNNER_TEMP/images"
+          docker save -o "$RUNNER_TEMP/images/$ARCH.tar" $refs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-images-${{ matrix.arch }}
+          path: ${{ runner.temp }}/images/${{ matrix.arch }}.tar
+          retention-days: 1
+
+  publish:
+    needs: [verify, images]
+    runs-on: ubuntu-24.04   # pinned like ci.yml
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io/<owner>/<image>
+    env:
+      REGISTRY: ghcr.io
+      IMAGES: wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-images-*
+          path: ${{ runner.temp }}/images
+          merge-multiple: true
       - name: Log in to GHCR
         env:
           ACTOR: ${{ github.actor }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$TOKEN" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
-      # The images tested above, plus one metadata layer for the labels (same
-      # filesystem layers), then pushed together as the last step.
-      - name: Label, tag and push the images
+      - name: Load the images
+        run: |
+          set -eu
+          for a in amd64 arm64; do docker load -i "$RUNNER_TEMP/images/$a.tar"; done
+      - name: Push per-architecture tags, then the multi-arch tags
         env:
           REPO: ${{ github.repository }}
-          VERSION: ${{ steps.version.outputs.version }}
-          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -eu
           owner=$(echo "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
@@ -90,23 +162,15 @@ jobs:
           tags="$VERSION"
           case "$VERSION" in *-*) ;; *) tags="$tags latest" ;; esac
           for t in $IMAGES; do
-            printf 'FROM wayhouse-deploy/%s:local\n' "$t" | docker build \
-              --label "org.opencontainers.image.source=https://github.com/$REPO" \
-              --label "org.opencontainers.image.version=$VERSION" \
-              --label "org.opencontainers.image.revision=$SHA" \
-              --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
-              -t "$REGISTRY/$owner/$t:$VERSION" -
+            for a in amd64 arm64; do
+              docker push "$REGISTRY/$owner/$t:$VERSION-$a"
+            done
           done
           # Every :VERSION first, then the moving tags, so a registry error part
           # way through never moves `latest` onto a mixed-version set.
-          for t in $IMAGES; do
-            docker push "$REGISTRY/$owner/$t:$VERSION"
-          done
           for tag in $tags; do
-            [ "$tag" = "$VERSION" ] && continue
             for t in $IMAGES; do
               image="$REGISTRY/$owner/$t"
-              docker tag "$image:$VERSION" "$image:$tag"
-              docker push "$image:$tag"
+              docker buildx imagetools create -t "$image:$tag" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
             done
           done

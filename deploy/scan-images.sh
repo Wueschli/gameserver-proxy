@@ -16,6 +16,9 @@
 # JSON and SARIF reports land in $TRIVY_REPORT_DIR (default target/trivy).
 # With $TRIVY_IMAGE_DIR set, the images come from `docker save` tarballs there
 # (<target>.tar) instead of the Docker daemon — CI's trivy job runs that way.
+# With $TRIVY_ARCH set (CI's trivy-arm64 job, scanning the arm64 images), the report
+# names get a "-<arch>" suffix so they never collide with the amd64 ones, and the
+# lockfile scans are skipped (the same files, the same findings).
 # Accepted findings go in .trivyignore at the repo root, each with a reason.
 set -eu
 cd "$(dirname "$0")/.."
@@ -38,14 +41,17 @@ scan() {
     echo "$name" >>"$out/not-scanned.txt" # an error, not findings: no report at all
   fi
 }
+sfx=${TRIVY_ARCH:+-$TRIVY_ARCH}
 for t in wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent; do
   if [ -n "${TRIVY_IMAGE_DIR:-}" ]; then
-    scan "image-$t" vuln,secret image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
+    scan "image-$t$sfx" vuln,secret image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
   else
     # --image-src docker: only the image just built, never a same-named registry one.
-    scan "image-$t" vuln,secret image "$@" --image-src docker --scanners vuln,secret "wayhouse-deploy/$t:local"
+    scan "image-$t$sfx" vuln,secret image "$@" --image-src docker --scanners vuln,secret "wayhouse-deploy/$t:local"
   fi
 done
-scan lock-cargo vuln fs "$@" --scanners vuln Cargo.lock
-scan lock-ui-npm vuln fs "$@" --scanners vuln crates/wayhouse-ui/web/package-lock.json
+if [ -z "${TRIVY_ARCH:-}" ]; then
+  scan lock-cargo vuln fs "$@" --scanners vuln Cargo.lock
+  scan lock-ui-npm vuln fs "$@" --scanners vuln crates/wayhouse-ui/web/package-lock.json
+fi
 exit $rc

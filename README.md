@@ -190,7 +190,7 @@ make help      # list every target
 
 Container images (six targets in one `Dockerfile`), a Docker Compose demo
 and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
-publishes the amd64 images to `ghcr.io/wayhouse-proxy/<name>` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
+publishes multi-arch (linux/amd64 + linux/arm64) images to `ghcr.io/wayhouse-proxy/<name>` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
 `wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`) via the `Release` workflow. The compose
 demo and the manifests are reference material only.
 

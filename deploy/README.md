@@ -37,8 +37,18 @@ HEAD, and `release.yml` the tagged commit; an `unknown` commit fails
 **Releasing.** Set `[workspace.package] version` in `Cargo.toml` (and `Cargo.lock`) to the
 new version, merge to main, wait for CI, then push the tag `v<version>`. `release.yml`
 refuses a tag that is not `v` + the workspace version, a commit that is not on main or has
-no green CI run (run CI by hand for a docs-only commit), builds all six images, checks
-`--version` and the commit on each and runs the compose smoke test, and only then pushes.
+no green CI run (run CI by hand for a docs-only commit), builds all six images on a native
+amd64 and a native arm64 runner, checks `--version` and the commit on each and runs the
+compose smoke test on both, and only then pushes (`publish` job).
+
+**First release.** The release path has never run end to end (the `publish` job only runs on a tag), so make the first tag a pre-release such as `v0.1.0-rc.1`: it publishes the images but never moves `latest`.
+
+**Multi-arch.** `ghcr.io/<owner>/<image>:<version>` (and `:latest` for a non-pre-release) is
+a manifest list for `linux/amd64` and `linux/arm64`; `docker pull` picks the host's. The
+per-architecture images stay available as `:<version>-amd64` and `:<version>-arm64`. There
+is no emulation and no cross-compiling: each architecture builds natively, so the Dockerfile
+is architecture-neutral (the base images are pinned by index digest, which covers both).
+CI has an arm64 leg of each of `build-release`, `plugins`, `deploy` and `trivy` (jobs `*-arm64`).
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
 binaries you built yourself from `deploy/prebuilt/` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
