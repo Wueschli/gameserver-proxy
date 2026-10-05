@@ -5,14 +5,12 @@
 //! machine; `openraft` only adds a replicated log and leader election on
 //! top of it.
 //!
-//! **Scope cut for this slice, stated up front**: HA and the `slave` role
-//! are not combined yet. A tier either runs `--role standalone` with
-//! optional `--ha-peers` (this module), or `--role slave` with no HA
-//! (slices 1/4's `parent_client`/`intent::relay`, untouched) — never both at
-//! once. Combining them needs the upward relay to run leader-only with its
-//! cursor promoted to replicated state, exactly as designed in `docs/10`;
-//! that wiring is real, designed, and deliberately not built in this slice
-//! to keep it reviewable. `main.rs` enforces the cut at startup.
+//! **HA and the `slave` role combine**: only the leader runs the upward
+//! relay (`parent_client` for config, `intent::relay` for intent) and
+//! proposes each parent revision as a [`WriteRequest::RelayConfig`] /
+//! [`WriteRequest::RelayIntent`] entry. The relay cursor (the highest parent
+//! revision absorbed) lives beside each log and is replicated with it, so a
+//! newly elected leader resumes where the group left off. See [`crate::relay`].
 //!
 //! Module layout, mirroring `openraft`'s own `raft-kv-memstore` example
 //! (adapted: `sled`-backed instead of in-memory, `axum` instead of
@@ -75,14 +73,8 @@ pub type NodeId = u64;
 
 /// Startup checks on the HA flags together: `--ha-peers` (bootstrap a cluster
 /// with a static member list) and `--ha-join` (wait to be added) are mutually
-/// exclusive, either needs `--ha-node-id`, and neither combines with
-/// `--role slave` yet.
-pub fn check_flags(
-    ha_peers: bool,
-    ha_join: bool,
-    node_id: Option<NodeId>,
-    slave: bool,
-) -> Result<(), String> {
+/// exclusive, and either needs `--ha-node-id`.
+pub fn check_flags(ha_peers: bool, ha_join: bool, node_id: Option<NodeId>) -> Result<(), String> {
     if ha_peers && ha_join {
         return Err(
             "--ha-join and --ha-peers are mutually exclusive: --ha-peers bootstraps a \
@@ -93,13 +85,6 @@ pub fn check_flags(
     let flag = if ha_join { "--ha-join" } else { "--ha-peers" };
     if (ha_peers || ha_join) && node_id.is_none() {
         return Err(format!("{flag} requires --ha-node-id"));
-    }
-    if (ha_peers || ha_join) && slave {
-        // Scope cut — see this module's doc.
-        return Err(format!(
-            "{flag} cannot be combined with --role slave yet: the upward relay needs to run \
-             leader-only with a replicated cursor, which is designed (docs/10) but not built"
-        ));
     }
     Ok(())
 }
@@ -138,6 +123,19 @@ pub enum WriteRequest {
         actor: Option<String>,
     },
     Intent(Vec<u8>),
+    /// A `slave` tier's upward relay of one config revision (promoted, as
+    /// every relayed revision is), proposed by the leader only. Carries the
+    /// parent's revision number, which becomes the relay cursor; applied at
+    /// most once per parent revision, see [`crate::relay`].
+    RelayConfig {
+        bytes: Vec<u8>,
+        parent_revision: u64,
+    },
+    /// [`WriteRequest::RelayConfig`] for the intent log.
+    RelayIntent {
+        bytes: Vec<u8>,
+        parent_revision: u64,
+    },
     /// Phase 12 slice 7: flips an existing config revision's `Stage::promoted`
     /// to `true` in place — the same operation `AppState::promote_revision`
     /// does directly when HA is off.
@@ -301,30 +299,34 @@ pub struct HaHandle {
     pub pre_ha: import::LocalPreHa,
 }
 
+impl HaHandle {
+    /// Whether this node is currently the Raft leader.
+    pub fn is_leader(&self) -> bool {
+        self.raft.metrics().borrow().current_leader == Some(self.node_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn ha_join_and_ha_peers_together_are_refused() {
-        let e = check_flags(true, true, Some(1), false).unwrap_err();
+        let e = check_flags(true, true, Some(1)).unwrap_err();
         assert!(e.contains("--ha-join") && e.contains("--ha-peers"), "{e}");
-        assert!(check_flags(true, false, Some(1), false).is_ok());
-        assert!(check_flags(false, true, Some(4), false).is_ok());
-        assert!(check_flags(false, false, None, false).is_ok());
+        assert!(check_flags(true, false, Some(1)).is_ok());
+        assert!(check_flags(false, true, Some(4)).is_ok());
+        assert!(check_flags(false, false, None).is_ok());
     }
 
     #[test]
-    fn ha_needs_a_node_id_and_refuses_the_slave_role() {
-        assert!(check_flags(true, false, None, false)
+    fn ha_needs_a_node_id() {
+        assert!(check_flags(true, false, None)
             .unwrap_err()
             .contains("--ha-node-id"));
-        assert!(check_flags(false, true, None, false)
+        assert!(check_flags(false, true, None)
             .unwrap_err()
             .contains("--ha-join requires"));
-        assert!(check_flags(false, true, Some(4), true)
-            .unwrap_err()
-            .contains("--role slave"));
     }
 
     #[test]

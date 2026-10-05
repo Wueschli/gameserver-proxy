@@ -25,7 +25,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::IntentOp;
 use crate::role::{Role, RoleHandle};
-use crate::store::{Applied, RevisionBytes, Store, StoreError};
+use crate::store::{Applied, RelayCursor, RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
 
@@ -43,18 +43,34 @@ pub struct IntentState {
     /// `Some` when `--ha-peers` is set (phase 12 slice 6) — see
     /// `crate::api::AppState::ha`'s doc, the config side of the same knob.
     pub ha: Option<Arc<crate::ha::HaHandle>>,
+    /// How far this tier's upward relay got in the parent's intent log
+    /// (`slave` role only; stays `0` otherwise). Lands in the same
+    /// transaction as the op it covers.
+    pub relay: RelayCursor,
 }
 
 impl IntentState {
-    pub fn new(store: Arc<Store>, role: RoleHandle, auth_token: Option<String>) -> Self {
+    pub fn try_new(
+        store: Arc<Store>,
+        role: RoleHandle,
+        auth_token: Option<String>,
+    ) -> Result<Self, StoreError> {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
-        IntentState {
+        let relay = RelayCursor::open(store.db())?;
+        Ok(IntentState {
             store,
             updates,
             role,
             auth_token: auth_token.map(Arc::from),
             ha: None,
-        }
+            relay,
+        })
+    }
+
+    /// Test convenience: [`Self::try_new`] on a store that is known to open.
+    #[cfg(test)]
+    pub fn new(store: Arc<Store>, role: RoleHandle, auth_token: Option<String>) -> Self {
+        Self::try_new(store, role, auth_token).expect("opening the relay cursor tree")
     }
 
     pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
@@ -69,6 +85,78 @@ impl IntentState {
         let revision = self.store.put(bytes)?;
         let _ = self.updates.send(revision);
         Ok(revision)
+    }
+
+    /// Lands one op relayed from the parent's intent revision
+    /// `parent_revision` and moves the relay cursor with it, in one
+    /// transaction. `Ok(None)` when the cursor is already at or past it. The
+    /// non-HA form of [`Self::apply_relayed_entry`].
+    pub fn apply_relayed(
+        &self,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        if parent_revision <= self.relay.get()? {
+            return Ok(None);
+        }
+        let revision = self
+            .store
+            .put_with(bytes, &|_| vec![self.relay.write(parent_revision)])?;
+        let _ = self.updates.send(revision);
+        Ok(Some(revision))
+    }
+
+    /// The Raft-apply form of [`Self::apply_relayed`] for the entry at log
+    /// `index`; a duplicate only advances the applied index.
+    pub fn apply_relayed_entry(
+        &self,
+        index: u64,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        if parent_revision <= self.relay.get()? {
+            self.store.mark_applied(index)?;
+            return Ok(None);
+        }
+        let applied = self
+            .store
+            .put_applied_with(bytes, index, &|_| vec![self.relay.write(parent_revision)])?;
+        match applied {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// Lands one op relayed from the parent: written directly without HA,
+    /// proposed through Raft with HA (this node must be the leader).
+    pub async fn relay_revision(
+        &self,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<(), crate::relay::RelayError> {
+        match &self.ha {
+            None => self.apply_relayed(bytes, parent_revision).map(drop)?,
+            Some(ha) => {
+                crate::relay::propose(
+                    ha,
+                    crate::ha::WriteRequest::RelayIntent {
+                        bytes,
+                        parent_revision,
+                    },
+                )
+                .await?
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this node should run the upward relay: always without HA,
+    /// else only the Raft leader.
+    pub fn is_relay_leader(&self) -> bool {
+        self.ha.as_ref().is_none_or(|h| h.is_leader())
     }
 
     /// The Raft-apply form of [`Self::apply_revision`]: the revision and

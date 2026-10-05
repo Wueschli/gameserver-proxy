@@ -292,8 +292,8 @@ Everything not built or not yet fixed is tracked as a
 Check the issue list before starting new work, and file new follow-ups there rather
 than here. Where the items that used to live here went:
 
-- v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
-  discovery): [#65](https://github.com/wayhouse-proxy/wayhouse/issues/65)
+- v2 design ideas (CGNAT, gossip load signals, `failure_domain` discovery; HA with
+  `--role slave` is built): [#65](https://github.com/wayhouse-proxy/wayhouse/issues/65)
 - Open design questions: [#69](https://github.com/wayhouse-proxy/wayhouse/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`

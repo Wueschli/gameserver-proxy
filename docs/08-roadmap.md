@@ -804,10 +804,9 @@ alternatives) and a `docs/09` ADR (21–23):
   `--ha-node-id`, `--ha-peers id=host:port,...` (identical on every
   replica; each boots and calls `raft.initialize()` with the same static
   set — harmless no-op on every node but the one that wins the race),
-  `--ha-token`. **Scope cut, stated in the module doc**: HA and the `slave`
-  role are mutually exclusive in this slice (enforced at startup) —
-  combining them needs the upward relay to run leader-only with a
-  replicated cursor, designed in `docs/10` but not built here. 16 new
+  `--ha-token`. **Scope cut at the time, built since (2026-10-05)**: HA and
+  the `slave` role were mutually exclusive in this slice; the leader-only
+  upward relay with a replicated cursor, designed in `docs/10`, now exists. 16 new
   tests. **Verified live with a real 3-node cluster**: booted nodes 1/2/3,
   confirmed node 3 elected leader; submitted a config write to node 1 (not
   the leader) — transparently forwarded, `200`, `{"revision":1}`; submitted

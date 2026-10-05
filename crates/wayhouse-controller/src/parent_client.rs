@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::AppState;
+use crate::relay::RelayError;
 
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
@@ -74,25 +75,56 @@ pub async fn fetch_initial(
     Ok(Some((revision, text)))
 }
 
+/// Seeds this tier from the parent's current config before the first
+/// subscribe: a cold tier (relay cursor `0`) must serve *something* the
+/// moment it comes up, not replay the parent's whole history through the
+/// catch-up range. `Ok(None)` when the tier already has a cursor or the
+/// parent has no config yet. Under HA only the leader may call this (the
+/// seed is proposed through Raft).
+pub async fn seed_if_cold(
+    base_url: &str,
+    token: Option<&str>,
+    state: &AppState,
+) -> anyhow::Result<Option<u64>> {
+    if state.relay.get()? > 0 {
+        return Ok(None);
+    }
+    let Some((revision, config)) = fetch_initial(base_url, token).await? else {
+        return Ok(None);
+    };
+    match state.relay_revision(config.into_bytes(), revision).await {
+        Ok(()) => {
+            tracing::info!(
+                parent_revision = revision,
+                "seeded initial config from parent controller"
+            );
+            Ok(Some(revision))
+        }
+        Err(RelayError::NotLeader) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Runs forever, reconnecting to the parent with backoff on disconnect.
 /// `tokio::spawn`ed by `main.rs` when `role: slave`; never returns under
-/// normal operation.
-pub async fn run(base_url: String, token: Option<String>, since: u64, state: Arc<AppState>) {
-    let mut cursor = since;
+/// normal operation. With HA only the Raft leader subscribes: a node that
+/// is not (or stops being) the leader idles until it is, and every
+/// subscription resumes from the relay cursor stored with the log.
+pub async fn run(base_url: String, token: Option<String>, state: Arc<AppState>) {
     let mut backoff = RECONNECT_MIN;
     loop {
-        match subscribe_once(&base_url, token.as_deref(), &mut cursor, &state).await {
+        crate::relay::wait_until_leader(|| state.is_relay_leader()).await;
+        match relay_once(&base_url, token.as_deref(), &state).await {
             Ok(()) => {
                 backoff = RECONNECT_MIN;
                 tracing::warn!(
                     parent = %base_url,
-                    cursor,
                     "parent controller subscribe stream ended; reconnecting"
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e, parent = %base_url, cursor,
+                    error = %e, parent = %base_url,
                     "parent controller unreachable; freezing on the last known \
                      configuration and retrying"
                 );
@@ -101,6 +133,12 @@ pub async fn run(base_url: String, token: Option<String>, since: u64, state: Arc
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(RECONNECT_MAX);
     }
+}
+
+async fn relay_once(base_url: &str, token: Option<&str>, state: &AppState) -> anyhow::Result<()> {
+    seed_if_cold(base_url, token, state).await?;
+    let mut cursor = state.relay.get()?;
+    subscribe_once(base_url, token, &mut cursor, state).await
 }
 
 async fn subscribe_once(
@@ -139,8 +177,16 @@ async fn subscribe_once(
             .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
         while let Some(event) = buf.next_event() {
-            if let Some(revision) = apply_sse_event(&event, state) {
-                *cursor = revision;
+            // A deposed leader must not keep a stream whose events it would
+            // skip: dropping it makes the next term resume from the cursor.
+            if !state.is_relay_leader() {
+                return Ok(());
+            }
+            match apply_sse_event(&event, state).await {
+                Ok(Some(revision)) => *cursor = revision,
+                Ok(None) => {}
+                Err(RelayError::NotLeader) => return Ok(()),
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -167,30 +213,25 @@ fn parse_sse_event(event: &str) -> Option<SseRevision> {
 }
 
 /// Lands one parsed revision in this tier's own store via
-/// [`AppState::apply_revision`] — bypassing the `slave` write gate on
+/// [`AppState::relay_revision`] — bypassing the `slave` write gate on
 /// purpose, since this *is* the sanctioned way a slave gets a new revision.
 /// The parent already validated it; this tier re-stores the bytes verbatim
 /// and assigns its own local revision number (a slave's revision numbering
 /// is local to itself, not required to match the parent's — `docs/10`'s
 /// homogeneous-schema requirement is about the payload shape, not about a
-/// shared counter across tiers). Returns the revision number so the caller
-/// can advance its cursor even when the parent had nothing new to apply for
-/// some other reason.
-fn apply_sse_event(event: &str, state: &AppState) -> Option<u64> {
-    let SseRevision { revision, config } = parse_sse_event(event)?;
-    match state.apply_revision(config.into_bytes()) {
-        Ok(local_revision) => {
-            tracing::info!(
-                parent_revision = revision,
-                local_revision,
-                "relayed a revision from the parent controller"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, parent_revision = revision, "store error relaying a parent revision");
-        }
-    }
-    Some(revision)
+/// shared counter across tiers). The parent revision becomes the relay
+/// cursor in the same write, so a failed write leaves the cursor behind and
+/// the revision is retried. `Ok(None)` for a keep-alive or malformed block.
+async fn apply_sse_event(event: &str, state: &AppState) -> Result<Option<u64>, RelayError> {
+    let Some(SseRevision { revision, config }) = parse_sse_event(event) else {
+        return Ok(None);
+    };
+    state.relay_revision(config.into_bytes(), revision).await?;
+    tracing::info!(
+        parent_revision = revision,
+        "relayed a revision from the parent controller"
+    );
+    Ok(Some(revision))
 }
 
 #[cfg(test)]
@@ -226,8 +267,8 @@ mod tests {
         let state = AppState::new(store, None, RoleHandle::new(Role::Slave));
 
         let event = r#"data: {"revision":5,"config":"pools: []"}"#;
-        let parent_revision = apply_sse_event(event, &state).unwrap();
-        assert_eq!(parent_revision, 5);
+        let parent_revision = apply_sse_event(event, &state).await.unwrap();
+        assert_eq!(parent_revision, Some(5));
 
         let (local_revision, bytes) = state.store.current().unwrap().unwrap();
         assert_eq!(
@@ -235,5 +276,10 @@ mod tests {
             "a slave numbers its own revisions locally"
         );
         assert_eq!(bytes, b"pools: []");
+        assert_eq!(state.relay.get().unwrap(), 5, "the cursor moves with it");
+
+        // The same parent revision again (a resubscribe overlap) is skipped.
+        apply_sse_event(event, &state).await.unwrap();
+        assert_eq!(state.store.current_revision().unwrap(), Some(1));
     }
 }
