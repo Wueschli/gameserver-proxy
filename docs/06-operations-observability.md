@@ -468,7 +468,10 @@ token. Everything else is a thin, header-preserving proxy:
 (`--controller-url`/`--controller-token`), and `GET /ws/fleet` — a browser
 WebSocket fed by one shared subscription to the aggregator's
 `/fleet/subscribe` (one aggregator connection total, fanned out to every
-connected browser, not one per tab). `--static-dir` (default
+connected browser, not one per tab). An open socket does not outlive its
+session: it re-checks the session every 30 s and before each outgoing message,
+and closes with code 1008 after logout, idle timeout, max age or eviction (the
+check doesn't count as activity, so a tab left open still idles out). `--static-dir` (default
 `crates/wayhouse-ui/web/dist`, built by `make ui`) serves the React/Vite/TS
 frontend as a fallback under whatever the API routes above don't claim — it's
 the one process, one port an operator's browser ever talks to. Either proxy
