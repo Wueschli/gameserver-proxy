@@ -30,6 +30,8 @@ pub const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Build after `--ca-file` is loaded: the client captures the roots.
 pub fn forward_client(timeout: Duration) -> reqwest::Client {
     gsp_http::builder()
+        // A forward goes to the leader and nowhere else, whatever it answers.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .build()
         .expect("the extra roots were validated by init_ca_file, so the client builds")
@@ -40,7 +42,9 @@ pub fn forward_client(timeout: Duration) -> reqwest::Client {
 /// bearer check and re-checks it — never swapped for `--ha-token`),
 /// `Content-Type`, and phase 12 slice 8's `X-Actor`, so the leader's handler
 /// — which re-parses them independently, exactly as if the browser/`gsp`/
-/// `curl` had called the leader directly — sees the same request.
+/// `curl` had called the leader directly — sees the same request. Every
+/// replica must therefore run the same `--auth-token`, and over plain-`http`
+/// `--ha-peers` the caller's token crosses the network in cleartext.
 #[derive(Debug, Clone, Default)]
 pub struct ForwardHeaders {
     pub authorization: Option<String>,
