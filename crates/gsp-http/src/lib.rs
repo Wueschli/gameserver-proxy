@@ -11,6 +11,11 @@
 //! [`builder`] / [`client`] still build a fresh client per call, so call sites
 //! keep their existing connection and timeout semantics.
 
+// The commit-SHA choice made by `build.rs`; compiled here only so its tests run.
+#[cfg(test)]
+#[path = "../build_sha.rs"]
+mod build_sha;
+
 #[cfg(feature = "server")]
 pub mod metrics;
 #[cfg(feature = "server")]

@@ -13,7 +13,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 ## Phase 1 – L4 TCP proxy ✅
 - ✅ TCP listener with `SO_REUSEPORT`, one accept task per core.
 - ✅ Static listener→pool mapping, `round_robin` + `least_conn`.
-- ✅ Bidirectional pump; per-direction idle timeout, connect timeout, half-close.
+- ✅ Bidirectional pump; shared idle timeout (neither direction moved bytes), teardown on error, connect timeout, half-close.
   Linux `splice(2)` zero-copy fast path landed in the perf pass (ADR 17) —
   `socket → pipe → socket` in the kernel, buffered `try_read`/`try_write`
   fallback elsewhere, both behind the same `proxy::pump` fn.
