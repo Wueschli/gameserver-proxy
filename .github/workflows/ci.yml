@@ -209,6 +209,41 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The arm64 counterpart of build-release for the deploy-arm64 job: the x86-64
+  # binaries above can't run on arm64, so it compiles its own. Binaries only (the
+  # plugins tests warm-up is amd64-specific). Same pins and glibc reasoning.
+  build-release-arm64:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-24.04-arm   # free for public repos; glibc 2.39 like the amd64 runner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: ./.github/actions/cargo-cache
+        with: { name: release-arm64 }
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked --version 0.7.7
+      - name: Build the minimal wayhouse
+        run: |
+          cargo auditable build --release --locked -p wayhouse --no-default-features
+          cp target/release/wayhouse target/release/wayhouse-minimal
+      - name: Build the release binaries
+        run: cargo auditable build --release --locked -p wayhouse -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui -p wayhouse-agent
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-binaries-arm64
+          path: |
+            target/release/wayhouse
+            target/release/wayhouse-minimal
+            target/release/wayhouse-controller
+            target/release/wayhouse-aggregator
+            target/release/wayhouse-ui
+            target/release/wayhouse-agent
+          if-no-files-found: error
+          retention-days: 1
+
   plugins:
     needs: [changes, build-release]
     if: needs.changes.outputs.plugins == 'true'
@@ -392,19 +427,25 @@ jobs:
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
 
-  # The release publishes linux/arm64 images next to amd64 (release.yml, issue
-  # #88); building them only at release time would find an arm64-only break too
-  # late. Same trigger as `deploy`, on a native arm64 runner: the self-contained
-  # builder path (no shared release build exists for arm64) plus the compose
-  # smoke test.
+  # linux/arm64 images are published next to amd64 (release.yml, issue #88);
+  # building them only at release time would find an arm64-only break too late.
+  # Mirrors `deploy` on a native arm64 runner (prebuilt binaries on push/PR, the
+  # self-contained builder path nightly), minus the static checks and Trivy.
   deploy-arm64:
-    needs: changes
+    needs: [changes, build-release-arm64]
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-24.04-arm   # free for public repos
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04-arm   # pinned like build-release-arm64
+    env:
+      BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Build all six images (compiled in Docker) and run --version on each
+      - name: Fetch the arm64 release binaries
+        if: env.BIN_SOURCE == 'prebuilt'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-binaries-arm64
+          path: deploy/prebuilt
+      - name: Build all six images and run --version on each
         run: make deploy-images
       - name: Compose smoke test
         run: make deploy-smoke

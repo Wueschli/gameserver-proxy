@@ -46,7 +46,7 @@ a manifest list for `linux/amd64` and `linux/arm64`; `docker pull` picks the hos
 per-architecture images stay available as `:<version>-amd64` and `:<version>-arm64`. There
 is no emulation and no cross-compiling: each architecture builds natively, so the Dockerfile
 is architecture-neutral (the base images are pinned by index digest, which covers both).
-CI's `deploy-arm64` job builds and smoke-tests the arm64 images whenever `deploy` runs.
+CI's `build-release-arm64` and `deploy-arm64` jobs build and smoke-test the arm64 images whenever `deploy` runs.
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
 binaries you built yourself from `deploy/prebuilt/` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
