@@ -24,7 +24,7 @@ use wayhouse_ui::api::{self, AppState};
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse-ui",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Operator dashboard BFF for a wayhouse fleet (docs/10 \"The admin GUI\")"
 )]
 struct Args {

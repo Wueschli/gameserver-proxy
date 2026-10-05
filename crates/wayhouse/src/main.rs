@@ -60,7 +60,7 @@ use wayhouse_core::{Runtime, Snapshot};
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Game-agnostic game server reverse proxy"
 )]
 struct Args {
@@ -250,6 +250,13 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         pools = cfg.pools.len(),
         "configuration loaded"
     );
+
+    for w in cfg.warnings() {
+        tracing::warn!("{w}");
+        if args.check {
+            eprintln!("warning: {w}");
+        }
+    }
 
     check_admin_auth(&cfg, args.insecure_no_auth)?;
     check_gossip_feature(&cfg)?;

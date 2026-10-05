@@ -16,7 +16,7 @@ fn git(args: &[&str]) -> Option<String> {
 
 fn main() {
     // Short git commit SHA for `wayhouse_build_info` (docs/06), shared by every
-    // binary through `wayhouse_http::metrics::COMMIT`. `WAYHOUSE_GIT_SHA` wins: a Docker
+    // binary through `wayhouse_http::COMMIT` (and in `--version`). `WAYHOUSE_GIT_SHA` wins: a Docker
     // build has no `.git` (it is in `.dockerignore`), so CI and
     // `deploy/build-images.sh` pass it as a build arg. Otherwise `git rev-parse`,
     // otherwise `commit="unknown"` (a source tarball still builds).
@@ -39,4 +39,7 @@ fn main() {
     ]);
     let sha = build_sha::pick_sha(env.as_deref(), rev.as_deref());
     println!("cargo:rustc-env=WAYHOUSE_GIT_SHA={sha}");
+    // `--version` of every binary (all share the workspace version): `<version> (<sha>)`.
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    println!("cargo:rustc-env=WAYHOUSE_LONG_VERSION={version} ({sha})");
 }

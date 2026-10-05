@@ -39,6 +39,17 @@ pub struct RouteHint {
     pub reject: bool,
 }
 
+/// First-party sniffer plugins that recognise only a flow's handshake datagram
+/// (QUIC Initial, WireGuard initiation, OpenVPN hard reset, RakNet offline
+/// messages, TeamSpeak 3 init), by their conventional module names. A session
+/// that is evicted mid-flow reopens on a datagram none of them recognise.
+pub(crate) const HANDSHAKE_ONLY_SNIFFERS: [&str; 5] =
+    ["quic", "wireguard", "openvpn", "raknet", "teamspeak3"];
+
+pub(crate) fn is_handshake_only_sniffer(name: &str) -> bool {
+    HANDSHAKE_ONLY_SNIFFERS.contains(&name)
+}
+
 /// A single route's match condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matcher {
