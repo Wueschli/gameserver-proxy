@@ -8,7 +8,7 @@
   active.
 - **Hot reload** via `SIGHUP` or file watch. Listeners are reconciled by name: an
   added listener is spawned, a removed one is stopped, and one whose definition
-  changed (bind, protocol, routes, affinity, …) is stopped and re-spawned. A
+  changed (bind, protocol, routes, …) is stopped and re-spawned. A
   listener whose definition is unchanged keeps running untouched. `backend_sources`
   discovery refresh tasks are reconciled the same way (added / removed /
   re-parameterised → started / stopped / restarted).
@@ -200,11 +200,13 @@
 > `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
 > one `first_bytes` route or a `sniffer` (else it would drop everything).
 >
-> UDP listeners
-> take
-> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
-> to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
-> when it is created. See `config.example.yaml`.
+> A UDP session reads the routed pool's `idle_timeout_sec` once when it is
+> created. UDP affinity (a client that comes back after its session was evicted
+> reaches the same backend) comes from the pool: use `balancer: consistent_hash`
+> with `hash_on: src_ip | src_ip_port`. There is no per-listener `affinity` key
+> and no sticky table (removed in #56: it was per worker, so `SO_REUSEPORT` kept
+> only ~34% of clients on 4 workers). A `round_robin` pool gives a returning
+> client a new backend. See `config.example.yaml`.
 >
 > **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
 > (a flat string, not the target schema's `auth: { mode, token }` object
@@ -402,7 +404,6 @@ listeners:
       # No `always`/catch-all route and no `reject` action — there isn't one;
       # an unmatched destination IP simply has no matching route and is
       # dropped (no_route).
-    affinity: { hash_on: src_ip }
 
   # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port.
   # One listener, one `bind: "host:lo-hi"` port range (F1.4) — one real socket
@@ -522,7 +523,7 @@ rolling update of many pods costs one fetch, not one per event.
 | Route changed/added | applies to new connections/sessions |
 | `resolvers:` changed | live — the reload task rebuilds the resolver clients and swaps the whole set in atomically when (and only when) `resolvers:` actually differs; an in-flight resolver call finishes against the old client, new calls use the new one. A rebuild resets each resolver's LRU result cache, so expect a brief cache-cold window. A bad endpoint keeps the previous set (logged). |
 | `backend_sources:` changed | live — the reload task reconciles the discovery refresh tasks (`SourceManager`): a `backend_sources[]` entry added / removed / re-parameterised (or a `pools[].source` re-pointed) starts / stops / restarts its task. A restarted task does an immediate first fetch, so the stale-set window is one round-trip. A pool that loses its `source` drops its cached discovered set (it now serves its file `targets`). A source that fails to rebuild is logged and skipped — the pool keeps its last-known-good set. |
-| Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / affinity / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
+| Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |

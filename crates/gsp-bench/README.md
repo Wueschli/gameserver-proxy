@@ -87,14 +87,15 @@ extend this further.
 
 ## `udp-affinity` mode
 
-The load test behind issue #56 (retire the UDP sticky table via
-`consistent_hash`). Every UDP listener keeps a worker-local sticky table
-(`STICKY_MAX` = 65,536 keys, cleared wholesale when full, no TTL) so a client
-whose idle session was evicted comes back to the same backend. A
-`consistent_hash` pool gets that from a rendezvous hash with no table.
+The load test behind issue #56. UDP affinity comes from the pool's balancer: a
+`consistent_hash` pool pins a client to a backend with a rendezvous hash, so a
+client whose idle session was evicted comes back to the same backend. A
+`round_robin` pool has no affinity and is the baseline. (Until #56 landed,
+every UDP listener also kept a worker-local sticky table; the numbers below
+are from that table and explain why it was removed.)
 
 ```sh
-cargo run --release -p gsp-bench -- --mode udp-affinity                          # sticky table (round_robin pool)
+cargo run --release -p gsp-bench -- --mode udp-affinity                          # round_robin pool: no affinity baseline
 cargo run --release -p gsp-bench -- --mode udp-affinity --balancer consistent-hash
 cargo run --release -p gsp-bench -- --mode udp-affinity --gsp-bin /path/to/other/gsp   # A/B two builds
 ```
@@ -105,7 +106,7 @@ out `--idle-sec` so every session is evicted, and runs a **warm wave** with the
 same clients. It reports opens/s, open-latency percentiles, backend spread, the
 proxy's RSS and fds after each phase, and **retention**: the share of clients
 that re-open on the same backend. Defaults (100,000 keys @ 4,000/s, 8 backends)
-take about 70 s and overflow the sticky table. `--strict` exits non-zero below
+take about 70 s. `--strict` exits non-zero below
 99% retention. Keep `--rate` at or under ~5,000: a session holds one proxy fd
 for `--idle-sec` plus up to two 1 s wheel ticks, and a 20,000-fd limit runs out
 above that. Also runnable by hand from the Actions tab (`load-test.yml`); it
@@ -114,7 +115,7 @@ never runs on a PR.
 Measured on a 4-core sandbox, loopback, `--release`, 8 backends, 4,000
 opens/s. The warm wave visits the keys in a shuffled order.
 
-| scenario | proxy workers | open p50 | open p99 | retention |
+| scenario (sticky table rows are from before #56) | proxy workers | open p50 | open p99 | retention |
 |----------|--------------:|---------:|---------:|----------:|
 | sticky table, 100k keys | 1 | 1.8 ms | 17 ms | **26.5%** (chance is 12.5%) |
 | sticky table, 100k keys | 4 | 1.0 ms | 16 ms | **34.4%** |
@@ -140,10 +141,9 @@ at 4,000/s and 5,000/s, so the table's per-open cost is not measurable on top
 of the session setup it sits in. What the table *does* cost is correctness once
 it fills (it clears wholesale, so everything it knew is gone at once).
 
-Also visible here: the proxy's RSS stays near 700 MiB after every session is
-gone, with or without the table. This is most likely the 64 KiB buffer each
-session's reply task allocates (`listener_udp.rs`, `vec![0u8; MAX_DATAGRAM]`);
-it is not table state. Not verified further (issue #122).
+The proxy's RSS used to stay near 700 MiB after every session was gone,
+with or without the table: the 64 KiB buffer each session's reply task
+allocated (issue #122). Reply tasks now share one buffer per runtime thread.
 
 ## Measured on this box
 

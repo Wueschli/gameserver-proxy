@@ -35,6 +35,7 @@
 //! Amplification guard: the proxy only ever sends toward a client that has an
 //! established session, i.e. that sent us a datagram first.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -50,7 +51,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use gsp_config::{HashOn, ListenerConfig};
+use gsp_config::ListenerConfig;
 
 use crate::drain::{ConnGuard, ConnTracker};
 use crate::error::ListenerError;
@@ -71,8 +72,6 @@ use crate::util::mono_ms;
 const MAX_DATAGRAM: usize = 64 * 1024;
 /// Idle-eviction timing-wheel tick cadence (also the eviction granularity).
 const WHEEL_TICK: Duration = Duration::from_secs(1);
-/// Hard cap on the per-worker stickiness table; cleared wholesale when hit.
-const STICKY_MAX: usize = 65_536;
 
 /// Session table key: the client address, plus (in prefix / transparent mode)
 /// the destination address the datagram was sent to.
@@ -107,30 +106,6 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.reply_task.abort();
     }
-}
-
-#[derive(PartialEq, Eq, Hash)]
-enum Who {
-    Ip(IpAddr),
-    IpPort(SocketAddr),
-}
-
-#[derive(PartialEq, Eq, Hash)]
-struct StickyKey {
-    dst: Option<SocketAddr>,
-    who: Who,
-}
-
-fn sticky_key(
-    affinity: Option<HashOn>,
-    client: SocketAddr,
-    dst: Option<SocketAddr>,
-) -> Option<StickyKey> {
-    let who = match affinity? {
-        HashOn::SrcIp => Who::Ip(client.ip()),
-        HashOn::SrcIpPort => Who::IpPort(client),
-    };
-    Some(StickyKey { dst, who })
 }
 
 // Plumbing entry point: each argument is a distinct shared handle wired in by
@@ -169,7 +144,6 @@ pub async fn run_udp_listener(
     );
 
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
-    let mut sticky: HashMap<StickyKey, SocketAddr> = HashMap::new();
     let mut rbatch = RecvBatch::new();
     let mut wheel = IdleWheel::new();
     let mut wheel_tick = interval(WHEEL_TICK);
@@ -317,7 +291,7 @@ pub async fn run_udp_listener(
                             continue;
                         }
                     };
-                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, data).await {
+                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, src_guard, limit_guard, client, dst, data).await {
                         Ok(session) => {
                             let now = mono_ms();
                             wheel.schedule(key, now + session.idle_ms, now);
@@ -628,7 +602,7 @@ impl IdleWheel {
     }
 }
 
-/// Pick a backend (honouring stickiness), bind the upstream socket, send the
+/// Pick a backend (affinity comes from the pool's balancer), bind the upstream socket, send the
 /// first datagram, and spawn the reply pump. On failure returns the
 /// `gsp_datagrams_dropped_total` `reason` label to record.
 #[allow(clippy::too_many_arguments)]
@@ -640,7 +614,6 @@ async fn open_session(
     resolvers: &Arc<Resolvers>,
     sniffers: &Arc<Sniffers>,
     down: &Arc<UdpSocket>,
-    sticky: &mut HashMap<StickyKey, SocketAddr>,
     src_guard: SourceGuard,
     limit_guard: LimitGuard,
     client: SocketAddr,
@@ -689,7 +662,6 @@ async fn open_session(
     // Resolve the route to a concrete backend address, plus (for a pool) a
     // `BackendGuard` holding the session slot. A `target` has neither pool nor
     // guard: no health check, no cap.
-    let skey = sticky_key(cfg.affinity, client, dst);
     let (backend, guard, idle_ms, proxy_protocol, pool_label) = match routed {
         Routed::Target {
             addr,
@@ -706,17 +678,10 @@ async fn open_session(
         ),
         Routed::Pool(name) => {
             let pool = snap.pool(&name).ok_or("no_route")?;
-            let g = match skey
-                .as_ref()
-                .and_then(|k| sticky.get(k))
-                .and_then(|&addr| pool.acquire_addr(addr))
-            {
-                Some(g) => g,
-                None => pool.acquire_for(Some(client)).map_err(|e| {
-                    tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
-                    "no_backend"
-                })?,
-            };
+            let g = pool.acquire_for(Some(client)).map_err(|e| {
+                tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
+                "no_backend"
+            })?;
             let addr = g.addr();
             (
                 addr,
@@ -788,15 +753,6 @@ async fn open_session(
     }
     if let Some(g) = &guard {
         g.observe(true);
-    }
-
-    if guard.is_some() {
-        if let Some(k) = skey {
-            if sticky.len() >= STICKY_MAX {
-                sticky.clear();
-            }
-            sticky.insert(k, backend);
-        }
     }
 
     let health = guard.as_ref().map(super::pool::BackendGuard::backend);
@@ -904,33 +860,88 @@ fn spawn_reply(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let out = reply_sock.as_deref().unwrap_or(down.as_ref());
-        let mut buf = vec![0u8; MAX_DATAGRAM];
         // Once per session, not per reply packet.
         let packets_s2c =
             metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c");
         loop {
-            match up.recv(&mut buf).await {
-                Ok(n) => {
-                    last_ms.store(mono_ms(), Ordering::Relaxed);
-                    let sent = if reply_sock.is_some() {
-                        out.send_to(&buf[..n], client).await
-                    } else {
-                        send_reply(out, &buf[..n], client, reply_src).await
-                    };
-                    if let Err(e) = sent {
-                        tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
-                        return;
-                    }
-                    packets_s2c.increment(1);
+            // Receive and forward inside one synchronous section so a single
+            // per-thread buffer serves every session (#122): a buffer per
+            // session cost 64 KiB each and stayed resident after a burst. The
+            // closure goes through `async_io` with `ERROR` interest, as
+            // tokio's own `recv` does: an ICMP port-unreachable is a socket error
+            // with no data and must wake the pump.
+            let relayed = up
+                .async_io(Interest::READABLE | Interest::ERROR, || {
+                    REPLY_BUF.with_borrow_mut(|buf| {
+                        // Raw recv, not `try_recv`: that re-checks readiness and
+                        // would skip the syscall for an error-only wakeup.
+                        let n = nix::sys::socket::recv(
+                            up.as_raw_fd(),
+                            buf,
+                            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+                        )
+                        .map_err(io::Error::from)?;
+                        Ok(match try_send_reply(out, &buf[..n], client, reply_src) {
+                            Ok(_) => Relay::Sent,
+                            // Client socket full: park a right-sized copy and
+                            // await writability outside the borrow.
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                Relay::Blocked(buf[..n].to_vec())
+                            }
+                            Err(e) => Relay::Failed(e),
+                        })
+                    })
+                })
+                .await;
+            let sent = match relayed {
+                Ok(Relay::Sent) => Ok(()),
+                Ok(Relay::Blocked(data)) => {
+                    send_reply(out, &data, client, reply_src).await.map(drop)
                 }
+                Ok(Relay::Failed(e)) => Err(e),
                 Err(e) => {
                     note_port_unreachable(&listener, &health, &e);
                     tracing::debug!(%listener, %client, error = %e, "udp upstream recv ended");
                     return;
                 }
+            };
+            last_ms.store(mono_ms(), Ordering::Relaxed);
+            if let Err(e) = sent {
+                tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
+                return;
             }
+            packets_s2c.increment(1);
         }
     })
+}
+
+thread_local! {
+    /// Scratch buffer for the reply pumps of every session on this thread; only
+    /// ever borrowed inside a synchronous section, never across an `.await`.
+    static REPLY_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; MAX_DATAGRAM]);
+}
+
+enum Relay {
+    Sent,
+    /// The datagram, to send once the client socket is writable.
+    Blocked(Vec<u8>),
+    /// Sending to the client failed.
+    Failed(io::Error),
+}
+
+/// Non-blocking [`send_reply`]: `WouldBlock` if the socket's send buffer is full.
+fn try_send_reply(
+    sock: &UdpSocket,
+    data: &[u8],
+    client: SocketAddr,
+    src: Option<IpAddr>,
+) -> io::Result<usize> {
+    match src {
+        None => sock.try_send_to(data, client),
+        Some(src) => sock.try_io(Interest::WRITABLE, || {
+            sendmsg_pktinfo(sock, data, client, src)
+        }),
+    }
 }
 
 async fn send_reply(
@@ -1047,33 +1058,6 @@ mod tests {
 
     fn slot_of(w: &IdleWheel, key: &SessionKey) -> Option<usize> {
         w.slots.iter().position(|s| s.contains(key))
-    }
-
-    #[test]
-    fn sticky_key_is_none_without_affinity() {
-        assert!(sticky_key(None, addr("10.0.0.1:5000"), None).is_none());
-    }
-
-    #[test]
-    fn sticky_key_src_ip_ignores_port_but_not_dst() {
-        let a = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), None).unwrap();
-        let b = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:6000"), None).unwrap();
-        assert!(a == b, "src_ip affinity must not depend on the client port");
-
-        let d1 = Some(addr("192.0.2.1:27015"));
-        let d2 = Some(addr("192.0.2.2:27015"));
-        let c = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), d1).unwrap();
-        let d = sticky_key(Some(HashOn::SrcIp), addr("10.0.0.1:5000"), d2).unwrap();
-        assert!(c != d, "prefix mode keys stickiness per destination");
-    }
-
-    #[test]
-    fn sticky_key_src_ip_port_distinguishes_ports() {
-        let a = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:5000"), None).unwrap();
-        let b = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:6000"), None).unwrap();
-        let a2 = sticky_key(Some(HashOn::SrcIpPort), addr("10.0.0.1:5000"), None).unwrap();
-        assert!(a != b);
-        assert!(a == a2);
     }
 
     #[test]

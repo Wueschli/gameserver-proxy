@@ -4,8 +4,8 @@
 //! route rule list (`always` / `client_cidr` / `dst` / `port` / `first_bytes` /
 //! `sni` matchers; `sniffer` for future plugins) onto static pools, with active
 //! health checks, round-robin /
-//! least-connections / consistent-hash balancing, per-backend session caps, and
-//! UDP session affinity. The full target schema lives in
+//! least-connections / consistent-hash balancing (UDP session affinity), and per-backend
+//! session caps. The full target schema lives in
 //! `docs/05-configuration.md` and grows into this crate incrementally.
 
 use std::path::Path;
