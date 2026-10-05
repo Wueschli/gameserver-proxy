@@ -18,8 +18,10 @@
 //! differs), a new one is simply not started. Every bind address is first
 //! probed for exclusivity ([`crate::net::probe_exclusive_tcp`]) because the
 //! workers' `SO_REUSEPORT` would otherwise let a second process share the port
-//! unnoticed; addresses this manager's own groups already hold are exempt (a
-//! rebind of the same address, or two listeners swapping ports).
+//! unnoticed; addresses overlapping one this manager's own groups already hold
+//! are exempt (a rebind of the same or a wildcard/specific address, or two
+//! listeners swapping ports). The probe is not atomic with the later bind, so
+//! two instances starting at the very same moment can both pass it.
 //!
 //! Pool / route *contents* are still read live from the `ArcSwap<Snapshot>` by
 //! the running tasks — only listener identity (bind, protocol, routes, …)
@@ -65,6 +67,15 @@ pub struct Reconciled {
     pub stopped: usize,
     /// Listeners that could not be bound; a failed rebind keeps its old group.
     pub failed: Vec<BindError>,
+}
+
+/// True if binding `a` would collide with a socket bound to `b`: same port and
+/// the same IP, or either side a wildcard of the same family (`0.0.0.0:80`
+/// versus `127.0.0.1:80`).
+fn overlaps(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port()
+        && (a.ip() == b.ip()
+            || (a.is_ipv4() == b.is_ipv4() && (a.ip().is_unspecified() || b.ip().is_unspecified())))
 }
 
 /// One bound socket per (bind address × worker), ready to hand to an accept task.
@@ -154,7 +165,7 @@ impl ListenerManager {
         for bind in cfg.binds() {
             // A port-range bind (F1.4) is one real socket set per port.
             let udp_mode = crate::listener_udp::udp_mode(cfg);
-            if !held.contains(&bind) {
+            if !held.iter().any(|h| overlaps(*h, bind)) {
                 match cfg.protocol {
                     Protocol::Tcp => {
                         crate::net::probe_exclusive_tcp(bind, cfg.freebind, cfg.transparent)
@@ -376,5 +387,24 @@ impl ListenerManager {
         {
             g.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlaps;
+
+    fn a(s: &str) -> std::net::SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn overlap_is_same_port_and_same_or_wildcard_ip() {
+        assert!(overlaps(a("127.0.0.1:80"), a("127.0.0.1:80")));
+        assert!(overlaps(a("0.0.0.0:80"), a("127.0.0.1:80")));
+        assert!(overlaps(a("127.0.0.1:80"), a("0.0.0.0:80")));
+        assert!(!overlaps(a("127.0.0.1:80"), a("127.0.0.1:81")));
+        assert!(!overlaps(a("127.0.0.1:80"), a("127.0.0.2:80")));
+        assert!(!overlaps(a("[::]:80"), a("127.0.0.1:80")));
     }
 }

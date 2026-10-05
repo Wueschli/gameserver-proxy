@@ -164,7 +164,9 @@ needed to override a kernel default.
 listener's worker sockets the proxy probes each bind address with a socket that
 does not set it. A port some other process already holds is refused: startup
 fails, and a reload keeps the previous listener running and reports the failure
-(`wayhouse_listener_bind_failures_total`).
+(`wayhouse_listener_bind_failures_total`); every reload, even of an unchanged
+config, retries a listener whose bind failed. The probe is not atomic with the
+bind, so two instances starting at the same instant can both pass it.
 
 ## OS limits
 

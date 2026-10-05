@@ -152,14 +152,20 @@ pub(crate) async fn apply_config(
     handle.store(next);
     metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
     metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
-    if listeners_changed {
+    // Always reconcile, not only when the listener definitions changed: the
+    // snapshot above is already stored, so after a failed (re)bind the running
+    // group no longer matches it, and only a reconcile on a later reload — even
+    // of the same file — retries the bind. With nothing to do it is a cheap diff.
+    {
         let out = handle.reconcile_listeners().await;
-        tracing::info!(
-            running = out.running,
-            stopped = out.stopped,
-            failed = out.failed.len(),
-            "listener definitions changed; listeners reconciled (added / removed / rebound)"
-        );
+        if listeners_changed || out.stopped > 0 || !out.failed.is_empty() {
+            tracing::info!(
+                running = out.running,
+                stopped = out.stopped,
+                failed = out.failed.len(),
+                "listeners reconciled (added / removed / rebound)"
+            );
+        }
         for e in &out.failed {
             metrics::counter!(m::LISTENER_BIND_FAILURES, "listener" => e.listener.clone())
                 .increment(1);
@@ -292,5 +298,50 @@ mod tests {
         let start = tokio::time::Instant::now();
         settle(&n, Duration::from_millis(200), Duration::from_secs(1)).await;
         assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    /// A failed rebind is retried by reloading the *same* config once the port
+    /// is free: `apply_config` must reconcile even though the listener
+    /// definitions equal the already-stored snapshot.
+    #[tokio::test]
+    async fn reloading_an_unchanged_config_retries_a_failed_listener_bind() {
+        let free = || {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let (p1, p2) = (free(), free());
+        let yaml = |bind: std::net::SocketAddr| {
+            format!(
+                "pools:\n  - name: p\n    targets: [\"127.0.0.1:9\"]\n    health_check:\n      type: none\n\
+                 listeners:\n  - name: l1\n    bind: \"{bind}\"\n    pool: p\n"
+            )
+        };
+        let parse = |bind| wayhouse_config::parse_str(&yaml(bind)).unwrap();
+        let runtime =
+            wayhouse_core::Runtime::start(Snapshot::from_config(&parse(p1)), Arc::default(), 1);
+        let handle = runtime.handle();
+        let resolvers = Resolvers::default();
+        let sniffers = Sniffers::default();
+
+        let blocker = std::net::TcpListener::bind(p2).unwrap();
+        apply_config(parse(p2), &handle, &resolvers, None, &sniffers, "test").await;
+        assert!(
+            tokio::net::TcpStream::connect(p1).await.is_ok(),
+            "the old listener keeps serving after the failed rebind"
+        );
+
+        drop(blocker);
+        apply_config(parse(p2), &handle, &resolvers, None, &sniffers, "test").await;
+        assert!(
+            tokio::net::TcpStream::connect(p2).await.is_ok(),
+            "reloading the same config retried the bind"
+        );
+        assert!(
+            tokio::net::TcpStream::connect(p1).await.is_err(),
+            "the old bind was released"
+        );
+        runtime
+            .shutdown_with_grace(Duration::from_millis(100))
+            .await;
     }
 }
