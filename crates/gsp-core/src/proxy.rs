@@ -66,7 +66,12 @@ pub async fn handle_tcp(
                 s
             }
             Err(e) => {
-                guard.observe(false);
+                // Running out of fds or ports is ours, not the backend's.
+                let local = matches!(&e, ProxyError::Connect { source, .. }
+                    if crate::util::is_local_resource_error(source));
+                if !local {
+                    guard.observe(false);
+                }
                 return Err(e);
             }
         };

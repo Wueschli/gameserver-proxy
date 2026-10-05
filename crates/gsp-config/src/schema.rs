@@ -314,8 +314,10 @@ pub(crate) fn default_source_refresh_sec() -> u64 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawHealthCheck {
-    #[serde(rename = "type", default = "default_hc_type")]
-    pub(crate) kind: String,
+    /// Absent means `tcp_connect`, but validation rejects that default on a
+    /// pool that only UDP listeners use.
+    #[serde(rename = "type", default)]
+    pub(crate) kind: Option<String>,
     #[serde(default = "default_hc_interval_sec")]
     pub(crate) interval_sec: u64,
     #[serde(default = "default_hc_timeout_ms")]
@@ -336,7 +338,7 @@ pub(crate) struct RawHealthCheck {
 impl Default for RawHealthCheck {
     fn default() -> Self {
         Self {
-            kind: default_hc_type(),
+            kind: None,
             interval_sec: default_hc_interval_sec(),
             timeout_ms: default_hc_timeout_ms(),
             rise: default_hc_rise(),
@@ -347,9 +349,6 @@ impl Default for RawHealthCheck {
     }
 }
 
-pub(crate) fn default_hc_type() -> String {
-    "tcp_connect".to_string()
-}
 pub(crate) fn default_hc_interval_sec() -> u64 {
     2
 }

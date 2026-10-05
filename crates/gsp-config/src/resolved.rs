@@ -84,10 +84,12 @@ impl ProxyProtocol {
 }
 
 /// Health probe variant. `tcp_connect` just opens a TCP connection; `udp_probe`
-/// sends `send` and expects a reply datagram (optionally prefix-matched).
+/// sends `send` and expects a reply datagram (optionally prefix-matched); `none`
+/// sends no probe and relies on passive observations alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HealthCheckKind {
     TcpConnect,
+    None,
     UdpProbe {
         send: Vec<u8>,
         expect_prefix: Vec<u8>,

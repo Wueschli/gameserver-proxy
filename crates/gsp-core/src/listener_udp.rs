@@ -66,7 +66,7 @@ use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::sniff::Sniffers;
 use crate::src_conns::{SourceGuard, SourceLimiter};
-use crate::util::mono_ms;
+use crate::util::{is_local_resource_error, mono_ms};
 
 /// Max datagram we will relay in either direction.
 const MAX_DATAGRAM: usize = 64 * 1024;
@@ -699,7 +699,8 @@ async fn open_session(
     let upstream = match connect_upstream(backend, up_src).await {
         Ok(u) => Arc::new(u),
         Err(e) => {
-            if let Some(g) = &guard {
+            // Running out of fds or ports is ours, not the backend's.
+            if let Some(g) = guard.as_ref().filter(|_| !is_local_resource_error(&e)) {
                 g.observe(false);
             }
             tracing::warn!(
@@ -719,9 +720,7 @@ async fn open_session(
                 "reply_bind"
             })?)),
             Err(e) => {
-                if let Some(g) = &guard {
-                    g.observe(false);
-                }
+                // A local socket we could not bind says nothing about the backend.
                 tracing::warn!(listener = %cfg.name, %orig, error = %e, "udp reply socket failed");
                 return Err("reply_bind");
             }
@@ -744,15 +743,15 @@ async fn open_session(
     } else {
         std::borrow::Cow::Borrowed(first)
     };
+    // A connected UDP send succeeds locally whether or not anything listens on
+    // the far side, so success proves nothing: the first reply (see
+    // `spawn_reply`) is the passive success.
     if let Err(e) = upstream.send(&first_out).await {
-        if let Some(g) = &guard {
+        if let Some(g) = guard.as_ref().filter(|_| !is_local_resource_error(&e)) {
             g.observe(false);
         }
         tracing::warn!(listener = %cfg.name, %backend, error = %e, "udp first datagram failed");
         return Err("upstream_send");
-    }
-    if let Some(g) = &guard {
-        g.observe(true);
     }
 
     let health = guard.as_ref().map(super::pool::BackendGuard::backend);
@@ -838,6 +837,19 @@ fn note_port_unreachable(listener: &str, health: &Option<Arc<Backend>>, err: &io
     }
 }
 
+/// Feed the passive healthy observation for a session's first reply: the
+/// backend demonstrably answered. Once per session.
+fn note_first_reply(listener: &str, health: &Option<Arc<Backend>>) {
+    if let Some(b) = health {
+        if let Some(state) = b.observe(true) {
+            tracing::info!(
+                listener = %listener, backend = %b.addr, healthy = state,
+                "backend health changed (passive, udp reply)"
+            );
+        }
+    }
+}
+
 /// Pump backend → client until the upstream socket errors (e.g. ICMP
 /// port-unreachable) or the client send fails. The idle sweep reaps the
 /// session entry afterwards.
@@ -863,6 +875,7 @@ fn spawn_reply(
         // Once per session, not per reply packet.
         let packets_s2c =
             metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c");
+        let mut answered = false;
         loop {
             // Receive and forward inside one synchronous section so a single
             // per-thread buffer serves every session (#122): a buffer per
@@ -906,6 +919,10 @@ fn spawn_reply(
                 }
             };
             last_ms.store(mono_ms(), Ordering::Relaxed);
+            if !answered && sent.is_ok() {
+                answered = true;
+                note_first_reply(&listener, &health);
+            }
             if let Err(e) = sent {
                 tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
                 return;
