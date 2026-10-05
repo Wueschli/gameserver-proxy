@@ -13,8 +13,7 @@ for t in wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayho
   img="wayhouse-deploy/$t:local"
   docker build -f deploy/Dockerfile --build-arg BIN_SOURCE="$src" --build-arg WAYHOUSE_GIT_SHA="$sha" --target "$t" -t "$img" .
   docker run --rm "$img" --version
-  # wayhouse-agent exposes no metrics, so wayhouse_build_info (and the commit) is not in its binary.
-  if [ "$src" = builder ] && [ "$t" != wayhouse-agent ]; then
+  if [ "$src" = builder ]; then
     sh deploy/check-image-commit.sh "$img" "$sha"
   fi
 done

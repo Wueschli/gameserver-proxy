@@ -21,7 +21,7 @@ use wayhouse_aggregator::parent_push;
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse-aggregator",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Fleet read/operational-verb aggregator for a wayhouse fleet (single tier — see docs/10)"
 )]
 struct Args {

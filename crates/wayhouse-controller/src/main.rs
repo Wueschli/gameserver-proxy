@@ -26,7 +26,7 @@ use wayhouse_controller::store::Store;
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse-controller",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Tier-1 config/intent controller for a wayhouse fleet (single standalone node — see docs/10)"
 )]
 struct Args {
@@ -80,10 +80,10 @@ struct Args {
     /// when the cluster is first bootstrapped. Setting this turns on HA: writes
     /// propose a Raft entry instead of writing the store directly, and a
     /// non-leader replica transparently forwards a write to the current
-    /// leader. Requires `--ha-node-id`. **Mutually exclusive with `--role
-    /// slave`** in this slice — combining HA with the slave role needs the
-    /// upward relay to run leader-only with a replicated cursor, designed
-    /// in `docs/10` but not yet built (see `crate::ha`'s module doc).
+    /// leader. Requires `--ha-node-id`. Combines with `--role slave`: the
+    /// Raft leader alone relays the parent's revisions into the group, and
+    /// the relay cursor is replicated, so a new leader resumes where the old
+    /// one left off.
     #[arg(long, value_delimiter = ',')]
     ha_peers: Vec<String>,
 
@@ -162,13 +162,8 @@ async fn main() -> anyhow::Result<()> {
     if args.role == Role::Slave && args.parent_url.is_none() {
         anyhow::bail!("--role slave requires --parent-url");
     }
-    ha::check_flags(
-        !args.ha_peers.is_empty(),
-        args.ha_join,
-        args.ha_node_id,
-        args.role == Role::Slave,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    ha::check_flags(!args.ha_peers.is_empty(), args.ha_join, args.ha_node_id)
+        .map_err(|e| anyhow::anyhow!(e))?;
     ha::check_ha_token(
         !args.ha_peers.is_empty() || args.ha_join,
         args.ha_token.as_deref(),
@@ -330,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
     let role_handle = RoleHandle::new(args.role);
     let mut config_state = AppState::try_new(store, args.auth_token.clone(), role_handle.clone())?;
     let mut intent_state_val =
-        IntentState::new(intent_store, role_handle.clone(), args.auth_token.clone());
+        IntentState::try_new(intent_store, role_handle.clone(), args.auth_token.clone())?;
 
     // Intra-tier HA (phase 12 slice 6): one Raft group per tier replicating
     // both the config and intent logs together — see `wayhouse_controller::ha`'s
@@ -475,44 +470,32 @@ async fn main() -> anyhow::Result<()> {
 
     if args.role == Role::Slave {
         let parent_url = args.parent_url.expect("checked above");
-        // Seed from the parent's current revision before serving, same as
-        // `wayhouse --controller`'s initial `fetch_current` — a slave starting
-        // cold shouldn't serve `404` for however long the first subscribe
-        // catch-up takes if the parent already has something. The intent
-        // log has no equivalent seed (see `intent::relay`'s doc) — its
-        // relay just subscribes from `since=0` directly.
-        let mut initial_cursor = 0u64;
-        match wayhouse_controller::parent_client::fetch_initial(
-            &parent_url,
-            args.parent_token.as_deref(),
-        )
-        .await
-        {
-            Ok(Some((revision, config))) => {
-                initial_cursor = revision;
-                match state.apply_revision(config.into_bytes()) {
-                    Ok(local_revision) => tracing::info!(
-                        parent_revision = revision,
-                        local_revision,
-                        "seeded initial config from parent controller"
-                    ),
-                    Err(e) => tracing::error!(error = %e, "failed to store initial parent config"),
-                }
+        // Without HA, seed from the parent's current revision before
+        // serving, same as `wayhouse --controller`'s initial `fetch_current`
+        // — a slave starting cold shouldn't serve `404` for however long the
+        // first subscribe catch-up takes if the parent already has
+        // something. (Under HA the leader's relay seeds through Raft once it
+        // is elected.) The intent log has no equivalent seed (see
+        // `intent::relay`'s doc) — its relay just subscribes from its stored
+        // cursor.
+        if state.ha.is_none() {
+            if let Err(e) = wayhouse_controller::parent_client::seed_if_cold(
+                &parent_url,
+                args.parent_token.as_deref(),
+                &state,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e, parent = %parent_url,
+                    "could not seed from the parent controller at startup; will keep retrying via subscribe"
+                );
             }
-            Ok(None) => tracing::info!(
-                parent = %parent_url,
-                "parent controller has no config yet; waiting on subscribe"
-            ),
-            Err(e) => tracing::warn!(
-                error = %e, parent = %parent_url,
-                "could not reach parent controller at startup; will keep retrying via subscribe"
-            ),
         }
 
         tokio::spawn(wayhouse_controller::parent_client::run(
             parent_url.clone(),
             args.parent_token.clone(),
-            initial_cursor,
             state.clone(),
         ));
         tokio::spawn(wayhouse_controller::intent::relay::run(

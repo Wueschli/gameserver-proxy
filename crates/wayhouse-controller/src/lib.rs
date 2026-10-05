@@ -33,5 +33,6 @@ pub mod parent_client;
 pub mod peers;
 pub mod proxy_peers;
 pub mod registry;
+pub mod relay;
 pub mod role;
 pub mod store;

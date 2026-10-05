@@ -29,7 +29,7 @@ Builder is `rust:1-trixie`, runtime is `gcr.io/distroless/cc-debian13:nonroot`
 (no shell, runs as uid 65532). Every base image is pinned by digest (the tag stays in
 the `FROM` line); the Dockerfile header says how to bump one.
 
-**Commit label.** The image has no `.git`, so `wayhouse_build_info{commit=...}` comes from the
+**Commit label.** The image has no `.git`, so the commit in `--version` (`<version> (<sha>)`, every binary) and `wayhouse_build_info{commit=...}` come from the
 `WAYHOUSE_GIT_SHA` build arg. `build-images.sh` and `make deploy-smoke` pass this checkout's
 HEAD, and `release.yml` the tagged commit; an `unknown` commit fails
 `deploy/check-image-commit.sh` (builder builds) and `deploy/smoke.sh`.

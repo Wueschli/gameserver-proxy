@@ -16,6 +16,14 @@
 #[path = "../build_sha.rs"]
 mod build_sha;
 
+/// Short git SHA this workspace was built from (`build.rs`), or `"unknown"` when
+/// `.git` was unavailable (a source tarball).
+pub const COMMIT: &str = env!("WAYHOUSE_GIT_SHA");
+
+/// `<version> (<commit>)`: what every binary prints for `--version`, so the commit
+/// is compiled into each of them (`deploy/check-image-commit.sh` looks for it).
+pub const LONG_VERSION: &str = env!("WAYHOUSE_LONG_VERSION");
+
 #[cfg(feature = "server")]
 pub mod metrics;
 #[cfg(feature = "server")]
@@ -163,5 +171,17 @@ mod token_eq_tests {
         assert!(!token_eq("secret-token", ""));
         // A prefix padded with NULs must not match: the length check counts.
         assert!(!token_eq("secret\0\0\0\0\0\0", "secret"));
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn long_version_is_version_and_commit() {
+        assert!(!super::COMMIT.is_empty());
+        assert_eq!(
+            super::LONG_VERSION,
+            format!("{} ({})", env!("CARGO_PKG_VERSION"), super::COMMIT)
+        );
     }
 }

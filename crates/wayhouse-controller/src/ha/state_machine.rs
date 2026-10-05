@@ -84,6 +84,9 @@ pub struct SnapshotContent {
     pub intent: Vec<(u64, Vec<u8>)>,
     pub config_applied: Option<u64>,
     pub intent_applied: Option<u64>,
+    /// Each log's upward relay cursor (`slave` tiers; `0` otherwise).
+    pub config_relay_cursor: u64,
+    pub intent_relay_cursor: u64,
     pub peers: RegistrySnapshot,
     pub proxy_peers: RegistrySnapshot,
     pub book: BookSnapshot,
@@ -267,6 +270,16 @@ impl StateMachineStore {
                 intent_applied: intent_store
                     .applied_index()
                     .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                config_relay_cursor: self
+                    .config
+                    .relay
+                    .get()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                intent_relay_cursor: self
+                    .intent
+                    .relay
+                    .get()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
                 peers: self
                     .peers
                     .snapshot()
@@ -338,18 +351,24 @@ impl StateMachineStore {
                 });
             }
         }
+        siblings.push(config.relay.write(content.config_relay_cursor));
         config
             .store
             .replace_all_with(
                 &revisions,
                 content.config_applied,
-                &[&config.stage, &config.actors],
+                &[&config.stage, &config.actors, config.relay.tree()],
                 siblings,
             )
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
         self.intent
             .store
-            .replace_all(&content.intent, content.intent_applied)
+            .replace_all_with(
+                &content.intent,
+                content.intent_applied,
+                &[self.intent.relay.tree()],
+                vec![self.intent.relay.write(content.intent_relay_cursor)],
+            )
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
         self.peers
             .replace(&content.peers)
@@ -490,6 +509,22 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                         WriteRequest::Intent(bytes) => WriteResponse::Revision(
                             self.intent
                                 .apply_entry(index, bytes)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        ),
+                        WriteRequest::RelayConfig {
+                            bytes,
+                            parent_revision,
+                        } => WriteResponse::Revision(
+                            self.config
+                                .apply_relayed_entry(index, bytes, parent_revision)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?,
+                        ),
+                        WriteRequest::RelayIntent {
+                            bytes,
+                            parent_revision,
+                        } => WriteResponse::Revision(
+                            self.intent
+                                .apply_relayed_entry(index, bytes, parent_revision)
                                 .map_err(|e| StorageIOError::write_state_machine(&e))?,
                         ),
                         WriteRequest::Promote(revision) => {
@@ -1208,6 +1243,114 @@ mod tests {
         assert_eq!(responses[0], WriteResponse::Revision(Some(99)));
         assert_eq!(sm.config.store.applied_index().unwrap(), Some(1));
         assert_eq!(sm.config.store.current_revision().unwrap(), None);
+    }
+
+    fn relay_config(index: u64, bytes: &[u8], parent_revision: u64) -> Entry<TypeConfig> {
+        normal_entry(
+            index,
+            WriteRequest::RelayConfig {
+                bytes: bytes.to_vec(),
+                parent_revision,
+            },
+        )
+    }
+
+    fn relay_intent(index: u64, bytes: &[u8], parent_revision: u64) -> Entry<TypeConfig> {
+        normal_entry(
+            index,
+            WriteRequest::RelayIntent {
+                bytes: bytes.to_vec(),
+                parent_revision,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_relayed_entry_lands_with_its_cursor_and_a_duplicate_is_skipped() {
+        let (mut sm, _dirs) = test_sm();
+        let responses = sm
+            .apply(vec![
+                relay_config(1, b"c7", 7),
+                relay_intent(2, br#"{"op":"a"}"#, 4),
+                // A deposed leader's proposal that committed after its
+                // successor's: the parent revision is not above the cursor.
+                relay_config(3, b"c7-again", 7),
+                relay_config(4, b"c6-stale", 6),
+                relay_intent(5, br#"{"op":"a"}"#, 4),
+                relay_config(6, b"c8", 8),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            responses,
+            vec![
+                WriteResponse::Revision(Some(1)),
+                WriteResponse::Revision(Some(1)),
+                WriteResponse::Revision(None),
+                WriteResponse::Revision(None),
+                WriteResponse::Revision(None),
+                WriteResponse::Revision(Some(2)),
+            ]
+        );
+        assert_eq!(sm.config.relay.get().unwrap(), 8);
+        assert_eq!(sm.intent.relay.get().unwrap(), 4);
+        assert_eq!(
+            sm.config.store.all_revisions().unwrap(),
+            vec![(1, b"c7".to_vec()), (2, b"c8".to_vec())]
+        );
+        assert!(
+            sm.config.stage_of(1).promoted,
+            "a relayed revision is promoted"
+        );
+        // Skipped entries still advance the applied index.
+        assert_eq!(sm.config.store.applied_index().unwrap(), Some(6));
+        assert_eq!(sm.intent.store.applied_index().unwrap(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_replayed_relay_entry_after_a_crash_writes_nothing() {
+        let (mut sm, _dirs) = test_sm();
+        sm.apply(vec![relay_config(1, b"c7", 7)]).await.unwrap();
+        // openraft re-delivers entries after a crash that lost
+        // `last_applied_log`.
+        let again = sm.apply(vec![relay_config(1, b"c7", 7)]).await.unwrap();
+        assert_eq!(again[0], WriteResponse::Revision(None));
+        assert_eq!(sm.config.store.current_revision().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_carries_the_relay_cursors() {
+        let (mut leader, _l) = test_sm();
+        leader
+            .apply(vec![
+                relay_config(1, b"c7", 7),
+                relay_intent(2, br#"{"op":"a"}"#, 4),
+            ])
+            .await
+            .unwrap();
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let (mut follower, _f) = test_sm();
+        follower
+            .install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+        assert_eq!(follower.config.relay.get().unwrap(), 7);
+        assert_eq!(follower.intent.relay.get().unwrap(), 4);
+
+        // The follower, elected leader, resumes where the group left off:
+        // the revision it already holds is a duplicate, the next is not.
+        let responses = follower
+            .apply(vec![relay_config(3, b"c7", 7), relay_config(4, b"c8", 8)])
+            .await
+            .unwrap();
+        assert_eq!(responses[0], WriteResponse::Revision(None));
+        assert_eq!(responses[1], WriteResponse::Revision(Some(2)));
     }
 
     // ---- Registry entries (Task 5) ----
