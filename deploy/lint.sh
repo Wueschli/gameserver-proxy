@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 # Render the defaults: CI's deploy job exports BIN_SOURCE=prebuilt, which must not
 # change what these checks see.
 unset BIN_SOURCE
-export GSP_CONTROLLER_TOKEN=x GSP_AGGREGATOR_TOKEN=x GSP_UI_PASSWORD=x \
+export GSP_CONTROLLER_TOKEN=x GSP_AGGREGATOR_TOKEN=x GSP_INGEST_TOKEN=y GSP_UI_PASSWORD=x \
        GSP_TUNNEL_ENDPOINT=1.2.3.4:51820
 C=deploy/compose
 

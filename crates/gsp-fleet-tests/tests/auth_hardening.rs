@@ -125,3 +125,30 @@ async fn short_tokens_are_refused() -> Result<()> {
     )
     .await
 }
+
+/// An aggregator with an admin token must have a separate ingest token, or the
+/// proxies that push would hold the token that drives the fleet.
+#[tokio::test]
+async fn an_aggregator_auth_token_requires_an_ingest_token() -> Result<()> {
+    let listen = format!("127.0.0.1:{}", free_port()?);
+    let auth = "admin-token-0123456789";
+    refused(
+        "gsp-aggregator",
+        &["--listen", &listen, "--auth-token", auth],
+        "requires --ingest-token",
+    )
+    .await?;
+    refused(
+        "gsp-aggregator",
+        &[
+            "--listen",
+            &listen,
+            "--auth-token",
+            auth,
+            "--ingest-token",
+            auth,
+        ],
+        "must differ",
+    )
+    .await
+}

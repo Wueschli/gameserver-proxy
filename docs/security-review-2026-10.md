@@ -64,6 +64,19 @@ routes) all use `gsp_http::token_eq` bearer checks (see the `token_eq` call site
 in `crates/gsp-controller/src/{addresses/api.rs:75, intent/api.rs:114,
 registry.rs:344, adopt.rs:80}`), so F1 still holds. Not re-audited beyond that.
 
+### Aggregator token split and fan-out target (2026-10-05)
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| A1 | High | `/ingest` and `/fleet/*` (drain, undrain, backend edits, route-hint, sniffer upload/delete) shared one `--auth-token`, so every edge `gsp` that pushes telemetry held a credential that could also drive every other instance (#102). | Fixed: `--ingest-token` unlocks only `POST /ingest`, `--auth-token` gates `/fleet/*`, and the aggregator refuses to start with `--auth-token` but no distinct `--ingest-token`. |
+| A2 | High | The fan-out called each instance's self-reported `admin_url` with the fleet-wide `--instance-token`, so a pusher could name a host it controls and collect that token on the next operator call (#102). | Fixed: the URL is validated at ingest (own source address by default, or `--instance-url-allow`); a refused push is a `400`. The fan-out client no longer follows redirects. |
+| A3 | Medium | Decoded path parameters (`pool`, `addr`, sniffer `name`) were pasted into the instance admin URL, so an encoded `..%2F` or `%3F` made one verb call another admin path with the instance token (#111). | Fixed: segments are validated (no empty, `.`, `..`, `/`, `\`, `?`, `#`) and pushed through `Url::path_segments_mut`; the sniffer name goes through `query_pairs_mut`. |
+
+Residual: a holder of the aggregator's `--auth-token` can still drive the whole
+fleet (one shared token, no per-verb roles), and `--ingest-token` is shared by
+every pusher, so one compromised edge can overwrite another instance's reported
+state (a pushed `instance` name is not bound to a credential).
+
 ## Checked and fine
 
 - **TLS** (`crates/gsp-http/src/tls.rs`): rustls only, no custom verifiers,

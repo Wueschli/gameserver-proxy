@@ -14,6 +14,7 @@ use tokio::net::TcpSocket;
 
 const TOKEN: &str = "fleet-metrics-test-token";
 const SCRAPE_TOKEN: &str = "fleet-scrape-only-token";
+const INGEST_TOKEN: &str = "fleet-ingest-only-token";
 
 async fn scrape(client: &Client, url: &str, token: Option<&str>) -> Result<(StatusCode, String)> {
     let mut req = client.get(url);
@@ -38,7 +39,10 @@ async fn controller_and_aggregator_serve_metrics_behind_their_auth_token() -> Re
         &format!("127.0.0.1:{cport}"),
         &args(&["--auth-token", TOKEN]),
     )?;
-    let _aggregator = spawn_aggregator_with(aport, &args(&["--auth-token", TOKEN]))?;
+    let _aggregator = spawn_aggregator_with(
+        aport,
+        &args(&["--auth-token", TOKEN, "--ingest-token", INGEST_TOKEN]),
+    )?;
     let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
     for (name, port) in [("gsp-controller", cport), ("gsp-aggregator", aport)] {
         let base = format!("http://127.0.0.1:{port}");
@@ -69,7 +73,9 @@ async fn a_metrics_token_unlocks_only_metrics_on_controller_and_aggregator() -> 
     let (cport, aport) = (free_port()?, free_port()?);
     let extra = args(&["--auth-token", TOKEN, "--metrics-token", SCRAPE_TOKEN]);
     let _controller = spawn_controller_with(dir.path(), &format!("127.0.0.1:{cport}"), &extra)?;
-    let _aggregator = spawn_aggregator_with(aport, &extra)?;
+    let mut agg_extra = extra.clone();
+    agg_extra.extend(args(&["--ingest-token", INGEST_TOKEN]));
+    let _aggregator = spawn_aggregator_with(aport, &agg_extra)?;
     let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
     for (name, port, api) in [
         ("gsp-controller", cport, "config"),
