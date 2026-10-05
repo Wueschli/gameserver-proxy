@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::cidr::{Acl, Cidr, GeoAcl};
-use crate::matcher::{MatchContext, Matcher, PEEK_MAX};
+use crate::matcher::{is_handshake_only_sniffer, MatchContext, Matcher, PEEK_MAX};
 use crate::schema::AdminTls;
 
 // ---------------------------------------------------------------------------
@@ -235,6 +235,53 @@ pub struct Config {
     /// `None` ⇒ this instance shows up ungrouped in the admin GUI's fleet
     /// tree. Never consulted by routing/forwarding.
     pub group: Option<String>,
+}
+
+/// A pool behind a handshake-only sniffer should keep a session at least this long
+/// between datagrams (WireGuard's usual keepalive is 25 s).
+const HANDSHAKE_MIN_IDLE: Duration = Duration::from_secs(60);
+
+impl Config {
+    /// Non-fatal findings about a valid config, for the caller to log (startup,
+    /// reload) or print (`--check`). Empty for a clean config.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for l in self
+            .listeners
+            .iter()
+            .filter(|l| l.protocol == Protocol::Udp)
+        {
+            let mut seen: Vec<&str> = Vec::new();
+            for r in &l.routes {
+                let Matcher::Sniffer { name, .. } = &r.matcher else {
+                    continue;
+                };
+                let Action::Pool(pool) = &r.action else {
+                    continue;
+                };
+                if !is_handshake_only_sniffer(name) || seen.contains(&pool.as_str()) {
+                    continue;
+                }
+                let Some(p) = self.pools.iter().find(|p| &p.name == pool) else {
+                    continue;
+                };
+                if p.idle_timeout < HANDSHAKE_MIN_IDLE {
+                    seen.push(pool);
+                    out.push(format!(
+                        "listener {}: pool {pool} has idle_timeout_sec {} behind the \
+                         handshake-only `{name}` sniffer; a flow quiet for longer loses its \
+                         session and, with nothing recognising its next datagram, is dropped \
+                         or misrouted until it handshakes again. Use at least {} s, above the \
+                         protocol's keepalive",
+                        l.name,
+                        p.idle_timeout.as_secs(),
+                        HANDSHAKE_MIN_IDLE.as_secs()
+                    ));
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Resolved `settings.gossip` (phase 13, docs/10 "Tier 2"). The mesh itself
