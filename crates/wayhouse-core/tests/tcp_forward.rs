@@ -361,14 +361,13 @@ listeners:
     let cfg = parse_str(&yaml).unwrap();
     assert_eq!(cfg.listeners[0].extra_binds.len(), 1);
     let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let mut c1 = TcpStream::connect(("127.0.0.1", lo)).await.unwrap();
+    let mut c1 = connect_when_listening(([127, 0, 0, 1], lo).into()).await;
     let mut m1 = [0u8; 1];
     c1.read_exact(&mut m1).await.unwrap();
     assert_eq!(m1[0], b'A', "the low port of the range should reach pool a");
 
-    let mut c2 = TcpStream::connect(("127.0.0.1", hi)).await.unwrap();
+    let mut c2 = connect_when_listening(([127, 0, 0, 1], hi).into()).await;
     let mut m2 = [0u8; 1];
     c2.read_exact(&mut m2).await.unwrap();
     assert_eq!(
@@ -573,13 +572,12 @@ listeners:
     );
     let cfg = parse_str(&yaml).unwrap();
     let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hello = client_hello("frankfurt.eu.example.com");
     // Split mid-record so a single peek can only ever see the first half.
     let split = hello.len() / 2;
 
-    let mut c = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut c = connect_when_listening(proxy_addr).await;
     c.write_all(&hello[..split]).await.unwrap();
     c.flush().await.unwrap();
     // Longer than one PEEK_POLL, well under the 250 ms PEEK_TIMEOUT.
@@ -685,10 +683,16 @@ async fn shutdown_drains_in_flight_connections_then_returns_early() {
     );
     let cfg = parse_str(&yaml).unwrap();
     let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let handle = runtime.handle();
 
-    let mut c = TcpStream::connect(proxy).await.unwrap();
+    let mut c = connect_when_listening(proxy).await;
     c.write_all(b"ping").await.unwrap();
+    // The proxy must have accepted the connection before shutdown starts, or
+    // the "accepted before shutdown still completes" claim below is a race.
+    wait_for("the proxy to register the connection", || {
+        handle.active_conns() == 1
+    })
+    .await;
 
     // Start a shutdown with a long grace while the request is still in flight.
     let t0 = std::time::Instant::now();
@@ -712,8 +716,10 @@ async fn shutdown_drains_in_flight_connections_then_returns_early() {
     );
 
     // New connections are refused once the listener has stopped.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(TcpStream::connect(proxy).await.is_err());
+    wait_for("the listener to stop accepting", || {
+        std::net::TcpStream::connect(proxy).is_err()
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -745,14 +751,19 @@ async fn sessions_registry_lists_a_live_connection_with_its_pool_and_backend() {
     let cfg = parse_str(&yaml).unwrap();
     let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     let handle = runtime.handle();
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    assert!(handle.sessions().is_empty());
-
-    let mut c = TcpStream::connect(proxy).await.unwrap();
+    // Waits for the listener to come up; the probe connection that succeeds
+    // is the one under test (a refused connect never registers a session).
+    let mut c = connect_when_listening(proxy).await;
     c.write_all(b"ping").await.unwrap();
-    // Let the accept task route and pick a backend.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the accept task to route and pick a backend.
+    wait_for("the session to show its backend", || {
+        handle
+            .sessions()
+            .first()
+            .is_some_and(|e| e.backend.is_some())
+    })
+    .await;
 
     let live = handle.sessions();
     assert_eq!(live.len(), 1, "one live session expected");
@@ -765,11 +776,11 @@ async fn sessions_registry_lists_a_live_connection_with_its_pool_and_backend() {
     assert_eq!(handle.active_conns(), 1);
 
     drop(c);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(
-        handle.sessions().is_empty(),
-        "session drops out of the registry when the connection closes"
-    );
+    wait_for(
+        "the session to drop out of the registry when the connection closes",
+        || handle.sessions().is_empty() && handle.active_conns() == 0,
+    )
+    .await;
 
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))
@@ -1097,6 +1108,20 @@ async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
+}
+
+/// Poll `cond` until it holds, panicking after a deadline. Replaces a fixed
+/// `sleep` before an assertion: waits exactly as long as the proxy needs, so
+/// it neither flakes under load nor slows the test down.
+async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Connect, retrying while the listener is still coming up. A fixed
