@@ -1,0 +1,27 @@
+name: PR title
+
+# The squash-merge title becomes the commit on main and the changelog entry
+# (release-please), so it has to be a conventional commit. Advisory: not part of
+# `ci-ok`, not a required check.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04   # pinned like ci.yml
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Title is a conventional commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}   # via env, never interpolated into the script
+        run: |
+          python3 .github/scripts/check_pr_title_test.py
+          python3 .github/scripts/check_pr_title.py "$TITLE"
