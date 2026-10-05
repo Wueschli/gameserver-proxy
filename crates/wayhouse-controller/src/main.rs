@@ -26,7 +26,7 @@ use wayhouse_controller::store::Store;
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse-controller",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Tier-1 config/intent controller for a wayhouse fleet (single standalone node — see docs/10)"
 )]
 struct Args {

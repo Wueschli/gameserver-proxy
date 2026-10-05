@@ -60,7 +60,7 @@ use wayhouse_core::{Runtime, Snapshot};
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Game-agnostic game server reverse proxy"
 )]
 struct Args {

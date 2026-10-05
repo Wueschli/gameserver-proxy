@@ -68,7 +68,7 @@ jobs:
           BIN_SOURCE=builder sh deploy/build-images.sh
           for t in $IMAGES; do
             out=$(docker run --rm "wayhouse-deploy/$t:local" --version)
-            case "$out" in *" $VERSION") ;; *) echo "::error::$t --version is '$out', expected version $VERSION"; exit 1 ;; esac
+            case "$out" in *" $VERSION ("*")") ;; *) echo "::error::$t --version is '$out', expected version $VERSION"; exit 1 ;; esac
           done
           make deploy-smoke
       - name: Log in to GHCR
