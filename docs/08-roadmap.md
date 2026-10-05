@@ -33,14 +33,15 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   single-level timing wheel (perf pass, ADR 19). `sendmmsg` egress batching is
   still deferred.
 - ✅ Per-session `connect(2)` upstream socket + a reply-pump task per session.
-- ✅ Session affinity (`hash_on: src_ip | src_ip_port` + per-worker sticky
-  table). (`consistent_hash` balancer deferred.)
+- ✅ Session affinity: a `consistent_hash` pool (`hash_on: src_ip | src_ip_port`).
+  The per-worker sticky table that first provided it was removed (#56): with
+  `SO_REUSEPORT` it kept only ~34% of clients on 4 workers.
 - ✅ `udp_probe` health check (`send_hex` / `expect_hex_prefix`).
 - ✅ Per-backend session caps (shared with TCP) + per-pool idle timeout;
   amplification guard (no reply without an established session).
 - **Result**: covers the majority of real-time game servers.
 
-## Phase 3 – Routing intelligence (week 8–10) ✅
+## Phase 3 – Routing intelligence ✅
 - ✅ Route rule list with priorities (`listeners[].routes`, first match wins;
   bare `pool:` normalised to one `always` route).
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
@@ -77,7 +78,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   range within one listener's routes) is what actually splits pools by port
   within the range — the bind range just makes the sockets exist.
 
-## Phase 4 – External routing logic (week 11–12) ✅ (sticky_key deferred)
+## Phase 4 – External routing logic ✅ (sticky_key deferred)
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
   `Resolver` trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest)
   in `gsp`; `pool` results; `on_error: reject | fallback_route`.
@@ -105,7 +106,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   a `SourceFactory` (`DiscoveryFactory`) that rebuilds the concrete adapter.
 - **Result**: matchmaker integration, token→instance routing.
 
-## Phase 5 – Operations & zero-downtime (week 13–14) ✅
+## Phase 5 – Operations & zero-downtime ✅
 - ✅ Hot reload (SIGHUP + file watch), atomic snapshot swap. *(phase 1)*
 - ✅ **Slice 1**: `enabled` / `draining` / `disabled` backend states —
   `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
@@ -134,7 +135,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Passive health signals from the data path. *(phase 1)*
 - **Result**: a production-ready deploy/update cycle.
 
-## Phase 6 – Client-IP preservation (week 15–16)
+## Phase 6 – Client-IP preservation ✅
 - ✅ **Slice 1**: PROXY protocol v1/v2 (TCP) — per-pool `proxy_protocol:
   none | v1 | v2`; one header prepended to the upstream connection before any
   client bytes (`gsp_core::proxy_protocol`), `gsp_proxy_protocol_headers_total`.
@@ -153,7 +154,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: backends see the real client IP (PROXY protocol or fully
   transparent, TCP + UDP).
 
-## Phase 7 – Security & hardening (week 17–18)
+## Phase 7 – Security & hardening ✅
 - ✅ **Slice 1**: CIDR allow/deny filter chain — per-listener `allow` / `deny`
   CIDR lists, checked on the client source IP before routing (TCP accept + UDP
   first datagram). `deny` wins; a non-empty `allow` is default-deny. Blocked =
@@ -219,7 +220,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - **Result**: hardened against common L4/7 abuse; per-connection overhead
   measurable via `make bench`.
 
-## Phase 8 – Discovery & scaling (week 19–20) ✅
+## Phase 8 – Discovery & scaling ✅
 - ✅ `BackendSource` seam in `gsp-core` (`discovery.rs`: trait + `Discovery`
   last-known-good cache + `refresh_loop`), concrete adapters in the `gsp` binary
   (`discovery.rs`: `DnsSrvSource` via `hickory-resolver`, `ConsulSource` /
@@ -238,21 +239,21 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Config: top-level `backend_sources:` list referenced by `pools[].source`
   (exactly one of `targets` / `source`). `static` is folded into the pool's
   targets at load time.
-- ✅ k8s uses **polling** (`GET .../endpoints/<svc>` with the in-pod SA token +
-  CA). Deferred: a watch-based informer (fewer API calls, faster convergence).
+- ✅ k8s lists the service's **EndpointSlices** (`discovery.k8s.io/v1`) with the in-pod SA
+  token + CA, and (post-phase-8) **watches** them from the listed `resourceVersion`: a pod change
+  triggers a fetch at once, while the poll interval stays as the resync safety net.
 - ✅ HA operations chapter in `docs/06` — anycast vs. L4 LB, capacity planning
   per instance, dashboards & alerts.
 - **Result**: dynamic backend fleets, horizontal scaling.
-- Deferred: k8s watch informer.
 - ✅ `backend_sources:` live reload (`SourceManager`) — landed in the
   data-plane-completion pass; see Phase 4's post-phase note.
 
-## Phase 9 – Sniffer plugin loader
+## Phase 9 – Sniffer plugin loader ✅
 
 Game-protocol sniffers load into a running proxy from disk, sandboxed, never
 compiled in and never a fork. A `sniffer:` route resolves its name against the
-loaded set (today that always misses — `gsp_core::sniff::sniffer` returns `None`
-for every real name).
+loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) live in
+[`crates/plugins/`](../crates/plugins/README.md).
 
 ### Locked decisions
 - **Sandbox: `wasmtime`, core module, no WASI.** A narrow ABI — the guest
@@ -332,7 +333,7 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
   measured inside NFR N1; `regex` first-bytes matching lives in an optional
   plugin, never in core. Known follow-ups, not blocking:
-  per-source cap LRU eviction, a k8s discovery watch informer — see
+  per-source cap LRU eviction — see
   `HANDOVER.md`. (`GET /sessions` since landed — data-plane completion.)
 - ✅ **Post-phase-9 (data-plane completion)**: per-plugin config. ADR 16a
   widens the guest ABI to
@@ -542,7 +543,8 @@ token, is ever exposed to a human directly.
      the same "ephemeral, nothing durable" posture the aggregator already
      has), returned as an `HttpOnly`, `SameSite=Lax` cookie (not yet marked
      `Secure` — noted as a gap for a TLS-fronted deployment, not silently
-     ignored); `POST /ui/logout` clears it; `GET /ui/session` (gated by the
+     ignored; since 2026-10-02 a UI serving native TLS, `--tls-cert`, sets
+     `Secure` itself, behind a proxy the proxy must); `POST /ui/logout` clears it; `GET /ui/session` (gated by the
      new `require_session` middleware) lets the frontend check login state
      on load. `None` (`--ui-password` omitted) leaves the UI open, consistent
      with every other optional-auth surface in this fleet. 9 new tests;
@@ -1100,8 +1102,12 @@ slice 1.
   (`docs/12`; blocking since 2026-10-02).
 - **Phase 14 follow-ups** — the multi-proxy `AllowedIPs` fix and the controller-allocated
   tunnel address authority landed 2026-10-02 (`docs/11` "Address authority"); the
-  CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Remaining pieces
-  (IPv6, lease expiry, HA-replicated allocation, a UI view) are in HANDOVER "Known follow-ups".
+  CI-friendly tunnel e2e exists (`make tunnel-e2e`, CI job `tunnel`). Lease expiry and
+  tunnel-pool pruning landed 2026-10-04; live address change remains
+  (GitHub issue #40); the UI view landed 2026-10-03, releasing from it 2026-10-04. IPv6 tunnel networks and
+  IPv6 underlays landed 2026-10-03 (`docs/11` "Address authority", spec
+  `docs/superpowers/specs/2026-10-03-ipv6-tunnel-design.md`), with `--tunnel-readdress`
+  for a changed network.
 
 ## Milestone cuts
 - **MVP**: phase 0–2 (L4 TCP+UDP, static, health, metrics).

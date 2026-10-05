@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use gsp_config::{parse_str, SourceConfig};
 use gsp_core::discovery::{refresh_loop, BackendSource, Discovery};
-use gsp_core::{BackendOverlay, Runtime, Snapshot, SourceFactory};
+use gsp_core::{BackendOverlay, Runtime, Snapshot, SourceError, SourceFactory};
 use tokio::sync::{watch, Notify};
 
 const CFG: &str = r#"
@@ -80,11 +80,11 @@ fn overlay_layers_on_top_of_the_discovered_set() {
 /// A scripted source: each `fetch` pops the next result off a queue.
 struct ScriptedSource {
     calls: AtomicUsize,
-    script: Mutex<Vec<anyhow::Result<Vec<SocketAddr>>>>,
+    script: Mutex<Vec<Result<Vec<SocketAddr>, SourceError>>>,
 }
 
 impl ScriptedSource {
-    fn new(script: Vec<anyhow::Result<Vec<SocketAddr>>>) -> Arc<Self> {
+    fn new(script: Vec<Result<Vec<SocketAddr>, SourceError>>) -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             script: Mutex::new(script),
@@ -103,7 +103,7 @@ impl BackendSource for ScriptedSource {
     fn refresh_interval(&self) -> Duration {
         Duration::from_millis(50)
     }
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let mut s = self.script.lock().unwrap();
         if s.is_empty() {
@@ -123,7 +123,10 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let source = ScriptedSource::new(vec![
         Ok(vec![addr("10.0.0.1:7777")]), // first refresh
         Ok(vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")]), // grew
-        Err(anyhow::anyhow!("source down")), // must not clear
+        Err(SourceError::Unreachable {
+            context: "fake".into(),
+            cause: "source down".into(),
+        }), // must not clear
         Ok(Vec::new()),                  // empty must not clear
     ]);
 
@@ -162,6 +165,100 @@ async fn refresh_picks_up_a_change_and_a_down_source_keeps_the_last_set() {
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
+/// A source whose `changed()` fires on demand, with an interval far longer
+/// than the test: only the push signal can explain a second fetch.
+struct PushSource {
+    set: Mutex<Vec<SocketAddr>>,
+    signal: Notify,
+}
+
+#[async_trait::async_trait]
+impl BackendSource for PushSource {
+    fn pool(&self) -> &str {
+        "game"
+    }
+    fn kind(&self) -> &'static str {
+        "kubernetes"
+    }
+    fn refresh_interval(&self) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+        Ok(self.set.lock().unwrap().clone())
+    }
+    async fn changed(&self) {
+        self.signal.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn a_changed_signal_triggers_a_fetch_without_waiting_for_the_interval() {
+    let discovery = Arc::new(Discovery::new());
+    let reload = Arc::new(Notify::new());
+    let (sd_tx, mut sd_rx) = watch::channel(false);
+    let source = Arc::new(PushSource {
+        set: Mutex::new(vec![addr("10.0.0.1:7777")]),
+        signal: Notify::new(),
+    });
+    let (src, d, r) = (source.clone(), discovery.clone(), reload.clone());
+    let task = tokio::spawn(async move {
+        refresh_loop(src, d, r, &mut sd_rx).await;
+    });
+
+    // The interval's immediate first tick populates the pool.
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("first set notified");
+
+    *source.set.lock().unwrap() = vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")];
+    source.signal.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("push signal must fetch before the hour-long interval");
+    assert_eq!(
+        discovery.get("game").unwrap(),
+        vec![addr("10.0.0.1:7777"), addr("10.0.0.2:7777")]
+    );
+
+    let _ = sd_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
+#[tokio::test]
+async fn a_withdrawn_source_clears_the_pool_but_an_error_does_not() {
+    let discovery = Arc::new(Discovery::new());
+    let reload = Arc::new(Notify::new());
+    let (sd_tx, mut sd_rx) = watch::channel(false);
+
+    let source = ScriptedSource::new(vec![
+        Ok(vec![addr("10.0.0.1:7777")]),
+        Err(SourceError::Withdrawn {
+            origin: "home".into(),
+        }),
+    ]);
+    let src_dyn: Arc<dyn BackendSource> = source.clone();
+    let d = discovery.clone();
+    let r = reload.clone();
+    let task = tokio::spawn(async move {
+        refresh_loop(src_dyn, d, r, &mut sd_rx).await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("first change notified");
+    assert_eq!(discovery.get("game").unwrap(), vec![addr("10.0.0.1:7777")]);
+
+    // The withdrawal empties the set (an empty `Some`, not the file seed) and
+    // wakes the reload path so the snapshot drops the backend.
+    tokio::time::timeout(Duration::from_secs(2), reload.notified())
+        .await
+        .expect("withdrawal notified");
+    assert_eq!(discovery.get("game").unwrap(), Vec::new());
+
+    let _ = sd_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
 /// A fixed-set source + a factory over it, keyed by the SRV `record` string
 /// (abused as a literal `ip:port`) so a reconcile with a changed spec is
 /// observable.
@@ -181,7 +278,7 @@ impl BackendSource for FixedSource {
     fn refresh_interval(&self) -> Duration {
         Duration::from_millis(30)
     }
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
         Ok(vec![self.addr])
     }
 }
@@ -189,14 +286,14 @@ impl BackendSource for FixedSource {
 struct FixedFactory;
 
 impl SourceFactory for FixedFactory {
-    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError> {
         let record = match &cfg.kind {
             gsp_config::SourceKind::DnsSrv { record } => record.clone(),
             _ => unreachable!(),
         };
         Ok(Arc::new(FixedSource {
             pool: pool.to_string(),
-            addr: record.parse()?,
+            addr: record.parse().map_err(SourceError::build)?,
         }))
     }
 }
@@ -216,9 +313,9 @@ async fn runtime_reconciles_sources_when_backend_sources_change() {
     let snap = Snapshot::build_with_sources(&cfg, None, &BackendOverlay::new(), &discovery);
     let runtime = Runtime::start_with_discovery(
         snap,
-        Default::default(),
+        Arc::default(),
         None,
-        Default::default(),
+        Arc::default(),
         discovery.clone(),
         Some(Arc::new(FixedFactory)),
         None,

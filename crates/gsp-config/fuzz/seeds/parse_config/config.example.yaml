@@ -85,8 +85,6 @@ listeners:
     bind: "0.0.0.0:27015"
     protocol: udp
     pool: realtime
-    affinity:
-      hash_on: src_ip             # src_ip (default for udp) | src_ip_port
     route_hint: true               # a launcher may POST /route-hint {src_ip,pool,ttl_sec}
                                     # before the player connects; that hint then wins
 
@@ -209,7 +207,7 @@ listeners:
 # Reload without restart: `kill -HUP <pid>` or just edit this file.
 # Live: pool targets, balancer, health-check params, caps, proxy_protocol.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
-#   protocol / routes / affinity / prefix / freebind / transparent / route_hint
+#   protocol / routes / prefix / freebind / transparent / route_hint
 #   / allow / deny / rate_limit / first_packet_gate / geo.
 #   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
 #   survive reloads.)

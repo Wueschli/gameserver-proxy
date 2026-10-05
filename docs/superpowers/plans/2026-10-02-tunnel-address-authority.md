@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (checked 2026-10-03):** all 46 steps done. Every step is ticked after checking `main` (`10a0113`) for the files, tests and commits it names. "Run it to verify it fails" steps are ticked on the strength of the history (each task's tests and implementation landed), not re-run.
+>
+> - Landed 2026-10-02 in `375599d`..`bc7dba2`, follow-ups `de55f1c`, `b536e11`, `acfb577`, `6287359` (per-registry POST/DELETE serialisation, address-book flush, a wrong `gsp` flag name, an HA pin-only warning).
+>
+> - The deferred pieces of the address authority are tracked in HANDOVER's "Known follow-ups", not here.
+
 **Goal:** `gsp-controller` allocates unique tunnel addresses (or grants requested ones), publishes each peer's address, and `gsp-agent` / `gsp --tunnel-*` route each other with `/32`s — fixing the multi-proxy `AllowedIPs 0.0.0.0/0` bug.
 
 **Architecture:** One `AddressBook` (new `addresses` module, its own sled db) shared by the backend-peers and proxy-peers registries; `POST /peers` / `POST /proxy-peers` claim an address atomically with the registration and answer with it. Clients register *before* bringing their interface up, persist the answer, and build `/32` peers from the published addresses. `DELETE` releases an address and logs a tombstone subscribers act on.
@@ -62,7 +68,7 @@ Failure modes the spec implies that no single task's happy-path tests cover; eac
   - `AddressBook::open(&Path, Option<Network>) -> Result<Self, sled::Error>`; `claim(Role, &str, Option<Ipv4Addr>, u64) -> Result<Assignment, ClaimError>`; `release(Role, &str) -> Result<Option<Ipv4Addr>, ClaimError>`; `get`, `entries`, `allocated`, `network`
   - `addresses::api::{AddressesState, router, claim_error_response, warn_stale, stale_warning_loop}`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add `pub mod addresses;` to `lib.rs`. Create `crates/gsp-controller/src/addresses.rs` containing only `pub mod api;` followed by this test module:
 
@@ -490,12 +496,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp-controller addresses 2>&1 | tail -20`
 Expected: compile errors such as ``cannot find type `AddressBook` in this scope`` / ``cannot find function `router```. (That is the RED: the types do not exist yet.)
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert this at the very top of `crates/gsp-controller/src/addresses.rs` (above the `pub mod api;` line and the test module from Step 1):
 
@@ -1116,12 +1122,12 @@ pub async fn stale_warning_loop(book: Arc<AddressBook>, stale_after: Duration) {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p gsp-controller addresses 2>&1 | tail -8`
 Expected: `test result: ok. 23 passed; 0 failed`.
 
-- [ ] **Step 5: Format, lint, commit**
+- [x] **Step 5: Format, lint, commit**
 
 ```bash
 cargo fmt --all
@@ -1148,7 +1154,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `POST /peers` / `POST /proxy-peers` response: `{"revision": u64, "tunnel_address": "10.60.0.1", "tunnel_network": "10.60.0.0/16"}` (`tunnel_network` omitted in pin-only mode).
   - Stored registrations and SSE events carry `tunnel_address`; stored `backends` are expanded `ip:port`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `peers.rs` tests, replace `valid()` so it sets `tunnel_address: None`, and add:
 
@@ -1451,12 +1457,12 @@ In `proxy_peers/api.rs` tests, change `test_state()` and add the helpers and tes
 
 Update every existing proxy test: `let (state, _dir) = test_state();` → `let (state, _book, _dir) = test_state();`; the test building `ProxyPeersState::new(store, Some("secret".into()))` must open its own `Store` under `dir.path().join("proxy-peers")` and an `AddressBook` as above and pass the book; the two `ProxyRegistration { … }` literals in the subscribe test gain `tunnel_address: None`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp-controller peers 2>&1 | tail -25`
 Expected: compile errors — ``no field `tunnel_address` on type `PeerRegistration` `` and ``this function takes 2 arguments but 3 arguments were supplied``.
 
-- [ ] **Step 3: Implement the registration types**
+- [x] **Step 3: Implement the registration types**
 
 `peers.rs`: add the field and helper, and relax the backend check.
 
@@ -1505,7 +1511,7 @@ Replace the backends loop in `validate()` with:
 
 `proxy_peers.rs`: add the same `tunnel_address` field, the same `requested_address()` and the same `tunnel_address` check in `validate()` (there is no backends loop).
 
-- [ ] **Step 4: Implement the claim in `peers/api.rs`**
+- [x] **Step 4: Implement the claim in `peers/api.rs`**
 
 Imports: add `use crate::addresses::api::claim_error_response; use crate::addresses::{expand_backends, now_secs, AddressBook, Role};`.
 
@@ -1664,12 +1670,12 @@ async fn register(State(state): State<ProxyPeersState>, body: String) -> Respons
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo test -p gsp-controller 2>&1 | tail -6`
 Expected: `test result: ok.` with no failures (the controller binary will not compile until Task 3 — if `cargo test -p gsp-controller` fails to build `main.rs` because `PeersState::new` gained an argument, do the minimal fix there now: open an `AddressBook` at `args.data_dir.join("tunnel-addresses")` with `None` network and pass `book.clone()`; Task 3 replaces it with the real wiring).
 
-- [ ] **Step 6: Format, lint, commit**
+- [x] **Step 6: Format, lint, commit**
 
 ```bash
 cargo fmt --all
@@ -1697,7 +1703,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `gsp_fleet_tests::spawn_controller_with(data_dir: &Path, listen: &str, extra: &[String]) -> Result<Proc>` (`spawn_controller_on` delegates to it with `&[]`)
   - controller flags `--tunnel-network <CIDR>` and `--tunnel-stale-after <dur>` (default `14d`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to the `tests` module in `addresses.rs`:
 
@@ -1829,12 +1835,12 @@ async fn tunnel_network_together_with_ha_is_refused_at_startup() -> Result<()> {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp-controller resolve_flags 2>&1 | tail -5` → ``cannot find function `resolve_flags` ``.
 Run: `cargo test -p gsp-fleet-tests --test tunnel_addresses 2>&1 | tail -5` → ``unresolved import `gsp_fleet_tests::spawn_controller_with` ``.
 
-- [ ] **Step 3: Implement `resolve_flags`**
+- [x] **Step 3: Implement `resolve_flags`**
 
 Add to `addresses.rs` (above the tests module):
 
@@ -1867,7 +1873,7 @@ pub fn resolve_flags(
 }
 ```
 
-- [ ] **Step 4: Implement the harness helper and the controller wiring**
+- [x] **Step 4: Implement the harness helper and the controller wiring**
 
 `crates/gsp-fleet-tests/src/lib.rs` — replace `spawn_controller_on` with:
 
@@ -1959,7 +1965,7 @@ Directly after the `proxy_peers_state` line (so it runs before `args.auth_token`
 
 and add `.merge(gsp_controller::addresses::api::router(addresses_state))` after the `proxy_peers` router merge in `let mut app = Router::new()…`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p gsp-controller resolve_flags 2>&1 | tail -4
@@ -1967,7 +1973,7 @@ cargo test -p gsp-fleet-tests --test tunnel_addresses 2>&1 | tail -6
 ```
 Expected: `resolve_flags` 3 passed; the fleet test file `2 passed`.
 
-- [ ] **Step 6: Whole-task verification and commit**
+- [x] **Step 6: Whole-task verification and commit**
 
 ```bash
 cargo fmt --all && make check
@@ -1992,7 +1998,7 @@ Expected: `make check` exits 0.
   - `DELETE /peers/{name}` and `DELETE /proxy-peers/{name}` → `200 {"revision": N, "released": "10.60.0.1" | null}`, `404` if the name is unknown everywhere.
   - Subscribe event payload for a deletion: `{"revision":N,"removed":{"name":"…"}}`; for a registration unchanged: `{"revision":N,"registration":{…}}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `peers.rs` tests:
 
@@ -2212,12 +2218,12 @@ In `proxy_peers/api.rs` tests (uses the helpers from Task 2):
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp-controller 2>&1 | tail -15`
 Expected: ``cannot find function `event_payload` `` / ``cannot find function `tombstone_bytes` `` and the delete tests failing to compile or returning `405 Method Not Allowed`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `peers.rs` (above `#[cfg(test)]`):
 
@@ -2380,12 +2386,12 @@ async fn delete_one(State(state): State<ProxyPeersState>, Path(name): Path<Strin
 
 and in `subscribe` the same closure: `Ok(Event::default().data(event_payload(revision, &bytes).to_string()))`.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p gsp-controller 2>&1 | tail -6`
 Expected: `test result: ok.`
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
@@ -2411,7 +2417,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `proxy_subscribe`: `Event::{Registered,Removed}`, `Action`, `plan`, `/32` peers.
   - CLI: `--address` optional; new `--peer-address` (required together with `--peer-pubkey`/`--peer-endpoint`); `--backends` accepts `:port`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/gsp-agent/src/address_store.rs` with only this test module (and `use super::*;`-style access to the items Step 3 adds):
 
@@ -2712,12 +2718,12 @@ In `proxy_subscribe.rs` tests, replace the `ProxyRegistration { … }` literals 
 
 (Delete the old `parses_a_well_formed_data_event`, `to_wg_peer_builds_a_full_tunnel_route_with_keepalive` and the two literal-based reject tests; the keep-alive/malformed-JSON/missing-field tests stay but their `parse_sse_event(...)` assertions now compare against `Option<Event>` — `is_none()` still holds.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp-agent 2>&1 | tail -20`
 Expected: compile errors — ``cannot find function `resolve_startup` ``, ``cannot find type `Registered` ``, ``no field `tunnel_address` ``.
 
-- [ ] **Step 3: Implement `address_store.rs`**
+- [x] **Step 3: Implement `address_store.rs`**
 
 Put this above the test module:
 
@@ -2818,7 +2824,7 @@ pub fn resolve_startup(
 }
 ```
 
-- [ ] **Step 4: Implement `register.rs`**
+- [x] **Step 4: Implement `register.rs`**
 
 Replace everything above the test module with:
 
@@ -3005,7 +3011,7 @@ pub async fn run(
 }
 ```
 
-- [ ] **Step 5: Implement the `proxy_subscribe.rs` changes**
+- [x] **Step 5: Implement the `proxy_subscribe.rs` changes**
 
 Replace the struct, `to_wg_peer`, event parsing and the loop body:
 
@@ -3132,7 +3138,7 @@ In `subscribe_once`, replace the `if let Some(reg) = parse_sse_event(&event) { �
 
 Update `reconcile_peer`'s log (it still prints `endpoint = %reg.endpoint`; also log `address = ?reg.tunnel_address`).
 
-- [ ] **Step 6: Implement the `main.rs` changes**
+- [x] **Step 6: Implement the `main.rs` changes**
 
 Add `mod address_store;` next to `mod keypair;`. Change the args:
 
@@ -3276,12 +3282,12 @@ Replace the `register::run` spawn:
 
 Remove the now-unused `let client = reqwest::Client::new();` that preceded the old spawn.
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 Run: `cargo test -p gsp-agent 2>&1 | tail -8`
 Expected: `test result: ok.` (all address_store, register and proxy_subscribe tests).
 
-- [ ] **Step 8: Verify and commit**
+- [x] **Step 8: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
@@ -3304,7 +3310,7 @@ Expected: `make check` exits 0 (the e2e lab is not part of it and is still red u
 - Consumes: Task 2/4 wire shapes.
 - Produces: the proxy-side mirrors of Task 5's modules — `proxy_register::{Registration{name,pubkey,endpoint:String,address:Option<String>}, Registered, RegisterError, register_once, register_with_retry, address_change, run}`, `tunnel_address::{ip_of, interface_cidr, load, save, StartupAddress, Source, resolve_startup}`, and in `tunnel_client`: `Event`, `Action`, `plan`, `/32` origin peers, tombstone handling. CLI: `--tunnel-address` optional (`ip/prefix` pins; omit to allocate).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/gsp/src/tunnel_address.rs` with only this test module:
 
@@ -3585,12 +3591,12 @@ In `tunnel_client.rs` tests: add `tunnel_address: None` to the existing `PeerReg
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p gsp tunnel 2>&1 | tail -15` and `cargo test -p gsp proxy_register 2>&1 | tail -10`
 Expected: compile errors (missing `Registered`, `resolve_startup`, `Event`, the `tunnel_address` field).
 
-- [ ] **Step 3: Implement the mirrors**
+- [x] **Step 3: Implement the mirrors**
 
 `crates/gsp/src/tunnel_address.rs` — put this above the test module:
 
@@ -4103,12 +4109,12 @@ In `subscribe_once`, replace the `if let Some(reg) = parse_sse_event(&event) { �
         }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p gsp 2>&1 | tail -8`
 Expected: `test result: ok.`
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
@@ -4133,7 +4139,7 @@ Expected: `make check` exits 0.
   - `origin_ip(&self) -> Ipv4Addr`, `proxy_address(&self, name: &str) -> Result<String>`, `proxy_last_seen(&self, name: &str) -> Result<u64>`
   - `stop_controller(&mut self)`, `start_controller(&mut self)`, `restart_edge(&mut self, idx: usize)`, `wait_roundtrip_after_restart(&self, edge: usize)`, `agent_refused(&mut self, name: &str, address_cidr: &str) -> Result<String>`
 
-- [ ] **Step 1: Write the failing scenarios**
+- [x] **Step 1: Write the failing scenarios**
 
 In `tests/tunnel.rs`: change the import to `use gsp_fleet_tests::{spawn_controller_on, wait_http_up, wait_until};`; change **every** `t.start_edge("edge-N", <octet>, X)` call to `t.start_edge("edge-N", X)` (seven call sites); delete the sentence "(That the *first* proxy keeps working alongside it is NOT asserted here — it doesn't today; see `known_bug_two_proxies_cannot_share_one_origin`.)" from scenario 3's doc comment.
 
@@ -4230,7 +4236,7 @@ async fn an_edge_restarts_with_the_controller_down() -> Result<()> {
 Run: `cargo test -p gsp-fleet-tests --test tunnel --no-run 2>&1 | tail -15`
 Expected: compile errors — ``this method takes 3 arguments but 2 arguments were supplied`` (`start_edge`) and ``no method named `origin_ip` ``, `proxy_address`, `proxy_last_seen`, `stop_controller`, `start_controller`, `restart_edge`, `wait_roundtrip_after_restart`, `agent_refused`.
 
-- [ ] **Step 2: Implement the harness changes (`src/tunnel.rs`)**
+- [x] **Step 2: Implement the harness changes (`src/tunnel.rs`)**
 
 Constants and imports:
 
@@ -4458,11 +4464,11 @@ New methods:
     }
 ```
 
-- [ ] **Step 3: Update the Makefile**
+- [x] **Step 3: Update the Makefile**
 
 In `tunnel-e2e` remove `--skip known_bug_` from the test arguments. In `tunnel-e2e-ci` remove `-E 'not test(known_bug_)'` from the `--no-run` line and `-E "not test(known_bug_)"` from the in-namespace run line. Also update the comment above `tunnel-e2e` if it mentions skipping the known bug.
 
-- [ ] **Step 4: Run the scenarios — the whole tunnel suite on both backends**
+- [x] **Step 4: Run the scenarios — the whole tunnel suite on both backends**
 
 ```bash
 cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
@@ -4473,7 +4479,7 @@ Expected: `Summary … 12 tests run: 12 passed` on each backend, including `two_
 
 Also run the plain-`cargo test` path once: `TUNNEL_BACKEND=userspace make tunnel-e2e 2>&1 | tail -5` → `test result: ok. 12 passed`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 cargo fmt --all && make check
@@ -4499,7 +4505,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: everything above. Produces no code interfaces.
 
-- [ ] **Step 1: Write the failing lint checks**
+- [x] **Step 1: Write the failing lint checks**
 
 In `deploy/lint.sh`'s ruby block, before the final `if errs.empty?`, add:
 
@@ -4517,7 +4523,7 @@ errs << "tunnel override: agent backends should use the :port shorthand" unless 
 Run: `sh deploy/lint.sh`
 Expected: `LINT FAIL:` for the controller flag, the gsp `--tunnel-address`, the agent `--address` and the backends shorthand.
 
-- [ ] **Step 2: Update the compose tunnel override**
+- [x] **Step 2: Update the compose tunnel override**
 
 Replace `deploy/compose/compose.tunnel.yml` with:
 
@@ -4583,12 +4589,12 @@ volumes:
 
 In `deploy/README.md`'s "Tunnel (phase 14)" section add one sentence: the controller allocates tunnel addresses from `--tunnel-network` (`10.60.0.0/16` here), so no `--address` / `--tunnel-address` is given; pin one only to keep a specific address (see docs/11 "Address authority").
 
-- [ ] **Step 3: Run the lint to verify it passes**
+- [x] **Step 3: Run the lint to verify it passes**
 
 Run: `sh deploy/lint.sh && BIN_SOURCE=prebuilt sh deploy/lint.sh`
 Expected: `deploy lint: ok` twice.
 
-- [ ] **Step 4: Update the documentation**
+- [x] **Step 4: Update the documentation**
 
 `docs/11-backend-transport.md`: replace the "Tunnel-internal address collision/exhaustion at fleet scale" bullet under "Open questions" with `- **Tunnel-internal address collision/exhaustion** — resolved 2026-10-02: see "Address authority" below.`, and add this section immediately before "## Open questions":
 
@@ -4631,7 +4637,7 @@ Then grep `docs/11`, `docs/12`, `docs/08` and `README.md` for `--address`, `--tu
 
 Spec: change its `Status:` line to `implemented (slices 1–6, 2026-10-02)`.
 
-- [ ] **Step 5: Final verification (superpowers:verification-before-completion)**
+- [x] **Step 5: Final verification (superpowers:verification-before-completion)**
 
 ```bash
 cargo fmt --all
@@ -4644,7 +4650,7 @@ git status --short                                # nothing unexpected
 ```
 Report the actual outputs. Do not claim the e2e passed without having run both backends.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A deploy docs README.md AGENTS.md HANDOVER.md

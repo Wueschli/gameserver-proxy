@@ -1,211 +1,263 @@
-# game-server-proxy
+> [!CAUTION]
+> ## 🚧 Work in progress: not finished, not production-ready 🚧
+>
+> This project is under active development and is **definitely not finished yet**.
+>
+> - There are **no releases** and **no published container images**. The version is `0.0.1`.
+> - The configuration format, CLI flags, admin/fleet HTTP APIs and on-disk formats
+>   **can change at any time without notice or a migration path**.
+> - Everything below is covered by automated tests, but **none of it has run in
+>   production**. Parts of the deployment story (the Docker images on a developer
+>   machine, the Kubernetes manifests on a real cluster) have only been exercised in CI.
+>
+> Feel free to read, build and experiment. Please don't put real players behind it yet.
 
-A **game-agnostic game server reverse proxy**: a single entry point in front of
-arbitrary game servers that transparently forwards TCP and UDP traffic to backend
-instances — without knowing the game's protocol.
+# gameserver-proxy
 
-Typical goals: hide backend IPs (DDoS protection), port-/hostname-based routing to
-many server instances, zero-downtime restarts (connection draining), central metrics
-and access control.
+[![CI](https://github.com/Wueschli/gameserver-proxy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Wueschli/gameserver-proxy/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-## Planning documents
+A **game-agnostic reverse proxy for game servers**, written in Rust. It is a single
+entry point in front of arbitrary game servers that transparently forwards TCP and
+UDP traffic to backend instances, without knowing the game's protocol.
 
-| File | Contents |
-|------|----------|
-| [docs/00-overview.md](docs/00-overview.md) | Goals, non-goals, use cases, glossary |
-| [docs/01-requirements.md](docs/01-requirements.md) | Functional & non-functional requirements |
-| [docs/02-architecture.md](docs/02-architecture.md) | Components, data plane / control plane, data flows |
-| [docs/03-routing.md](docs/03-routing.md) | Routing strategies in detail |
-| [docs/04-transport-and-client-ip.md](docs/04-transport-and-client-ip.md) | TCP/UDP handling, client-IP preservation, PROXY protocol |
-| [docs/05-configuration.md](docs/05-configuration.md) | Configuration schema & examples |
-| [docs/06-operations-observability.md](docs/06-operations-observability.md) | Metrics, logging, health checks, draining |
-| [docs/07-security-ddos.md](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
-| [docs/08-roadmap.md](docs/08-roadmap.md) | Phased implementation / milestones |
-| [docs/09-technology-choices.md](docs/09-technology-choices.md) | Language, libraries, alternatives |
-| [docs/10-distributed-control-plane.md](docs/10-distributed-control-plane.md) | *(v2, built — phases 10–13)* Fleet-shared config/intent + regional health, controller, aggregator, GUI |
-| [docs/11-backend-transport.md](docs/11-backend-transport.md) | WireGuard backend transport for origins behind NAT/a different network (`gsp-agent`, backend/proxy peers registries) |
-| [docs/12-deployment.md](docs/12-deployment.md) | Container images, sizes, and how a many-port proxy works under Docker/Kubernetes networking |
+Typical goals:
 
-## Status
+- **Hide backend IPs** so the proxy is the only DDoS-exposed point.
+- **Route** by port, source address, SNI hostname or the first bytes of a connection
+  to many server instances behind one public endpoint.
+- **Restart without kicking players**, through connection draining.
+- **Operate centrally**: Prometheus metrics, health checks, access control and an
+  admin GUI for a whole fleet of proxies.
 
-**All roadmap phases 0–14 are built** (resolver `sticky_key` deferred): the data
-plane (phases 0–9), the distributed control plane (phases 10–13) and the
-WireGuard backend transport (phase 14) — see the sections below and
-[docs/08-roadmap.md](docs/08-roadmap.md). Reference container images, a compose demo and
-Kubernetes manifests live in [`deploy/`](deploy/). TCP and UDP listener → backend pool forwarding with:
+Game knowledge never lives in the core. It comes from optional, sandboxed WASM
+sniffer plugins (Minecraft virtual hosts and Source-engine A2S queries ship as
+examples) or from an external routing service you control.
+
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Workspace layout](#workspace-layout)
+- [Documentation](#documentation)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Features
+
+<details open>
+<summary><b>Data plane: TCP and UDP forwarding</b></summary>
 
 - `round_robin`, `least_conn` and `consistent_hash` (rendezvous-hash affinity,
-  `hash_on: src_ip | src_ip_port`) balancing
-- active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
-  passive connect-failure feedback; unhealthy backends are skipped
+  `hash_on: src_ip | src_ip_port`) load balancing.
+- Active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
+  passive connect-failure feedback; unhealthy backends are skipped.
 - UDP: worker-local (lock-free) session tables, one `connect(2)` upstream socket per
-  session, `src_ip` / `src_ip_port` backend affinity, idle-timeout eviction, and a
-  no-unsolicited-reply amplification guard
-- optional per-backend session caps (shared by TCP connections and UDP sessions)
-- hot reload on `SIGHUP` or config-file change (atomic snapshot swap; backend health
-  carried across the swap)
-- admin/observability API and Prometheus metrics
-- per-listener route rule list (`routes:`, first match wins) with `always`,
-  `client_cidr` (source IP), `dst` (destination IP), `port` (destination port),
-  `first_bytes` (prefix and/or length of the first bytes) and `sni` (host from
-  the peeked, non-terminated TLS ClientHello) matchers — plus a `sniffer`
-  matcher backed by the sandboxed WASM plugin loader (phase 9, below)
-- UDP `prefix:` listeners — one wildcard `IP_PKTINFO` socket serves a whole
-  routed prefix, routing by the real per-datagram destination and replying from
-  it; TCP `freebind:`
-- push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` + per-listener
-  `route_hint: true` (a short-lived `src_ip → pool` hint wins over the route list)
-- operator backend states: `PATCH /pools/{p}/backends/{addr} {state:
-  enabled|draining|disabled}` — `draining` / `disabled` divert new sessions while
-  existing ones keep running; carried across a reload
-- graceful shutdown: `SIGINT`/`SIGTERM` stops accepting and drains in-flight TCP
-  connections + UDP sessions, bounded by `settings.shutdown_grace_sec` (default 30)
-- instance drain: `POST /admin/drain` / `POST /admin/undrain` flip `readyz` for an
-  upstream LB without stopping the data path; `GET /config` dumps the live
-  snapshot and `GET /sessions` lists live connections / UDP sessions
-- runtime backend CRUD: `POST` / `DELETE /pools/{p}/backends[/{addr}]` add or remove
-  a backend at runtime; the edits are layered on the file config and survive a reload
-- runtime listener reconfig: a reload spawns added listeners, stops removed ones and
-  re-binds changed ones by name — no restart; a same-bind rebind is gapless
-- client-IP preservation (phase 6): per-pool `proxy_protocol:
-  none | v1 | v2` (TCP) prepends a PROXY protocol header to the upstream
-  connection, or `v2-udp` prepends the v2 binary header to the first datagram of
-  each UDP session; or a TCP/UDP listener with `transparent: true` (Linux TPROXY)
-  sources every upstream connection/datagram from the real client `ip:port` and
-  replies from the original destination address
-- security hardening (phase 7): a filter chain checked before routing —
-  per-listener `allow` / `deny` CIDR lists (radix-trie matched; `deny` wins,
-  non-empty `allow` is default-deny), an optional MaxMind GeoIP country filter
-  (`settings.geo_db` + per-listener `geo: { allow, deny }`), a `rate_limit`
-  token bucket per source IP and per /24 (v4) / /64 (v6), and a `per_source`
-  concurrent connection/session cap per IP / /24 / /64 — plus process-wide
-  `settings.limits` caps (`max_connections`, `max_udp_sessions`,
-  `max_new_sessions_per_sec`); blocked traffic is dropped silently and counted by
-  `gsp_filter_blocked_total`. UDP listeners can also set `first_packet_gate: true`
-  to open a session only when the first datagram is positively recognised
-  (`first_bytes` / sniffer), keeping spoof floods off the session table. The
-  amplifier checklist in `docs/07` is covered by `tests/amplification.rs`, the
-  peek/config parsers have `cargo-fuzz` harnesses (`make fuzz`), and `make bench`
-  (`crates/gsp-bench`) checks the added-latency budget (NFR N1/N2)
-- backend discovery (phase 8): a top-level `backend_sources:` list referenced by
-  `pools[].source` — `static`, `dns_srv` (SRV), `consul` (health API) or
-  `kubernetes` (Endpoints, polled). Level-triggered: each dynamic source has one
-  control-plane refresh task that returns the *current* address set, diffed
-  into the same snapshot rebuild as file reload / overlay edits; an errored or
-  empty refresh keeps the last-known-good set (`gsp_discovery_refresh_total`,
-  `gsp_discovery_backends`). Adapters live in the binary; `gsp-core` keeps the
-  HTTP-free `BackendSource` seam. A reload reconciles the refresh tasks live
-  (`SourceManager`): a `backend_sources[]` entry added / removed / re-parameterised
-  starts / stops / restarts its task without a process restart
-- sniffer plugin loader (phase 9): `settings.sniffers: { dir, call_timeout_ms,
-  max_memory_bytes, modules }` loads `*.wasm` modules — sandboxed `wasmtime`
-  (no WASI, no host imports, epoch-interruption time bound + a `StoreLimits`
-  memory bound), rescanned live on every config reload. Two first-party
-  plugins ship as a separate `crates/plugins/` workspace (`make plugins`):
-  `a2s` (Source-engine query recognition) and `minecraft` (virtual-host
-  extraction from the protocol handshake), plus a `regex-firstbytes`
-  template. Measured comfortably inside NFR N1 (p50 8–10 µs per call,
-  real plugins, loopback) — see `docs/07`
+  session, idle-timeout eviction (affinity: a `consistent_hash` pool) and a
+  no-unsolicited-reply amplification guard.
+- Linux fast paths: `splice(2)` zero-copy for TCP, `recvmmsg(2)` batching for UDP.
+- Optional per-backend session caps (shared by TCP connections and UDP sessions).
+- UDP `prefix:` listeners (one wildcard `IP_PKTINFO` socket serves a whole routed
+  prefix) and TCP `freebind:`.
 
-**Phase 10+11 complete** (single-tier PoC), **phase 12 complete** (fleet
-hierarchy: `standalone`/`slave` controller tiers, intra-tier Raft HA,
-staged/canary config rollout, RBAC + audit — see `docs/10`), and **phase 13
-complete** (Tier-2 regional health fabric: an authenticated SWIM gossip mesh
-per `failure_domain`, sharing per-backend health as a quorum-weighted advisory
-signal that only ever nudges — never overrides — an instance's own local
-checks; `settings.failure_domain` / `settings.gossip` in `docs/05`). Three
-additional binaries alongside `gsp` itself —
-`gsp-controller` (a `sled`-backed config revision store: `POST`/`GET /config`,
-`GET /config/subscribe` SSE, revision history/diff/rollback — a `gsp
---controller <url>` instance pulls from it instead of a local file, with
-freeze-on-disconnect + reconnect-with-backoff), `gsp-aggregator` (fleet reads
-+ operational fan-out: instances `POST /ingest` their own state on an
-interval, `GET /fleet/pools|sessions|healthz|subscribe` reads it back,
-`POST`/`PATCH`/`DELETE /fleet/...` fan intent verbs out to every instance's
-own admin API), and `gsp-ui` (a dedicated BFF holding both services' bearer
-tokens so the browser only ever needs a session cookie, serving a built
-React/Vite/TS frontend). Independent optional bearer-token auth on each hop.
-See `docs/06`'s "Fleet control plane" section for the full endpoint
-reference, `docs/10` for the design, and `crates/gsp-fleet-tests` for the
-multi-process integration tests. The `gsp-ui` frontend was redesigned after the
-PoC (Tailwind + Radix, client-side routing, a grouped fleet tree, a
-schema-driven settings form with a raw-YAML escape hatch, plugin management);
-destructive actions ask for confirmation first, and the frontend has its own
-vitest suite (`make ui-test`) — see `docs/08-roadmap.md` "Later / optional" for
-what's left.
+</details>
 
-**Phase 14 complete** (backend transport, `docs/11`): proxies can reach game
-servers that are *not* on a shared trusted network. An origin-side
-`gsp-agent` brings up a local WireGuard interface (kernel module, `boringtun`
-userspace fallback) and registers its public key and fronted backend
-addresses with `gsp-controller`'s backend-peers registry (tunnel addresses are
-allocated by the controller, `--tunnel-network`); `gsp --tunnel-*`
-subscribes to that registry and peers every origin onto its own interface,
-and a mirror proxy-peers registry lets agents learn every proxy without a
-restart. A `backend_sources[].type: tunnel` source turns a registered origin
-into ordinary routable backends, so the data plane is unchanged. Needs
-`CAP_NET_ADMIN` + `/dev/net/tun`; container and port-exposure guidance is in
-`docs/12`. CGNAT / both-sides-restrictive-NAT is a documented v1 limitation.
+<details>
+<summary><b>Routing</b></summary>
 
-Phase 9
-(sniffer plugin loader): the WASM sandbox above, plus `crates/plugins/` and
-its `README.md`. Phase 8
-(discovery & scaling): the `backend_sources` adapters above plus an HA
-operations chapter in `docs/06` (anycast vs. L4 LB, per-instance capacity,
-dashboards & alerts). Phase 7
-(security & hardening): the filter chain above, plus an amplifier-checklist test
-suite, `cargo-fuzz` harnesses for the peek/config parsers, and a `make bench`
-latency harness for NFR N1/N2. Phase 5
-added `draining` / `disabled` backend states, graceful connection draining, the
-instance-drain / `GET /config` admin surface, runtime backend add/remove, and
-runtime listener add/remove/rebind. External resolver: HTTP + gRPC `resolvers:`
-+ `action: { resolver: <name> }`, `pool` / `target` results, `on_error`, and a
-TTL'd LRU result cache. Phase 6 is complete: the PROXY protocol header
-(TCP `v1`/`v2`, UDP `v2-udp`) and TPROXY transparent mode (`transparent: true`,
-TCP + UDP, v4 + v6). See [docs/08-roadmap.md](docs/08-roadmap.md).
+- Per-listener route rules (`routes:`, first match wins) with `always`,
+  `client_cidr`, `dst`, `port`, `first_bytes` (prefix and/or length) and `sni`
+  (host from the peeked, non-terminated TLS ClientHello) matchers.
+- A `sniffer` matcher backed by sandboxed WASM plugins (`wasmtime`, no WASI, no host
+  imports, time and memory bounded), rescanned on every reload. First-party plugins:
+  `a2s`, `minecraft`, `quic`, `wireguard`, `openvpn`, `raknet`, `teamspeak3` and a `regex-firstbytes` template.
+- External resolvers over HTTP or gRPC (`action: { resolver: <name> }`) with
+  `on_error` handling and a TTL'd LRU result cache.
+- Push resolver: `POST /route-hint {src_ip, pool, ttl_sec}` for short-lived
+  `src_ip → pool` hints.
 
-## Build & run
+</details>
 
-Requires a stable Rust toolchain (`rustup` — the repo pins `stable` via
-`rust-toolchain.toml`) and `protoc` (the gRPC resolver client is generated at
-build time — `apt install protobuf-compiler` / `brew install protobuf`).
+<details>
+<summary><b>Client IP preservation</b></summary>
+
+- PROXY protocol per pool: `v1` / `v2` for TCP, `v2-udp` on the first datagram of a
+  UDP session.
+- Transparent mode (`transparent: true`, Linux TPROXY) for TCP and UDP, IPv4 and IPv6:
+  upstream traffic is sourced from the real client `ip:port`.
+
+</details>
+
+<details>
+<summary><b>Security and DDoS hardening</b></summary>
+
+- A filter chain checked before routing: per-listener `allow` / `deny` CIDR lists, an
+  optional MaxMind GeoIP country filter, a token-bucket `rate_limit` per source IP and
+  per /24 (v4) or /64 (v6), and `per_source` concurrency caps.
+- Process-wide caps (`max_connections`, `max_udp_sessions`,
+  `max_new_sessions_per_sec`).
+- UDP `first_packet_gate: true` only opens a session for a positively recognised first
+  datagram, keeping spoofed floods off the session table.
+- `cargo-fuzz` harnesses for the packet and config parsers (`make fuzz`) and a latency
+  harness for the added-latency budget (`make bench`).
+
+</details>
+
+<details>
+<summary><b>Operations</b></summary>
+
+- Hot reload on `SIGHUP` or config-file change: atomic snapshot swap with backend
+  health carried over; listeners are added, removed or re-bound without a restart.
+- Graceful shutdown that drains in-flight TCP connections and UDP sessions.
+- Admin API: health/readiness, Prometheus `/metrics`, live config and session dumps,
+  instance drain, backend `enabled` / `draining` / `disabled` states and runtime
+  backend add/remove. Optional native TLS (`settings.admin.tls`).
+- Backend discovery from `static`, `dns_srv`, `consul`, `kubernetes` and `tunnel`
+  sources, reconciled live on reload.
+
+</details>
+
+<details>
+<summary><b>Fleet control plane (optional)</b></summary>
+
+- **`gsp-controller`**: versioned config store with SSE push, revision
+  history/diff/rollback, staged/canary rollout, Raft HA, RBAC and audit. Proxies run
+  with `gsp --controller <url>` instead of a local file.
+- **`gsp-aggregator`**: fleet-wide reads (`GET /fleet/*`) and fan-out of operator
+  actions to every instance.
+- **`gsp-ui`**: admin GUI (React/Vite/TS frontend behind a dedicated BFF, so the
+  browser only ever holds a session cookie).
+- Regional health gossip: an authenticated SWIM mesh per `failure_domain` shares
+  backend health as an advisory signal.
+- Every fleet HTTP server can serve TLS itself; clients accept a custom CA
+  (`--ca-file`).
+
+</details>
+
+<details>
+<summary><b>Backend transport over WireGuard (optional)</b></summary>
+
+- **`gsp-agent`** runs next to game servers that are not on a network the proxy can
+  reach. It brings up WireGuard (kernel module, `boringtun` userspace fallback) and
+  registers with `gsp-controller`, which allocates tunnel addresses from an IPv6
+  (default) or IPv4 tunnel network; the WireGuard underlay may be either family.
+- Proxies peer with every registered origin automatically, and a
+  `backend_sources[].type: tunnel` source turns an origin into ordinary backends.
+- Needs `CAP_NET_ADMIN` and `/dev/net/tun`. Origins behind CGNAT on both sides are a
+  known limitation.
+
+</details>
+
+## Quick start
+
+You need a stable Rust toolchain (the repo pins `stable` in `rust-toolchain.toml`)
+and `protoc`, because the gRPC resolver client is generated at build time
+(`apt install protobuf-compiler` or `brew install protobuf`).
 
 ```sh
-make check                 # fmt check + clippy (-D warnings) + tests
-make run                   # run against config.example.yaml
-make bench                  # latency / load harness vs. NFR N1/N2
-make fuzz                   # parser fuzz targets (needs nightly + cargo-fuzz)
+git clone https://github.com/Wueschli/gameserver-proxy.git
+cd gameserver-proxy
 
-cargo run -p gsp -- --config config.example.yaml --check   # validate only
+make check                                                 # fmt check + clippy (-D warnings) + tests
+cargo run -p gsp -- --config config.example.yaml --check   # validate a config only
+make run                                                   # run the proxy against config.example.yaml
 ```
 
-Admin endpoints (default `127.0.0.1:9900`): `GET /healthz` `/readyz` `/metrics`
-`/pools` `/config` `/sessions`; `POST /route-hint` `/admin/drain`
-`/admin/undrain`; `POST` / `DELETE /pools/{pool}/backends[/{addr}]`;
-`PATCH /pools/{pool}/backends/{addr}` (set backend admin state). Log level via
-`GSP_LOG` (e.g. `GSP_LOG=debug`).
+[`config.example.yaml`](config.example.yaml) is the annotated reference config; the
+full schema is in [docs/05-configuration.md](docs/05-configuration.md).
+
+The admin API listens on `127.0.0.1:9900` by default:
+
+| Method | Endpoints |
+|--------|-----------|
+| `GET` | `/healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions` |
+| `POST` | `/route-hint` `/admin/drain` `/admin/undrain` `/pools/{pool}/backends` |
+| `PATCH` | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`) |
+| `DELETE` | `/pools/{pool}/backends/{addr}` |
+
+Set the log level with `GSP_LOG` (for example `GSP_LOG=debug`).
+
+Other useful targets:
+
+```sh
+make bench     # latency / load harness against the NFR N1/N2 budgets
+make fuzz      # parser fuzz targets (needs nightly + cargo-fuzz)
+make plugins   # build the WASM sniffer plugins (needs the wasm32-unknown-unknown target)
+make ui        # build the admin GUI frontend (needs Node/npm)
+make help      # list every target
+```
+
+Container images (six targets in one `Dockerfile`), a Docker Compose demo
+and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
+publishes the amd64 images to `ghcr.io/wueschli/<name>` (`gsp`, `gsp-minimal`, `gsp-controller`,
+`gsp-aggregator`, `gsp-ui`, `gsp-agent`) via the `Release` workflow. The compose
+demo and the manifests are reference material only.
 
 ## Workspace layout
 
 | Crate | Responsibility |
 |-------|----------------|
-| `crates/gsp-config` | YAML config types, parsing, validation  |
-| `crates/gsp-core` | data plane: config snapshot, backend pools, TCP + UDP listeners, byte pump, UDP session tables |
-| `crates/gsp` | binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
-| `crates/gsp-controller` | Tier-1 config + operator-intent distribution (`sled` revision logs, SSE, Raft HA, canary rollout, backend/proxy-peers registries) |
-| `crates/gsp-aggregator` | fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent-verb fan-out |
-| `crates/gsp-ui` | admin GUI BFF (session/RBAC auth) + React/Vite/TS frontend in `web/` (`make ui`) |
-| `crates/gsp-agent` | origin-side WireGuard agent (phase 14, `docs/11`) |
-| `crates/gsp-fleet-tests` | multi-process integration tests over the real binaries (part of `make check`) |
-| `crates/gsp-bench` | latency / load harness (`make bench`) — added p50/p99 vs. NFR N1/N2 |
-| `crates/plugins` | first-party WASM sniffer plugins (`a2s`, `minecraft`, `regex-firstbytes`) — standalone workspace, `make plugins` |
+| [`crates/gsp-config`](crates/gsp-config) | YAML config types, parsing and validation |
+| [`crates/gsp-core`](crates/gsp-core) | Data plane: config snapshot, backend pools, TCP and UDP listeners, byte pump, UDP session tables |
+| [`crates/gsp`](crates/gsp) | The proxy binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
+| [`crates/gsp-controller`](crates/gsp-controller) | Config and operator-intent distribution (revision store, SSE, Raft HA, canary rollout, peer registries) |
+| [`crates/gsp-aggregator`](crates/gsp-aggregator) | Fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent fan-out |
+| [`crates/gsp-ui`](crates/gsp-ui) | Admin GUI backend-for-frontend plus the React/Vite/TS frontend in `web/` |
+| [`crates/gsp-agent`](crates/gsp-agent) | Origin-side WireGuard agent |
+| [`crates/gsp-http`](crates/gsp-http) | Shared HTTP client and TLS server helpers |
+| [`crates/gsp-fleet-tests`](crates/gsp-fleet-tests) | Multi-process integration tests over the real binaries |
+| [`crates/gsp-bench`](crates/gsp-bench) | Latency / load harness |
+| [`crates/plugins`](crates/plugins) | First-party WASM sniffer plugins (standalone workspace) |
 
-## Contributing / continuing the work
+## Documentation
 
-- [`AGENTS.md`](AGENTS.md) — working agreement, guardrails, "when you touch X also
-  touch Y" (written for AI agents; doubles as the contributor reference).
-- [`HANDOVER.md`](HANDOVER.md) — current state, locked decisions, and what's
-  deferred / next.
+The design documents in [`docs/`](docs/) are the source of truth for how the proxy is
+meant to work. Start with the overview and the architecture chapter; the rest can be
+read as needed. See [docs/README.md](docs/README.md) for a guided index.
+
+| Document | Contents |
+|----------|----------|
+| [00 Overview](docs/00-overview.md) | Goals, non-goals, use cases, glossary |
+| [01 Requirements](docs/01-requirements.md) | Functional and non-functional requirements |
+| [02 Architecture](docs/02-architecture.md) | Components, data plane / control plane, data flows |
+| [03 Routing](docs/03-routing.md) | Routing strategies in detail |
+| [04 Transport and client IP](docs/04-transport-and-client-ip.md) | TCP/UDP handling, client-IP preservation, PROXY protocol |
+| [05 Configuration](docs/05-configuration.md) | Configuration schema and examples |
+| [06 Operations and observability](docs/06-operations-observability.md) | Metrics, logging, health checks, draining, fleet endpoints |
+| [07 Security and DDoS](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
+| [08 Roadmap](docs/08-roadmap.md) | Phased implementation and milestones |
+| [09 Technology choices](docs/09-technology-choices.md) | Language, libraries, alternatives, decision records |
+| [10 Distributed control plane](docs/10-distributed-control-plane.md) | Controller, aggregator, admin GUI, regional health |
+| [11 Backend transport](docs/11-backend-transport.md) | WireGuard transport for origins on other networks |
+| [12 Deployment](docs/12-deployment.md) | Container images and many-port proxies under Docker/Kubernetes |
+
+## Project status
+
+All roadmap phases 0 to 14 are implemented and covered by `make check` (the resolver
+`sticky_key` is deferred): the data plane (phases 0 to 9), the distributed control
+plane (10 to 13) and the WireGuard backend transport (14). "Implemented" means built
+and tested, not battle-tested; see the notice at the top.
+
+Open follow-ups, known limitations and decisions still pending live in
+[`HANDOVER.md`](HANDOVER.md); per-phase detail is in
+[docs/08-roadmap.md](docs/08-roadmap.md).
+
+## Contributing
+
+This is a personal project in an early state, so there is no formal contribution
+process yet. Issues and ideas are welcome.
+
+The repository keeps its working notes in the open:
+
+- [`AGENTS.md`](AGENTS.md) is the working agreement (layout, commands, guardrails,
+  "when you touch X, also touch Y"). It doubles as the contributor reference.
+- [`HANDOVER.md`](HANDOVER.md) is the current state, locked decisions and what is
+  deferred or next.
+- [`docs/superpowers/`](docs/superpowers/) holds the per-feature design specs and
+  implementation plans written before each larger change.
+
+Run `make check` before sending changes.
 
 ## License
 

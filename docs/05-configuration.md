@@ -8,7 +8,7 @@
   active.
 - **Hot reload** via `SIGHUP` or file watch. Listeners are reconciled by name: an
   added listener is spawned, a removed one is stopped, and one whose definition
-  changed (bind, protocol, routes, affinity, …) is stopped and re-spawned. A
+  changed (bind, protocol, routes, …) is stopped and re-spawned. A
   listener whose definition is unchanged keeps running untouched. `backend_sources`
   discovery refresh tasks are reconciled the same way (added / removed /
   re-parameterised → started / stopped / restarted).
@@ -45,8 +45,8 @@
 > bytes (TCP `MSG_PEEK` / first UDP datagram; at least one of `prefix` / `length`),
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
 > from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
-> `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (one sniffer
-> per listener) but matches nothing until a sniffer plugin is loaded — no
+> `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (a listener
+> may use several sniffers, see `docs/03-routing.md`) but matches nothing until a sniffer plugin is loaded — no
 > sniffers are built in; the name is checked at listener start, not by
 > `validate()`. The sniffer loader is Phase 9; regex-over-first-bytes is a Phase
 > 9 plugin concern, not a `first_bytes` sub-form.
@@ -200,11 +200,13 @@
 > `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
 > one `first_bytes` route or a `sniffer` (else it would drop everything).
 >
-> UDP listeners
-> take
-> `affinity: { hash_on: src_ip | src_ip_port }` (defaulting
-> to `src_ip`); a UDP session reads the routed pool's `idle_timeout_sec` once
-> when it is created. See `config.example.yaml`.
+> A UDP session reads the routed pool's `idle_timeout_sec` once when it is
+> created. UDP affinity (a client that comes back after its session was evicted
+> reaches the same backend) comes from the pool: use `balancer: consistent_hash`
+> with `hash_on: src_ip | src_ip_port`. There is no per-listener `affinity` key
+> and no sticky table (removed in #56: it was per worker, so `SO_REUSEPORT` kept
+> only ~34% of clients on 4 workers). A `round_robin` pool gives a returning
+> client a new backend. See `config.example.yaml`.
 >
 > **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
 > (a flat string, not the target schema's `auth: { mode, token }` object
@@ -215,6 +217,20 @@
 > boundary regardless; needed once something calls in from outside that
 > boundary, which today means `gsp-aggregator`'s intent-verb fan-out
 > (`docs/10` "The aggregator"), given the same token to present.
+>
+> **Admin API TLS** (2026-10-02): `settings.admin.tls: { cert, key }` (PEM chain,
+> leaf first; PEM private key — both required) serves the admin API over HTTPS.
+> Startup-only like `listen`; the files are re-read every 30 s, so a renewed
+> certificate needs no restart. `gsp --check` loads the pair; errors name
+> `settings.admin.tls.cert`/`.key`.
+> Optional keys under `tls` bound the TLS handshakes: `max_pending` (512),
+> `max_pending_per_source` (16), `new_per_source_per_sec` (20; `0` = no rate limit),
+> `new_per_source_burst` (64); see docs/12 "Native TLS". The admin URL reported to `--aggregator` becomes
+> `https://<listen>`, so the certificate must be valid for the `listen` address
+> (an IP SAN), and the aggregator needs `--ca-file` for a private CA. With
+> `--controller` every instance gets the same YAML, so the paths are the same on every
+> host while each host's file must hold a certificate for **its own** `listen`
+> address. See docs/12 "TLS for the fleet services".
 >
 > The full schema below is the target.
 
@@ -257,18 +273,19 @@ backend_sources:
     type: static
     targets: ["10.1.0.11:7777", "10.1.0.12:7777"]
   - name: k8s-match
-    type: kubernetes            # polls GET .../endpoints/<service>
+    type: kubernetes            # LIST .../endpointslices for the service, plus a watch for instant updates
     service: "match-server"
     namespace: "games"          # default: "default"
-    port_name: "game"           # optional; else the subset's first port
+    port_name: "game"           # optional; else each slice's first port
     api: "https://kubernetes.default.svc"   # default; SA token + CA read in-pod
-    refresh_interval_sec: 10
+    refresh_interval_sec: 10   # k8s: resync interval; changes arrive via the watch
   - name: consul-eu
-    type: consul               # GET /v1/health/service/<service>?passing=true
+    type: consul               # GET /v1/health/service/<service>?passing=true, plus a blocking query for instant updates
     service: "match-server"
     consul_addr: "http://127.0.0.1:8500"    # default
     tag: "prod"                # optional
-    refresh_interval_sec: 10
+    consul_token_file: "/run/secrets/consul-token"   # optional ACL token (X-Consul-Token), re-read as it rotates
+    refresh_interval_sec: 10   # consul: resync interval; changes arrive via the blocking query
   - name: srv-us
     type: dns_srv              # resolves the SRV record; port from the record
     record: "_game._udp.us.internal.example.com"
@@ -387,7 +404,6 @@ listeners:
       # No `always`/catch-all route and no `reject` action — there isn't one;
       # an unmatched destination IP simply has no matching route and is
       # dropped (no_route).
-    affinity: { hash_on: src_ip }
 
   # IPv4-only variant: subdomain by port (scheme B), SRV hands out the port.
   # One listener, one `bind: "host:lo-hi"` port range (F1.4) — one real socket
@@ -404,11 +420,41 @@ listeners:
         action: { pool: match-us }
 ```
 
+A `kubernetes` source reads the service's EndpointSlices (`discovery.k8s.io/v1`,
+selected by the `kubernetes.io/service-name` label) and merges them: ready
+endpoints only (an unset `ready` counts as ready), duplicates across slices
+collapsed, `FQDN` slices skipped, and a slice without the wanted port ignored.
+Its service account needs `list` and `watch` on `endpointslices` in the
+namespace; [`deploy/k8s/45-gsp-rbac.yaml`](../deploy/k8s/45-gsp-rbac.yaml) is a
+ready-made Role. Without `watch` the source logs one warning per outage and keeps
+converging on the poll interval, so a missing grant slows updates but never breaks
+discovery. The watch resumes from the version of the last list and reopens itself
+when the API server ends it; a `410 Gone` triggers an immediate list, which renews
+the version. A failing watch retries every 5 s, doubling up to 60 s. The
+service-account token is read from its file again every 60 s, so the kubelet's
+rotation of the bound token (about hourly) is followed without a restart.
+
+A `consul` source lists the passing instances of the service and then holds a
+blocking query (`?index=<X-Consul-Index>&wait=300s`) on the index of its last
+list; a new index triggers a list at once, and the poll interval stays as the
+resync net. An index that goes backwards, or a response without one, is treated as
+a reset and gets a fresh list. A failing query retries like the Kubernetes watch
+(5 s doubling to 60 s). With ACLs enabled, put the token in a file and point
+`consul_token_file` at it; the file (not the token) is what the YAML and
+`GET /config` carry, and it is read again every 60 s. The token needs
+`service:read` on the service and `node:read` on the nodes running it. The service
+name and the tag are URL-escaped.
+
+Both pushed signals are coalesced: after the first change the source is fetched
+once it has been quiet for 500 ms (at most 5 s after the first change), so a
+rolling update of many pods costs one fetch, not one per event.
+
 ## Validation rules (excerpt)
 
 - A pool needs exactly one of `targets:` / `source:`; `source` must point to a
   `backend_sources[].name`. `refresh_interval_sec >= 1`. `dns_srv` needs
-  `record`; `consul` / `kubernetes` need `service`; `tunnel` needs `pubkey`
+  `record`; `consul` / `kubernetes` need `service` (`consul_token_file`, if
+  given, must not be empty); `tunnel` needs `pubkey`
   (a base64-encoded 32-byte WireGuard key).
 - Every `action.pool` / `action.resolver` must exist.
 - Every listener needs at least one route. There is currently no warning for a
@@ -419,7 +465,10 @@ listeners:
   for a resolver whose routes are on UDP listeners); v1/v2 only with TCP.
 - A resolver's `timeout_ms`, `target_connect_timeout_ms` and
   `target_idle_timeout_sec` must all be `> 0`.
-- `transparent: true` (TCP or UDP) may not be combined with `prefix`.
+- `transparent: true` (TCP or UDP) may not be combined with `prefix`, and may not be set
+  on a listener whose `pool:` or a route's pool action uses a `tunnel` backend source (the
+  client and tunnel address families can differ). A resolver route can still return such a
+  pool at runtime; there the proxy connects without the client's source address.
 - Every entry in a listener's `allow` / `deny` must be a valid CIDR.
 - `rate_limit`, if present, needs at least one of `per_ip` / `per_net`, each with
   `rate >= 1`.
@@ -474,10 +523,11 @@ listeners:
 | Route changed/added | applies to new connections/sessions |
 | `resolvers:` changed | live — the reload task rebuilds the resolver clients and swaps the whole set in atomically when (and only when) `resolvers:` actually differs; an in-flight resolver call finishes against the old client, new calls use the new one. A rebuild resets each resolver's LRU result cache, so expect a brief cache-cold window. A bad endpoint keeps the previous set (logged). |
 | `backend_sources:` changed | live — the reload task reconciles the discovery refresh tasks (`SourceManager`): a `backend_sources[]` entry added / removed / re-parameterised (or a `pools[].source` re-pointed) starts / stops / restarts its task. A restarted task does an immediate first fetch, so the stale-set window is one round-trip. A pool that loses its `source` drops its cached discovered set (it now serves its file `targets`). A source that fails to rebuild is logged and skipped — the pool keeps its last-known-good set. |
-| Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / affinity / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
+| Listener added / removed / changed | reconciled by name at runtime — added spawned, removed stopped, changed (bind / protocol / routes / …) stopped and re-spawned. `SO_REUSEPORT` means a same-bind rebind has no gap; new sockets bind before the old ones are torn down. |
 | `settings.shutdown_grace_sec` changed | live (read per shutdown) |
 | `settings.workers` changed | requires a restart (documented) |
 | `settings.limits.*` changed | requires a restart — the live counters / token bucket are built once at startup (like `workers`) |
+| `settings.admin.*` changed (`listen`, `auth_token`, `tls`) | requires a restart — the admin API is bound once at startup; a reload silently keeps the old values. With `tls` set, the certificate **files** are still re-read every 30 s, so renewal needs no restart |
 | `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
 | `settings.sniffers.dir` contents changed (module added / removed / recompiled), or a `modules[].config` string changed | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
 | `settings.sniffers` block added / removed, or `call_timeout_ms` / `max_memory_bytes` changed | requires a restart — the `wasmtime::Engine` and its epoch-ticker thread are built once at startup, like `settings.workers` |

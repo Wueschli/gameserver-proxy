@@ -19,11 +19,12 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{watch, Notify};
 
+use crate::error::SourceError;
 use crate::metrics_defs as m;
 
 /// A level-triggered source of backend addresses for one pool.
@@ -42,7 +43,20 @@ pub trait BackendSource: Send + Sync {
     /// The current full set of backend addresses. Level-triggered: the runtime
     /// diffs this against the live set. An `Err` (or an empty `Ok`) leaves the
     /// last-known-good set untouched.
-    async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>>;
+    async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError>;
+
+    /// Resolves when the source has reason to believe its set changed, so
+    /// [`refresh_loop`] fetches right away instead of waiting out the
+    /// interval. A push-capable source (a Kubernetes watch) overrides this;
+    /// the default never resolves, which leaves pure interval polling.
+    ///
+    /// The interval tick stays as a resync safety net either way, so a
+    /// missed or spurious signal only costs latency or one extra fetch.
+    /// Must be cancel-safe: [`refresh_loop`] drops the future whenever the
+    /// interval fires first, and calls it again after every fetch.
+    async fn changed(&self) {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Last-known-good discovered address set per pool.
@@ -67,7 +81,7 @@ impl Discovery {
     pub fn store(&self, pool: &str, mut addrs: Vec<SocketAddr>) -> bool {
         addrs.sort();
         addrs.dedup();
-        let mut map = self.sets.lock().unwrap();
+        let mut map = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
         match map.get(pool) {
             Some(cur) if *cur == addrs => false,
             _ => {
@@ -79,19 +93,53 @@ impl Discovery {
 
     /// The discovered set for `pool`, if a source has ever populated it.
     pub fn get(&self, pool: &str) -> Option<Vec<SocketAddr>> {
-        self.sets.lock().unwrap().get(pool).cloned()
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(pool)
+            .cloned()
     }
 
     /// Drop the last-known-good set for `pool`. Called when a pool's `source` is
     /// removed on reload so a later re-add (or `GET`) starts from a clean slate
     /// rather than a stale set; harmless if the pool keeps a static target list.
     pub fn forget(&self, pool: &str) {
-        self.sets.lock().unwrap().remove(pool);
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pool);
     }
 }
 
-/// Poll one source on its interval; on a change, store it and wake the reload
-/// task. Returns when `shutdown` flips to `true`.
+/// A pushed change is fetched once the source has been quiet this long.
+pub const CHANGE_QUIET: Duration = Duration::from_millis(500);
+/// Longest a steady stream of pushed changes can defer the fetch.
+pub const CHANGE_MAX_WAIT: Duration = Duration::from_secs(5);
+
+/// After a source's first [`BackendSource::changed`] signal, absorbs the
+/// signals that follow — a rolling update is dozens of them — until the source
+/// has been quiet for [`CHANGE_QUIET`] or [`CHANGE_MAX_WAIT`] has passed, so
+/// the burst costs one fetch. `fetch` is level-triggered, so nothing the burst
+/// carried is lost. Returns `false` if `shutdown` fired meanwhile.
+async fn coalesce(source: &dyn BackendSource, shutdown: &mut watch::Receiver<bool>) -> bool {
+    let deadline = tokio::time::Instant::now() + CHANGE_MAX_WAIT;
+    loop {
+        let quiet = (tokio::time::Instant::now() + CHANGE_QUIET).min(deadline);
+        tokio::select! {
+            () = source.changed() => {}
+            () = tokio::time::sleep_until(quiet) => return true,
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// Poll one source on its interval, and again whenever it signals
+/// [`BackendSource::changed`] (coalesced, see [`CHANGE_QUIET`]); on a change,
+/// store it and wake the reload task. Returns when `shutdown` flips to `true`.
 pub async fn refresh_loop(
     source: Arc<dyn BackendSource>,
     discovery: Arc<Discovery>,
@@ -106,6 +154,11 @@ pub async fn refresh_loop(
     loop {
         tokio::select! {
             _ = tick.tick() => {}
+            () = source.changed() => {
+                if !coalesce(&*source, shutdown).await {
+                    return;
+                }
+            }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     return;
@@ -143,6 +196,22 @@ pub async fn refresh_loop(
                         count = n,
                         "discovered backend set changed; requesting snapshot rebuild"
                     );
+                    reload.notify_one();
+                }
+            }
+            Err(e @ SourceError::Withdrawn { .. }) => {
+                // The one error that is an answer: the set really is empty.
+                // Clearing it stores `Some([])`, which wins over the file
+                // `targets` seed.
+                let changed = discovery.store(&pool, Vec::new());
+                tracing::info!(pool, kind, error = %e, "source withdrew its backends; clearing the pool");
+                metrics::counter!(
+                    m::DISCOVERY_REFRESH,
+                    "pool" => pool.clone(), "kind" => kind, "result" => "withdrawn"
+                )
+                .increment(1);
+                metrics::gauge!(m::DISCOVERY_BACKENDS, "pool" => pool.clone()).set(0.0);
+                if changed {
                     reload.notify_one();
                 }
             }
@@ -188,5 +257,109 @@ mod tests {
 
         assert!(d.store("p", vec![a("127.0.0.1:1")]));
         assert_eq!(d.get("p").unwrap(), vec![a("127.0.0.1:1")]);
+    }
+
+    /// Push-only source: `changed()` resolves once per `poke`; `fetch` counts.
+    struct Pushy {
+        poked: Notify,
+        fetches: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl BackendSource for Pushy {
+        fn pool(&self) -> &str {
+            "p"
+        }
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+        fn refresh_interval(&self) -> Duration {
+            Duration::from_secs(3600)
+        }
+        async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![a("127.0.0.1:1")])
+        }
+        async fn changed(&self) {
+            self.poked.notified().await;
+        }
+    }
+
+    fn fetches(src: &Pushy) -> usize {
+        src.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Runs `refresh_loop` on paused time; returns the source and a stop switch.
+    async fn spawn_pushy() -> (Arc<Pushy>, watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+        let src = Arc::new(Pushy {
+            poked: Notify::new(),
+            fetches: 0.into(),
+        });
+        let (tx, mut rx) = watch::channel(false);
+        let task = tokio::spawn({
+            let src = src.clone();
+            async move {
+                refresh_loop(
+                    src,
+                    Arc::new(Discovery::new()),
+                    Arc::new(Notify::new()),
+                    &mut rx,
+                )
+                .await;
+            }
+        });
+        // The interval's first tick is immediate: the initial fetch.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(fetches(&src), 1);
+        (src, tx, task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_changes_costs_one_fetch_after_it_goes_quiet() {
+        let (src, _tx, _task) = spawn_pushy().await;
+
+        // Ten signals, 100 ms apart: each lands inside the previous quiet window.
+        for _ in 0..10 {
+            src.poked.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(fetches(&src), 1, "no fetch while the burst runs");
+
+        tokio::time::sleep(CHANGE_QUIET).await;
+        assert_eq!(fetches(&src), 2, "one fetch once it went quiet");
+
+        // A later, separate change is fetched on its own.
+        src.poked.notify_one();
+        tokio::time::sleep(CHANGE_QUIET + Duration::from_millis(10)).await;
+        assert_eq!(fetches(&src), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_steady_stream_cannot_defer_the_fetch_past_the_max_wait() {
+        let (src, _tx, _task) = spawn_pushy().await;
+
+        // A signal every 100 ms, for far longer than CHANGE_MAX_WAIT.
+        for _ in 0..120 {
+            src.poked.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            fetches(&src) >= 2,
+            "the fetch must not starve under a continuous stream"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_ends_the_loop_while_a_burst_is_being_absorbed() {
+        let (src, tx, task) = spawn_pushy().await;
+        src.poked.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("loop stops")
+            .unwrap();
+        assert_eq!(fetches(&src), 1, "no fetch after shutdown");
     }
 }

@@ -30,6 +30,7 @@ errs << "seed passes --opt=value args to curl: #{bad.inspect}" unless bad.empty?
 errs << "compose gsp lacks --aggregator-instance" unless base["gsp"]["command"].any? { |a| a.start_with?("--aggregator-instance=") }
 ds = YAML.load_stream(File.read("deploy/k8s/50-gsp-daemonset.yaml")).find { |d| d["kind"] == "DaemonSet" }
 c = ds["spec"]["template"]["spec"]["containers"][0]
+errs << "k8s gsp DaemonSet lacks serviceAccountName gsp (45-gsp-rbac.yaml)" unless ds.dig("spec", "template", "spec", "serviceAccountName") == "gsp"
 errs << "k8s gsp lacks --aggregator-instance=$(NODE_NAME)" unless c["args"].include?("--aggregator-instance=$(NODE_NAME)")
 errs << "k8s gsp lacks NODE_NAME from spec.nodeName" unless c["env"].any? { |e| e["name"] == "NODE_NAME" && e.dig("valueFrom", "fieldRef", "fieldPath") == "spec.nodeName" }
 
@@ -49,6 +50,8 @@ errs << "deploy-smoke runs `up` as its own recipe line: a failed up skips logs +
 df = File.read("deploy/Dockerfile")
 gsp_stage = df[/AS gsp\n.*?(?=\nFROM |\z)/m]
 errs << "gsp image lacks a 65532-owned /data" unless gsp_stage.include?("--chown=65532:65532 /out/data /data")
+minimal_stage = df[/AS gsp-minimal\n.*?(?=\nFROM |\z)/m]
+errs << "gsp-minimal image lacks a 65532-owned /data" unless minimal_stage.to_s.include?("--chown=65532:65532 /out/data /data")
 
 # Prebuilt mode (CI feeds binaries from the shared release build): the stage
 # selector, the prebuilt stage, runtime stages reading from `bins`, and the
@@ -62,7 +65,10 @@ errs << "build-images.sh must pass --build-arg BIN_SOURCE" unless File.read("dep
 
 # The tunnel override must use the address authority, not hand-picked addresses.
 ctl_cmd = tunnel["controller"]["command"]
-errs << "tunnel override: controller needs --tunnel-network=10.60.0.0/16" unless ctl_cmd.include?("--tunnel-network=10.60.0.0/16")
+errs << "tunnel override: controller needs --tunnel-network=fd49:89c1:4b5e:60::/64 (IPv6 is the default)" unless ctl_cmd.include?("--tunnel-network=fd49:89c1:4b5e:60::/64")
+# Both tunnel services share the host network namespace, where runc refuses
+# net.* sysctls ("not allowed in host network namespace"): `up` would fail.
+%w[gsp agent].each { |s| errs << "tunnel #{s} sets a net.* sysctl, which host networking refuses" if (tunnel[s]["sysctls"] || {}).keys.any? { |k| k.start_with?("net.") } }
 errs << "tunnel override: controller lost the base flags" unless %w[--listen=0.0.0.0:9901 --data-dir=/data].all? { |f| ctl_cmd.include?(f) } && ctl_cmd.any? { |a| a.start_with?("--auth-token=") }
 errs << "tunnel override: gsp must not hand-pick --tunnel-address" if tunnel["gsp"]["command"].any? { |a| a.start_with?("--tunnel-address") }
 agent_cmd = tunnel["agent"]["command"]

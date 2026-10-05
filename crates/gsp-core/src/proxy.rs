@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::drain::ConnGuard;
+use crate::error::ProxyError;
 use crate::metrics_defs as m;
 use crate::pool::Pool;
 
@@ -27,6 +28,7 @@ pub const TARGET_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const TARGET_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// What a finished connection carries back to the caller for logging/metrics.
+#[derive(Debug)]
 pub struct ConnOutcome {
     pub bytes_c2s: u64,
     pub bytes_s2c: u64,
@@ -46,7 +48,7 @@ pub async fn handle_tcp(
     transparent_source: Option<SocketAddr>,
     conn: &ConnGuard,
     pool: &Pool,
-) -> anyhow::Result<ConnOutcome> {
+) -> Result<ConnOutcome, ProxyError> {
     let guard = pool.acquire_for(Some(client_addr))?;
     let backend_addr = guard.addr();
     conn.set_target(Some(pool.name.as_ref()), backend_addr);
@@ -78,9 +80,11 @@ pub async fn handle_tcp(
     if !hdr.is_empty() {
         if let Err(e) = backend.write_all(&hdr).await {
             guard.observe(false);
-            return Err(anyhow::anyhow!(
-                "write PROXY header to backend {backend_addr} failed: {e}"
-            ));
+            return Err(ProxyError::ProxyHeader {
+                role: "backend",
+                addr: backend_addr,
+                source: e,
+            });
         }
         metrics::counter!(
             m::PROXY_PROTOCOL_HEADERS, "pool" => pool.name.to_string(), "version" => pp.label(),
@@ -108,7 +112,7 @@ pub async fn handle_tcp_target(
     transparent_source: Option<SocketAddr>,
     conn: &ConnGuard,
     proxy_protocol: gsp_config::ProxyProtocol,
-) -> anyhow::Result<ConnOutcome> {
+) -> Result<ConnOutcome, ProxyError> {
     conn.set_target(Some("(resolver target)"), target);
     let mut backend = connect_backend(target, connect_timeout, transparent_source).await?;
 
@@ -120,9 +124,11 @@ pub async fn handle_tcp_target(
     };
     if !hdr.is_empty() {
         if let Err(e) = backend.write_all(&hdr).await {
-            return Err(anyhow::anyhow!(
-                "write PROXY header to target {target} failed: {e}"
-            ));
+            return Err(ProxyError::ProxyHeader {
+                role: "target",
+                addr: target,
+                source: e,
+            });
         }
         metrics::counter!(
             m::PROXY_PROTOCOL_HEADERS,
@@ -139,7 +145,7 @@ async fn connect_backend(
     addr: SocketAddr,
     connect_timeout: Duration,
     transparent_source: Option<SocketAddr>,
-) -> anyhow::Result<TcpStream> {
+) -> Result<TcpStream, ProxyError> {
     match timeout(
         connect_timeout,
         crate::net::connect_tcp_from(addr, transparent_source),
@@ -152,14 +158,14 @@ async fn connect_backend(
                 m::BACKEND_CONNECT_ERRORS, "backend" => addr.to_string(), "kind" => "refused",
             )
             .increment(1);
-            Err(anyhow::anyhow!("connect to backend {addr} failed: {e}"))
+            Err(ProxyError::Connect { addr, source: e })
         }
         Err(_) => {
             metrics::counter!(
                 m::BACKEND_CONNECT_ERRORS, "backend" => addr.to_string(), "kind" => "timeout",
             )
             .increment(1);
-            Err(anyhow::anyhow!("connect to backend {addr} timed out"))
+            Err(ProxyError::ConnectTimeout { addr })
         }
     }
 }

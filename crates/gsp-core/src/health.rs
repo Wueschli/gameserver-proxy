@@ -19,7 +19,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::gossip::GossipFabric;
 use crate::metrics_defs as m;
 use crate::snapshot::Snapshot;
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Sweep cadence. Actual per-backend probe frequency is governed by each
 /// backend's own `check_interval`; this only bounds the resolution.
@@ -53,7 +53,7 @@ pub async fn run(
 
 async fn sweep(snapshot: &Arc<ArcSwap<Snapshot>>, gossip: Option<&GossipFabric>) {
     let snap = snapshot.load_full();
-    let now = now_ms();
+    let now = mono_ms();
 
     let mut probes = Vec::new();
     for (pool_name, pool) in &snap.pools {
@@ -166,7 +166,6 @@ async fn probe(addr: SocketAddr, timeout: Duration, kind: &HealthCheckKind) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gossip::GossipHandle;
 
     fn snapshot_with_one_unreachable_backend() -> Arc<ArcSwap<Snapshot>> {
         // "127.0.0.1:1" is a privileged port nothing listens on — a
@@ -189,6 +188,7 @@ mod tests {
         assert!(backend.is_healthy());
     }
 
+    #[cfg(feature = "gossip")]
     #[tokio::test]
     async fn sweep_publishes_and_then_reads_back_its_own_quorum_verdict() {
         let snap = snapshot_with_one_unreachable_backend();
@@ -198,7 +198,7 @@ mod tests {
         // A real, single-node mesh (no seeds) — this is the full real
         // pipeline (channel -> gossip task -> add_broadcast ->
         // BroadcastMerger merge), not a pre-seeded map.
-        let (handle, inbox) = GossipHandle::new();
+        let (handle, inbox) = crate::gossip::GossipHandle::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let cfg = gsp_config::GossipConfig {
             bind: "127.0.0.1:0".parse().unwrap(),

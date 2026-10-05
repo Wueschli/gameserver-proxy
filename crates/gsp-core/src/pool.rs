@@ -9,7 +9,7 @@
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig, ProxyProtocol};
@@ -79,10 +79,14 @@ struct Streaks {
     fail: u32,
 }
 
+/// The live, mutable state of one backend address. Shared (`Arc`) between every
+/// [`Backend`] built for the same address in the same pool across config /
+/// admin / discovery rebuilds ([`Pool::new`]), so sessions still holding a
+/// [`BackendGuard`] from an older snapshot keep counting against `max_sessions`
+/// and `least_conn`, and passive health observations made through them land on
+/// the current backend.
 #[derive(Debug)]
-pub struct Backend {
-    pub addr: SocketAddr,
-    pool: Arc<str>,
+struct BackendState {
     healthy: AtomicBool,
     /// Tier-2 regional health fabric override (phase 13, docs/10 "Tier 2").
     /// Additive to `healthy`, never replacing it: `is_healthy()` requires
@@ -94,6 +98,26 @@ pub struct Backend {
     active: AtomicUsize,
     last_check_ms: AtomicU64,
     streaks: Mutex<Streaks>,
+}
+
+impl BackendState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            healthy: AtomicBool::new(true),
+            domain_down: AtomicBool::new(false),
+            admin_state: AtomicU8::new(AdminState::Enabled.to_u8()),
+            active: AtomicUsize::new(0),
+            last_check_ms: AtomicU64::new(0),
+            streaks: Mutex::new(Streaks::default()),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct Backend {
+    pub addr: SocketAddr,
+    pool: Arc<str>,
+    state: Arc<BackendState>,
     rise: u32,
     fall: u32,
     check_kind: HealthCheckKind,
@@ -106,26 +130,18 @@ pub struct Backend {
 }
 
 impl Backend {
-    #[allow(clippy::too_many_arguments)] // one caller (`Pool::new`); a struct would just move the list
     fn new(
         addr: SocketAddr,
         pool: Arc<str>,
         hc: &HealthCheck,
         max_sessions: Option<usize>,
-        initially_healthy: bool,
-        initially_domain_down: bool,
-        initial_state: AdminState,
+        state: Arc<BackendState>,
         weight: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
             addr,
             pool,
-            healthy: AtomicBool::new(initially_healthy),
-            domain_down: AtomicBool::new(initially_domain_down),
-            admin_state: AtomicU8::new(initial_state.to_u8()),
-            active: AtomicUsize::new(0),
-            last_check_ms: AtomicU64::new(0),
-            streaks: Mutex::new(Streaks::default()),
+            state,
             rise: hc.rise,
             fall: hc.fall,
             check_kind: hc.kind.clone(),
@@ -137,18 +153,15 @@ impl Backend {
     }
 
     /// This instance's own local verdict (active/passive checks), ignoring
-    /// any Tier-2 domain override. Not exposed outside `pool.rs` — carrying
-    /// state across a reload (see [`Pool::new`]) is the only caller that
-    /// needs to distinguish it from [`Backend::is_healthy`].
+    /// any Tier-2 domain override.
     fn local_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+        self.state.healthy.load(Ordering::Acquire)
     }
 
     /// Whether the Tier-2 regional health fabric currently overrides this
-    /// backend to down (phase 13). Not exposed outside `pool.rs`, same
-    /// reason as [`Backend::local_healthy`].
+    /// backend to down (phase 13).
     fn domain_down_flag(&self) -> bool {
-        self.domain_down.load(Ordering::Acquire)
+        self.state.domain_down.load(Ordering::Acquire)
     }
 
     /// Healthy overall: this instance's own checks say so **and** the Tier-2
@@ -166,7 +179,7 @@ impl Backend {
     /// when `is_healthy()` actually flips as a result.
     pub fn observe_domain(&self, quorum_down: bool) -> Option<bool> {
         let was_healthy = self.is_healthy();
-        self.domain_down.store(quorum_down, Ordering::Release);
+        self.state.domain_down.store(quorum_down, Ordering::Release);
         metrics::gauge!(
             m::BACKEND_DOMAIN_DOWN,
             "pool" => self.pool.to_string(),
@@ -178,11 +191,13 @@ impl Backend {
     }
 
     pub fn admin_state(&self) -> AdminState {
-        AdminState::from_u8(self.admin_state.load(Ordering::Acquire))
+        AdminState::from_u8(self.state.admin_state.load(Ordering::Acquire))
     }
 
     pub fn set_admin_state(&self, state: AdminState) {
-        self.admin_state.store(state.to_u8(), Ordering::Release);
+        self.state
+            .admin_state
+            .store(state.to_u8(), Ordering::Release);
     }
 
     /// Eligible to receive *new* sessions: passing health checks and not
@@ -192,7 +207,7 @@ impl Backend {
     }
 
     pub fn active(&self) -> usize {
-        self.active.load(Ordering::Relaxed)
+        self.state.active.load(Ordering::Relaxed)
     }
 
     pub fn check_timeout(&self) -> Duration {
@@ -204,30 +219,34 @@ impl Backend {
     }
 
     pub(crate) fn due_for_check(&self, now_ms: u64) -> bool {
-        let last = self.last_check_ms.load(Ordering::Relaxed);
+        let last = self.state.last_check_ms.load(Ordering::Relaxed);
         last == 0 || now_ms.saturating_sub(last) >= self.check_interval.as_millis() as u64
     }
 
     pub(crate) fn mark_checked(&self, now_ms: u64) {
-        self.last_check_ms.store(now_ms, Ordering::Relaxed);
+        self.state.last_check_ms.store(now_ms, Ordering::Relaxed);
     }
 
     /// Feed a health observation (active check result or passive connect
     /// result). Returns `Some(new_state)` when the healthy flag flips.
     pub fn observe(&self, ok: bool) -> Option<bool> {
-        let mut s = self.streaks.lock().unwrap();
+        let mut s = self
+            .state
+            .streaks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if ok {
             s.fail = 0;
             s.ok = s.ok.saturating_add(1);
-            if !self.healthy.load(Ordering::Acquire) && s.ok >= self.rise {
-                self.healthy.store(true, Ordering::Release);
+            if !self.state.healthy.load(Ordering::Acquire) && s.ok >= self.rise {
+                self.state.healthy.store(true, Ordering::Release);
                 return Some(true);
             }
         } else {
             s.ok = 0;
             s.fail = s.fail.saturating_add(1);
-            if self.healthy.load(Ordering::Acquire) && s.fail >= self.fall {
-                self.healthy.store(false, Ordering::Release);
+            if self.state.healthy.load(Ordering::Acquire) && s.fail >= self.fall {
+                self.state.healthy.store(false, Ordering::Release);
                 return Some(false);
             }
         }
@@ -235,10 +254,10 @@ impl Backend {
     }
 
     fn try_acquire(self: &Arc<Self>) -> Option<BackendGuard> {
-        let prev = self.active.fetch_add(1, Ordering::Relaxed);
+        let prev = self.state.active.fetch_add(1, Ordering::Relaxed);
         if let Some(max) = self.max_sessions {
             if prev >= max {
-                self.active.fetch_sub(1, Ordering::Relaxed);
+                self.state.active.fetch_sub(1, Ordering::Relaxed);
                 return None;
             }
         }
@@ -287,7 +306,7 @@ impl BackendGuard {
 
 impl Drop for BackendGuard {
     fn drop(&mut self) {
-        self.backend.active.fetch_sub(1, Ordering::Relaxed);
+        self.backend.state.active.fetch_sub(1, Ordering::Relaxed);
         metrics::gauge!(
             m::BACKEND_ACTIVE_SESSIONS,
             "pool" => self.backend.pool.to_string(),
@@ -314,28 +333,24 @@ pub struct Pool {
 impl Pool {
     /// Build a pool from config. `prev` (the same pool from the previous
     /// snapshot, if any) is consulted to carry over per-backend health state
-    /// by address across a hot reload.
+    /// and active-session count by address across a hot reload (the old and new
+    /// [`Backend`] share one [`BackendState`]).
     pub fn new(cfg: &PoolConfig, prev: Option<&Arc<Pool>>) -> Self {
         let name: Arc<str> = Arc::from(cfg.name.as_str());
         let backends = cfg
             .targets
             .iter()
             .map(|&addr| {
-                let prev_backend = prev.and_then(|p| p.backends.iter().find(|b| b.addr == addr));
-                let carried_healthy = prev_backend.map(|b| b.local_healthy()).unwrap_or(true);
-                let carried_domain_down =
-                    prev_backend.map(|b| b.domain_down_flag()).unwrap_or(false);
-                let carried_state = prev_backend
-                    .map(|b| b.admin_state())
-                    .unwrap_or(AdminState::Enabled);
+                let state = prev
+                    .and_then(|p| p.backends.iter().find(|b| b.addr == addr))
+                    .map(|b| b.state.clone())
+                    .unwrap_or_else(BackendState::new);
                 Backend::new(
                     addr,
                     name.clone(),
                     &cfg.health_check,
                     cfg.max_sessions,
-                    carried_healthy,
-                    carried_domain_down,
-                    carried_state,
+                    state,
                     cfg.weights.get(&addr).copied().unwrap_or(1),
                 )
             })
@@ -785,5 +800,71 @@ mod tests {
             Some(&Arc::new(p1)),
         );
         assert!(!p2.backends()[0].is_healthy());
+    }
+
+    #[test]
+    fn rebuild_keeps_active_count_so_max_sessions_still_binds() {
+        let cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, Some(2));
+        let old = Arc::new(Pool::new(&cfg, None));
+        let _g1 = old.acquire().unwrap();
+        let _g2 = old.acquire().unwrap();
+        let new = Arc::new(Pool::new(&cfg, Some(&old)));
+        assert_eq!(new.backends()[0].active(), 2);
+        assert!(matches!(new.acquire(), Err(PickError::AllAtCapacity(_))));
+    }
+
+    #[test]
+    fn rebuild_release_through_old_guard_frees_new_backend() {
+        let cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, Some(1));
+        let old = Arc::new(Pool::new(&cfg, None));
+        let g = old.acquire().unwrap();
+        let new = Arc::new(Pool::new(&cfg, Some(&old)));
+        assert!(new.acquire().is_err());
+        drop(g);
+        assert_eq!(new.backends()[0].active(), 0);
+        assert!(new.acquire().is_ok());
+    }
+
+    #[test]
+    fn rebuild_keeps_least_conn_view() {
+        let cfg = pcfg(&["127.0.0.1:1", "127.0.0.1:2"], Balancer::LeastConn, None);
+        let old = Arc::new(Pool::new(&cfg, None));
+        let _g: Vec<_> = (0..3).map(|_| old.acquire().unwrap()).collect();
+        // Load backend :1 more heavily than :2, then rebuild.
+        let busy = old.acquire_addr("127.0.0.1:1".parse().unwrap()).unwrap();
+        let new = Arc::new(Pool::new(&cfg, Some(&old)));
+        let total: usize = new.backends().iter().map(|b| b.active()).sum();
+        assert_eq!(total, 4);
+        let lighter = new
+            .backends()
+            .iter()
+            .min_by_key(|b| b.active())
+            .unwrap()
+            .addr;
+        assert_eq!(new.acquire().unwrap().addr(), lighter);
+        drop(busy);
+    }
+
+    #[test]
+    fn rebuild_routes_passive_observations_from_old_guards_to_new_backend() {
+        let cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None);
+        let old = Arc::new(Pool::new(&cfg, None));
+        let g = old.acquire().unwrap();
+        let new = Arc::new(Pool::new(&cfg, Some(&old)));
+        for _ in 0..3 {
+            g.observe(false);
+        }
+        assert!(!new.backends()[0].is_healthy());
+    }
+
+    #[test]
+    fn rebuild_applies_new_max_sessions_against_carried_count() {
+        let old_cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, Some(1));
+        let old = Arc::new(Pool::new(&old_cfg, None));
+        let _g = old.acquire().unwrap();
+        let new_cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, Some(2));
+        let new = Arc::new(Pool::new(&new_cfg, Some(&old)));
+        let _held = new.acquire().unwrap();
+        assert!(new.acquire().is_err());
     }
 }

@@ -15,7 +15,7 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > (`host` patterns: exact, `*.suffix`, `.suffix` — matched against `server_name`
 > from the peeked, non-terminated TLS ClientHello; TCP listeners only). The
 > `sniffer` matcher exists (`{ type: sniffer, sniffer: <name>, host: [...] }`,
-> one sniffer per listener) but **no sniffers are built in** — a `sniffer:`
+> several per listener) but **no sniffers are built in** — a `sniffer:`
 > route never matches until a plugin is loaded (Phase 9). The TCP path
 > `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
 > needs bytes; UDP inspects the first datagram it already holds. A ClientHello
@@ -63,7 +63,12 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 2. **Listener binding** – the listener may already map 1:1 to a pool (simplest case,
    no further logic).
 3. **Sniffer** (if a `sniffer` route is configured) – runs once on the peeked
-   first bytes. A `RouteHint { reject: true }` **drops the connection / datagram
+   first bytes. A listener may route on several sniffers (e.g. `quic`,
+   `wireguard` and `a2s` on one UDP port): they are tried in order of first
+   appearance in the route list and the **first that recognises the bytes wins**
+   — a later sniffer is not consulted, even if none of the winner's routes
+   match (routing then falls through to non-sniffer routes such as `always`) —
+   and a `sniffer` route only matches the sniffer it names. A `RouteHint { reject: true }` **drops the connection / datagram
    immediately** (before the push-resolver hint, so a spoofable `src_ip` hint
    cannot override it); TCP `gsp_listener_connections_total{result="sniffer_reject"}`,
    UDP `gsp_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A
@@ -118,8 +123,11 @@ short-lived `src_ip → pool` mapping.
   - `sni` (generic, see above)
   - `minecraft` → handshake hostname + protocol version
   - `a2s` / `source-query` → Valve query recognized (route to a query pool)
-  - `quic` → version + (unencrypted) connection-ID length
-  - `wireguard`, `openvpn` … (if the proxy should also front those)
+  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`). The plugin also decrypts the Initial (its keys derive from the packet's own destination connection ID and a public salt, RFC 9001 §5.2) and returns the TLS SNI as the hint's `host` (v1, v2 and drafts 29 to 34). When the SNI cannot be read (an older draft, or a ClientHello split across Initial packets with the SNI in a later one) only the key is set, so a `host:` route does not match and an empty-`host:` route still does
+  - `wireguard` → handshake initiation recognized (key `wireguard`)
+  - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal: about 3 in 256 random datagrams match, so it makes the first-packet gate leaky and belongs after stronger plugins in the sniffer list)
+  - `raknet` → RakNet offline handshake recognized by its magic (Minecraft Bedrock and other RakNet games; key `raknet`)
+  - `teamspeak3` → TeamSpeak 3 `TS3INIT1` client init recognized (key `teamspeak3`)
 - Plugin contract: **read-only**, receives up to `peek_max_bytes`, returns
   `Option<RouteHint { key?: String, pool_hint?: String, reject?: bool }>`. No access to
   later bytes, no writing.
@@ -161,12 +169,17 @@ short-lived `src_ip → pool` mapping.
 
 ## Session affinity
 
-- **Sticky table**: `key → backend_id (+ TTL)`. The key comes from the resolver
-  (`sticky_key`), a sniffer (`key`), or config (`hash_on: src_ip`).
-- A new request with a known key and a **healthy** backend → goes there.
-- Backend `unhealthy`/`draining` → re-resolve the key, replace the table entry.
-- For UDP, affinity is effectively mandatory (otherwise the gameplay stream fragments
-  across multiple instances). Default: `hash_on: src_ip` + sticky table.
+- **Implemented**: a `consistent_hash` pool (rendezvous hash of `src_ip` or
+  `src_ip_port`). Stateless, so it holds at any worker count and after any idle
+  eviction; an unhealthy or draining backend is skipped and its clients move to
+  the next-highest score. Adding a backend remaps about 1/N of the clients.
+- **Not implemented**: a `key → backend_id (+ TTL)` sticky table keyed by the
+  resolver's `sticky_key` or a sniffer `key`. The UDP table that existed was
+  removed in #56: it was per worker, so with `SO_REUSEPORT` (clients spread by
+  source port) it kept only ~34% of clients on 4 workers.
+- For UDP, affinity is effectively mandatory (otherwise the gameplay stream
+  fragments across multiple instances): point UDP listeners at a
+  `consistent_hash` pool.
 
 ## Routing without a protocol hint (raw data to an IP:port)
 
@@ -221,7 +234,7 @@ schemes, used alone or combined:
   plane API before connecting:
   `POST /route-hint { src_ip: "203.0.113.7", pool: "survival", ttl_sec: 30 }`.
 - The proxy keeps a short-lived `src_ip → pool` table. The first packet/SYN from that
-  IP with no other hint is resolved via it, then the normal sticky table takes over.
+  IP with no other hint is resolved via it, then the pool's balancer takes over.
 - Weakness: several players behind **one** NAT IP wanting different subdomains at the
   same time cannot be told apart — unless the launcher can additionally set a short
   token that does end up in the first packet (then `first-bytes`). Otherwise fall back
@@ -288,7 +301,6 @@ listener raw-udp
     route 2: dst 2001:db8:ace:1::2/128 → pool creative
     route 3: dst 2001:db8:ace:1::3/128 → pool arena
     route 4: always                     → reject   # unknown destination IP
-  affinity: hash_on = src_ip            # keep the UDP session on one backend
 ```
 The client connects to `survival.example.net:7777`, immediately sends raw packets; the
 proxy reads the destination address from the datagram `cmsg` and picks the pool.

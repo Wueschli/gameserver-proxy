@@ -6,115 +6,83 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-02 (`--ca-file`, HA-over-TLS and cleanup session; see "Resume here").
+Last updated: 2026-10-04.
 
 ## Current state
 
 **All roadmap phases (0–14) are built, individually verified live, and covered by
-`make check`.** No slice is in flight — the repo is at a natural stopping point.
-Remaining work: the "Known follow-ups" table below. Every CI job is blocking (2026-10-02).
+`make check`.** Remaining work is the [open GitHub issues](https://github.com/Wueschli/gameserver-proxy/issues). Every CI job
+blocks except the two informational security scans, `trivy` and `audit` (2026-10-02,
+owner's call).
 
-### Resume here (written for picking this up on another machine)
+### Resume here
 
-State at 2026-10-02 (latest): `--ca-file` (PR #1) and TLS-capable HA peers + readable HTTP
-errors (PR #2) are merged; a cleanup PR (one HTTP client for Raft RPCs, blocking
-`tunnel`/`deploy`, review minors, this refresh) is on branch
-`claude/dazzling-carson-j2yxj0`.
+The repository is **public** since 2026-10-03 (history scanned, clean), so
+GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,
+03:17 UTC) is on again; it exercises the nightly-only paths (the in-Docker
+`BIN_SOURCE=builder` deploy build) and runs `fuzz`/`deploy` as canaries for commits
+that don't touch their paths.
 
-**CI timings, measured.** Cold (lockfile changed; PR #1's run 37003396498): `test` 8m15,
-`build-release` 16.5 min, each `tunnel` leg ~10 min, ~22 min wall clock. Warm (PR #2's run
-37011410675, no lockfile change): `test` 4m41, `build-release` 6m10, `tunnel` 6m47 (kernel)
-/ 8m12 (userspace), `plugins` 3m12, ~9.5 min wall clock. The rolling cache works; if a
-later code push is back near the cold numbers without a lockfile change, the cache key in
-`.github/actions/cargo-cache` is the first suspect.
+Owner decisions that still hold:
 
-Open decisions for the owner:
+| Question | Decision |
+|----------|----------|
+| Native TLS on the fleet HTTP servers | Built (2026-10-02): controller, aggregator and UI via `--tls-cert`/`--tls-key`, `gsp`'s admin API via `settings.admin.tls`. New client code must not hard-code `http://` and must build clients via `gsp_http::{client, builder}`. |
+| Publish the reference images | Docker only, amd64, to GHCR on `vX.Y.Z` tags (`.github/workflows/release.yml`, 2026-10-04). Multi-arch and Kubernetes packaging: [#88](https://github.com/Wueschli/gameserver-proxy/issues/88). |
+| Self-hosted CI runner | Not while the repo is public (GitHub advises against self-hosted runners on public repositories, since fork PRs can run code on them); the switch (PR #21) was closed. |
 
-1. **Native TLS for `gsp-controller` is wanted eventually** (owner, 2026-10-02). It bundles
-   serving TLS itself; custom CA support (`--ca-file`) and TLS-capable HA peers
-   (`--ha-peers id=https://…`) landed 2026-10-02. Until then docs/12 "gsp-controller behind
-   TLS" is the supported pattern. New controller or client code must not hard-code
-   `http://`, and must build HTTP clients via `gsp_http::{client, builder}` so
-   `--ca-file` applies.
-2. **Publish the reference images?** The owner chose "reference only" (2026-10-01).
-   Publishing (GHCR on release tags, multi-arch if arm64 is needed) is a small follow-up:
-   `deploy/Dockerfile` already has the `BIN_SOURCE` switch; it needs a release workflow,
-   tags and a registry login.
+**CI timings, measured** (2026-10-02). Cold (lockfile changed): `test` 8m15,
+`build-release` 16.5 min, each `tunnel` leg ~10 min, ~22 min wall clock. Warm: `test`
+4m41, `build-release` 6m10, `tunnel` 6m47 (kernel) / 8m12 (userspace), `plugins` 3m12,
+~9.5 min wall clock. If a code push without a lockfile change is back near the cold
+numbers, the cache key in `.github/actions/cargo-cache` is the first suspect.
 
-Never verified outside CI or the original dev sandbox:
+Never verified outside CI:
 
-- `make deploy-images` / `make deploy-smoke` and the compose **tunnel** override have not
-  been run on a developer machine (the dev sandbox had no Docker daemon, so they were only
-  ever exercised by the CI `deploy` job). On a machine with Docker, run both once.
+- `make deploy-images` / `make deploy-smoke` and the compose **tunnel** override were
+  only ever exercised by the CI `deploy` job. On a machine with Docker, run both once.
 - The k8s manifests were only schema-validated (kubeconform), never applied to a cluster.
 
 Watch-list:
 
-- **Runner image:** every CI job is pinned to `ubuntu-24.04` (2026-10-02), so the
-  2026-10-19 `ubuntu-latest` → Ubuntu 26 switch changes nothing. Moving to 26 later is a
-  deliberate edit of all jobs together: re-check `tunnel` (AppArmor userns sysctl,
-  `wireguard` module) and the release jobs' glibc vs. the distroless runtime (2.41).
-  GitHub supports a runner image for a while after it stops being `latest`, not forever.
-- `actions/cache@v4` prints a Node 20 deprecation warning (it still works); bump when a
-  Node 24 major exists.
-- A self-hosted-runner experiment on 2026-10-01 (reverted in `79d1bd7`) had a failing
-  `tunnel (userspace)` job whose log nobody read — cause unknown (host limits? sudo/apt on
-  the VPS?). Only relevant if self-hosting is tried again.
+- **Runner image:** every CI job is pinned to `ubuntu-24.04`, so the 2026-10-19
+  `ubuntu-latest` → Ubuntu 26 switch changes nothing. Moving to 26 later is a deliberate
+  edit of all jobs together: re-check `tunnel` (AppArmor userns sysctl, `wireguard`
+  module) and the release jobs' glibc vs. the distroless runtime (2.41).
+- **Trivy pinning:** CI runs the official `aquasec/trivy` image pinned by digest, not
+  `trivy-action`/`setup-trivy`, whose tags were hijacked in March 2026. Re-check the
+  binary against the release checksum when bumping the digest. The `trivy` job also
+  `cosign verify`s the digest's keyless Sigstore signature (identity: Aqua's release
+  workflow at a version tag) on every run, so a bump to an unsigned digest fails there.
+- **cargo-auditable:** release binaries (CI `build-release` and the Dockerfile builder)
+  are built with `cargo auditable build`, version 0.7.7 in both; bump together.
+- **Merge queue:** PRs land one at a time, each re-run on the latest `main`. If several
+  PRs are routinely in flight at once, GitHub's merge queue (needs an
+  `on: merge_group` trigger) would keep `main` green.
 
-Suggested order: pick from "Known follow-ups" — the owner's stated interest is native TLS
-(controller-served, needs a design first) and the deferred pieces of the address
-authority. Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
+Whether a red `tunnel`/`deploy` also *blocks merging* depends on GitHub
 branch-protection required checks, a repo setting outside this tree.
 
-Most recent landings (newest first; full history in `git log`):
+### Recent landings
 
-- Cleanup (2026-10-02): `ha::network::Network` holds one HTTP client, so Raft RPCs reuse
-  their connection (`ha_tls.rs` counts terminator accepts: 26 new TLS connections per 5 s
-  before, under 6 after); `tunnel` and `deploy` CI jobs are blocking; `CaError` names its
-  cause once; measured CI timings recorded above.
-- TLS-capable HA peers + readable HTTP errors (2026-10-02, spec
-  `docs/superpowers/specs/2026-10-02-ha-tls-peers-design.md`, docs/12 "HA replicas over
-  TLS"): `--ha-peers` entries may be `id=https://host[:port]`; `ha::peers::peer_url` builds
-  every Raft RPC and forwarded-write URL. New `gsp-fleet-tests` `ha_tls.rs` is the first
-  automated multi-replica HA test: three replicas reachable only through private-CA TLS
-  terminators elect, forward and replicate with `--ca-file`, never elect without it.
-  `gsp_http::error_chain` now renders every HTTP error with its cause (e.g.
-  `invalid peer certificate: UnknownIssuer`). `/admin/adopt` never hard-coded `http://`
-  (it takes a full `parent_url`) — the old follow-up row was wrong.
-- Custom CA support (2026-10-02, spec `docs/superpowers/specs/2026-10-02-custom-ca-design.md`,
-  ADR 26, docs/12 "gsp-controller behind TLS"): every binary takes `--ca-file <PEM>`,
-  additive to the built-in Mozilla roots; a bad file is a startup error. New crate
-  `gsp-http` is the one place production HTTP clients are built. `gsp-fleet-tests`
-  `ca_file.rs` runs `gsp --check` through a private-CA TLS terminator (fails without the
-  flag, passes with it). Test-only CA fixtures live in `crates/gsp-http/tests/fixtures/`.
+Newest first. Each feature's design lives in the linked chapter, ADR or spec; the
+details are in `git log`.
 
-- Tunnel address authority (2026-10-02, spec
-  `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`, `docs/11`
-  "Address authority"): `gsp-controller --tunnel-network` allocates/pins/releases
-  tunnel addresses for origins and proxies; `gsp-agent` and `gsp --tunnel-*` register
-  for an address before bringing the interface up (`--address` / `--tunnel-address`
-  now optional), peers are `/32`s. This fixed the old "second proxy steals the first
-  one's route" bug (`two_proxies_share_one_origin` passes in the lab). The tunnel e2e
-  lab has 12 scenarios, green on both backends. With the controller down,
-  `gsp --tunnel-*` spends its ~30 s registration budget before falling back to the
-  saved address.
-
-- `deploy/` — reference `Dockerfile` (five distroless targets), compose
-  control-plane demo + tunnel override, plain k8s manifests, `deploy/smoke.sh`, CI job
-  `deploy` (blocking since 2026-10-02). **First CI run (36922142697, 2026-10-01) was
-fully green**: all five images built and ran `--version`, the compose smoke passed
-end to end, kubeconform passed. Not exercised anywhere: the tunnel override and the
-k8s manifests on a real cluster. A pre-push fresh-context review caught one bug that
-would have failed that first run (curl 8.11.1 rejects `--opt=value`, so the `seed`
-args are separate); `make deploy-lint` pins that and other render-time facts.
-- `docs/12-deployment.md` — container image sizing + the Docker/Kubernetes
-  port-exposure model (host networking vs. a pre-reserved `bind: "host:lo-hi"`
-  range; `CAP_NET_ADMIN` / `/dev/net/tun` for `--tunnel-*` / `gsp-agent`).
-- Phase 14 slice 7 — proxy-peers registry, so an origin's `gsp-agent` learns every
-  proxy (added or pre-existing) without an origin-side restart.
-- Phase 14 slice 6 — end-to-end live verification in 4 Docker containers; fixed two
-  real bugs (`gsp-agent` never added the edge proxy as a peer; `reconcile_peer` tore
-  down and rebuilt the WireGuard session on every unchanged re-registration).
+| Date | Feature | Where it is documented |
+|------|---------|------------------------|
+| 2026-10-04 | Live tunnel address change (agent and `gsp` re-address the interface without a restart) | `docs/11` "Address authority" ("Address changes") |
+| 2026-10-03 | CI change detection from `cargo metadata` (`.github/scripts/changes.py`) | [spec](docs/superpowers/specs/2026-10-03-ci-change-detection-design.md), AGENTS.md "CI" |
+| 2026-10-03 | Edge restarts keep the tunnel up (`boot_id` on registrations) | `docs/11` "Edge restarts" |
+| 2026-10-03 | `gsp --aggregator-admin-url` (fan-out through NAT, port maps, TLS terminators) | `docs/12` |
+| 2026-10-03 | Tunnel addresses page in `gsp-ui` (read-only; Release button added 2026-10-04) | `docs/10` "The admin GUI" |
+| 2026-10-03 | TLS handshake flood limits (`gsp_http::tls::HandshakeLimits`) | ADR 29, [spec](docs/superpowers/specs/2026-10-03-tls-handshake-limits-design.md) |
+| 2026-10-03 | HA write forwarding bounded by a 10 s timeout (`504` on a hung leader) | `docs/10` |
+| 2026-10-02 | `cargo audit` and Trivy scans in CI (informational) | ADR 28, AGENTS.md commands table |
+| 2026-10-02 | Native TLS for every fleet HTTP server | ADR 27, `docs/12` "Native TLS", [spec](docs/superpowers/specs/2026-10-02-native-tls-other-servers-design.md) |
+| 2026-10-02 | TLS-capable HA peers (`--ha-peers id=https://…`) | `docs/12` "HA replicas over TLS", [spec](docs/superpowers/specs/2026-10-02-ha-tls-peers-design.md) |
+| 2026-10-02 | `--ca-file` on every binary; new crate `gsp-http` | ADR 26, `docs/12`, [spec](docs/superpowers/specs/2026-10-02-custom-ca-design.md) |
+| 2026-10-02 | Tunnel address authority (`gsp-controller --tunnel-network`) | `docs/11` "Address authority", [spec](docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md) |
+| 2026-10-01 | `deploy/`: reference images, Compose demo, k8s manifests | `docs/12`, [`deploy/README.md`](deploy/README.md) |
 
 ## What's built
 
@@ -137,7 +105,7 @@ args are separate); `make deploy-lint` pins that and other render-time facts.
   (standalone workspace, `make plugins`). Per-plugin config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
   single-level timing-wheel UDP idle expiry.
-- Ops: `gsp_build_info{version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
+- Ops: `gsp_build_info{component,version,commit}`, `gsp_fd_open` / `gsp_fd_limit` sampling.
 
 ### Distributed control plane — phases 10–13 (fully built)
 
@@ -163,9 +131,11 @@ args are separate); `make deploy-lint` pins that and other render-time facts.
   react-router, grouped fleet tree via `settings.group`, schema-driven settings
   form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
   /admin/sniffers`). Destructive actions (drain, remove backend, set a backend
-  `draining`/`disabled`, rollback, plugin remove) confirm first via
+  `draining`/`disabled`, rollback, plugin remove, applying Settings) confirm first via
   `useConfirm()`; action buttons disable while a request is in flight; a
-  vitest suite (`make ui-test`, CI `ui` job) pins that, and
+  vitest suite (`make ui-test`, CI `ui` job) pins that, a Playwright smoke test
+  (`make ui-e2e`, same job, backend stubbed with `page.route`) drives the Settings
+  confirm in a real browser, and
   `gsp-ui`'s `header_contract` test pins that every proxied route forwards
   status + response headers (**add new proxied routes to its `ROUTES` table**).
 - **Tier-2 regional health gossip** — embedded `foca` SWIM mesh over one HMAC-auth
@@ -209,46 +179,27 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   host, its backends are ordinary routable addresses; `connect_backend` /
   `connect_upstream` / health dials don't know a tunnel is involved.
 
-## Deferred / not built
-
-- **CGNAT / both-sides-behind-restrictive-NAT** (phase 14) — documented v1
-  limitation. A relay-of-last-resort (closer to Steam Datagram Relay's shape) is a
-  possible v2, not designed.
-- **`gsp-ui` leftovers** — config *submit* (Settings page) still applies without a
-  confirmation step, and there is no end-to-end browser test (Playwright) — only
-  component tests against a mocked `api.ts`.
-- **Tunnel e2e leftovers** (deferred minors from the 2026-10-01 branch review; none
-  affect correctness of what is asserted today):
-  - the 1200-byte UDP check in scenario 1 is one datagram with no retry — a single
-    dropped datagram on a fresh path would flake it (a 3-try loop fixes it);
-  - scenario 4's negative check looks for `/pools` lines starting with two spaces; it
-    would pass vacuously if that format changed — also assert the pool name is present;
-  - `echo.rs`: if `setns` fails inside the thread, the error surfaces as "did not
-    report ready within 5s" instead of the real cause;
-  - a blocked user namespace (e.g. Ubuntu AppArmor without the CI `sysctl`) makes
-    `unshare -Urnm` fail in the Makefile *before* the in-test hint can name
-    `make tunnel-e2e`;
-  - `make tunnel-e2e` also builds `gsp-aggregator`/`gsp-ui` (unused by these tests, build
-    time only), and `ensure_built()` runs `cargo build` again inside the namespace, which
-    works offline only because everything is already built (and it recompiles `ring` there
-    on every run — cause not investigated);
-
-- **HA + `--role slave` together** — rejected at startup today. Needs the upward
-  relay to run leader-only with its cursor promoted to replicated state (designed in
-  `docs/10`, not built).
-- **`sendmmsg` UDP egress batching**, k8s discovery watch informer, resolver
-  `sticky_key` / `sticky_key` recovery, per-domain gossip capacity/load signals,
-  `failure_domain` auto-discovery — see the table below.
-
 ## Known flakes & environment gotchas
 
-- **`make audit`** wraps `cargo audit` (needs `cargo install cargo-audit --locked`).
+- **Disk fills up in long sessions.** `target/debug` grew to ~30 GB over many test
+  builds on 2026-10-02 (the linker then fails with exit 1, not a clear "no space");
+  `target/debug/incremental` alone was 12 GB. `rm -rf target/debug/incremental` is the
+  cheap fix, `rm -rf target/debug` the full one (one cold rebuild).
+- **`make deploy-lint` and the locale.** Its ruby checks read the Dockerfile as
+  US-ASCII under a `C`/POSIX locale and fail with `invalid byte sequence`; run it with
+  `LANG=C.UTF-8 LC_ALL=C.UTF-8` (CI's runners are UTF-8 already).
+- **`make audit`** runs `cargo audit` over all three lockfiles (root, `crates/plugins`,
+  the fuzz harness; `.github/scripts/cargo_audit.sh`, JSON in `target/cargo-audit/`;
+  needs `cargo install cargo-audit --locked`). In CI since 2026-10-02 as the
+  **informational** `audit` job (every push/PR + nightly; summary table, warnings,
+  `cargo-audit` artifact).
   New advisories land on a schedule you don't control — on 2026-10-01 it caught
   `rustls` (RUSTSEC-2026-0285) and two `wasmtime` fuel-accounting advisories
   (RUSTSEC-2026-0315/0316), fixed by lockfile-only patch bumps (`rustls` 0.23.45,
   `wasmtime` 48.0.3). Three "unmaintained crate" warnings (`atomic-polyfill`,
-  `fxhash`, `instant`) are informational and don't fail the target. Not in CI
-  yet — run it before a release.
+  `fxhash`, `instant`) are informational and don't fail the target; they show in
+  the `audit` job's summary (still present on 2026-10-02 — replacing them means moving off
+  the crates that pull them in).
 - **Fixed-sleep test flakes (fixed 2026-10-01)**: `resolver_target_gets_a_proxy_protocol_header`
   and `acl_deny_drops_the_connection_before_routing` slept 150 ms then `connect().unwrap()`,
   which loses to listener startup under parallel load; they now retry the connect
@@ -257,6 +208,30 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   background thread); it now retries the open. **The other ~30 `sleep(150ms)` +
   connect tests in `crates/gsp-core/tests/tcp_forward.rs` have the same shape** —
   if one flakes, reuse `connect_when_listening` there rather than lengthening the sleep.
+- **sled lock flake (fixed 2026-10-04)**: `ha::import::tests::set_aside_moves_only_unmarked_non_empty_dirs`
+  failed now and then with `WouldBlock` ("could not acquire lock"). Same cause as above, and
+  it was a **production** race too, not only a test one: `set_aside_pre_ha` opens and drops
+  a registry store to inspect it, renames the directory, then reopens it to count it, and
+  `read_pre_ha` opens it again once the cluster initializes, all in one process, while
+  sled's background threads can still hold the dropped store's lock. The import's opens
+  now go through `store::retry_when_unlocked` (bounded 5 s, lock error only, also matched
+  under `anyhow` context); `set_aside_waits_for_a_lock_that_is_about_to_be_released` holds
+  the lock for 300 ms and failed before the fix. The flake itself was not reproduced
+  locally (100 runs under load), so the link to the CI failure follows from the cause.
+- **UDP idle-eviction test flake (fixed 2026-10-04)**: `an_active_session_survives_past_its_idle_window_then_expires`
+  (`gsp-core/tests/udp_forward.rs`). Two causes. The echo backend is UDP-only, so the pool's default
+  `tcp_connect` health check failed against it and (`fall: 3` every 2 s) marked it unhealthy about 4 s in;
+  the test waits for an eviction right around then and got "no healthy backend" instead of the freed
+  slot. And the first datagram raced listener startup after a fixed 150 ms sleep. The two idle tests
+  now use a `udp_probe` check, and the first datagram is retried until it is echoed. Any new UDP
+  test against `echo_backend` needs a `udp_probe` health check if it runs past ~3 s.
+- **Lints and CI pins (2026-10-04)**: the root `Cargo.toml` has a curated
+  `[workspace.lints.clippy]` (`redundant_closure_for_method_calls`, `needless_pass_by_value`,
+  `items_after_statements`, `manual_let_else`, `default_trait_access`); every workspace
+  crate opts in. `cast_possible_truncation` is left out: ~30 of its hits are test code, and
+  the production ones are the vetted `u128` millis casts. Every third-party action in
+  `.github/` is pinned to a commit SHA with the tag in a trailing comment (the `stable` and
+  `nightly` toolchain branches of `dtolnay/rust-toolchain` too); bump them by hand.
 - **A config file directly under `/tmp`** triggers continuous ~200 ms
   `configuration reloaded source=file` log spam (a `notify` / tmpfs
   mtime-granularity interaction). Harmless — `reload.rs` only swaps the `Snapshot` —
@@ -288,45 +263,38 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
   **12 scenarios** (namespace helpers, TCP/UDP round trip, stays-up-across-re-registrations,
   a proxy added later, **two proxies sharing one origin**, a pinned-key mismatch, a pinned
   address collision, an edge restart keeping its address, an edge restarting with the
-  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (the
-  kernel edge-restart scenario alone waits up to 200 s). Run it with
+  controller down) and takes ~4–5 min per backend locally, ~9.5 min per leg in CI (measured
+  before the 2026-10-03 boot id fix removed the kernel edge-restart scenario's 200 s
+  wait; expect that leg to be ~2.5 min shorter now). Run it with
   `TUNNEL_BACKEND=kernel|userspace make tunnel-e2e` (plain `cargo test`) or
   `make tunnel-e2e-ci` (nextest + JUnit; needs `cargo install cargo-nextest --locked`). Needs `unshare`, `ip`,
   `nsenter`; the userspace backend also needs `/run/wireguard`
   (the make target mounts a tmpfs on `/run` for it). Traps it taught:
   **`/pools` health is optimistic** (a new backend is `healthy` before the tunnel is
-  up — wait for a real round trip); **userspace (`boringtun`) first handshake takes
-  ~25 s** (the proxy has no endpoint for the origin, so it waits for the agent's
-  25 s persistent keepalive; kernel is ~2 s) — observed 2026-10-01, not fixed;
+  up — wait for a real round trip); **userspace (`boringtun`) first handshake used to take
+  ~25 s** (the proxy has no endpoint for the origin, and `boringtun` arms a peer's
+  persistent keepalive only 25 s after the peer is created, while the kernel sends one
+  at once; kernel is ~2 s). The agent now sends one empty UDP datagram through the
+  tunnel right after configuring a proxy peer (`interface::kick_handshake`), which
+  starts the handshake immediately — fix written 2026-10-04, confirmed by
+  the `tunnel (userspace)` CI leg (scenario 1 passes in ~8 s, down from ≥25 s for the
+  handshake alone; the lab's userspace deadline stays 90 s because `an_edge_restarts_with_the_controller_down` takes ~37 s there); tracked in
+  [#67](https://github.com/Wueschli/gameserver-proxy/issues/67);
   dead namespaces' veths disappear asynchronously, so test namespaces never reuse
   names within a run. Slice 7 (proxy-peers registry) is live-verified, including two
   proxies carrying traffic at once.
 
-## Known follow-ups (none blocking)
+## Open follow-ups
 
-| Item | Notes |
-|------|-------|
-| Tunnel address authority — deferred pieces (decided out of scope 2026-10-02, owner wants them later) | Spec: `docs/superpowers/specs/2026-10-02-tunnel-address-authority-design.md`: **IPv6** tunnel networks; **HA-replicated allocation** (the registries aren't Raft-integrated, so `--tunnel-network` + `--ha-peers` is refused at startup); **automatic lease expiry** (v1 is explicit release + a stale warning); a **gsp-ui view** of `GET /tunnel/addresses`; **changing a live peer's address without a restart** (v1 logs the mismatch and keeps running); `TunnelSource` **dropping pool entries when an origin is deleted** (a `404` still means "keep last-known-good") |
-| Address authority — deferred review minors | `warn_stale` is silent on a storage error; `allocate()` is an O(allocated) scan under the global mutex and `allocated()`/`Exhausted` use `Tree::len()` (O(n)) — consider capping `--tunnel-network` size; `check_pin` treats an unparseable holder as free; `parse_duration` can overflow (use `checked_mul`); stored addresses are not re-validated if `--tunnel-network` later changes; a store failure after a successful claim also keeps the claim (the doc comment only mentions the backend-422 case), and a stream of distinct names with bad backends can use up the pool (bearer-gated; DELETE + the stale warning are the remedy); every 4xx is treated as a permanent registration failure incl. 408/429 (consider transient); a changed `--address` pin loses to the saved address on a transient failure without notice; the final transient error is not logged when falling back to the saved address; a name re-registered with a NEW pubkey never removes the old key's peer (pre-existing); `the_production_client_has_a_request_timeout` waits ~10 s; lab: scenario 8 does not assert the edge came up ON its saved address, `agent_refused` loses the agent log on timeout, `start_controller` drops failed attempts' logs and its sled-lock comment may be wrong, scenario 7 asserts stickiness only after the 200 s wait, `restart_edge` has a redundant sleep and deletes the shared boringtun socket path (safe only for single-edge scenarios) |
-| Kernel WireGuard: a restarted edge `gsp` leaves the tunnel down for ~2.5 min (found 2026-10-02; pre-dates the address work) | The edge has no endpoint for the origin so it cannot start a handshake; the agent sees an identical proxy registration so never re-sets the peer; keepalives do not re-key a session it still believes valid; recovery waits for WireGuard's 120 s rekey. A possible fix is a boot id in the proxy registration (protocol change), not done. The lab's restart scenario therefore waits up to 200 s after an edge restart (`wait_roundtrip_after_restart`), which adds ~2.5 min to the kernel `tunnel` CI leg. |
-| Native TLS in `gsp-controller` (owner wants it eventually, 2026-10-02) | Umbrella: terminate TLS in the controller itself (not designed), the only piece left. Clients trusting a custom CA (`--ca-file`) and HA peers over a TLS terminator (`--ha-peers id=https://…`) are done (2026-10-02). Today's supported pattern is a reverse proxy (docs/12 "gsp-controller behind TLS"). Keep base URLs/schemes configurable in any new code so this stays small. |
-| Publish the reference images | Reference-only today (owner's choice). GHCR on release tags (+ multi-arch if arm64 is needed): a release workflow, tags and a registry login; `deploy/Dockerfile`'s `BIN_SOURCE` switch already supports building from CI-built binaries. |
-| Change a live HA member's address | `--ha-peers` only bootstraps a cluster; each member's address then lives in the Raft membership, so an existing `host:port` cluster cannot move to `https://` peers (or to new hosts) by editing the flag. Needs openraft's membership-change API plus an operator verb (docs/10 already lists dynamic membership as deferred). Workaround today: bootstrap a new cluster. |
-| HA-over-TLS — deferred review minor (2026-10-02) | `error_chain` dedups by substring (documented trade-off, could hide a short source contained in an earlier message). The other minors of this row were fixed in the cleanup PR (one client for Raft RPCs, docs/10 wording, a self-standing negative test). |
-| HA write forwarding has no timeout (pre-existing; found reviewing the cleanup PR, 2026-10-02) | `ha::client::forward_to_leader` builds a client per forwarded write and sets no request timeout; unlike Raft RPCs (openraft wraps each in heartbeat/vote/snapshot timeouts, so a stuck pooled connection costs one RPC), nothing bounds it, so a half-open leader can hang a follower's write handler indefinitely. Fix: a shared client with `.timeout(..)`. Cleanup-PR minors: say in `ha/network.rs` that the shared client relies on openraft's outer timeouts; `tls_front_counted` counts TCP accepts though docs/messages say "TLS connections"; the negative HA test's `contains("certificate")` is loose (`unknownissuer` alone would be tighter); cold `build-release` varied 11–17 min across measured runs |
-| `--ca-file` — deferred review minors (2026-10-02) | no test sets `--ca-file` against a plain `http://` endpoint (correct by construction); `crates/gsp-http/tests/fixtures/leaf.key` may need a secret-scanner allowlist entry if one is ever enabled. (Fixed since: the docs/12 stray `: `, the cause printed twice in `CaError`, the `format!` log field.) |
-| `gsp` aggregator `admin_url` override | `gsp --aggregator-*` reports `admin_url` = `http://<settings.admin.listen>` with no flag to override, so aggregator intent fan-out cannot reach a containerised/k8s `gsp` (found reviewing `deploy/`); needs e.g. `--aggregator-admin-url` |
-| `sendmmsg` UDP egress batching | reply pump + upstream forward still one `send` per datagram; per-session reply buffers of `RECV_BATCH`×`MAX_DATAGRAM` would 16× RSS — needs a smaller batch buffer or per-datagram alloc, its own decision |
-| Per-source cap + UDP sticky table: LRU eviction | both refuse / wholesale-clear when full today; acceptable defaults — do only if load testing shows them biting |
-| k8s discovery watch informer | polling Endpoints now; a convergence-speed optimization, belongs with the fleet-phase discovery rework |
-| Resolver `sticky_key` | deferred pending a design for how a later request recovers the key; overlaps the phase-11 intent model |
-| `IPV6_TRANSPARENT` on musl / non-glibc | `set_ip_transparent` already calls `socket2` 0.6's `set_ip_transparent_v6` unconditionally — may already work; build + smoke-test on a musl target before writing code |
-| Retire the UDP sticky table via `consistent_hash` | pure polish, no user-visible gap |
-| Reload debounce only coalesces within one 200 ms window | wider-spaced events cause separate (idempotent) reloads; low priority |
-| NFR N3/N4/N5/N9 (aggregate throughput, full 500k/1M, HA) | need dedicated hardware + multiple hosts + a real load generator; the `gsp-bench --mode concurrency` ramp already went as far as one box allows (~20k TCP / ~5k UDP verified here) |
-| More sniffers (`quic`, `wireguard`, …), multiple sniffers per listener | community / plugin ecosystem; never blocks core work |
+Everything not built or not yet fixed is tracked as a
+[GitHub issue](https://github.com/Wueschli/gameserver-proxy/issues), not in this file.
+Check the issue list before starting new work, and file new follow-ups there rather
+than here. Where the items that used to live here went:
 
----
+- v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
+  discovery): [#65](https://github.com/Wueschli/gameserver-proxy/issues/65)
+- The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/Wueschli/gameserver-proxy/issues/67)
+- Open design questions: [#69](https://github.com/Wueschli/gameserver-proxy/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
 
@@ -359,7 +327,7 @@ ones with a subtlety.)
 - **Listeners are reconciled by name** (`ListenerManager::reconcile`), not
   rebuilt with the snapshot. An unchanged listener keeps running with its route
   rules captured at spawn; only the *pool contents* they resolve to are read
-  live. A `ListenerConfig` change (bind, protocol, routes, affinity, `prefix`,
+  live. A `ListenerConfig` change (bind, protocol, routes, `prefix`,
   `freebind`, `route_hint`, ACL, `rate_limit`, `geo`, `transparent`) stops and
   re-spawns it — a same-bind rebind is gapless via `SO_REUSEPORT`.
 - **Startup-only config** (reload does *not* re-read): `workers`,
@@ -399,7 +367,7 @@ per-connection or per-datagram task, hop, or allocation, add it here.**
 
 - **Base**: 1 `Pool::acquire[_for]` (lock-free reads + one atomic add), 1
   upstream `connect`, 1 spawned pump/reply task, (UDP) 1 socket `bind`+`connect`
-  + sticky-table + session-table insert.
+  + session-table insert.
 - **Routing**: 1 `local_addr()` syscall + a linear scan of the small route list
   (bit-compare per `client_cidr`/`dst`, `u16` range per `port`, `starts_with` +
   len check per `first_bytes`, one `extract_sni` pass per `sni`).
@@ -457,11 +425,11 @@ rebuild reads `Discovery::get`).
 
 | File | Responsibility |
 |------|----------------|
-| `crates/gsp-config/src/lib.rs` | Raw YAML types, `validate()`, resolved `Config` / `PoolConfig` / `ListenerConfig` / `ResolverConfig` / `SniffersConfig` / `HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `CidrSet` trie, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`); filters (`Acl`, `GeoAcl`, `RateLimit`, `PerSourceLimit`, `GlobalLimits`). **All schema rules here.** |
+| `crates/gsp-config/src/` (`schema.rs` raw YAML types, `validate.rs` `validate()`, `parse.rs`, `resolved.rs`, `cidr.rs`, `matcher.rs`, `keys.rs`; `lib.rs` re-exports) | Raw YAML types, `validate()`, resolved `Config` / `PoolConfig` / `ListenerConfig` / `ResolverConfig` / `SniffersConfig` / `HealthCheck`; routing (`Matcher`, `Action`, `OnError`, `Cidr`, `CidrSet` trie, `HostPattern`, `MatchContext`, `RouteHint`, `extract_sni`); filters (`Acl`, `GeoAcl`, `RateLimit`, `PerSourceLimit`, `GlobalLimits`). **All schema rules here.** |
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools, sources, resolvers, limits, geo_db }`; `build` → `build_with_overlay` → `build_with_sources` carry health/admin-state over by address and apply overlay + discovered backends. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer, `rr` index, `hash_on`, `weights`; `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health / active / streaks / `check_kind` + `AdminState`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does ACL/geo/rate/`per_source`/global-cap checks, first-bytes peek, route match, pool lookup. |
-| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, sticky affinity, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
+| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
 | `crates/gsp-core/src/{ratelimit,src_conns,limits,geo}.rs` | Per-listener token bucket / per-source concurrent cap / process-wide caps / MaxMind country lookup. |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `Sniffers` `ArcSwap`-backed registry (`register` / `get` / `replace`) + `warn_if_missing`. **No built-in sniffers** — the seam the phase-9 loader fills. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`), lock-free read. |
@@ -482,9 +450,10 @@ rebuild reads `Discovery::get`).
 | `crates/gsp/src/sniffer_loader.rs` | `SnifferLoader` (shared `wasmtime::Engine` + epoch-ticker thread) + `scan(&SniffersConfig)`; `WasmSniffer`; `build_sniffers` = `new` + one `scan`. |
 | `crates/gsp/src/discovery.rs` | `DnsSrvSource` (`hickory-resolver`), `ConsulSource` / `KubernetesSource` (`reqwest`), `DiscoveryFactory`. |
 | `crates/gsp/src/reload.rs` | `SIGHUP` + `notify` file watch + `reload_requested()` → debounce → `apply` (validate, `build_with_overlay`, store, reconcile listeners / sources / resolvers, rescan sniffers). |
-| `crates/gsp/src/procinfo.rs` | `gsp_build_info` / `gsp_fd_open` / `gsp_fd_limit` — build identity + a small detached `/proc/self/fd` sampling task. |
+| `crates/gsp/src/procinfo.rs` | `gsp_fd_open` / `gsp_fd_limit` — a small detached `/proc/self/fd` sampling task. |
 | `crates/gsp/proto/resolver.proto` + `build.rs` | gRPC resolver contract + `tonic_build` codegen (needs `protoc`). |
 | `crates/gsp-controller/src/addresses.rs` + `addresses/api.rs` | Tunnel address authority: `Network`, `AddressBook` (claim / release / entries over two sled trees, one mutex, flush after each transaction), `expand_backends`, `resolve_flags`; `GET /tunnel/addresses`, `claim_error_response` (409 / 422 / 503 mapping), the daily stale warning. Shared by both peer registries. |
+| `crates/gsp-controller/src/lease.rs` | `--tunnel-lease-ttl` expiry: `sweep` (list the book, `RegistryState::expire` each owner unseen past the cutoff, re-checked where the write lands), `lease_loop` (leader-only, 1 h startup grace), `check_ttl` (min 2 h). Under HA the write is `WriteRequest::Expire`. |
 | `crates/gsp-controller/src/{peers,proxy_peers}.rs` + `{peers,proxy_peers}/api.rs` | The two mirrored registries (origins register in `peers`, proxies in `proxy_peers`): `POST` claims an address atomically with the registration (under a per-registry write lock), `DELETE` releases it and logs a tombstone, SSE `subscribe` replays registrations and tombstones. |
 | `crates/gsp-agent/src/{register,address_store,proxy_subscribe,interface,keypair,main}.rs` | Origin agent: register first (bounded `http_client()`), `resolve_startup` picks controller answer vs saved `<data_dir>/tunnel-address`, `/32` proxy peers, `plan()`/`Action` for events and tombstones. |
 | `crates/gsp/src/{proxy_register,tunnel_address,tunnel_client}.rs` (+ the `--tunnel-*` block in `main.rs`) | Proxy side of the same: register before bringing the interface up (before any listener binds), saved address at `<tunnel-key-file>.address`, `/32` origin peers, tombstones. |
@@ -508,10 +477,10 @@ time). Needs `protoc` on `PATH`. Not part of `make check`:
 - the namespace lab `make tunnel-e2e` / `make tunnel-e2e-ci` (12 scenarios, see "Known
   flakes & environment gotchas");
 - `make ui-test` (vitest), `make deploy-lint` (daemon-free render checks of `deploy/`;
-  needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` (need a Docker
-  daemon);
-- the CI helper scripts: `sh .github/scripts/changes_test.sh` and
-  `python3 .github/scripts/test_summary_test.py` (CI runs both in the `changes` job).
+  needs the docker CLI + ruby), `make deploy-images` / `make deploy-smoke` / `make deploy-scan` (need a
+  Docker daemon; the scan also needs `trivy`);
+- the CI helper scripts: `python3 .github/scripts/changes_test.py` (needs `cargo`),
+  `test_summary_test.py`, `trivy_summary_test.py`, `audit_summary_test.py` and `sarif_categories_test.py` (CI runs all five in the `changes` job).
 
 CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 "Infra / environment".
@@ -537,12 +506,20 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 - **`protoc` is a build requirement** (gRPC resolver codegen in
   `crates/gsp/build.rs`). CI installs `protobuf-compiler`.
 - CI: `.github/workflows/ci.yml`. Docs-only pushes (`**.md`, `docs/**`, `LICENSE-*`) don't run it,
-  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.sh`, tested by
-  `changes_test.sh`, self-run in CI) decides which path-scoped jobs run: `ui`, `plugins`, `tunnel`,
-  `deploy`, `fuzz` (`test` always runs for non-docs pushes). A workflow edit, a failed diff, the
+  and a newer push cancels an older run. A `changes` job (`.github/scripts/changes.py`, tested by
+  `changes_test.py`, self-run in CI) decides which path-scoped jobs run from `cargo metadata`
+  (a changed file's package plus its path-dependency dependents, against each job's `ROOTS`): `ui`, `plugins`, `tunnel`,
+  `deploy`, `fuzz`; `test` and `audit` always run for non-docs pushes, and `trivy` follows
+  `deploy` (it scans `deploy`'s images, handed over as the 1-day `deploy-images` artifact
+  of `docker save` tarballs). `trivy` and `audit` are informational: `continue-on-error`,
+  results on the run's summary page, as warning annotations and as artifacts
+  (`trivy-reports`, `cargo-audit`). A workflow edit, a failed diff, the
   **nightly schedule (03:17 UTC)** and `workflow_dispatch` run everything — so `deploy` and `fuzz`
-  also act as nightly canaries for code-driven breakage. Adding a job or moving files between
-  areas means updating `changes.sh` *and* its test. A full run is ~32 runner-minutes.
+  also act as nightly canaries for code-driven breakage. Adding a job, or changing which packages a job
+  builds, means updating `ROOTS` in `changes.py` *and* its test; a new crate or dependency
+  edge needs no edit. A full run bills roughly 60–80
+  runner-minutes (each job rounds up to the minute; cold caches cost more); the scan
+  jobs add under a minute each.
   Cargo caching is `.github/actions/cargo-cache` (rolling: a new snapshot per `main` push,
   restored by prefix `os-rustc-Cargo.lock`; PRs read it but don't write). It replaced
   `Swatinem/rust-cache`, which only saves on an exact-key miss — its key is the lockfile
@@ -574,7 +551,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   in-Docker build instead, so that path can't rot. These three jobs are pinned to
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
   built there might need a newer glibc than the distroless runtime's 2.41. (Since
-  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.sh`
+  2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.py`
   emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
@@ -594,10 +571,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
 
 ---
 
-## Open questions carried from `docs/01-requirements.md`
+## Open questions
 
-- Does one client ever need **two backends at once** (TCP control + UDP gameplay
-  on different instances)? Affects the session model.
-- Is **QUIC-aware routing** (connection ID) needed, or is opaque UDP enough?
-  Assumed opaque.
-- Cross-instance session failover: assumed **no** for v1 (ADR 4).
+Tracked in [#69](https://github.com/Wueschli/gameserver-proxy/issues/69). Cross-instance
+session failover is assumed **no** for v1 (ADR 4).

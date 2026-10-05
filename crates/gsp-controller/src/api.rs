@@ -26,7 +26,7 @@
 //! validate-then-[`Store::put`] path `submit_config` uses, so a subscriber
 //! sees rollback as just another ordinary revision, no special-casing
 //! needed anywhere else. The whole surface is gated by
-//! [`crate::auth::require_bearer`] when `AppState::auth_token` is set.
+//! [`gsp_http::server::require_bearer`] when `AppState::auth_token` is set.
 //!
 //! Slice 7 (`docs/10` "Staged / canary rollout (design)") adds **staged
 //! rollout on top of the same single, never-forked revision log**: `POST
@@ -58,7 +58,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::role::{Role, RoleHandle};
-use crate::store::{RevisionBytes, Store, StoreError};
+use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
 /// Capacity of the update-notification broadcast: how many accepted
 /// submissions can land between two ticks of a subscriber's tail loop before
@@ -118,6 +118,10 @@ fn encode_rev(rev: u64) -> [u8; 8] {
     rev.to_be_bytes()
 }
 
+fn stage_bytes(stage: &Stage) -> Vec<u8> {
+    serde_json::to_vec(stage).expect("Stage always serializes")
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
@@ -129,7 +133,7 @@ pub struct AppState {
     /// only ever carries a `u64`, never the config text).
     pub updates: broadcast::Sender<u64>,
     /// Bearer token every `/config*` request must present, or `None` to
-    /// leave the API open (`crate::auth`).
+    /// leave the API open (`gsp_http::server`).
     pub auth_token: Option<Arc<str>>,
     /// `standalone` (default) accepts writes directly; `slave` (phase 12
     /// slice 1) never does — every revision it holds arrived via
@@ -149,19 +153,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
+    pub fn try_new(
+        store: Arc<Store>,
+        auth_token: Option<String>,
+        role: RoleHandle,
+    ) -> Result<Self, StoreError> {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         // A sibling tree in the exact same `sled` database `store` opened —
         // see `Store::db`'s doc.
-        let stage = store
-            .db()
-            .open_tree("stage")
-            .expect("opening the stage tree");
-        let actors = store
-            .db()
-            .open_tree("actors")
-            .expect("opening the actors tree");
-        AppState {
+        let stage = store.db().open_tree("stage")?;
+        let actors = store.db().open_tree("actors")?;
+        Ok(AppState {
             store,
             stage,
             updates,
@@ -169,7 +171,13 @@ impl AppState {
             role,
             actors,
             ha: None,
-        }
+        })
+    }
+
+    /// Test convenience: [`Self::try_new`] on a store that is known to open.
+    #[cfg(test)]
+    pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
+        Self::try_new(store, auth_token, role).expect("opening the sibling trees")
     }
 
     pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
@@ -206,19 +214,94 @@ impl AppState {
     /// own direct writes, `actor` from `X-Actor`) and by
     /// `crate::ha::state_machine` (a committed Raft entry, which already
     /// carries whatever stage/actor the original submission specified).
+    #[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
     pub fn apply_revision_with_stage_and_actor(
         &self,
         bytes: RevisionBytes,
         stage: Stage,
         actor: Option<&str>,
     ) -> Result<u64, StoreError> {
-        let mut side = vec![(&self.stage, encode_stage(&stage))];
-        if let Some(actor) = actor {
-            side.push((&self.actors, actor.as_bytes().to_vec()));
-        }
-        let revision = self.store.put_with(bytes, &side)?;
+        let stage_bytes = stage_bytes(&stage);
+        let revision = self.store.put_with(bytes, &|revision| {
+            self.stage_and_actor_writes(revision, &stage_bytes, actor)
+        })?;
         let _ = self.updates.send(revision);
         Ok(revision)
+    }
+
+    /// The sibling-tree entries that join a revision's transaction: its
+    /// stage and, if known, its actor.
+    fn stage_and_actor_writes<'a>(
+        &'a self,
+        revision: u64,
+        stage_bytes: &[u8],
+        actor: Option<&str>,
+    ) -> Vec<SiblingWrite<'a>> {
+        let mut writes = vec![SiblingWrite {
+            tree: &self.stage,
+            key: encode_rev(revision).to_vec(),
+            value: Some(stage_bytes.to_vec()),
+        }];
+        if let Some(actor) = actor {
+            writes.push(SiblingWrite {
+                tree: &self.actors,
+                key: encode_rev(revision).to_vec(),
+                value: Some(actor.as_bytes().to_vec()),
+            });
+        }
+        writes
+    }
+
+    /// The Raft-apply form of [`Self::apply_revision_with_stage_and_actor`]:
+    /// revision, `applied_index`, stage and actor all land in one `sled`
+    /// transaction, and a step whose `index` this database has already
+    /// absorbed (a replay after a crash lost `last_applied_log`) writes
+    /// nothing. `Ok(None)` = already applied.
+    #[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
+    pub fn apply_entry(
+        &self,
+        index: u64,
+        bytes: RevisionBytes,
+        stage: Stage,
+        actor: Option<&str>,
+    ) -> Result<Option<u64>, StoreError> {
+        let stage_bytes = stage_bytes(&stage);
+        let applied = self.store.put_applied_with(bytes, index, &|revision| {
+            self.stage_and_actor_writes(revision, &stage_bytes, actor)
+        })?;
+        match applied {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// The Raft-apply form of [`Self::promote_revision`] for the entry at
+    /// log `index`: the stage flip and the `applied_index` share one
+    /// transaction. `Ok(None)` = already applied (skipped); otherwise
+    /// `Some(found)`, and `applied_index` advances even when the revision
+    /// does not exist.
+    pub fn promote_entry(&self, index: u64, revision: u64) -> Result<Option<bool>, StoreError> {
+        let found = self.store.get(revision)?.is_some();
+        let mut writes = Vec::new();
+        if found {
+            let mut stage = self.stage_of(revision);
+            stage.promoted = true;
+            writes.push(SiblingWrite {
+                tree: &self.stage,
+                key: encode_rev(revision).to_vec(),
+                value: Some(stage_bytes(&stage)),
+            });
+        }
+        if !self.store.mark_applied_with(index, writes)? {
+            return Ok(None);
+        }
+        if found {
+            let _ = self.updates.send(revision);
+        }
+        Ok(Some(found))
     }
 
     /// Flips an existing revision's `promoted` to `true` in place — the one
@@ -246,7 +329,7 @@ impl AppState {
 
     fn set_stage(&self, revision: u64, stage: &Stage) -> Result<(), StoreError> {
         self.stage
-            .insert(encode_rev(revision), encode_stage(stage))?;
+            .insert(encode_rev(revision), stage_bytes(stage))?;
         self.stage.flush()?;
         Ok(())
     }
@@ -305,8 +388,8 @@ pub fn router(state: AppState) -> Router {
         .route("/config/rollback/{revision}", post(rollback))
         .route("/config/promote/{revision}", post(promote))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
 }
@@ -343,6 +426,7 @@ async fn submit_config(
     body: String,
 ) -> Response {
     let actor = actor_header(&headers);
+    let forward = crate::ha::client::ForwardHeaders::from_headers(&headers);
     let stage = match params.stage.as_deref() {
         None => Stage::promoted(),
         Some("canary") => match params.group {
@@ -374,6 +458,7 @@ async fn submit_config(
         stage,
         &format!("/config{query_suffix}"),
         actor,
+        &forward,
     )
     .await
 }
@@ -398,7 +483,7 @@ fn actor_header(headers: &axum::http::HeaderMap) -> Option<String> {
 /// parsing — a slave's only source of new revisions is
 /// [`crate::parent_client`], which never calls this function.
 /// `forward_path` is this write's own route + query string, forwarded
-/// byte-for-byte (`actor` along with it, as `X-Actor` again) to the raft
+/// byte-for-byte (`forward`'s headers along with it) to the raft
 /// leader if this replica isn't it (`crate::ha::client::propose_write`) —
 /// irrelevant when HA is off.
 async fn submit(
@@ -407,6 +492,7 @@ async fn submit(
     stage: Stage,
     forward_path: &str,
     actor: Option<String>,
+    forward: &crate::ha::client::ForwardHeaders,
 ) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
@@ -433,7 +519,8 @@ async fn submit(
             },
             forward_path,
             text,
-            actor.as_deref(),
+            forward,
+            crate::ha::client::revision_response,
         )
         .await;
     }
@@ -461,13 +548,13 @@ async fn promote(
     }
 
     if let Some(ha) = &state.ha {
-        let actor = actor_header(&headers);
         return crate::ha::client::propose_write(
             ha,
             crate::ha::WriteRequest::Promote(revision),
             &format!("/config/promote/{revision}"),
             String::new(),
-            actor.as_deref(),
+            &crate::ha::client::ForwardHeaders::from_headers(&headers),
+            crate::ha::client::revision_response,
         )
         .await;
     }
@@ -667,6 +754,7 @@ async fn rollback(
                 Stage::promoted(),
                 "/config",
                 actor_header(&headers),
+                &crate::ha::client::ForwardHeaders::from_headers(&headers),
             )
             .await;
             tracing::info!(from_revision = revision, "rolled back");
@@ -757,21 +845,14 @@ async fn subscribe_worker(
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {} // already sent by catch-up
             Ok(revision) if !is_visible(&stage, revision, group) => {} // not (yet) ours to see
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(revision, "update notification for a revision store lost");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing config updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "subscriber lagged; replaying from the store");
                 if !catch_up(&store, &stage, group, &mut last_sent, &tx).await {
@@ -821,10 +902,6 @@ fn is_visible(stage: &sled::Tree, revision: u64, group: Option<&str>) -> bool {
     read_stage(stage, revision).visible_to(group)
 }
 
-fn encode_stage(stage: &Stage) -> Vec<u8> {
-    serde_json::to_vec(stage).expect("Stage always serializes")
-}
-
 /// Reads `revision`'s [`Stage`], failing closed ([`Stage::hidden`], logged)
 /// when the entry is missing, unreadable or undecodable.
 fn read_stage(stage: &sled::Tree, revision: u64) -> Stage {
@@ -844,6 +921,7 @@ fn read_stage(stage: &sled::Tree, revision: u64) -> Stage {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // the stage is built inline by every caller
 fn store_error_response(e: StoreError) -> Response {
     tracing::error!(error = %e, "store error serving the config API");
     (
@@ -963,7 +1041,13 @@ listeners:
     fn put_promoted(store: &Store, bytes: &[u8]) -> u64 {
         let tree = test_stage_tree(store);
         store
-            .put_with(bytes.to_vec(), &[(&tree, encode_stage(&Stage::promoted()))])
+            .put_with(bytes.to_vec(), &|revision| {
+                vec![SiblingWrite {
+                    tree: &tree,
+                    key: encode_rev(revision).to_vec(),
+                    value: Some(stage_bytes(&Stage::promoted())),
+                }]
+            })
             .unwrap()
     }
 
@@ -1548,10 +1632,13 @@ listeners:
         let stage_tree = test_stage_tree(&store);
         // rev2 is canary-only, not visible to a group-less subscriber.
         let rev2 = store
-            .put_with(
-                b"two".to_vec(),
-                &[(&stage_tree, encode_stage(&Stage::canary("region-a".into())))],
-            )
+            .put_with(b"two".to_vec(), &|revision| {
+                vec![SiblingWrite {
+                    tree: &stage_tree,
+                    key: encode_rev(revision).to_vec(),
+                    value: Some(stage_bytes(&Stage::canary("region-a".into()))),
+                }]
+            })
             .unwrap();
 
         let (updates_tx, updates_rx) = broadcast::channel(8);
