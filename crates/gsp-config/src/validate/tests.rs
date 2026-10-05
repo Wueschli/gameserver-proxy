@@ -174,6 +174,7 @@ fn parses_v2_udp_on_a_udp_listener() {
 pools:
   - name: p
     targets: ["127.0.0.1:9001"]
+    health_check: { type: none }
     proxy_protocol: v2-udp
 listeners:
   - name: l
@@ -352,6 +353,7 @@ fn accepts_udp_listener() {
 pools:
   - name: local
     targets: ["127.0.0.1:9001"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:7777"
@@ -580,8 +582,10 @@ fn first_bytes_prefix_matches_and_sets_peek_len() {
 pools:
   - name: query
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
   - name: game
     targets: ["127.0.0.1:2"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:27015"
@@ -626,8 +630,10 @@ fn first_bytes_length_bound_matches_and_combines_with_prefix() {
 pools:
   - name: q
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
   - name: g
     targets: ["127.0.0.1:2"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:27015"
@@ -842,10 +848,13 @@ fn several_sniffers_per_listener_route_by_the_recognising_one() {
 pools:
   - name: quic
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
   - name: wg
     targets: ["127.0.0.1:2"]
+    health_check: { type: none }
   - name: other
     targets: ["127.0.0.1:3"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:443"
@@ -881,6 +890,7 @@ fn parses_udp_prefix_listener() {
 pools:
   - name: p
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "[::]:7777"
@@ -944,6 +954,7 @@ fn parses_bind_port_range_listener() {
 pools:
   - name: p
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:30000-30099"
@@ -1218,6 +1229,7 @@ fn first_packet_gate_parses_and_recognises_known_first_bytes() {
 pools:
   - name: p
     targets: ["127.0.0.1:1"]
+    health_check: { type: none }
 listeners:
   - name: l
     bind: "0.0.0.0:7777"
@@ -1411,7 +1423,7 @@ fn transparent_is_rejected_on_a_listener_reaching_a_tunnel_pool() {
 #[test]
 fn parses_udp_transparent_listener() {
     let cfg = parse_str(
-        "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+        "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n    health_check: {type: none}\n\
          listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    protocol: udp\n    \
          transparent: true\n    pool: p\n",
     )
@@ -2028,4 +2040,57 @@ fn rejects_bad_group_paths() {
     ] {
         assert!(parse_str(&bad).is_err(), "should reject: {bad}");
     }
+}
+
+fn udp_pool(health_check: &str, protocols: &[&str]) -> String {
+    let mut y =
+        format!("pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n{health_check}listeners:\n");
+    for (i, proto) in protocols.iter().enumerate() {
+        y.push_str(&format!(
+            "  - {{ name: l{i}, bind: \"0.0.0.0:{}\", protocol: {proto}, pool: p }}\n",
+            7000 + i
+        ));
+    }
+    y
+}
+
+#[test]
+fn rejects_default_tcp_connect_check_on_a_udp_only_pool() {
+    let err = parse_str(&udp_pool("", &["udp"])).unwrap_err().to_string();
+    assert!(err.contains("pool p") && err.contains("udp_probe"), "{err}");
+    // A pool shared with a TCP listener keeps the default.
+    parse_str(&udp_pool("", &["udp", "tcp"])).unwrap();
+    // An explicit choice is the operator's call.
+    parse_str(&udp_pool(
+        "    health_check: { type: tcp_connect }\n",
+        &["udp"],
+    ))
+    .unwrap();
+}
+
+#[test]
+fn accepts_health_check_type_none() {
+    let cfg = parse_str(&udp_pool("    health_check: { type: none }\n", &["udp"])).unwrap();
+    assert_eq!(cfg.pools[0].health_check.kind, HealthCheckKind::None);
+    assert!(parse_str(&udp_pool(
+        "    health_check: { type: none, send_hex: \"00\" }\n",
+        &["udp"]
+    ))
+    .is_err());
+}
+
+#[test]
+fn rejects_zero_pool_idle_timeout() {
+    let yaml = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+    idle_timeout_sec: 0
+listeners:
+  - name: l
+    bind: "0.0.0.0:7777"
+    pool: p
+"#;
+    let err = parse_str(yaml).unwrap_err().to_string();
+    assert!(err.contains("idle_timeout_sec"), "{err}");
 }

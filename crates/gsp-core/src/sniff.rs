@@ -488,6 +488,7 @@ listeners:
 pools:
   - name: p
     targets: ["{backend_addr}"]
+    health_check: {{ type: none }}
 listeners:
   - name: u
     bind: "{proxy}"

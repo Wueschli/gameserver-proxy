@@ -107,7 +107,8 @@ pub async fn run(args: &Args) -> Result<bool> {
     };
     let cfg_path = write_config(&format!(
         "settings:\n  workers: {workers}\n\
-         pools:\n  - name: p\n    targets: [{targets}]\n    balancer: {balancer}\n    idle_timeout_sec: {idle}\n\
+         pools:\n  - name: p\n    targets: [{targets}]\n    balancer: {balancer}\n    idle_timeout_sec: {idle}\n    \
+         health_check:\n      type: none\n\
          \x20 - {{ name: ready, targets: [\"{tcp_backend}\"] }}\n\
          listeners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n\
          \x20 - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"

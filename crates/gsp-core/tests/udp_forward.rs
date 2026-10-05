@@ -64,6 +64,8 @@ async fn forwards_udp_datagrams_and_reuses_the_session() {
 pools:
   - name: p
     targets: ["{b1}", "{b2}"]
+    health_check:
+      type: none
     balancer: round_robin
 listeners:
   - name: l
@@ -110,6 +112,8 @@ async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
 pools:
   - name: p
     targets: ["{b1}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -163,6 +167,8 @@ async fn sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend() 
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -342,8 +348,12 @@ async fn first_bytes_prefix_routes_to_its_pool() {
 pools:
   - name: query
     targets: ["{query}"]
+    health_check:
+      type: none
   - name: game
     targets: ["{game}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -390,8 +400,12 @@ async fn first_bytes_length_routes_short_vs_long_datagrams() {
 pools:
   - name: short
     targets: ["{short}"]
+    health_check:
+      type: none
   - name: long
     targets: ["{long}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -439,8 +453,12 @@ async fn udp_prefix_listener_routes_by_destination_ip_and_replies_from_it() {
 pools:
   - name: a
     targets: ["{a}"]
+    health_check:
+      type: none
   - name: b
     targets: ["{b}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "0.0.0.0:{port}"
@@ -492,6 +510,8 @@ async fn shutdown_drains_udp_sessions_then_returns() {
 pools:
   - name: p
     targets: ["{b}"]
+    health_check:
+      type: none
     idle_timeout_sec: 1
 listeners:
   - name: l
@@ -563,6 +583,8 @@ async fn prepends_a_v2_udp_proxy_header_to_the_first_datagram_only() {
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
     proxy_protocol: v2-udp
 listeners:
   - name: l
@@ -626,6 +648,8 @@ async fn first_packet_gate_drops_unrecognised_datagrams() {
 pools:
   - name: p
     targets: ["{b}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -682,7 +706,7 @@ async fn icmp_port_unreachable_marks_the_backend_unhealthy() {
 pools:
   - name: p
     targets: ["{dead}"]
-    health_check: {{ interval_sec: 1, timeout_ms: 200, rise: 1, fall: 1 }}
+    health_check: {{ type: tcp_connect, interval_sec: 1, timeout_ms: 200, rise: 1, fall: 1 }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -752,6 +776,8 @@ async fn replies_of_every_size_reach_their_own_client_intact() {
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -804,6 +830,8 @@ async fn consistent_hash_keeps_a_client_ip_on_one_backend_across_ports() {
 pools:
   - name: p
     targets: ["{b1}", "{b2}"]
+    health_check:
+      type: none
     balancer: consistent_hash
     hash_on: src_ip
 listeners:
@@ -832,6 +860,104 @@ listeners:
         tags.windows(2).all(|w| w[0] == w[1]),
         "one client IP must hash to one backend, got {tags:?}"
     );
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// A UDP socket that swallows every datagram: the connected send succeeds
+/// locally, but the backend never answers.
+async fn silent_backend() -> std::net::SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while sock.recv_from(&mut buf).await.is_ok() {}
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_stream_of_new_sessions_does_not_hide_a_failing_active_check() {
+    // The backend's port has no TCP listener, so the explicit `tcp_connect`
+    // probe fails every second; the backend takes datagrams but never answers.
+    // A passive "success" per new session used to wipe the failure streak.
+    let backend = silent_backend().await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check: {{ type: tcp_connect, interval_sec: 1, timeout_ms: 200, rise: 2, fall: 2 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let be = runtime
+        .handle()
+        .snapshot()
+        .pool("p")
+        .unwrap()
+        .backend(backend)
+        .unwrap()
+        .clone();
+
+    let mut flipped = false;
+    for _ in 0..120 {
+        // A fresh client (new session) every 50 ms.
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let _ = client.send_to(b"hi", proxy_addr).await;
+        if !be.is_healthy() {
+            flipped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        flipped,
+        "failing probes must take the backend down despite traffic"
+    );
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn health_check_none_keeps_a_udp_only_backend_in_rotation() {
+    // The #124 setup: a UDP-only backend and no probe payload. It must stay
+    // healthy well past `fall` x `interval`, and keep answering new sessions.
+    let backend = echo_backend(3).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check: {{ type: none, interval_sec: 1, fall: 1 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = first_reply(&client, b"x", &mut buf).await;
+    assert_eq!(&buf[..n], &[3, b'x']);
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;

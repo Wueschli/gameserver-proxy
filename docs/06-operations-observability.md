@@ -84,8 +84,9 @@
 - `gsp_build_info{component,version,commit}` (gauge, always `1`) — set once at
   startup; the same label set on `gsp` (`component="gsp"`) and every fleet
   binary. `commit` is a 12-char git SHA baked in at build time
-  (`crates/gsp-http/build.rs`, `"unknown"` if `.git` isn't available, e.g. a
-  source tarball).
+  (`crates/gsp-http/build.rs`): the `GSP_GIT_SHA` environment variable if set
+  (the Docker build arg, since the build has no `.git`), else `git rev-parse`,
+  else `"unknown"` (e.g. a source tarball).
 - `gsp_fd_open` (gauge, no labels) — this process's open file descriptor count
   (`/proc/self/fd` on Linux; absent elsewhere), sampled every 5 s by a small
   background task (`crates/gsp/src/procinfo.rs`), independent of the

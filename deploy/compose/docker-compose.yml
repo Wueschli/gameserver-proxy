@@ -11,6 +11,7 @@ x-build: &build
   dockerfile: deploy/Dockerfile
   args:
     BIN_SOURCE: ${BIN_SOURCE:-builder}   # `prebuilt` = binaries from deploy/prebuilt (CI)
+    GSP_GIT_SHA: ${GSP_GIT_SHA:-}   # shown as commit= in gsp_build_info (builder only)
 
 services:
   controller:

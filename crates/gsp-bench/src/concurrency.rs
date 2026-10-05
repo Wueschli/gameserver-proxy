@@ -319,7 +319,7 @@ async fn tcp_ramp(gsp_bin: &Path, args: &Args) -> Result<bool> {
     let admin_addr = free_addr();
     let workers = args.workers;
     let cfg_path = write_config(&format!(
-        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600 }}\nlisteners:\n  - {{ name: l, bind: \"{tcp_addr}\", protocol: tcp, pool: p }}\n"
+        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600, health_check: {{ type: none }} }}\nlisteners:\n  - {{ name: l, bind: \"{tcp_addr}\", protocol: tcp, pool: p }}\n"
     ))?;
 
     let mut proxy = ProxyProcess::spawn(gsp_bin, cfg_path)?;
@@ -397,7 +397,7 @@ async fn udp_ramp(gsp_bin: &Path, args: &Args) -> Result<bool> {
     let tcp_backend = spawn_tcp_echo().await;
     let workers = args.workers;
     let cfg_path = write_config(&format!(
-        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600 }}\n  - {{ name: ready, targets: [\"{tcp_backend}\"] }}\nlisteners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n  - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"
+        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600, health_check: {{ type: none }} }}\n  - {{ name: ready, targets: [\"{tcp_backend}\"] }}\nlisteners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n  - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"
     ))?;
 
     let mut proxy = ProxyProcess::spawn(gsp_bin, cfg_path)?;

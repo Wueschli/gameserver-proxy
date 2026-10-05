@@ -15,6 +15,7 @@ use std::time::Duration;
 use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig, ProxyProtocol};
 
 use crate::metrics_defs as m;
+use crate::util::mono_ms;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PickError {
@@ -96,18 +97,25 @@ struct BackendState {
     domain_down: AtomicBool,
     admin_state: AtomicU8,
     active: AtomicUsize,
-    last_check_ms: AtomicU64,
+    /// `mono_ms` at which the next active probe is due.
+    next_check_ms: AtomicU64,
+    /// An active probe is in flight, so the sweep must not start another.
+    probing: AtomicBool,
     streaks: Mutex<Streaks>,
 }
 
 impl BackendState {
-    fn new() -> Arc<Self> {
+    /// `addr`/`interval` only place the first active check: spread over one
+    /// interval, per backend, so a pool that appears all at once (startup,
+    /// reload, discovery) does not probe everything in the same instant.
+    fn new(addr: SocketAddr, interval: Duration) -> Arc<Self> {
         Arc::new(Self {
             healthy: AtomicBool::new(true),
             domain_down: AtomicBool::new(false),
             admin_state: AtomicU8::new(AdminState::Enabled.to_u8()),
             active: AtomicUsize::new(0),
-            last_check_ms: AtomicU64::new(0),
+            next_check_ms: AtomicU64::new(mono_ms() + first_check_jitter_ms(addr, interval)),
+            probing: AtomicBool::new(false),
             streaks: Mutex::new(Streaks::default()),
         })
     }
@@ -127,6 +135,13 @@ pub struct Backend {
     /// Relative share for `Balancer::Weighted` (>= 1); `1` for every other
     /// balancer.
     weight: u32,
+}
+
+/// Deterministic offset in `[0, interval)` derived from the address.
+fn first_check_jitter_ms(addr: SocketAddr, interval: Duration) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    addr.hash(&mut h);
+    h.finish() % (interval.as_millis() as u64).max(1)
 }
 
 impl Backend {
@@ -218,13 +233,43 @@ impl Backend {
         &self.check_kind
     }
 
-    pub(crate) fn due_for_check(&self, now_ms: u64) -> bool {
-        let last = self.state.last_check_ms.load(Ordering::Relaxed);
-        last == 0 || now_ms.saturating_sub(last) >= self.check_interval.as_millis() as u64
+    /// Claims the backend for an active probe: true when one is due and none is
+    /// in flight. The caller must call [`Backend::finish_probe`] afterwards.
+    pub(crate) fn begin_probe(&self, now_ms: u64) -> bool {
+        if now_ms < self.state.next_check_ms.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self
+            .state
+            .probing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        self.state.next_check_ms.store(
+            now_ms + self.check_interval.as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        true
     }
 
-    pub(crate) fn mark_checked(&self, now_ms: u64) {
-        self.state.last_check_ms.store(now_ms, Ordering::Relaxed);
+    pub(crate) fn finish_probe(&self) {
+        self.state.probing.store(false, Ordering::Release);
+    }
+
+    /// This instance's own verdict, for the sweep's `none` recovery path.
+    pub(crate) fn locally_healthy(&self) -> bool {
+        self.local_healthy()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_due(&self) {
+        self.state.next_check_ms.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_due(&self, now_ms: u64) -> bool {
+        now_ms >= self.state.next_check_ms.load(Ordering::Relaxed)
     }
 
     /// Feed a health observation (active check result or passive connect
@@ -344,7 +389,7 @@ impl Pool {
                 let state = prev
                     .and_then(|p| p.backends.iter().find(|b| b.addr == addr))
                     .map(|b| b.state.clone())
-                    .unwrap_or_else(BackendState::new);
+                    .unwrap_or_else(|| BackendState::new(addr, cfg.health_check.interval));
                 Backend::new(
                     addr,
                     name.clone(),
@@ -823,6 +868,24 @@ mod tests {
         drop(g);
         assert_eq!(new.backends()[0].active(), 0);
         assert!(new.acquire().is_ok());
+    }
+
+    #[test]
+    fn rebuild_keeps_the_check_schedule_and_the_in_flight_probe() {
+        let cfg = pcfg(&["127.0.0.1:1"], Balancer::RoundRobin, None);
+        let old = Arc::new(Pool::new(&cfg, None));
+        let old_b = old.backends()[0].clone();
+        old_b.force_due();
+        assert!(old_b.begin_probe(mono_ms()));
+        let new = Arc::new(Pool::new(&cfg, Some(&old)));
+        let new_b = new.backends()[0].clone();
+        // The schedule was not reset, and the probe still running on the old
+        // backend blocks a second one on the new.
+        assert!(!new_b.is_due(mono_ms()));
+        new_b.force_due();
+        assert!(!new_b.begin_probe(mono_ms()), "probe still in flight");
+        old_b.finish_probe();
+        assert!(new_b.begin_probe(mono_ms()));
     }
 
     #[test]
