@@ -22,10 +22,12 @@
 - `gsp_bytes_total{listener,dir}` – `dir` = `c2s|s2c`. No `pool` label.
 - `gsp_packets_total{listener,dir}` (UDP). No `pool` label.
 - `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
-  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject`
+  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject|pending_full`
   (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`;
   `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised;
-  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply)
+  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply;
+  `pending_full`: a new session's external resolver call is still in flight and the
+  per-worker pending cap (1024 sessions, 1 MiB buffered) or the per-session buffer (4 datagrams) is full)
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)
