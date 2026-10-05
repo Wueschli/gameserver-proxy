@@ -30,6 +30,9 @@ impl Resolver for Gated {
     }
     async fn resolve(&self, req: ResolveRequest) -> Result<Resolution, ResolveError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if req.first_bytes.starts_with(b"fail") {
+            return Err(ResolveError::Failed("boom".into()));
+        }
         if req.first_bytes.starts_with(b"slow") {
             self.release.notified().await;
         }
@@ -44,7 +47,7 @@ async fn echo_backend() -> std::net::SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     tokio::spawn(async move {
-        let mut buf = [0u8; 2048];
+        let mut buf = [0u8; 65536];
         while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
             let _ = sock.send_to(&buf[..n], peer).await;
         }
@@ -60,7 +63,7 @@ fn free_udp_addr() -> std::net::SocketAddr {
 }
 
 async fn recv(client: &UdpSocket, wait: Duration) -> Option<Vec<u8>> {
-    let mut buf = [0u8; 64];
+    let mut buf = vec![0u8; 65536];
     let n = tokio::time::timeout(wait, client.recv(&mut buf))
         .await
         .ok()?
@@ -167,6 +170,56 @@ async fn pending_buffer_is_bounded() {
         got += 1;
     }
     assert_eq!(got, 4, "first datagram plus three buffered ones");
+
+    runtime
+        .shutdown_with_grace(Duration::from_millis(100))
+        .await;
+}
+
+/// The total bytes buffered across pending sessions are capped per worker.
+#[tokio::test]
+async fn pending_bytes_are_capped_per_worker() {
+    let (runtime, proxy, release, _calls) = start_gated().await;
+    let mut clients = Vec::new();
+    for _ in 0..30 {
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(proxy).await.unwrap();
+        let mut payload = vec![0u8; 40_000];
+        payload[..4].copy_from_slice(b"slow");
+        c.send(&payload).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        clients.push(c);
+    }
+    release.notify_waiters();
+
+    let mut answered = 0;
+    for c in &clients {
+        if recv(c, Duration::from_millis(300)).await.is_some() {
+            answered += 1;
+        }
+    }
+    // 1 MiB cap / 40 kB = 26 sessions fit; the rest are dropped, not queued.
+    assert_eq!(answered, 26);
+
+    runtime
+        .shutdown_with_grace(Duration::from_millis(100))
+        .await;
+}
+
+/// A failed resolve drops the buffered datagrams and frees the pending slot, so
+/// the same client can open a session afterwards.
+#[tokio::test]
+async fn failed_resolve_drops_buffered_packets_and_frees_the_slot() {
+    let (runtime, proxy, _release, calls) = start_gated().await;
+    let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    c.connect(proxy).await.unwrap();
+    c.send(b"fail-1").await.unwrap();
+    c.send(b"more-2").await.unwrap();
+    assert!(recv(&c, Duration::from_millis(300)).await.is_none());
+
+    c.send(b"ok-3").await.unwrap();
+    assert_eq!(recv(&c, Duration::from_secs(1)).await.unwrap(), b"ok-3");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     runtime
         .shutdown_with_grace(Duration::from_millis(100))

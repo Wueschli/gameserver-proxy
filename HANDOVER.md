@@ -374,7 +374,7 @@ per-connection or per-datagram task, hop, or allocation, add it here.**
   len check per `first_bytes`, one `extract_sni` pass per `sni`).
 - **UDP external resolver** (first route match is a `resolver`): the call runs in
   a spawned task (one per pending session, `JoinSet` on the worker), never on
-  the recv loop. Pending sessions are capped at 1024 per worker and buffer up to
+  the recv loop. Pending sessions are capped at 1024 and 1 MiB buffered per worker, and hold up to
   4 datagrams each (one `to_vec` per buffered datagram); overflow drops as
   `pending_full`. Static-pool routes and route hints stay inline, no spawn.
 - **Peek** (only if a route uses `first_bytes`/`sni`/`sniffer`): one `MSG_PEEK`

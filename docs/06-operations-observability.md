@@ -27,7 +27,7 @@
   `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised;
   `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply;
   `pending_full`: a new session's external resolver call is still in flight and the
-  per-worker pending cap (1024 sessions) or the per-session buffer (4 datagrams) is full)
+  per-worker pending cap (1024 sessions, 1 MiB buffered) or the per-session buffer (4 datagrams) is full)
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)

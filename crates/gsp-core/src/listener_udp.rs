@@ -79,6 +79,10 @@ const PENDING_MAX: usize = 1024;
 /// Max datagrams buffered per pending session (the first, plus a few that
 /// arrive before the route is known); later ones are dropped (`pending_full`).
 const PENDING_PACKETS: usize = 4;
+/// Max total bytes buffered across a worker's pending sessions (worst case would
+/// otherwise be `PENDING_MAX` × `PENDING_PACKETS` × 64 KiB). Datagrams past it
+/// are dropped (`pending_full`).
+const PENDING_BYTES_MAX: usize = 1024 * 1024;
 
 /// Session table key: the client address, plus (in prefix / transparent mode)
 /// the destination address the datagram was sent to.
@@ -163,6 +167,7 @@ pub async fn run_udp_listener(
     let cfg = Arc::new(cfg);
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
     let mut pending: HashMap<SessionKey, Pending> = HashMap::new();
+    let mut pending_bytes = 0usize;
     // One task per pending session; dropping the set (listener exit) aborts them.
     let mut resolving: JoinSet<(SessionKey, Option<Routed>)> = JoinSet::new();
     let mut rbatch = RecvBatch::new();
@@ -208,11 +213,13 @@ pub async fn run_udp_listener(
                         // every pending slot rather than leak them.
                         tracing::error!(listener = %cfg.name, error = %e, "udp resolve task failed");
                         pending.clear();
+                        pending_bytes = 0;
                         continue;
                     }
                 };
                 let Some(p) = pending.remove(&key) else { continue };
                 let dropped = p.packets.len() as u64;
+                pending_bytes -= p.packets.iter().map(Vec::len).sum::<usize>();
                 let reason = if draining {
                     Err("draining")
                 } else {
@@ -305,7 +312,10 @@ pub async fn run_udp_listener(
 
                     // Route still resolving: buffer behind the first datagram.
                     if let Some(p) = pending.get_mut(&key) {
-                        if p.packets.len() < PENDING_PACKETS {
+                        if p.packets.len() < PENDING_PACKETS
+                            && pending_bytes + data.len() <= PENDING_BYTES_MAX
+                        {
+                            pending_bytes += data.len();
                             p.packets.push(data.to_vec());
                         } else {
                             metrics::counter!(
@@ -383,13 +393,16 @@ pub async fn run_udp_listener(
                         Ok(Prepared::Resolve(hit)) => {
                             // Resolve off the receive loop so a slow resolver
                             // never stalls the other sessions on this worker.
-                            if pending.len() >= PENDING_MAX {
+                            if pending.len() >= PENDING_MAX
+                                || pending_bytes + data.len() > PENDING_BYTES_MAX
+                            {
                                 metrics::counter!(
                                     m::DATAGRAMS_DROPPED,
                                     "listener" => cfg.name.clone(), "reason" => "pending_full",
                                 ).increment(1);
                                 continue;
                             }
+                            pending_bytes += data.len();
                             let first = data.to_vec();
                             pending.insert(key, Pending {
                                 packets: vec![first.clone()],
