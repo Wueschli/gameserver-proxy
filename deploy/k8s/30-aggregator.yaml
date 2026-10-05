@@ -12,10 +12,16 @@ spec:
         - name: aggregator
           image: gsp-deploy/gsp-aggregator:local
           # --instance-token is what intent fan-out presents to each gsp admin API.
-          args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)", "--instance-token=$(INSTANCE_TOKEN)"]
+          # --ingest-token is what each gsp pushes with; it cannot call /fleet/*.
+          # A pushed admin_url must name the pusher's own address (the node IP
+          # here); if nodes reach the Service from another address, add
+          # --instance-url-allow=<node CIDR>.
+          args: ["--listen=0.0.0.0:9902", "--auth-token=$(TOKEN)", "--ingest-token=$(INGEST_TOKEN)", "--instance-token=$(INSTANCE_TOKEN)"]
           env:
             - name: TOKEN
               valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+            - name: INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: ingest-token } }
             - name: INSTANCE_TOKEN
               valueFrom: { secretKeyRef: { name: gsp-tokens, key: admin-token } }
           ports: [{ containerPort: 9902 }]

@@ -23,7 +23,12 @@ async fn the_aggregator_fans_out_through_the_overridden_admin_url() -> Result<()
     build_fleet_bins()?;
     let agg_port = free_port()?;
     let agg_url = format!("http://127.0.0.1:{agg_port}");
-    let _aggregator = spawn_aggregator_with(agg_port, &["--ca-file", TEST_CA].map(String::from))?;
+    // The reported host (`localhost`) is not the pusher's source IP, so the
+    // aggregator needs it on its `--instance-url-allow` list.
+    let _aggregator = spawn_aggregator_with(
+        agg_port,
+        &["--ca-file", TEST_CA, "--instance-url-allow", "localhost"].map(String::from),
+    )?;
     wait_http_up(&format!("{agg_url}/healthz"), UP).await?;
 
     let admin_port = free_port()?;

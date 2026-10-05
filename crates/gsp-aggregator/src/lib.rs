@@ -31,4 +31,6 @@ pub mod api;
 pub mod fanout;
 pub mod ingest;
 pub mod parent_push;
+pub mod target;
+pub mod trust;
 mod util;

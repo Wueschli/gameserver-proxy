@@ -185,22 +185,7 @@ impl Store {
     /// calling this — the store itself does not parse or validate `bytes`.
     #[allow(clippy::needless_pass_by_value)] // owns what it writes; callers hand the buffers over
     pub fn put(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
-        let next = self.next_revision()?;
-
-        (&self.revisions, &self.meta)
-            .transaction(|(revisions, meta)| {
-                revisions.insert(&encode_rev(next), bytes.as_slice())?;
-                meta.insert(CURRENT_KEY, &encode_rev(next))?;
-                Ok::<_, sled::transaction::ConflictableTransactionError<sled::Error>>(())
-            })
-            .map_err(|e| match e {
-                sled::transaction::TransactionError::Storage(e) => StoreError::Sled(e),
-                sled::transaction::TransactionError::Abort(e) => StoreError::Sled(e),
-            })?;
-
-        self.revisions.flush()?;
-        self.meta.flush()?;
-        Ok(next)
+        self.put_with(bytes, &|_| Vec::new())
     }
 
     /// [`Store::put`] plus sibling-tree writes in the same transaction,
@@ -208,14 +193,24 @@ impl Store {
     /// registry whose `current` tree must move with its log. `siblings`
     /// receives the revision number being written; the trees must come from
     /// this store's own [`Store::db`] (see [`SiblingWrite`]).
+    ///
+    /// Overlapping puts race for the same revision number; the in-transaction
+    /// `current` check lets exactly one win and the losers retry against the
+    /// new `current`, so every put gets a distinct revision and none is lost.
+    #[allow(clippy::needless_pass_by_value)] // owns what it writes; callers hand the buffers over
     pub fn put_with<'a>(
         &self,
         bytes: RevisionBytes,
         siblings: &dyn Fn(u64) -> Vec<SiblingWrite<'a>>,
     ) -> Result<u64, StoreError> {
-        let next = self.next_revision()?;
-        self.apply_at(None, Some((next, bytes)), siblings(next))?;
-        Ok(next)
+        loop {
+            let next = self.next_revision()?;
+            match self.apply_at(None, Some((next, bytes.clone())), siblings(next)) {
+                Ok(_) => return Ok(next),
+                Err(StoreError::ConcurrentWrite) => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// The highest Raft log index this store has absorbed, or `None` if it
@@ -566,6 +561,72 @@ mod tests {
         );
 
         assert!(store.revisions_after(rev3).unwrap().is_empty());
+    }
+
+    const N: usize = 16;
+
+    #[test]
+    fn concurrent_puts_each_get_a_distinct_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.put(format!("config: {i}").into_bytes()).unwrap()
+                })
+            })
+            .collect();
+        let mut revs: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        revs.sort_unstable();
+        assert_eq!(revs, (1..=N as u64).collect::<Vec<_>>());
+        assert_eq!(store.revisions_after(0).unwrap().len(), N);
+        assert_eq!(store.current_revision().unwrap(), Some(N as u64));
+    }
+
+    #[test]
+    fn concurrent_put_with_keeps_side_entries_on_their_own_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+        let side = store.db().open_tree("side").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let (store, side, barrier) = (store.clone(), side.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let tag = format!("tag-{i}").into_bytes();
+                    let rev = store
+                        .put_with(format!("config: {i}").into_bytes(), &|revision| {
+                            vec![SiblingWrite {
+                                tree: &side,
+                                key: encode_rev(revision).to_vec(),
+                                value: Some(tag.clone()),
+                            }]
+                        })
+                        .unwrap();
+                    (rev, i)
+                })
+            })
+            .collect();
+        let mut revs = Vec::new();
+        for h in handles {
+            let (rev, i) = h.join().unwrap();
+            assert_eq!(
+                store.get(rev).unwrap().unwrap(),
+                format!("config: {i}").into_bytes()
+            );
+            assert_eq!(
+                side.get(encode_rev(rev)).unwrap().unwrap().to_vec(),
+                format!("tag-{i}").into_bytes()
+            );
+            revs.push(rev);
+        }
+        revs.sort_unstable();
+        assert_eq!(revs, (1..=N as u64).collect::<Vec<_>>());
     }
 
     #[test]

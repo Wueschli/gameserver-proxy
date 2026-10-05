@@ -50,6 +50,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::api::AppState;
+use crate::target::Target;
 
 /// Route definitions only — no `.with_state()` here. `api::router` merges
 /// this (still generic over `AppState`) into its own routes and calls
@@ -81,6 +82,10 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+fn bad_request(error: String) -> Response {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response()
+}
+
 /// `X-Actor`, if present — see the module doc.
 fn actor_header(headers: &HeaderMap) -> Option<String> {
     headers
@@ -100,7 +105,7 @@ async fn drain_instance(
         &state,
         &instance,
         Method::POST,
-        "/admin/drain",
+        Target::new(&["admin", "drain"]),
         None,
         actor.as_deref(),
     )
@@ -118,7 +123,7 @@ async fn undrain_instance(
         &state,
         &instance,
         Method::POST,
-        "/admin/undrain",
+        Target::new(&["admin", "undrain"]),
         None,
         actor.as_deref(),
     )
@@ -141,7 +146,7 @@ async fn list_instance_sniffers(
         &state,
         &instance,
         Method::GET,
-        "/admin/sniffers",
+        Target::new(&["admin", "sniffers"]),
         None,
         actor.as_deref(),
     )
@@ -159,7 +164,7 @@ async fn add_backend(
     broadcast(
         &state,
         Method::POST,
-        &format!("/pools/{pool}/backends"),
+        Target::new(&["pools", &pool, "backends"]),
         Some(body),
         actor.as_deref(),
     )
@@ -177,7 +182,7 @@ async fn patch_backend(
     broadcast(
         &state,
         Method::PATCH,
-        &format!("/pools/{pool}/backends/{addr}"),
+        Target::new(&["pools", &pool, "backends", &addr]),
         Some(body),
         actor.as_deref(),
     )
@@ -194,7 +199,7 @@ async fn delete_backend(
     broadcast(
         &state,
         Method::DELETE,
-        &format!("/pools/{pool}/backends/{addr}"),
+        Target::new(&["pools", &pool, "backends", &addr]),
         None,
         actor.as_deref(),
     )
@@ -207,7 +212,7 @@ async fn route_hint(State(state): State<AppState>, headers: HeaderMap, body: Byt
     broadcast(
         &state,
         Method::POST,
-        "/route-hint",
+        Target::new(&["route-hint"]),
         Some(body),
         actor.as_deref(),
     )
@@ -239,7 +244,7 @@ async fn upload_sniffer(
     broadcast_with_content_type(
         &state,
         Method::POST,
-        &format!("/admin/sniffers?name={}", q.name),
+        Target::new(&["admin", "sniffers"]).map(|t| t.with_query("name", &q.name)),
         Some(body),
         "application/octet-stream",
         actor.as_deref(),
@@ -259,7 +264,7 @@ async fn delete_sniffer(
     broadcast(
         &state,
         Method::DELETE,
-        &format!("/admin/sniffers/{name}"),
+        Target::new(&["admin", "sniffers", &name]),
         None,
         actor.as_deref(),
     )
@@ -272,10 +277,14 @@ async fn proxy_to_instance(
     state: &AppState,
     instance: &str,
     method: Method,
-    path_suffix: &str,
+    target: Result<Target, String>,
     body: Option<Bytes>,
     actor: Option<&str>,
 ) -> Response {
+    let target = match target {
+        Ok(t) => t,
+        Err(e) => return bad_request(e),
+    };
     let Some(inst) = state.store.get(instance) else {
         return (
             StatusCode::NOT_FOUND,
@@ -286,8 +295,19 @@ async fn proxy_to_instance(
             .into_response();
     };
 
-    let url = format!("{}{}", inst.payload.admin_url, path_suffix);
-    let mut req = state.http.request(method, &url);
+    let url = match target.url(&inst.payload.admin_url) {
+        Ok(url) => url,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("{instance}: {e}"),
+                }),
+            )
+                .into_response()
+        }
+    };
+    let mut req = state.http.request(method, url.clone());
     if let Some(token) = &state.instance_token {
         req = req.bearer_auth(token);
     }
@@ -350,11 +370,11 @@ struct InstanceResult {
 async fn broadcast(
     state: &AppState,
     method: Method,
-    path_suffix: &str,
+    target: Result<Target, String>,
     body: Option<Bytes>,
     actor: Option<&str>,
 ) -> Response {
-    broadcast_with_content_type(state, method, path_suffix, body, "application/json", actor).await
+    broadcast_with_content_type(state, method, target, body, "application/json", actor).await
 }
 
 /// Like [`broadcast`], but lets the caller pick the forwarded body's
@@ -363,11 +383,15 @@ async fn broadcast(
 async fn broadcast_with_content_type(
     state: &AppState,
     method: Method,
-    path_suffix: &str,
+    target: Result<Target, String>,
     body: Option<Bytes>,
     content_type: &str,
     actor: Option<&str>,
 ) -> Response {
+    let target = match target {
+        Ok(t) => t,
+        Err(e) => return bad_request(e),
+    };
     let instances = state.store.snapshot();
     let instance_token = state.instance_token.clone();
     let actor = actor.map(str::to_string);
@@ -376,14 +400,24 @@ async fn broadcast_with_content_type(
     for inst in instances {
         let client = state.http.clone();
         let method = method.clone();
-        let url = format!("{}{}", inst.payload.admin_url, path_suffix);
+        let url = target.url(&inst.payload.admin_url);
         let body = body.clone();
         let instance = inst.payload.instance;
         let instance_token = instance_token.clone();
         let actor = actor.clone();
         let content_type = content_type.clone();
         calls.spawn(async move {
-            let mut req = client.request(method, &url);
+            let url = match url {
+                Ok(url) => url,
+                Err(error) => {
+                    return InstanceResult {
+                        instance,
+                        status: None,
+                        error: Some(error),
+                    }
+                }
+            };
+            let mut req = client.request(method, url);
             if let Some(token) = &instance_token {
                 req = req.bearer_auth(token);
             }
@@ -817,5 +851,174 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["results"][0]["status"], 200);
+    }
+
+    /// #111: a decoded `/` or `..` in a path parameter must not steer the
+    /// forwarded request to another admin path (carrying the instance token).
+    #[tokio::test]
+    async fn encoded_traversal_in_a_path_segment_is_refused_before_any_fan_out() {
+        let hit: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hit2 = hit.clone();
+        let mock = Router::new().fallback(move |uri: axum::http::Uri| {
+            let hit = hit2.clone();
+            async move {
+                hit.lock().unwrap().push(uri.to_string());
+                "ok"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+
+        for (method, uri) in [
+            ("POST", "/fleet/pools/..%2Fadmin%2Fdrain%3F/backends"),
+            ("POST", "/fleet/pools/%2e%2e/backends"),
+            (
+                "PATCH",
+                "/fleet/pools/local/backends/..%2F..%2Fadmin%2Fdrain",
+            ),
+            ("DELETE", "/fleet/pools/local/backends/%2e%2e"),
+            ("DELETE", "/fleet/sniffers/..%2Fdrain"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        }
+        assert!(
+            hit.lock().unwrap().is_empty(),
+            "nothing reached the instance: {:?}",
+            hit.lock().unwrap()
+        );
+    }
+
+    /// Characters that are legal in a segment but meaningful in a URL are
+    /// percent-encoded, so they stay one segment.
+    #[tokio::test]
+    async fn a_segment_with_a_percent_or_space_stays_one_encoded_segment() {
+        let hit: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hit2 = hit.clone();
+        let mock = Router::new().fallback(move |uri: axum::http::Uri| {
+            let hit = hit2.clone();
+            async move {
+                hit.lock().unwrap().push(uri.path().to_string());
+                "ok"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/pools/a%25b%20c/backends")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            hit.lock().unwrap().as_slice(),
+            ["/pools/a%25b%20c/backends"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sniffer_name_query_is_encoded() {
+        let hit: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hit2 = hit.clone();
+        let mock = Router::new().fallback(move |uri: axum::http::Uri| {
+            let hit = hit2.clone();
+            async move {
+                hit.lock().unwrap().push(uri.to_string());
+                "ok"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/sniffers?name=a%26x%3D1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            hit.lock().unwrap().as_slice(),
+            ["/admin/sniffers?name=a%26x%3D1"]
+        );
+    }
+
+    /// The fan-out must not follow a redirect: it would carry the instance
+    /// token to wherever the instance (or whoever answers for it) points.
+    #[tokio::test]
+    async fn a_redirect_from_an_instance_is_not_followed() {
+        let hit = Arc::new(Mutex::new(0u32));
+        let hit2 = hit.clone();
+        let target = Router::new().fallback(move || {
+            let hit = hit2.clone();
+            async move {
+                *hit.lock().unwrap() += 1;
+                "elsewhere"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
+
+        let redirector = Router::new().fallback(move || async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", format!("http://{target_addr}/"))],
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, redirector).await.unwrap() });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/instances/a/drain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(*hit.lock().unwrap(), 0);
     }
 }
