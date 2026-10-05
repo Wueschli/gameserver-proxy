@@ -1086,3 +1086,61 @@ async fn a_second_udp_instance_with_the_same_bind_fails_to_start() {
 
     first.shutdown_with_grace(Duration::from_millis(100)).await;
 }
+
+/// Replacing a UDP listener must not hold the reload until its live sessions
+/// idle out: a client that keeps sending would hold the drain open forever.
+#[tokio::test]
+async fn changing_a_udp_listener_does_not_block_reconcile_on_live_sessions() {
+    let backend = echo_backend(1).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = |extra: &str| {
+        format!(
+            r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check:
+      type: none
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+{extra}"#
+        )
+    };
+    let cfg1 = parse_str(&yaml("")).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg1), std::sync::Arc::default(), 1);
+    let handle = runtime.handle();
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    let mut buf = [0u8; 64];
+    first_reply(&client, b"hb", &mut buf).await;
+    // Keep the session alive for the whole test.
+    let client = std::sync::Arc::new(client);
+    let pinger = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = client.send(b"hb").await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    };
+
+    let cfg2 = parse_str(&yaml(
+        "    rate_limit:\n      per_ip: { rate: 1000, burst: 1000 }\n",
+    ))
+    .unwrap();
+    handle.store(Snapshot::build_with_overlay(
+        &cfg2,
+        Some(&handle.current()),
+        handle.backend_overlay(),
+    ));
+    let r = tokio::time::timeout(Duration::from_secs(5), handle.reconcile_listeners()).await;
+    pinger.abort();
+    let out = r.expect("reconcile must return while a UDP session is live");
+    assert_eq!(out.stopped, 1);
+    assert!(out.failed.is_empty());
+}
