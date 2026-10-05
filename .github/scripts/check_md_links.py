@@ -17,7 +17,9 @@ INLINE_CODE = re.compile(r"`[^`]*`")
 
 def slug(heading: str) -> str:
     """GitHub's heading anchor: lowercase, drop punctuation, spaces to dashes."""
-    h = re.sub(r"[`*]", "", heading.strip().lower())
+    h = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.strip().lower())  # links keep their label
+    h = re.sub(r"[`*]", "", h)
+    h = re.sub(r"(?<!\w)_|_(?!\w)", "", h)  # emphasis underscores, not foo_bar
     h = re.sub(r"[^\w\- ]", "", h)
     return h.replace(" ", "-")
 
@@ -27,11 +29,12 @@ def _lines(path: str):
     fence = None
     with open(path, encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
-            m = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
             if m:
+                run, rest = m.group(1), m.group(2)
                 if fence is None:
-                    fence = m.group(1)[0]
-                elif m.group(1)[0] == fence:
+                    fence = run
+                elif run[0] == fence[0] and len(run) >= len(fence) and not rest.strip():
                     fence = None
                 continue
             if fence is None:

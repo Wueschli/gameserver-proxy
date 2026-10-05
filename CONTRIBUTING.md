@@ -6,7 +6,7 @@ Agents follow [`AGENTS.md`](AGENTS.md) on top of this; current state and open de
 
 ## Build and test
 
-You need the Rust toolchain pinned in `rust-toolchain.toml` (install it with `rustup`) and
+You need the Rust toolchain from `rust-toolchain.toml` (stable; CI and the maintainers use rustc 1.99, install with `rustup`) and
 `protoc` on `PATH` (`apt install protobuf-compiler` or `brew install protobuf`), because
 `crates/wayhouse/build.rs` generates the gRPC resolver client.
 

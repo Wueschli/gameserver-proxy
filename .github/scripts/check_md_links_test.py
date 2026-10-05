@@ -50,6 +50,18 @@ class LinksTest(unittest.TestCase):
         body = "```sh\ngrep -on \"](./nope.md)\" x\n```\n`[a](nope.md)`\n"
         self.assertEqual(self.run_check({"a.md": body}, "a.md"), [])
 
+    def test_a_shorter_or_mismatched_fence_does_not_close_a_longer_one(self):
+        body = "````md\n```\n[a](nope.md)\n~~~\n[b](nope.md)\n````\n[ok](a.md)\n"
+        self.assertEqual(self.run_check({"a.md": body}, "a.md"), [])
+
+    def test_a_closing_fence_with_text_after_it_does_not_close(self):
+        body = "```\n``` not a close\n[a](nope.md)\n```\n"
+        self.assertEqual(self.run_check({"a.md": body}, "a.md"), [])
+
+    def test_anchor_of_a_heading_with_a_link_uses_its_label(self):
+        files = {"a.md": "[x](b.md#see-docs)\n", "b.md": "## See [docs](x.md)\n"}
+        self.assertEqual(self.run_check(files, "a.md"), [])
+
     def test_directory_links_pass(self):
         self.assertEqual(self.run_check({"a.md": "[d](d/)\n", "d/x.md": ""}, "a.md"), [])
 
@@ -58,6 +70,8 @@ class LinksTest(unittest.TestCase):
         self.assertEqual(slug("Model A: trunk (default)"), "model-a-trunk-default")
         self.assertEqual(slug("`make check`"), "make-check")
         self.assertEqual(slug("foo_bar baz"), "foo_bar-baz")
+        self.assertEqual(slug("_emphasis_ here"), "emphasis-here")
+        self.assertEqual(slug("See [docs](x.md)"), "see-docs")
 
 
 if __name__ == "__main__":
