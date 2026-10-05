@@ -4,16 +4,14 @@ on:
   push:
     branches: [main]
     # Docs-only pushes cost ~30 runner-minutes for nothing: no code, image or
-    # manifest is affected. (pull_request has the same filter.)
+    # manifest is affected.
     paths-ignore:
       - "**.md"
       - "docs/**"
       - "LICENSE-*"
+  # No paths-ignore here: the ruleset requires `ci-ok`, so a docs-only PR must
+  # still start the workflow. The `code` output of `changes` skips the heavy jobs.
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE-*"
   workflow_dispatch:   # run everything by hand from the Actions tab
   schedule:
     - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
@@ -56,6 +54,7 @@ jobs:
       deploy: ${{ steps.f.outputs.deploy }}
       fuzz: ${{ steps.f.outputs.fuzz }}
       release: ${{ steps.f.outputs.release }}
+      code: ${{ steps.f.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -91,6 +90,8 @@ jobs:
           printf '%s\n' "$files" | python3 .github/scripts/changes.py $flag | tee -a "$GITHUB_OUTPUT"
 
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -535,6 +536,8 @@ jobs:
   # JSON is in the cargo-audit artifact. Accepted advisories:
   # .cargo/audit.toml ([advisories] ignore = [...], each with a reason).
   audit:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -782,3 +785,20 @@ jobs:
           name: fuzz-artifacts
           path: crates/wayhouse-config/fuzz/artifacts/**
           if-no-files-found: ignore
+
+  # The one check the `protect-main` ruleset requires. Always runs (also on
+  # docs-only PRs, where every other job is skipped); skipped jobs count as
+  # passed, a failed or cancelled one fails the gate.
+  ci-ok:
+    if: always()
+    needs: [changes, test, musl, build-release, build-release-arm64, plugins, plugins-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz]
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

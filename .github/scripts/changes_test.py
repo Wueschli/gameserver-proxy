@@ -211,24 +211,39 @@ class Main(unittest.TestCase):
             raise AssertionError("no metadata needed for --all")
 
         got = self.run_main(["--all"], "", boom)
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
 
     def test_a_metadata_failure_runs_everything(self):
         def broken(_):
             raise changes.MetadataError("cargo metadata failed")
 
         got = self.run_main([], "crates/wayhouse-agent/src/main.rs\n", broken)
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
 
     def test_a_roots_entry_matching_no_package_runs_everything(self):
         # e.g. wayhouse-agent renamed: a silently empty root would skip tunnel.
         got = self.run_main([], "README.md\n", lambda _: changes.Graph({}, {}))
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
 
     def test_output_lists_every_area_once(self):
         got = self.run_main([], "README.md\n", lambda _: changes.load_graph(REPO))
-        self.assertEqual(set(got), ALL)
+        self.assertEqual(set(got), ALL | {"code"})
         self.assertEqual(set(got.values()), {"false"})
+
+    def test_code_is_false_for_docs_only_and_true_otherwise(self):
+        self.assertFalse(changes.is_code([]))
+        self.assertFalse(changes.is_code(["README.md", "docs/a/b.png", "LICENSE-MIT", "crates/x/NOTES.md"]))
+        self.assertTrue(changes.is_code(["README.md", "crates/wayhouse/src/main.rs"]))
+        self.assertTrue(changes.is_code([".github/workflows/ci.yml"]))
+        self.assertTrue(changes.is_code(["Cargo.lock"]))
+
+    def test_code_is_true_with_all_flag_and_on_metadata_failure(self):
+        self.assertEqual(self.run_main(["--all"], "", None)["code"], "true")
+
+        def broken(_):
+            raise changes.MetadataError("x")
+
+        self.assertEqual(self.run_main([], "README.md\n", broken)["code"], "true")
 
 
 if __name__ == "__main__":
