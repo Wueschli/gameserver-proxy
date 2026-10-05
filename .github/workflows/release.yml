@@ -3,6 +3,17 @@ name: Release
 # Publishes the six reference images (deploy/Dockerfile) to GHCR, amd64 only,
 # when a version tag is pushed. Nothing else triggers it, so it costs one build
 # per release. Multi-arch and Kubernetes packaging: issue #88.
+#
+# Nothing is published until everything passed (issue #112):
+#   1. the tag is v<workspace version>, so the tag, the image tags and what
+#      `--version` / gsp_build_info report agree;
+#   2. the tagged commit is on main and CI succeeded on it;
+#   3. all six images build (self-contained, compiled in Docker like the nightly
+#      deploy job), each reports the version and carries the commit, and the
+#      compose smoke test passes on them;
+#   4. only then are they pushed, in one last step. A build or smoke failure
+#      therefore leaves nothing public; only a registry error mid-push can still
+#      leave a partial set (re-run the job: the pushes are idempotent).
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -13,45 +24,89 @@ permissions:
 jobs:
   images:
     runs-on: ubuntu-24.04   # pinned like ci.yml
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
+      actions: read     # find CI's run for this commit
       packages: write   # push to ghcr.io/<owner>/<image>
     env:
       REGISTRY: ghcr.io
+      IMAGES: gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0   # origin/main, to prove the tag is on it
           persist-credentials: false
+      - name: Tag matches the workspace version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 .github/scripts/check_release_test.py
+          echo "version=$(python3 .github/scripts/check_release.py "$TAG")" >> "$GITHUB_OUTPUT"
+      - name: Tagged commit is on main and CI passed on it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          git merge-base --is-ancestor "$SHA" origin/main ||
+            { echo "::error::$SHA is not on main: release from a commit that main contains"; exit 1; }
+          ok=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" \
+                 --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          [ "$ok" -ge 1 ] || {
+            echo "::error::no successful CI run for $SHA. Wait for CI on main, or run CI by hand (Actions > CI > Run workflow on main) if the commit changed only docs, then re-run this job."
+            exit 1
+          }
+      - name: Build all six images, check version and commit, run the compose smoke test
+        env:
+          GSP_GIT_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          BIN_SOURCE=builder sh deploy/build-images.sh
+          for t in $IMAGES; do
+            out=$(docker run --rm "gsp-deploy/$t:local" --version)
+            case "$out" in *" $VERSION") ;; *) echo "::error::$t --version is '$out', expected version $VERSION"; exit 1 ;; esac
+          done
+          make deploy-smoke
       - name: Log in to GHCR
         env:
           ACTOR: ${{ github.actor }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$TOKEN" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
-      - name: Build, smoke-test and push the images
+      # The images tested above, plus one metadata layer for the labels (same
+      # filesystem layers), then pushed together as the last step.
+      - name: Label, tag and push the images
         env:
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
           SHA: ${{ github.sha }}
         run: |
           set -eu
           owner=$(echo "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
-          version="${TAG#v}"
           # Pre-releases (v1.2.3-rc.1) get their own tag but never move `latest`.
-          tags="$version"
-          case "$version" in *-*) ;; *) tags="$tags latest" ;; esac
-          for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
-            image="$REGISTRY/$owner/$t"
-            docker build -f deploy/Dockerfile --target "$t" \
+          tags="$VERSION"
+          case "$VERSION" in *-*) ;; *) tags="$tags latest" ;; esac
+          for t in $IMAGES; do
+            printf 'FROM gsp-deploy/%s:local\n' "$t" | docker build \
               --label "org.opencontainers.image.source=https://github.com/$REPO" \
-              --label "org.opencontainers.image.version=$version" \
+              --label "org.opencontainers.image.version=$VERSION" \
               --label "org.opencontainers.image.revision=$SHA" \
               --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
-              -t "$image:$version" .
-            # Prove the binary starts on the runtime base before publishing it.
-            docker run --rm "$image:$version" --version
-            for tag in $tags; do
-              [ "$tag" = "$version" ] || docker tag "$image:$version" "$image:$tag"
+              -t "$REGISTRY/$owner/$t:$VERSION" -
+          done
+          # Every :VERSION first, then the moving tags, so a registry error part
+          # way through never moves `latest` onto a mixed-version set.
+          for t in $IMAGES; do
+            docker push "$REGISTRY/$owner/$t:$VERSION"
+          done
+          for tag in $tags; do
+            [ "$tag" = "$VERSION" ] && continue
+            for t in $IMAGES; do
+              image="$REGISTRY/$owner/$t"
+              docker tag "$image:$VERSION" "$image:$tag"
               docker push "$image:$tag"
             done
           done
