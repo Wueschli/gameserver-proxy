@@ -27,10 +27,29 @@ pub enum UdpMode {
 ///
 /// `mode` selects the per-datagram destination mechanism (see [`UdpMode`]).
 pub fn bind_reuseport_udp(addr: SocketAddr, mode: UdpMode) -> std::io::Result<std::net::UdpSocket> {
+    bind_udp(addr, mode, true)
+}
+
+/// Fail with `AddrInUse` if *anything* is already bound to `addr`, including
+/// sockets that set `SO_REUSEPORT` (another process, a stale instance).
+///
+/// [`bind_reuseport_udp`] alone cannot tell: the kernel lets any same-user
+/// socket with the flag join, so a duplicate instance would start without
+/// error and silently split the traffic. The probe socket sets neither
+/// `SO_REUSEADDR` nor `SO_REUSEPORT`, so it conflicts with every existing
+/// binding; it is closed before returning. Run it once per bind address, then
+/// bind the worker sockets with [`bind_reuseport_udp`].
+pub fn probe_exclusive_udp(addr: SocketAddr, mode: UdpMode) -> std::io::Result<()> {
+    bind_udp(addr, mode, false).map(drop)
+}
+
+fn bind_udp(addr: SocketAddr, mode: UdpMode, shared: bool) -> std::io::Result<std::net::UdpSocket> {
     let sock = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_reuse_address(true)?;
-    #[cfg(unix)]
-    sock.set_reuse_port(true)?;
+    if shared {
+        sock.set_reuse_address(true)?;
+        #[cfg(unix)]
+        sock.set_reuse_port(true)?;
+    }
     sock.set_nonblocking(true)?;
     match mode {
         UdpMode::Plain => {}
@@ -73,8 +92,10 @@ pub fn bind_transparent_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSo
 }
 
 /// Bind a TCP listening socket with `SO_REUSEADDR` and (on Unix) `SO_REUSEPORT`
-/// so that multiple worker tasks — and, later, multiple processes — can share
-/// the same port with the kernel spreading accepts across them.
+/// so that the worker tasks of one listener share the port with the kernel
+/// spreading accepts across them. Because the flag lets *any* same-user socket
+/// join, callers must run [`probe_exclusive_tcp`] first to refuse a port some
+/// other process already holds.
 ///
 /// With `freebind`, set `IP_FREEBIND` / `IPV6_FREEBIND` so the socket can bind
 /// an address that is not (yet) configured on a local interface.
@@ -87,10 +108,35 @@ pub fn bind_reuseport_tcp(
     freebind: bool,
     transparent: bool,
 ) -> std::io::Result<std::net::TcpListener> {
+    bind_tcp(addr, backlog, freebind, transparent, true)
+}
+
+/// Fail with `AddrInUse` if *anything* is already bound to `addr`, including
+/// sockets that set `SO_REUSEPORT`; see [`probe_exclusive_udp`] for why the
+/// shared bind cannot detect that itself. The probe keeps `SO_REUSEADDR` (so a
+/// port in `TIME_WAIT` is not a conflict) but not `SO_REUSEPORT`, and is
+/// closed before returning.
+pub fn probe_exclusive_tcp(
+    addr: SocketAddr,
+    freebind: bool,
+    transparent: bool,
+) -> std::io::Result<()> {
+    bind_tcp(addr, 1, freebind, transparent, false).map(drop)
+}
+
+fn bind_tcp(
+    addr: SocketAddr,
+    backlog: i32,
+    freebind: bool,
+    transparent: bool,
+    shared: bool,
+) -> std::io::Result<std::net::TcpListener> {
     let sock = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
-    sock.set_reuse_port(true)?;
+    if shared {
+        sock.set_reuse_port(true)?;
+    }
     sock.set_nonblocking(true)?;
     if freebind {
         if addr.is_ipv6() {
@@ -215,6 +261,34 @@ mod tests {
         let mut buf = [0u8; 2];
         c.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ok");
+    }
+
+    #[test]
+    fn probe_exclusive_tcp_refuses_a_port_a_reuseport_listener_holds() {
+        let held = bind_reuseport_tcp("127.0.0.1:0".parse().unwrap(), 16, false, false).unwrap();
+        let addr = held.local_addr().unwrap();
+        // A second shared bind joins silently: the duplicate-instance hazard.
+        bind_reuseport_tcp(addr, 16, false, false).expect("reuseport joins");
+        let err = probe_exclusive_tcp(addr, false, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn probe_exclusive_tcp_passes_on_a_free_port_and_leaves_it_free() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+        probe_exclusive_tcp(addr, false, false).unwrap();
+        bind_reuseport_tcp(addr, 16, false, false).expect("probe must not keep the port");
+    }
+
+    #[test]
+    fn probe_exclusive_udp_refuses_a_port_a_reuseport_socket_holds() {
+        let held = bind_reuseport_udp("127.0.0.1:0".parse().unwrap(), UdpMode::Plain).unwrap();
+        let addr = held.local_addr().unwrap();
+        bind_reuseport_udp(addr, UdpMode::Plain).expect("reuseport joins");
+        let err = probe_exclusive_udp(addr, UdpMode::Plain).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     #[test]

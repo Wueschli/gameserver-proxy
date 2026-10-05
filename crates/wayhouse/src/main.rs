@@ -445,7 +445,8 @@ async fn run(
         source_factory,
         cfg.gossip.clone(),
         cfg.workers,
-    );
+    )
+    .map_err(|e| anyhow::anyhow!("cannot start listeners: {e}"))?;
     let handle = runtime.handle();
     metrics::gauge!(wayhouse_core::metrics_defs::CONFIG_VERSION).set(reload::unix_now());
     // Build identity + fd headroom (docs/06 "Planned / not yet built", now

@@ -12,7 +12,7 @@ use crate::discovery::Discovery;
 use crate::drain::{ConnTracker, DEFAULT_SHUTDOWN_GRACE};
 use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
-use crate::listeners::ListenerManager;
+use crate::listeners::{BindError, ListenerManager, Reconciled};
 use crate::overlay::BackendOverlay;
 use crate::resolver::Resolvers;
 use crate::route_hint::RouteHints;
@@ -123,8 +123,9 @@ impl RuntimeHandle {
 
     /// Bring the running listener set in line with the current snapshot:
     /// spawn added listeners, stop removed ones, rebind changed ones. Call
-    /// after [`RuntimeHandle::store`]. Returns `(running, stopped)` counts.
-    pub async fn reconcile_listeners(&self) -> (usize, usize) {
+    /// after [`RuntimeHandle::store`]. A listener that cannot bind is listed in
+    /// [`Reconciled::failed`] and keeps its previous group running.
+    pub async fn reconcile_listeners(&self) -> Reconciled {
         let snap = self.snapshot.load_full();
         self.listeners.reconcile(&snap).await
     }
@@ -160,6 +161,10 @@ impl Runtime {
     /// each) plus the health checker. `workers == 0` means one per CPU core.
     /// `resolvers` are the external routing resolvers, built from config by the
     /// caller (empty map = none).
+    ///
+    /// # Panics
+    /// If a listener cannot bind. Production startup uses
+    /// [`Runtime::start_with_discovery`], which returns the error instead.
     pub fn start(initial: Arc<Snapshot>, resolvers: Arc<Resolvers>, workers: usize) -> Self {
         Self::start_with_geo(initial, resolvers, None, workers)
     }
@@ -167,6 +172,9 @@ impl Runtime {
     /// Like [`Runtime::start`], with a preloaded GeoIP database for listeners
     /// that declare a `geo` filter. The binary opens it (and fails startup if
     /// the path is bad); tests pass `None`.
+    ///
+    /// # Panics
+    /// If a listener cannot bind (see [`Runtime::start`]).
     pub fn start_with_geo(
         initial: Arc<Snapshot>,
         resolvers: Arc<Resolvers>,
@@ -186,6 +194,9 @@ impl Runtime {
     /// registry for listeners with a `sniffer:` route (phase 9). Empty by
     /// default — no sniffers ship in the binary; the `wayhouse` binary's plugin
     /// loader builds the registry.
+    ///
+    /// # Panics
+    /// If a listener cannot bind (see [`Runtime::start`]).
     pub fn start_with_sniffers(
         initial: Arc<Snapshot>,
         resolvers: Arc<Resolvers>,
@@ -203,6 +214,7 @@ impl Runtime {
             None,
             workers,
         )
+        .expect("a listener could not bind")
     }
 
     /// Like [`Runtime::start_with_sniffers`], plus backend discovery (phase 8):
@@ -216,6 +228,12 @@ impl Runtime {
     /// `gossip`, when `Some` (`settings.gossip`, phase 13), spawns the
     /// [`crate::gossip`] SWIM mesh task. Like `geo`/`sniffers`, it is
     /// startup-only — a reload does not start or stop the mesh.
+    ///
+    /// # Errors
+    /// A [`BindError`] if any listener's socket cannot be bound, including when
+    /// another process already holds the address (every listener socket sets
+    /// `SO_REUSEPORT`, which on its own would let a duplicate instance start
+    /// and share the port). Nothing is left running in that case.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::needless_pass_by_value)] // start-up hand-over: the runtime owns what it is given
     pub fn start_with_discovery(
@@ -227,7 +245,7 @@ impl Runtime {
         source_factory: Option<Arc<dyn SourceFactory>>,
         gossip: Option<wayhouse_config::GossipConfig>,
         workers: usize,
-    ) -> Self {
+    ) -> Result<Self, BindError> {
         let snapshot = Arc::new(ArcSwap::from(initial.clone()));
         let hints = RouteHints::new();
         let conns = ConnTracker::new();
@@ -261,7 +279,7 @@ impl Runtime {
             sniffers,
             worker_count,
         );
-        listeners.start_all(&initial);
+        listeners.start_all(&initial)?;
 
         // Spawned before the health task so it can hand `sweep` a
         // `GossipFabric` from the start (phase 13, docs/10 "Tier 2").
@@ -286,7 +304,7 @@ impl Runtime {
             mgr
         });
 
-        Self {
+        Ok(Self {
             snapshot,
             hints,
             conns,
@@ -298,7 +316,7 @@ impl Runtime {
             reload_requested,
             shutdown_tx,
             tasks,
-        }
+        })
     }
 
     pub fn handle(&self) -> RuntimeHandle {

@@ -84,6 +84,11 @@ pub const DISCOVERY_BACKENDS: &str = "wayhouse_discovery_backends";
 /// Counter. Labels: `result` (`ok` | `failed`).
 pub const CONFIG_RELOAD: &str = "wayhouse_config_reload_total";
 
+/// Counter. Labels: `listener`. A listener (re)bind that failed during a
+/// reload; the previous listener, if any, keeps running and the next reload
+/// retries.
+pub const LISTENER_BIND_FAILURES: &str = "wayhouse_listener_bind_failures_total";
+
 /// Gauge: unix timestamp of the last successfully applied config.
 pub const CONFIG_VERSION: &str = "wayhouse_config_version";
 

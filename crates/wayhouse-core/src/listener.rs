@@ -14,7 +14,6 @@ use crate::error::ListenerError;
 use crate::geo::GeoDb;
 use crate::limits::GlobalLimits;
 use crate::metrics_defs as m;
-use crate::net::bind_reuseport_tcp;
 use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
 use crate::route_hint::RouteHints;
@@ -35,7 +34,8 @@ const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const PEEK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 // Plumbing entry point: each argument is a distinct shared handle wired in by
-// `ListenerManager::spawn_group` (its only caller). Bundling them would just
+// `ListenerManager::spawn_group` (its only caller), which also binds `socket`
+// (see `net::bind_reuseport_tcp`) so a bind failure surfaces before any task runs. Bundling them would just
 // move the list into a struct literal there.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tcp_listener(
@@ -50,15 +50,11 @@ pub async fn run_tcp_listener(
     geo: Option<Arc<GeoDb>>,
     sniffers: Arc<Sniffers>,
     worker_id: usize,
+    socket: std::net::TcpListener,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), ListenerError> {
     let cfg = Arc::new(cfg);
-    let listener = TcpListener::from_std(bind_reuseport_tcp(
-        cfg.bind,
-        1024,
-        cfg.freebind,
-        cfg.transparent,
-    )?)?;
+    let listener = TcpListener::from_std(socket)?;
     crate::sniff::warn_if_missing(&cfg.name, &cfg.sniffers, &sniffers);
     tracing::info!(
         listener = %cfg.name,

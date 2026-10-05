@@ -43,7 +43,7 @@ pub use drain::{ConnGuard, ConnTracker, Proto, SessionInfo, SessionMeta, DEFAULT
 pub use error::{ListenerError, ProxyError, SourceError};
 pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
-pub use listeners::ListenerManager;
+pub use listeners::{BindError, ListenerManager, Reconciled};
 pub use overlay::BackendOverlay;
 pub use ratelimit::RateLimiter;
 pub use resolver::{

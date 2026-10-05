@@ -320,7 +320,8 @@ async fn runtime_reconciles_sources_when_backend_sources_change() {
         Some(Arc::new(FixedFactory)),
         None,
         1,
-    );
+    )
+    .unwrap();
     let handle = runtime.handle();
 
     // The refresh task's first tick populates the pool.
