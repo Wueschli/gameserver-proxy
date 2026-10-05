@@ -81,4 +81,4 @@
 
 ## Self-review
 
-Spec coverage: reject-before-write (T3), never block rescan or startup (T2), validator reusable by the registry install path (T1 signature takes bytes, so `POST /admin/sniffers/install` in the install plan calls the same function). Issue #183/#184 text still cites "#171 invalid .wasm"; fix the wording when closing (comment on both issues).
+Spec coverage: reject-before-write (T3), never block rescan or startup (T2), validator reusable by the registry install path (T1 signature takes bytes; the install plan's UI backend uses the same checks through the shared `wayhouse-registry` crate and the proxies re-run this validator on every upload). Issue #183/#184 text still cites "#171 invalid .wasm"; fix the wording when closing (comment on both issues).
