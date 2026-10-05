@@ -294,7 +294,6 @@ than here. Where the items that used to live here went:
 
 - v2 design ideas (CGNAT, HA with `--role slave`, gossip load signals, `failure_domain`
   discovery): [#65](https://github.com/wayhouse-proxy/wayhouse/issues/65)
-- The 25 s `boringtun` first handshake and the `ring` rebuild inside the tunnel lab: [#67](https://github.com/wayhouse-proxy/wayhouse/issues/67)
 - Open design questions: [#69](https://github.com/wayhouse-proxy/wayhouse/issues/69)
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
