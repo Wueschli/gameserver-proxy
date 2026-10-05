@@ -24,7 +24,7 @@ use reqwest::Method;
 
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, is_stale, ClaimError, Network, Rejection};
-use crate::ha::client::{propose_write, propose_write_as};
+use crate::ha::client::{propose_write, propose_write_as, ForwardHeaders};
 use crate::ha::cluster_state::ClusterState;
 use crate::ha::{HaHandle, WriteRequest, WriteResponse};
 
@@ -165,6 +165,7 @@ pub(super) async fn register<R: Registration>(
     reg: R,
     path: &str,
     body: String,
+    headers: &ForwardHeaders,
 ) -> Response {
     let words = wording(R::ROLE);
     let recorded = match recorded_network(ha) {
@@ -185,7 +186,7 @@ pub(super) async fn register<R: Registration>(
         if is_unchanged(&reg, &stored, assignment.address) {
             let now = (state.now_fn)();
             if is_stale(&assignment, now, TOUCH_AFTER) {
-                spawn_touch::<R>(ha, reg.name().to_owned(), now, path, body);
+                spawn_touch::<R>(ha, reg.name().to_owned(), now, path, body, headers);
             }
             return submitted(revision, assignment.address, recorded);
         }
@@ -196,7 +197,7 @@ pub(super) async fn register<R: Registration>(
     }
     let name = reg.name().to_owned();
     let req = reg.register_request((state.now_fn)());
-    propose_write(&ha.handle, req, path, body, None, |resp| match resp {
+    propose_write(&ha.handle, req, path, body, headers, |resp| match resp {
         WriteResponse::Registered { revision, address } => {
             tracing::info!(revision, name = %name, %address, "registered a {}", words.kind);
             submitted(revision, address, recorded)
@@ -210,8 +211,16 @@ pub(super) async fn register<R: Registration>(
 /// Proposes a `Touch` for `name` without waiting for it: a lost touch only
 /// means the next re-registration proposes it again. A follower forwards the
 /// registration itself, so the leader runs the same check and touches.
-fn spawn_touch<R: Registration>(ha: &RegistryHa, name: String, now: u64, path: &str, body: String) {
+fn spawn_touch<R: Registration>(
+    ha: &RegistryHa,
+    name: String,
+    now: u64,
+    path: &str,
+    body: String,
+    headers: &ForwardHeaders,
+) {
     let handle = ha.handle.clone();
+    let headers = headers.clone();
     let path = path.to_owned();
     tokio::spawn(async move {
         let req = WriteRequest::Touch {
@@ -219,7 +228,7 @@ fn spawn_touch<R: Registration>(ha: &RegistryHa, name: String, now: u64, path: &
             name,
             now,
         };
-        let resp = propose_write(&handle, req, &path, body, None, |resp| match resp {
+        let resp = propose_write(&handle, req, &path, body, &headers, |resp| match resp {
             WriteResponse::Touched => StatusCode::OK.into_response(),
             other => {
                 tracing::debug!(?other, "a background touch changed nothing");
@@ -238,6 +247,7 @@ pub(super) async fn release<R: Registration>(
     ha: &RegistryHa,
     name: String,
     path: &str,
+    headers: &ForwardHeaders,
 ) -> Response {
     let words = wording(R::ROLE);
     let recorded = match recorded_network(ha) {
@@ -257,7 +267,7 @@ pub(super) async fn release<R: Registration>(
         Method::DELETE,
         path,
         String::new(),
-        None,
+        headers,
         |resp| match resp {
             WriteResponse::Released { revision, address } => {
                 tracing::info!(revision, name = %name, ?address, "released a {}", words.kind);
