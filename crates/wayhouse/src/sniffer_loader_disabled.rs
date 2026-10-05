@@ -10,13 +10,24 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
-use wayhouse_config::SniffersConfig;
+use wayhouse_config::{SnifferModulePin, SniffersConfig};
 use wayhouse_core::sniff::{Sniffer, Sniffers};
 
 /// Never constructed; see the module doc.
 pub enum SnifferLoader {}
 
+/// Same cap as the full build, so the admin route compiles unchanged.
+pub const MAX_MODULE_BYTES: usize = 8 * 1024 * 1024;
+
 impl SnifferLoader {
+    pub fn pins(&self) -> Vec<SnifferModulePin> {
+        match *self {}
+    }
+
+    pub fn validate(&self, _bytes: &[u8], _max_memory_bytes: usize) -> Result<(), String> {
+        match *self {}
+    }
+
     pub fn scan(&self, _cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
         match *self {}
     }
