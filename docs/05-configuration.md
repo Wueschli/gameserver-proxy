@@ -24,8 +24,9 @@
 > | weighted` (scalar, not an object) — `consistent_hash` also reads a pool-level
 > `hash_on: src_ip | src_ip_port` (default `src_ip`), and `weighted` a pool-level
 > `weights: { "ip:port": N }` map (weight `>= 1`, default 1), each rejected on the
-> other balancers; `health_check.type: tcp_connect | udp_probe` with `send_hex` /
-> `expect_hex_prefix` for `udp_probe`; `per_backend.max_sessions`; and
+> other balancers; `health_check.type: tcp_connect | udp_probe | none` with
+> `send_hex` / `expect_hex_prefix` for `udp_probe` (see "Health checks" below);
+> `per_backend.max_sessions`; and
 > `proxy_protocol: none | v1 | v2 | v2-udp` (scalar). `v1`/`v2` are TCP-only,
 > `v2-udp` UDP-only; the form must match the transport of the listeners that
 > statically route to the pool (validated).
@@ -305,7 +306,7 @@ pools:
     balancer: { strategy: consistent_hash, hash_on: src_ip }
     affinity: { table_ttl_sec: 120 }
     health_check:
-      type: udp_probe          # tcp_connect | udp_probe | http
+      type: udp_probe          # tcp_connect | udp_probe | none | http
       send_hex: "01"
       expect_hex_prefix: "02"
       interval_sec: 2
@@ -532,3 +533,25 @@ rolling update of many pods costs one fetch, not one per event.
 | `settings.sniffers.dir` contents changed (module added / removed / recompiled), or a `modules[].config` string changed | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
 | `settings.sniffers` block added / removed, or `call_timeout_ms` / `max_memory_bytes` changed | requires a restart — the `wasmtime::Engine` and its epoch-ticker thread are built once at startup, like `settings.workers` |
 | Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |
+
+## Health checks
+
+- `health_check.type` defaults to `tcp_connect`, which can never succeed against a
+  UDP-only backend. A pool that only UDP listeners route to and that leaves `type`
+  out is therefore **rejected** at load: pick `udp_probe` (with `send_hex`, and
+  `expect_hex_prefix` if the reply is recognisable) or `none`. A pool shared with a
+  TCP listener keeps the default; an explicit `type` is always accepted.
+- `none` runs no active probe, for a game with no probe payload. Health then comes
+  from passive observations alone: a UDP ICMP port-unreachable, a failed upstream
+  send or a TCP connect failure counts against a backend, and a backend marked
+  unhealthy is given another chance after one `interval_sec` (re-admitted after
+  `rise` such intervals), since nothing else could ever bring it back.
+- For UDP, a successful `send()` is **not** a passive success (it succeeds whether or
+  not anything listens). The first reply datagram of a session is.
+- A proxy-side shortage (`EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS`, `EADDRNOTAVAIL`)
+  while opening a socket, for a probe or for a session, is not counted for or
+  against the backend.
+- Probes run in the background, at most 256 at once; the first check of each
+  backend is spread over one `interval_sec`. A slow probe does not delay the
+  others, and a backend is never probed twice at once.
+- `idle_timeout_sec` must be greater than 0 (as for the other timeouts).

@@ -235,7 +235,7 @@ async fn run_latency(args: &Args) -> Result<bool> {
         let backend = spawn_udp_echo().await;
         let proxy_addr = free_addr();
         let cfg = gsp_config::parse_str(&format!(
-            "pools:\n  - {{ name: p, targets: [\"{backend}\"] }}\n\
+            "pools:\n  - {{ name: p, targets: [\"{backend}\"], health_check: {{ type: none }} }}\n\
              listeners:\n  - {{ name: l, bind: \"{proxy_addr}\", protocol: udp, pool: p }}\n"
         ))?;
         let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), args.workers);

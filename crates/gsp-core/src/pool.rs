@@ -15,6 +15,7 @@ use std::time::Duration;
 use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig, ProxyProtocol};
 
 use crate::metrics_defs as m;
+use crate::util::mono_ms;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PickError {
@@ -92,7 +93,10 @@ pub struct Backend {
     domain_down: AtomicBool,
     admin_state: AtomicU8,
     active: AtomicUsize,
-    last_check_ms: AtomicU64,
+    /// `mono_ms` at which the next active probe is due.
+    next_check_ms: AtomicU64,
+    /// An active probe is in flight, so the sweep must not start another.
+    probing: AtomicBool,
     streaks: Mutex<Streaks>,
     rise: u32,
     fall: u32,
@@ -103,6 +107,13 @@ pub struct Backend {
     /// Relative share for `Balancer::Weighted` (>= 1); `1` for every other
     /// balancer.
     weight: u32,
+}
+
+/// Deterministic offset in `[0, interval)` derived from the address.
+fn first_check_jitter_ms(addr: SocketAddr, interval: Duration) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    addr.hash(&mut h);
+    h.finish() % (interval.as_millis() as u64).max(1)
 }
 
 impl Backend {
@@ -124,7 +135,11 @@ impl Backend {
             domain_down: AtomicBool::new(initially_domain_down),
             admin_state: AtomicU8::new(initial_state.to_u8()),
             active: AtomicUsize::new(0),
-            last_check_ms: AtomicU64::new(0),
+            // Spread first checks over one interval, per backend, so a pool
+            // that appears all at once (startup, reload, discovery) does not
+            // probe everything in the same instant.
+            next_check_ms: AtomicU64::new(mono_ms() + first_check_jitter_ms(addr, hc.interval)),
+            probing: AtomicBool::new(false),
             streaks: Mutex::new(Streaks::default()),
             rise: hc.rise,
             fall: hc.fall,
@@ -203,13 +218,42 @@ impl Backend {
         &self.check_kind
     }
 
-    pub(crate) fn due_for_check(&self, now_ms: u64) -> bool {
-        let last = self.last_check_ms.load(Ordering::Relaxed);
-        last == 0 || now_ms.saturating_sub(last) >= self.check_interval.as_millis() as u64
+    /// Claims the backend for an active probe: true when one is due and none is
+    /// in flight. The caller must call [`Backend::finish_probe`] afterwards.
+    pub(crate) fn begin_probe(&self, now_ms: u64) -> bool {
+        if now_ms < self.next_check_ms.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self
+            .probing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        self.next_check_ms.store(
+            now_ms + self.check_interval.as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        true
     }
 
-    pub(crate) fn mark_checked(&self, now_ms: u64) {
-        self.last_check_ms.store(now_ms, Ordering::Relaxed);
+    pub(crate) fn finish_probe(&self) {
+        self.probing.store(false, Ordering::Release);
+    }
+
+    /// This instance's own verdict, for the sweep's `none` recovery path.
+    pub(crate) fn locally_healthy(&self) -> bool {
+        self.local_healthy()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_due(&self) {
+        self.next_check_ms.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_due(&self, now_ms: u64) -> bool {
+        now_ms >= self.next_check_ms.load(Ordering::Relaxed)
     }
 
     /// Feed a health observation (active check result or passive connect

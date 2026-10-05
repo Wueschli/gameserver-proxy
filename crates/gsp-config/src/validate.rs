@@ -193,6 +193,8 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
 
     let mut pool_names = BTreeSet::new();
     let mut pools = Vec::with_capacity(raw.pools.len());
+    // Pools that left `health_check.type` out, so they got the TCP default.
+    let mut implicit_hc_pools = BTreeSet::new();
     for p in raw.pools {
         if !pool_names.insert(p.name.clone()) {
             return Err(Invalid(format!("duplicate pool name: {}", p.name)));
@@ -243,8 +245,11 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         }
 
         let hc = &p.health_check;
-        let hc_kind = match hc.kind.as_str() {
-            "tcp_connect" => {
+        if hc.kind.is_none() {
+            implicit_hc_pools.insert(p.name.clone());
+        }
+        let hc_kind = match hc.kind.as_deref().unwrap_or("tcp_connect") {
+            kind @ ("tcp_connect" | "none") => {
                 if hc.send_hex.is_some() || hc.expect_hex_prefix.is_some() {
                     return Err(Invalid(format!(
                         "pool {}: send_hex / expect_hex_prefix only apply to health_check.type \
@@ -252,7 +257,11 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                         p.name
                     )));
                 }
-                HealthCheckKind::TcpConnect
+                if kind == "none" {
+                    HealthCheckKind::None
+                } else {
+                    HealthCheckKind::TcpConnect
+                }
             }
             "udp_probe" => {
                 let send = match &hc.send_hex {
@@ -289,7 +298,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             other => {
                 return Err(Invalid(format!(
                     "pool {}: health_check.type {other:?} is not supported \
-                     (tcp_connect | udp_probe)",
+                     (tcp_connect | udp_probe | none)",
                     p.name
                 )))
             }
@@ -303,6 +312,12 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
         if hc.rise == 0 || hc.fall == 0 {
             return Err(Invalid(format!(
                 "pool {}: health_check rise and fall must be >= 1",
+                p.name
+            )));
+        }
+        if p.idle_timeout_sec == 0 {
+            return Err(Invalid(format!(
+                "pool {}: idle_timeout_sec must be > 0",
                 p.name
             )));
         }
@@ -749,6 +764,35 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             per_source,
             rate_limit,
         });
+    }
+
+    // The default `tcp_connect` probe can never succeed against a UDP-only
+    // backend, so a pool used only by UDP listeners must pick its check.
+    for p in &pools {
+        if !implicit_hc_pools.contains(&p.name) {
+            continue;
+        }
+        let (mut on_tcp, mut on_udp) = (false, false);
+        for l in &listeners {
+            let uses = l
+                .routes
+                .iter()
+                .any(|r| matches!(&r.action, Action::Pool(n) if n == &p.name));
+            if uses {
+                match l.protocol {
+                    Protocol::Tcp => on_tcp = true,
+                    Protocol::Udp => on_udp = true,
+                }
+            }
+        }
+        if on_udp && !on_tcp {
+            return Err(Invalid(format!(
+                "pool {}: only UDP listeners use this pool, so the default tcp_connect health \
+                 check would mark every backend unhealthy; set health_check.type to udp_probe \
+                 (with send_hex) or none (passive observations only)",
+                p.name
+            )));
+        }
     }
 
     // `proxy_protocol` form must match the transport of the listeners that use
