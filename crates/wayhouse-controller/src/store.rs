@@ -429,6 +429,43 @@ impl Store {
     }
 }
 
+/// Where a `slave` tier's upward relay stands: the highest parent revision
+/// this log has absorbed. A sibling `sled` tree of the log it belongs to, so
+/// it joins the transaction that lands each relayed revision (and is
+/// replaced with the log by a Raft snapshot install). Under HA the cursor is
+/// therefore replicated state: a newly elected leader resumes the relay
+/// where the group left off, and a stale proposal (`parent_revision` not
+/// above the cursor) is recognisably a duplicate.
+#[derive(Clone)]
+pub struct RelayCursor(sled::Tree);
+
+const RELAY_CURSOR_KEY: &[u8] = b"parent";
+
+impl RelayCursor {
+    pub fn open(db: &sled::Db) -> Result<Self, sled::Error> {
+        Ok(RelayCursor(db.open_tree("relay_cursor")?))
+    }
+
+    /// The highest absorbed parent revision; `0` before anything was relayed.
+    pub fn get(&self) -> Result<u64, StoreError> {
+        Ok(self.0.get(RELAY_CURSOR_KEY)?.map_or(0, |v| decode_rev(&v)))
+    }
+
+    /// The sibling write that moves the cursor to `parent_revision`.
+    pub fn write(&self, parent_revision: u64) -> SiblingWrite<'_> {
+        SiblingWrite {
+            tree: &self.0,
+            key: RELAY_CURSOR_KEY.to_vec(),
+            value: Some(encode_rev(parent_revision).to_vec()),
+        }
+    }
+
+    /// The tree itself, for [`Store::replace_all_with`]'s `clear` list.
+    pub fn tree(&self) -> &sled::Tree {
+        &self.0
+    }
+}
+
 fn encode_rev(rev: u64) -> [u8; 8] {
     rev.to_be_bytes()
 }

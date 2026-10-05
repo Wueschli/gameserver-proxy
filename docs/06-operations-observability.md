@@ -379,9 +379,13 @@ whichever replica gets the request, straight from its own local copy — not
 a linearizable read, a deliberate relaxation justified in `docs/10`
 "Intra-tier HA (design)". `--ha-token` gates the new peer-only `/raft/*`
 routes (`append`, `vote`, `snapshot`) — a separate secret from
-`--auth-token`. **Mutually exclusive with `--role slave` in this release**
-(rejected at startup) — see `docs/10` for the scope cut and what combining
-them would need.
+`--auth-token`. **HA combines with `--role slave`** (2026-10-05): only the
+Raft leader subscribes to the parent and proposes each relayed revision into
+the group; the relay cursor (the highest parent revision absorbed, one per
+log) is replicated with the log, so a newly elected leader resumes where the
+group left off and a duplicate proposal is skipped. Start every replica with
+the same `--role slave --parent-url ...`. `POST /admin/adopt` is refused on an
+HA controller (the role is a per-node setting).
 
 **Staged / canary rollout (phase 12 slice 7)**: `POST /config?stage=canary
 &group=<name>` submits a revision visible only to a subscriber reporting
@@ -468,7 +472,10 @@ token. Everything else is a thin, header-preserving proxy:
 (`--controller-url`/`--controller-token`), and `GET /ws/fleet` — a browser
 WebSocket fed by one shared subscription to the aggregator's
 `/fleet/subscribe` (one aggregator connection total, fanned out to every
-connected browser, not one per tab). `--static-dir` (default
+connected browser, not one per tab). An open socket does not outlive its
+session: it re-checks the session every 30 s and before each outgoing message,
+and closes with code 1008 after logout, idle timeout, max age or eviction (the
+check doesn't count as activity, so a tab left open still idles out). `--static-dir` (default
 `crates/wayhouse-ui/web/dist`, built by `make ui`) serves the React/Vite/TS
 frontend as a fallback under whatever the API routes above don't claim — it's
 the one process, one port an operator's browser ever talks to. Either proxy
