@@ -1,4 +1,5 @@
-//! The one place the fleet binaries build outbound HTTP clients.
+//! The one place the fleet binaries build outbound HTTP clients — and, with the
+//! `server` feature, serve HTTPS themselves (the `tls` module, native TLS).
 //!
 //! `reqwest`'s `rustls-tls` trusts only the Mozilla roots compiled into the
 //! binary. `--ca-file` adds an operator's own CAs (a private or internal CA, a
@@ -9,6 +10,22 @@
 //! threaded through every call site. Not set means exactly the old behaviour.
 //! [`builder`] / [`client`] still build a fresh client per call, so call sites
 //! keep their existing connection and timeout semantics.
+
+// The commit-SHA choice made by `build.rs`; compiled here only so its tests run.
+#[cfg(test)]
+#[path = "../build_sha.rs"]
+mod build_sha;
+
+#[cfg(feature = "server")]
+pub mod metrics;
+#[cfg(feature = "server")]
+pub mod policy;
+pub mod sse;
+#[cfg(feature = "server")]
+pub mod tls;
+
+#[cfg(feature = "server")]
+pub mod server;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -93,17 +110,58 @@ pub fn client() -> Client {
 /// `reqwest::Error`'s own `Display` stops at "error sending request for url
 /// (…)", hiding the cause (a refused connection, an untrusted certificate);
 /// use this wherever an HTTP error becomes text. A source whose text the
-/// message already contains is skipped, since hyper/reqwest often repeat it.
+/// message already ends with (at a `": "` boundary, or the whole message) is
+/// skipped, since hyper/reqwest often repeat it; a short source that merely
+/// appears somewhere inside an earlier message is kept.
 pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     let mut out = e.to_string();
     let mut next = e.source();
     while let Some(src) = next {
         let text = src.to_string();
-        if !out.contains(&text) {
+        if out != text && !out.ends_with(&format!(": {text}")) {
             out.push_str(": ");
             out.push_str(&text);
         }
         next = src.source();
     }
     out
+}
+
+/// Compares a presented bearer token / password against the expected one in
+/// time that does not depend on *where* the two first differ, so a network
+/// attacker cannot recover a secret byte by byte from response timing (which
+/// `==` on `str` allows: it returns at the first mismatching byte). The loop
+/// always runs over the expected secret's length, so the presented value's
+/// length doesn't change the timing either; a length mismatch is folded into
+/// the result instead of returning early.
+pub fn token_eq(presented: &str, expected: &str) -> bool {
+    let (a, b) = (presented.as_bytes(), expected.as_bytes());
+    let mut diff = u8::from(a.len() != b.len());
+    for (i, y) in b.iter().enumerate() {
+        diff |= a.get(i).copied().unwrap_or(0) ^ y;
+    }
+    std::hint::black_box(diff) == 0
+}
+
+#[cfg(test)]
+mod token_eq_tests {
+    use super::token_eq;
+
+    #[test]
+    fn equal_tokens_match() {
+        assert!(token_eq("secret-token", "secret-token"));
+        assert!(token_eq("", ""));
+    }
+
+    #[test]
+    fn different_tokens_do_not_match() {
+        assert!(!token_eq("secret-tokeN", "secret-token"));
+        assert!(!token_eq("Xecret-token", "secret-token"));
+        assert!(!token_eq("secret", "secret-token"));
+        assert!(!token_eq("secret-token-longer", "secret-token"));
+        assert!(!token_eq("", "secret-token"));
+        assert!(!token_eq("secret-token", ""));
+        // A prefix padded with NULs must not match: the length check counts.
+        assert!(!token_eq("secret\0\0\0\0\0\0", "secret"));
+    }
 }

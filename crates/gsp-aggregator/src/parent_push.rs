@@ -124,6 +124,7 @@ mod tests {
         let received: Arc<Mutex<Vec<IngestPayload>>> = Arc::new(Mutex::new(Vec::new()));
         let received_clone = received.clone();
 
+        #[allow(clippy::items_after_statements)] // test-local items sit next to their only use
         async fn capture(
             State(store): State<Arc<Mutex<Vec<IngestPayload>>>>,
             Json(payload): Json<IngestPayload>,

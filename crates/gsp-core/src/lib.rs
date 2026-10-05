@@ -5,12 +5,17 @@
 //! Roadmap status (`docs/08-roadmap.md`): phases 1–2 — TCP and UDP forwarding,
 //! round-robin / least-connections balancing, per-backend session caps,
 //! active `tcp_connect` / `udp_probe` health checks with passive failure
-//! feedback, per-worker UDP session tables with `src_ip` affinity, and hot
+//! feedback, per-worker UDP session tables, and hot
 //! reload via an atomic snapshot swap.
 
 pub mod discovery;
 pub mod drain;
+pub mod error;
 pub mod geo;
+#[cfg(feature = "gossip")]
+pub mod gossip;
+#[cfg(not(feature = "gossip"))]
+#[path = "gossip_disabled.rs"]
 pub mod gossip;
 pub mod health;
 pub mod limits;
@@ -35,6 +40,7 @@ mod util;
 
 pub use discovery::{refresh_loop, BackendSource, Discovery};
 pub use drain::{ConnGuard, ConnTracker, Proto, SessionInfo, SessionMeta, DEFAULT_SHUTDOWN_GRACE};
+pub use error::{ListenerError, ProxyError, SourceError};
 pub use geo::GeoDb;
 pub use limits::{GlobalLimits, LimitGuard};
 pub use listeners::ListenerManager;

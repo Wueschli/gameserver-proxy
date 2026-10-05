@@ -60,6 +60,7 @@ mod header_contract {
         ("GET", "/api/config/revisions"),
         ("GET", "/api/config/revisions/1"),
         ("GET", "/api/config/revisions/1/diff?against=2"),
+        ("GET", "/api/tunnel/addresses"),
         // controller_proxy: admin writes
         ("POST", "/api/config"),
         ("POST", "/api/config/rollback/1"),

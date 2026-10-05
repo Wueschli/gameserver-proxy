@@ -43,7 +43,7 @@ async fn forwards_tcp_bytes_end_to_end() {
     );
     let cfg = parse_str(&yaml).unwrap();
     let snapshot: Arc<Snapshot> = Snapshot::from_config(&cfg);
-    let runtime = Runtime::start(snapshot, Default::default(), 1);
+    let runtime = Runtime::start(snapshot, Arc::default(), 1);
 
     // Let the listener bind.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -61,6 +61,7 @@ async fn forwards_tcp_bytes_end_to_end() {
 }
 
 #[tokio::test]
+#[allow(clippy::items_after_statements)] // test-local items sit next to their only use
 async fn splice_forwards_a_large_stream_and_propagates_half_close() {
     // Echo backend that closes its side once the client half-closes.
     let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -92,7 +93,7 @@ async fn splice_forwards_a_large_stream_and_propagates_half_close() {
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let stream = TcpStream::connect(proxy_addr).await.unwrap();
@@ -166,7 +167,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut successes = 0;
@@ -331,7 +332,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut c1 = TcpStream::connect(p1).await.unwrap();
@@ -379,7 +380,7 @@ listeners:
     );
     let cfg = parse_str(&yaml).unwrap();
     assert_eq!(cfg.listeners[0].extra_binds.len(), 1);
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut c1 = TcpStream::connect(("127.0.0.1", lo)).await.unwrap();
@@ -419,7 +420,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Drain backend A: every new connection must now land on B.
@@ -465,7 +466,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Same source IP (127.0.0.1), different ephemeral ports each connection.
@@ -545,7 +546,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hit_mark = |host: &'static str| async move {
@@ -591,7 +592,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hello = client_hello("frankfurt.eu.example.com");
@@ -641,7 +642,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let hit = || async {
@@ -703,7 +704,7 @@ async fn shutdown_drains_in_flight_connections_then_returns_early() {
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut c = TcpStream::connect(proxy).await.unwrap();
@@ -762,7 +763,7 @@ async fn sessions_registry_lists_a_live_connection_with_its_pool_and_backend() {
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -804,7 +805,7 @@ async fn admin_drain_flips_readiness_without_stopping_the_data_path() {
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -842,7 +843,7 @@ async fn reload_adds_removes_and_rebinds_listeners_at_runtime() {
     );
     // Start with just l1.
     let cfg = parse_str(&only_l1).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -938,7 +939,7 @@ async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut client = TcpStream::connect(proxy_addr).await.unwrap();
@@ -1005,7 +1006,7 @@ async fn acl_deny_drops_the_connection_before_routing() {
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n    deny: [\"127.0.0.1/32\"]\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
 
     // The proxy accepts the TCP connection then drops it without connecting a
     // backend: the client sees EOF and never gets its bytes echoed.
@@ -1050,7 +1051,7 @@ async fn rate_limit_drops_connections_past_the_burst() {
          \x20   rate_limit:\n      per_ip: {{ rate: 1, burst: 2 }}\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut forwarded = 0;
@@ -1102,7 +1103,7 @@ async fn global_max_connections_caps_live_tcp() {
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Two long-lived connections fill the cap.
@@ -1172,7 +1173,7 @@ async fn geo_filter_denies_unlisted_country() {
     let geo = gsp_core::GeoDb::open(cfg.geo_db.as_ref().unwrap()).unwrap();
     let runtime = gsp_core::Runtime::start_with_geo(
         Snapshot::from_config(&cfg),
-        Default::default(),
+        Arc::default(),
         Some(geo),
         1,
     );
@@ -1215,7 +1216,7 @@ async fn per_source_cap_limits_concurrent_connections_from_one_ip() {
          \x20   per_source:\n      max_per_ip: 2\n"
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Two long-lived connections from loopback fill the per-IP cap.

@@ -12,9 +12,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Query, Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -26,7 +25,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::IntentOp;
 use crate::role::{Role, RoleHandle};
-use crate::store::{RevisionBytes, Store, StoreError};
+use crate::store::{Applied, RevisionBytes, Store, StoreError};
 
 const UPDATES_CAPACITY: usize = 64;
 
@@ -71,6 +70,20 @@ impl IntentState {
         let _ = self.updates.send(revision);
         Ok(revision)
     }
+
+    /// The Raft-apply form of [`Self::apply_revision`]: the revision and
+    /// the store's `applied_index` land in one transaction, and a replay of
+    /// an already-absorbed log `index` writes nothing. `Ok(None)` = already
+    /// applied.
+    pub fn apply_entry(&self, index: u64, bytes: RevisionBytes) -> Result<Option<u64>, StoreError> {
+        match self.store.put_applied(bytes, index)? {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
 }
 
 pub fn router(state: IntentState) -> Router {
@@ -78,28 +91,10 @@ pub fn router(state: IntentState) -> Router {
         .route("/intent", axum::routing::post(submit_intent))
         .route("/intent/subscribe", get(subscribe))
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
         ))
         .with_state(state)
-}
-
-/// Mirrors `crate::auth::require_bearer` exactly, just typed against
-/// [`IntentState`] instead of `crate::api::AppState` — two distinct `axum`
-/// states can't share one `State<T>`-typed middleware function.
-async fn require_bearer(State(state): State<IntentState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
-    }
 }
 
 #[derive(Serialize)]
@@ -115,7 +110,11 @@ struct ErrorResponse {
 /// `POST /intent` — body is one JSON [`IntentOp`]. Validated
 /// ([`IntentOp::validate`]) and structurally parsed before it ever reaches
 /// the store — a malformed or invalid op is rejected here, never broadcast.
-async fn submit_intent(State(state): State<IntentState>, body: String) -> Response {
+async fn submit_intent(
+    State(state): State<IntentState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> Response {
     if state.role.get() == Role::Slave {
         return (
             StatusCode::FORBIDDEN,
@@ -154,7 +153,8 @@ async fn submit_intent(State(state): State<IntentState>, body: String) -> Respon
             crate::ha::WriteRequest::Intent(body.clone().into_bytes()),
             "/intent",
             body,
-            None, // intent has no audit-trail actor in this slice — config only
+            &crate::ha::client::ForwardHeaders::from_headers(&headers),
+            crate::ha::client::revision_response,
         )
         .await;
     }
@@ -212,24 +212,14 @@ async fn subscribe_worker(
     loop {
         match updates.recv().await {
             Ok(revision) if revision <= last_sent => {}
-            Ok(revision) => match store.get(revision) {
-                Ok(Some(bytes)) => {
-                    if tx.send((revision, bytes)).await.is_err() {
-                        return;
-                    }
-                    last_sent = revision;
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        revision,
-                        "update notification for an intent revision store lost"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "store error tailing intent updates");
+            // Replay from the cursor rather than fetching just `revision`: a
+            // snapshot install wakes once, for its newest revision, and the
+            // ones before it must still be sent.
+            Ok(_) => {
+                if !catch_up(&store, &mut last_sent, &tx).await {
                     return;
                 }
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     skipped,
@@ -265,6 +255,7 @@ async fn catch_up(
     true
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as a `map_err` callback, which hands the error over by value
 fn store_error_response(e: StoreError) -> Response {
     tracing::error!(error = %e, "store error serving the intent API");
     (

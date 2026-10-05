@@ -22,10 +22,12 @@
 - `gsp_bytes_total{listener,dir}` – `dir` = `c2s|s2c`. No `pool` label.
 - `gsp_packets_total{listener,dir}` (UDP). No `pool` label.
 - `gsp_datagrams_dropped_total{listener,reason}` — v0 `reason` =
-  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject`
+  `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject|pending_full`
   (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`;
   `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised;
-  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply)
+  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply;
+  `pending_full`: a new session's external resolver call is still in flight and the
+  per-worker pending cap (1024 sessions, 1 MiB buffered) or the per-session buffer (4 datagrams) is full)
 
 ### Upstream / pool
 - `gsp_pool_backends{pool,state}` (gauge; `state` = healthy|unhealthy|draining|disabled)
@@ -44,9 +46,11 @@
 
 ### Backend discovery (phase 8)
 - `gsp_discovery_refresh_total{pool,kind,result}` – `kind` =
-  `dns_srv|consul|kubernetes`; `result` = `ok|empty|error`. One per refresh
-  attempt. `empty` / `error` keep the last-known-good backend set (the pool is
-  never cleared by a failed refresh).
+  `dns_srv|consul|kubernetes|tunnel`; `result` = `ok|empty|error|withdrawn`. One
+  per refresh attempt. `empty` / `error` keep the last-known-good backend set (the
+  pool is never cleared by a failed refresh). `withdrawn` (`tunnel` only) means the
+  controller deleted or expired an origin this proxy had seen: the pool's set is
+  cleared.
 - `gsp_discovery_backends{pool}` (gauge) – addresses returned by the pool's
   source at its last successful refresh.
 
@@ -77,9 +81,12 @@
 
 ### Proxy internals
 - `gsp_config_reload_total{result}` / `gsp_config_version` (gauge, timestamp)
-- `gsp_build_info{version,commit}` (gauge, always `1`) — set once at startup;
-  `commit` is a 12-char git SHA baked in at build time (`crates/gsp/build.rs`,
-  `"unknown"` if `.git` isn't available, e.g. a source tarball).
+- `gsp_build_info{component,version,commit}` (gauge, always `1`) — set once at
+  startup; the same label set on `gsp` (`component="gsp"`) and every fleet
+  binary. `commit` is a 12-char git SHA baked in at build time
+  (`crates/gsp-http/build.rs`): the `GSP_GIT_SHA` environment variable if set
+  (the Docker build arg, since the build has no `.git`), else `git rev-parse`,
+  else `"unknown"` (e.g. a source tarball).
 - `gsp_fd_open` (gauge, no labels) — this process's open file descriptor count
   (`/proc/self/fd` on Linux; absent elsewhere), sampled every 5 s by a small
   background task (`crates/gsp/src/procinfo.rs`), independent of the
@@ -87,6 +94,14 @@
 - `gsp_fd_limit` (gauge, no labels) — this process's `RLIMIT_NOFILE` soft
   limit (`getrlimit`, via `nix`), sampled once at startup (it doesn't change
   at runtime).
+- `gsp_tls_handshakes_refused_total{reason="per_source"|"rate"}` (counter) — TLS
+  connections to the admin API closed at the door: the source already had its cap
+  of handshakes in flight, or was opening connections faster than its rate.
+  Counted in `gsp-http` (its name lives in `gsp_http::tls`, not `metrics_defs.rs`,
+  which `gsp-http` cannot depend on). Exposed on `gsp`'s `/metrics` and on the
+  fleet binaries' (below). Present only when that listener serves TLS.
+- `gsp_tls_handshakes_evicted_total` (counter, no labels) — pending handshakes
+  dropped to make room at the global cap (same notes).
 - `gsp_gossip_members` (gauge, no labels) — current SWIM member count in this
   instance's Tier-2 gossip mesh (phase 13, `docs/10` "Tier 2", `gsp-core::
   gossip`). Present only when `settings.gossip` is set.
@@ -95,6 +110,9 @@
 - `gsp_gossip_auth_rejected_total` (counter, no labels, phase 13) — gossip
   datagrams dropped for a missing/invalid HMAC tag; never trusted, never
   forwarded to the SWIM state machine.
+- `gsp_gossip_stale_rejected_total` (counter, no labels) — authentic gossip
+  datagrams dropped because their sender timestamp is more than 30 s from this
+  node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `gsp_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.
   Independent of, and unable to clear, the backend's own local `healthy`
@@ -260,9 +278,20 @@ Three additional, independent binaries. Originally a single-tier PoC
 (phase 10+11); the `docs/10` `standalone`/`slave` hierarchy, intra-tier HA,
 adoption, staged/canary rollout, RBAC, and moving operator intent into the
 controller's revision log are phase 12 — **all built**, documented per-flag in
-the subsections below. None of them expose `GET /metrics`; the Prometheus
-surface stays per-`gsp`-instance as above. All three serve unauthenticated
+the subsections below. All three serve unauthenticated
 `GET /healthz` for liveness regardless of their auth settings below.
+
+**`GET /metrics` on the fleet binaries.** Each serves a Prometheus endpoint
+(`gsp_http::metrics`) with `gsp_build_info{component,version,commit}` and the TLS handshake
+counters above. It is gated like the rest of the binary's API: on `gsp-controller` and
+`gsp-aggregator` by `--auth-token` (`Authorization: Bearer`, open when no token is set),
+unless a dedicated `--metrics-token` (at least 16 bytes) is given: then `/metrics`
+accepts only that token (not the admin token) and the token opens nothing else, so
+Prometheus never holds the admin secret. `gsp-ui` has only `--metrics-token`, because a
+scraper cannot hold the UI's browser session. A `gsp-ui` with a login configured and no
+`--metrics-token` does not serve `/metrics` at all; an open UI (no login) serves it
+open. Per-request or per-store metrics for these binaries are not built; the
+per-instance proxy surface stays on each `gsp`.
 
 ### `gsp-controller` — structural config distribution
 
@@ -418,7 +447,9 @@ Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
 that couldn't be reached; a broadcast never fails or blocks on one bad
 instance. A `gsp` instance opts in with `--aggregator <url>` (+
 `--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
-default 10s) — independent of `--controller`, pushing state and pulling
+default 10s, and `--aggregator-admin-url`, the base URL the aggregator should
+fan out to when `http(s)://<settings.admin.listen>` is not reachable from it,
+e.g. in a container, behind NAT or a TLS terminator) — independent of `--controller`, pushing state and pulling
 config are unrelated axes.
 
 ### `gsp-ui` — the operator dashboard's BFF
@@ -454,6 +485,11 @@ two login modes, mutually exclusive.
 
 With neither flag, the UI is fully open and every session is implicitly
 `admin` — same posture every other optional-auth surface in this fleet has.
+
+Sessions expire: `--session-idle-timeout-secs` (default 1800) and
+`--session-max-age-secs` (default 43200, also the cookie's `Max-Age`), with at
+most `--max-sessions` (default 1000) held at once. `POST /ui/login` is
+rate-limited per client address and per username (`429` + `Retry-After`).
 
 Three roles gate three route groups: `viewer` (every `GET` — fleet reads,
 config/revision reads/diffs, `GET /ws/fleet`), `operator` (+ the phase-5

@@ -8,9 +8,15 @@
 //! the answer carries this origin's `tunnel_address`, which startup needs
 //! *before* the WireGuard interface can be brought up.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use defguard_wireguard_rs::net::IpAddrMask;
 use serde::{Deserialize, Serialize};
+
+use crate::address_store;
+use crate::live_interface::LiveInterface;
 
 #[derive(Serialize)]
 struct PeerRegistration<'a> {
@@ -56,7 +62,8 @@ fn body(reg: &Registration) -> PeerRegistration<'_> {
 
 #[derive(Debug)]
 pub enum RegisterError {
-    /// The controller understood and refused (4xx): retrying cannot help.
+    /// The controller understood and refused (4xx other than 408/429):
+    /// retrying cannot help.
     Rejected(String),
     /// Transport trouble or a 5xx: worth retrying.
     Transient(anyhow::Error),
@@ -77,9 +84,16 @@ impl std::error::Error for RegisterError {}
 /// retry budget real: without them a controller that accepts TCP but never
 /// answers would block startup (and the refresh loop) forever.
 pub fn http_client() -> reqwest::Client {
+    client_with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+}
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn client_with_timeouts(connect: Duration, request: Duration) -> reqwest::Client {
     gsp_http::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(connect)
+        .timeout(request)
         .build()
         .expect("timeouts plus --ca-file roots (validated at startup) always build")
 }
@@ -111,7 +125,10 @@ pub async fn register_once(
     }
     let text = resp.text().await.unwrap_or_default();
     let msg = format!("controller rejected registration ({status}): {text}");
-    if status.is_client_error() {
+    // 408 and 429 are "not now", not "never": retry them like a 5xx.
+    let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    if status.is_client_error() && !retryable {
         Err(RegisterError::Rejected(msg))
     } else {
         Err(RegisterError::Transient(anyhow::anyhow!(msg)))
@@ -119,7 +136,7 @@ pub async fn register_once(
 }
 
 /// Retries transient failures with backoff until `budget` runs out; a
-/// rejection (4xx) returns immediately.
+/// rejection (4xx other than 408/429) returns immediately.
 pub async fn register_with_retry(
     client: &reqwest::Client,
     controller_url: &str,
@@ -145,41 +162,103 @@ pub async fn register_with_retry(
     }
 }
 
-/// `Some(message)` when the controller now reports a different address than
-/// the one this process is running with. Never fatal: a live interface must
-/// not be torn down over a registry change — a restart applies the new one.
-pub fn address_change(running: &str, reported: &str) -> Option<String> {
-    (running != reported).then(|| {
-        format!(
-            "the controller now assigns tunnel address {reported} but this process is running \
-             with {running}; keeping {running} — restart to apply the new address"
-        )
-    })
+/// What [`run`] needs to keep the live interface on the controller's address.
+pub struct AddressSync {
+    pub live: Arc<LiveInterface>,
+    /// The operator's pinned `--address`/`--tunnel-address` ip/prefix, if any;
+    /// supplies the prefix when the controller reports no network.
+    pub pinned_cidr: Option<String>,
+    /// Where the address is saved for a restart while the controller is down.
+    pub path: PathBuf,
+}
+
+impl AddressSync {
+    /// Applies the address the controller reported to the live interface:
+    /// moves it when the address (or the network prefix) changed, and records
+    /// the address so a restart while the controller is down starts from it
+    /// (rewritten whenever the file differs, so a failed save is retried).
+    /// `Ok(true)` when the interface moved.
+    pub fn apply(&self, reported: &Registered) -> anyhow::Result<bool> {
+        let cidr = address_store::interface_cidr(
+            &reported.tunnel_address,
+            reported.tunnel_network.as_deref(),
+            self.pinned_cidr.as_deref(),
+        )?;
+        let new: IpAddrMask = cidr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("tunnel address {cidr:?} is not a valid ip/cidr: {e}"))?;
+        let moved = self.live.needs_readdress(&new);
+        if moved {
+            self.live.readdress(&new)?;
+            // The proxies re-peer with the new address on their own; renew
+            // ours so the handshake does not wait for a keepalive to time out.
+            match self.live.renew_peers() {
+                Ok(targets) => targets
+                    .into_iter()
+                    .for_each(crate::interface::kick_handshake),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not renew the peers after the address change")
+                }
+            }
+        }
+        // Whether or not the interface moved this time: a save that failed
+        // after an earlier move would otherwise never be retried.
+        if address_store::load(&self.path).as_deref() != Some(cidr.as_str()) {
+            address_store::save(&self.path, &cidr)?;
+        }
+        Ok(moved)
+    }
+
+    /// Adds back the peers a renewal lost, for [`LiveInterface::repair_peers`].
+    pub fn repair_peers(&self) {
+        self.live
+            .repair_peers()
+            .into_iter()
+            .for_each(crate::interface::kick_handshake);
+    }
 }
 
 /// Re-registers every `interval` for as long as the process runs (a fixed
-/// refresh: there is no "did anything change" signal to key off yet).
-/// `running_address` is the bare IP the interface was brought up with.
+/// refresh: there is no "did anything change" signal to key off yet), and
+/// moves the live interface whenever the controller's answer changes the
+/// address — an operator released it and it was reallocated, say. The peers
+/// follow on their own: each proxy re-reads the new address from the
+/// registry. A failed move is retried on the next tick.
 pub async fn run(
     client: reqwest::Client,
     controller_url: String,
     token: Option<String>,
     reg: Registration,
     interval: Duration,
-    running_address: String,
+    sync: AddressSync,
 ) {
-    let mut warned = false;
+    let sync = Arc::new(sync);
     loop {
         match register_once(&client, &controller_url, token.as_deref(), &reg).await {
             Ok(r) => {
                 tracing::info!(revision = r.revision, "registered with the controller");
-                match address_change(&running_address, &r.tunnel_address) {
-                    Some(msg) if !warned => {
-                        tracing::error!("{msg}");
-                        warned = true;
+                // Moving the interface makes blocking netlink calls: keep it
+                // off the async workers.
+                let s = sync.clone();
+                let moved = tokio::task::spawn_blocking(move || {
+                    let from = s.live.address();
+                    let applied = s.apply(&r).map(|moved| moved.then_some(from));
+                    s.repair_peers();
+                    applied
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("address change task failed: {e}")));
+                match moved {
+                    Ok(Some(from)) => {
+                        tracing::warn!(
+                            from = %from, to = %sync.live.address(),
+                            "the controller assigned a new tunnel address; moved the interface"
+                        );
                     }
-                    Some(_) => {}
-                    None => warned = false,
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!(error = %format!("{e:#}"), "could not apply the controller's tunnel address; will retry")
+                    }
                 }
             }
             Err(e) => {
@@ -192,6 +271,8 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn reg() -> Registration {
@@ -223,12 +304,121 @@ mod tests {
         assert!(json.contains("\"tunnel_address\":\"10.60.0.2\""));
     }
 
+    fn sync(live: &Arc<LiveInterface>, pinned: Option<&str>, path: &Path) -> AddressSync {
+        AddressSync {
+            live: live.clone(),
+            pinned_cidr: pinned.map(str::to_string),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn reported(ip: &str) -> Registered {
+        Registered {
+            revision: 1,
+            tunnel_address: ip.into(),
+            tunnel_network: Some("10.60.0.0/24".into()),
+        }
+    }
+
     #[test]
-    fn address_change_reports_only_a_real_difference() {
-        assert_eq!(address_change("10.60.0.5", "10.60.0.5"), None);
-        let msg = address_change("10.60.0.5", "10.60.0.9").unwrap();
-        assert!(msg.contains("10.60.0.5") && msg.contains("10.60.0.9"));
-        assert!(msg.contains("restart"));
+    fn a_changed_address_moves_the_interface_and_is_saved() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        assert!(sync(&live, None, &path)
+            .apply(&reported("10.60.0.7"))
+            .unwrap());
+        assert_eq!(live.address().to_string(), "10.60.0.7/24");
+        assert_eq!(address_store::load(&path).as_deref(), Some("10.60.0.7/24"));
+    }
+
+    #[test]
+    fn a_failed_save_is_retried_on_the_next_apply_even_though_the_interface_moved() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        let sync = sync(&live, None, &path);
+        assert!(sync.apply(&reported("10.60.0.7")).is_err());
+        assert_eq!(live.address().to_string(), "10.60.0.7/24");
+
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        assert!(!sync.apply(&reported("10.60.0.7")).unwrap());
+        assert_eq!(address_store::load(&path).as_deref(), Some("10.60.0.7/24"));
+    }
+
+    #[test]
+    fn a_stale_saved_address_is_rewritten_when_the_interface_already_has_the_new_one() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        address_store::save(&path, "10.60.0.5/24").unwrap();
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        assert!(!sync(&live, None, &path)
+            .apply(&reported("10.60.0.2"))
+            .unwrap());
+        assert_eq!(address_store::load(&path).as_deref(), Some("10.60.0.2/24"));
+    }
+
+    #[test]
+    fn an_unchanged_address_touches_nothing() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        address_store::save(&path, "10.60.0.2/24").unwrap();
+        assert!(!sync(&live, None, &path)
+            .apply(&reported("10.60.0.2"))
+            .unwrap());
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_move_saves_nothing() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&["10.60.0.7/24"], &[], &log));
+        assert!(sync(&live, None, &path)
+            .apply(&reported("10.60.0.7"))
+            .is_err());
+        assert!(
+            !path.exists(),
+            "a restart must not start from an address that never came up"
+        );
+        assert_eq!(live.address().to_string(), "10.60.0.2/24");
+    }
+
+    #[test]
+    fn pin_only_mode_keeps_the_pinned_prefix() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        let r = Registered {
+            revision: 1,
+            tunnel_address: "10.60.0.9".into(),
+            tunnel_network: None,
+        };
+        assert!(sync(&live, Some("10.60.0.9/24"), &path).apply(&r).unwrap());
+        assert_eq!(live.address().to_string(), "10.60.0.9/24");
+    }
+
+    #[test]
+    fn ipv6_spellings_of_one_address_are_not_a_change() {
+        // `AddressSync::apply` decides by comparing parsed masks.
+        let a: IpAddrMask = "fd49:0::5/64".parse().unwrap();
+        let b: IpAddrMask = "FD49::5/64".parse().unwrap();
+        let c: IpAddrMask = "fd49::6/64".parse().unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     /// A one-shot HTTP server answering every request with a canned response.
@@ -293,6 +483,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_408_or_429_is_transient_not_a_rejection() {
+        for status in ["408 Request Timeout", "429 Too Many Requests"] {
+            let url = canned(status, r#"{"error":"slow down"}"#).await;
+            match register_once(&reqwest::Client::new(), &url, None, &reg()).await {
+                Err(RegisterError::Transient(e)) => {
+                    assert!(format!("{e:#}").contains("slow down"), "{e:#}")
+                }
+                other => panic!("{status}: expected Transient, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn retrying_gives_up_on_a_permanent_rejection_immediately() {
         let url = canned("409 Conflict", r#"{"error":"held"}"#).await;
         let started = std::time::Instant::now();
@@ -340,7 +543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_production_client_has_a_request_timeout() {
+    async fn the_client_gives_up_on_a_controller_that_never_answers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -350,13 +553,17 @@ mod tests {
                 held.push(s);
             }
         });
-        // Must give up on its own (10 s request timeout), never hang.
+        // Must give up on its own (the request timeout), never hang. The
+        // production values are only checked to be finite; the hang itself is
+        // exercised with a short timeout through the same builder.
+        assert!(REQUEST_TIMEOUT <= Duration::from_secs(30));
+        let client = client_with_timeouts(CONNECT_TIMEOUT, Duration::from_millis(300));
         let got = tokio::time::timeout(
-            Duration::from_secs(20),
-            register_once(&http_client(), &url, None, &reg()),
+            Duration::from_secs(5),
+            register_once(&client, &url, None, &reg()),
         )
         .await
-        .expect("http_client() has no request timeout");
+        .expect("the client has no request timeout");
         assert!(matches!(got, Err(RegisterError::Transient(_))));
     }
 }

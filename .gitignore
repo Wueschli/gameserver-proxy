@@ -12,6 +12,8 @@
 crates/gsp-ui/web/node_modules
 crates/gsp-ui/web/dist
 crates/gsp-ui/web/*.tsbuildinfo
+crates/gsp-ui/web/test-results
+crates/gsp-ui/web/playwright-report
 
 # binaries staged for `BIN_SOURCE=prebuilt` image builds (CI)
 deploy/prebuilt/
@@ -21,3 +23,4 @@ crates/gsp-ui/web/junit.xml
 
 # superpowers skills' scratch (ledgers, briefs, review packages)
 .superpowers/
+__pycache__/

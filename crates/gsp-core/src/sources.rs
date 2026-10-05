@@ -18,7 +18,7 @@
 //! supplies, exactly the seam resolvers and sniffers use.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -26,13 +26,14 @@ use tokio::task::JoinHandle;
 use gsp_config::SourceConfig;
 
 use crate::discovery::{refresh_loop, BackendSource, Discovery};
+use crate::error::SourceError;
 use crate::snapshot::Snapshot;
 
 /// Builds a concrete [`BackendSource`] from its config. Implemented in the `gsp`
 /// binary (where the HTTP / DNS clients live); `gsp-core` only drives the
 /// lifecycle.
 pub trait SourceFactory: Send + Sync {
-    fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>>;
+    fn build(&self, pool: &str, cfg: &SourceConfig) -> Result<Arc<dyn BackendSource>, SourceError>;
 }
 
 struct SourceGroup {
@@ -73,7 +74,7 @@ impl SourceManager {
         })
     }
 
-    fn spawn_group(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<SourceGroup> {
+    fn spawn_group(&self, pool: &str, cfg: &SourceConfig) -> Result<SourceGroup, SourceError> {
         let source = self.factory.build(pool, cfg)?;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let discovery = self.discovery.clone();
@@ -94,7 +95,7 @@ impl SourceManager {
     /// best-effort initial fetch); the pool then starts from its seed and the
     /// next reload can retry.
     pub fn start_all(&self, snap: &Snapshot) {
-        let mut groups = self.groups.lock().unwrap();
+        let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
         for (pool, cfg) in &snap.sources {
             match self.spawn_group(pool, cfg) {
                 Ok(g) => {
@@ -115,7 +116,7 @@ impl SourceManager {
     pub async fn reconcile(&self, snap: &Snapshot) -> (usize, usize) {
         // Phase 1 (lock held, no await): remove stale groups, spawn new ones.
         let stopped: Vec<(String, SourceGroup)> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
 
             let stale: Vec<String> = groups
                 .iter()
@@ -162,14 +163,18 @@ impl SourceManager {
                 self.discovery.forget(&pool);
             }
         }
-        let n_running = self.groups.lock().unwrap().len();
+        let n_running = self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
         (n_running, n_stopped)
     }
 
     /// Stop every refresh task and wait for them to finish.
     pub async fn stop_all(&self) {
         let drained: Vec<SourceGroup> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             groups.drain().map(|(_, g)| g).collect()
         };
         for g in drained {
@@ -180,7 +185,12 @@ impl SourceManager {
     /// Best-effort abort of any still-running refresh task (after a grace
     /// deadline expired).
     pub fn abort_all(&self) {
-        for g in self.groups.lock().unwrap().values() {
+        for g in self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
             g.abort();
         }
     }
@@ -214,7 +224,7 @@ mod tests {
         fn refresh_interval(&self) -> Duration {
             Duration::from_millis(20)
         }
-        async fn fetch(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        async fn fetch(&self) -> Result<Vec<SocketAddr>, SourceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.addrs.clone())
         }
@@ -225,7 +235,11 @@ mod tests {
     }
 
     impl SourceFactory for FakeFactory {
-        fn build(&self, pool: &str, cfg: &SourceConfig) -> anyhow::Result<Arc<dyn BackendSource>> {
+        fn build(
+            &self,
+            pool: &str,
+            cfg: &SourceConfig,
+        ) -> Result<Arc<dyn BackendSource>, SourceError> {
             let addr: SocketAddr = match &cfg.kind {
                 SourceKind::DnsSrv { record } => record.parse().unwrap(),
                 _ => unreachable!("test only uses dns_srv"),

@@ -55,6 +55,7 @@ impl Sniffers {
     }
 
     /// Register one sniffer, replacing any earlier one under the same name.
+    #[allow(clippy::needless_pass_by_value)] // registries take ownership of what they store
     pub fn register(&self, sniffer: Arc<dyn Sniffer>) {
         self.map.rcu(|cur| {
             let mut next = (**cur).clone();
@@ -82,11 +83,27 @@ impl Sniffers {
     }
 }
 
-/// Log a warning if `listener` routes on a sniffer name that resolves to
+/// Run a listener's sniffers (`names`, in config order) over `first`; the first
+/// one that recognises the bytes wins, and its configured name is returned
+/// with its hint. Later sniffers are not consulted, so a `reject` from an
+/// earlier recogniser cannot be overridden by a later one. Names that resolve
+/// to nothing in `sniffers` are skipped.
+pub fn sniff_first<'a>(
+    names: &'a [String],
+    sniffers: &Sniffers,
+    first: &[u8],
+) -> Option<(&'a str, RouteHint)> {
+    names.iter().find_map(|n| {
+        let hint = sniffers.get(n)?.sniff(first)?;
+        Some((n.as_str(), hint))
+    })
+}
+
+/// Log a warning for each sniffer name `listener` routes on that resolves to
 /// nothing in `sniffers` — those routes can never match until the plugin is
 /// loaded.
-pub fn warn_if_missing(listener: &str, name: Option<&str>, sniffers: &Sniffers) {
-    if let Some(name) = name {
+pub fn warn_if_missing(listener: &str, names: &[String], sniffers: &Sniffers) {
+    for name in names {
         if sniffers.get(name).is_none() {
             tracing::warn!(
                 %listener, sniffer = %name,
@@ -131,12 +148,56 @@ pub(crate) mod tests {
         }
     }
 
-    /// A registry with the test sniffers (`test-host`, `test-reject`).
+    /// Recognises `b"TAG"` first bytes with a bare hint (no host).
+    pub(crate) struct TestTag;
+    impl Sniffer for TestTag {
+        fn name(&self) -> &'static str {
+            "test-tag"
+        }
+        fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
+            first.starts_with(b"TAG").then(RouteHint::default)
+        }
+    }
+
+    /// A registry with the test sniffers (`test-host`, `test-reject`, `test-tag`).
     pub(crate) fn test_registry() -> Sniffers {
         let s = Sniffers::new();
         s.register(Arc::new(TestHost));
         s.register(Arc::new(TestReject));
+        s.register(Arc::new(TestTag));
         s
+    }
+
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn sniff_first_returns_the_first_recogniser_in_config_order() {
+        let reg = test_registry();
+        let both = names(&["test-tag", "test-host"]);
+        // only the second recognises
+        let (n, h) = sniff_first(
+            &both,
+            &reg,
+            b"HOST:a.example
+",
+        )
+        .unwrap();
+        assert_eq!((n, h.host.as_deref()), ("test-host", Some("a.example")));
+        // only the first recognises
+        assert_eq!(sniff_first(&both, &reg, b"TAG!").unwrap().0, "test-tag");
+        // nobody recognises
+        assert!(sniff_first(&both, &reg, b"zzz").is_none());
+        // an unloaded name is skipped, not fatal
+        let with_missing = names(&["nope", "test-tag"]);
+        assert_eq!(
+            sniff_first(&with_missing, &reg, b"TAG").unwrap().0,
+            "test-tag"
+        );
+        // earlier recogniser wins; its reject is final
+        let reject_first = names(&["test-reject", "test-tag"]);
+        assert!(sniff_first(&reject_first, &reg, b"BAD").unwrap().1.reject);
     }
 
     #[test]
@@ -212,7 +273,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,
@@ -231,6 +292,88 @@ listeners:
 
         assert_eq!(mark("survival.example.net").await, b'S');
         assert_eq!(mark("creative.example.net").await, b'L');
+
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    /// Two sniffers on one listener: each connection is routed by whichever
+    /// sniffer recognises its first bytes.
+    #[tokio::test]
+    async fn two_sniffers_on_one_listener_route_by_recognising_sniffer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        async fn marker(tag: u8) -> std::net::SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = l.accept().await {
+                    tokio::spawn(async move {
+                        let _ = s.write_all(&[tag]).await;
+                        let mut buf = [0u8; 64];
+                        while let Ok(n) = s.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        let host_be = marker(b'H').await;
+        let tag_be = marker(b'T').await;
+        let fallback = marker(b'F').await;
+        let proxy = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let yaml = format!(
+            r#"
+pools:
+  - name: h
+    targets: ["{host_be}"]
+  - name: t
+    targets: ["{tag_be}"]
+  - name: f
+    targets: ["{fallback}"]
+listeners:
+  - name: l
+    bind: "{proxy}"
+    routes:
+      - match: {{ type: sniffer, sniffer: test-host }}
+        action: {{ pool: h }}
+      - match: {{ type: sniffer, sniffer: test-tag }}
+        action: {{ pool: t }}
+      - match: {{ type: always }}
+        action: {{ pool: f }}
+"#
+        );
+        let cfg = gsp_config::parse_str(&yaml).unwrap();
+        assert_eq!(cfg.listeners[0].sniffers, ["test-host", "test-tag"]);
+        let runtime = crate::Runtime::start_with_sniffers(
+            crate::Snapshot::from_config(&cfg),
+            Arc::default(),
+            None,
+            Arc::new(test_registry()),
+            1,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mark = |payload: &'static [u8]| async move {
+            let mut c = TcpStream::connect(proxy).await.unwrap();
+            c.write_all(payload).await.unwrap();
+            let mut m = [0u8; 1];
+            c.read_exact(&mut m).await.unwrap();
+            m[0]
+        };
+        assert_eq!(mark(b"HOST:a.example\nrest").await, b'H');
+        assert_eq!(mark(b"TAG and more").await, b'T');
+        assert_eq!(mark(b"unrecognised").await, b'F');
 
         runtime
             .shutdown_with_grace(std::time::Duration::from_millis(100))
@@ -288,7 +431,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,
@@ -345,6 +488,7 @@ listeners:
 pools:
   - name: p
     targets: ["{backend_addr}"]
+    health_check: {{ type: none }}
 listeners:
   - name: u
     bind: "{proxy}"
@@ -359,7 +503,7 @@ listeners:
         let cfg = gsp_config::parse_str(&yaml).unwrap();
         let runtime = crate::Runtime::start_with_sniffers(
             crate::Snapshot::from_config(&cfg),
-            Default::default(),
+            Arc::default(),
             None,
             Arc::new(test_registry()),
             1,

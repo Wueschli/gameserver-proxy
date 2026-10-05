@@ -43,7 +43,7 @@ async fn counting_echo_backend() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
 
 async fn start(yaml: &str) -> Runtime {
     let cfg = parse_str(yaml).unwrap();
-    let rt = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
     rt
 }
@@ -56,7 +56,7 @@ async fn no_unsolicited_or_duplicated_replies() {
     let (backend, _n) = counting_echo_backend().await;
     let proxy = free_udp_addr();
     let rt = start(&format!(
-        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n\
+        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n    health_check:\n      type: none\n\
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    protocol: udp\n    pool: p\n"
     ))
     .await;
@@ -114,6 +114,8 @@ async fn dropped_datagrams_get_no_error_reply() {
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy}"
@@ -161,7 +163,7 @@ async fn reply_is_exactly_the_backend_payload() {
     });
     let proxy = free_udp_addr();
     let rt = start(&format!(
-        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n\
+        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n    health_check:\n      type: none\n\
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    protocol: udp\n    pool: p\n"
     ))
     .await;
@@ -193,7 +195,7 @@ async fn rate_limit_is_enforced_before_any_state_change() {
     let proxy = free_udp_addr();
     // burst 2 new sessions per source IP; loopback shares one IP.
     let rt = start(&format!(
-        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n\
+        "pools:\n  - name: p\n    targets: [\"{backend}\"]\n    health_check:\n      type: none\n\
          listeners:\n  - name: l\n    bind: \"{proxy}\"\n    protocol: udp\n    pool: p\n\
          \x20   rate_limit:\n      per_ip: {{ rate: 1, burst: 2 }}\n"
     ))

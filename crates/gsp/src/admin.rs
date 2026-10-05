@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
-    middleware::{self, Next},
+    extract::{Path, Query, State},
+    http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -39,7 +39,7 @@ struct AdminState {
 
 /// The admin API route table. Split out from [`serve`] so integration tests can
 /// mount it on their own ephemeral listener. `/healthz` alone stays outside
-/// the [`require_bearer`] gate — plain liveness-probe convention, same
+/// the [`gsp_http::server::require_bearer`] gate — plain liveness-probe convention, same
 /// choice `gsp-controller`/`gsp-aggregator` made for their own `/healthz`.
 fn router(state: AdminState) -> Router {
     let gated = Router::new()
@@ -59,8 +59,9 @@ fn router(state: AdminState) -> Router {
         .route("/admin/sniffers", get(list_sniffers).post(upload_sniffer))
         .route("/admin/sniffers/{name}", delete(delete_sniffer))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref())
+                .with_body("unauthorized\n"),
+            gsp_http::server::require_bearer,
         ));
 
     Router::new()
@@ -69,27 +70,26 @@ fn router(state: AdminState) -> Router {
         .with_state(state)
 }
 
-/// See `AdminState::auth_token`. A single shared secret, not RBAC — the same
-/// scope call `gsp-controller`'s and `gsp-aggregator`'s own `auth.rs` make.
-async fn require_bearer(State(state): State<AdminState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(req).await; // no token configured: open, as always
-    };
-
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    match presented {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response(),
+/// The admin API's TLS handshake limits: the defaults, with each
+/// `settings.admin.tls` limit that is set on top.
+pub fn handshake_limits(tls: Option<&gsp_config::AdminTls>) -> gsp_http::tls::HandshakeLimits {
+    let d = gsp_http::tls::HandshakeLimits::default();
+    let Some(t) = tls else { return d };
+    gsp_http::tls::HandshakeLimits {
+        max_pending: t.max_pending.unwrap_or(d.max_pending),
+        max_pending_per_source: t.max_pending_per_source.unwrap_or(d.max_pending_per_source),
+        new_per_source_per_sec: t.new_per_source_per_sec.unwrap_or(d.new_per_source_per_sec),
+        new_per_source_burst: t.new_per_source_burst.unwrap_or(d.new_per_source_burst),
+        ..d
     }
 }
 
 pub async fn serve(
     addr: SocketAddr,
+    tls: Option<(
+        std::sync::Arc<gsp_http::tls::ReloadingCert>,
+        gsp_http::tls::HandshakeLimits,
+    )>,
     runtime: RuntimeHandle,
     prometheus: PrometheusHandle,
     auth_token: Option<String>,
@@ -104,16 +104,14 @@ pub async fn serve(
         sniffers,
     });
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(%addr, error = %e, "failed to bind admin listener");
-            return;
-        }
+    // HTTPS with `settings.admin.tls`, plain HTTP otherwise. A bind failure
+    // lands here too and, as before, ends only this task (non-fatal).
+    let (cert, limits) = match tls {
+        Some((cert, limits)) => (Some(cert), limits),
+        None => (None, gsp_http::tls::HandshakeLimits::default()),
     };
-    tracing::info!(%addr, "admin API listening");
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!(error = %e, "admin API server error");
+    if let Err(e) = gsp_http::tls::serve(addr, app, cert, limits, "admin API").await {
+        tracing::error!(%addr, error = %e, "admin API server error");
     }
 }
 
@@ -150,11 +148,11 @@ async fn undrain(State(s): State<AdminState>) -> (StatusCode, &'static str) {
 
 /// `GET /config` — a plaintext view of the active snapshot (listeners + pools).
 async fn config(State(s): State<AdminState>) -> impl IntoResponse {
-    let snap = s.runtime.snapshot();
-    let mut out = String::new();
     fn opt(v: Option<impl std::fmt::Display>) -> String {
         v.map_or_else(|| "-".to_string(), |n| n.to_string())
     }
+    let snap = s.runtime.snapshot();
+    let mut out = String::new();
     let lim = &snap.limits;
     out.push_str(&format!(
         "draining={}\tactive_conns={}\tlimits=conn:{},udp:{},new_rate:{}\tgeo_db={}\n\nlisteners:\n",
@@ -221,9 +219,10 @@ async fn config(State(s): State<AdminState>) -> impl IntoResponse {
                 Some(p) => format!("\tprefix={p:?}"),
                 None => String::new(),
             },
-            match &l.sniffer {
-                Some(n) => format!("\tsniffer={n}"),
-                None => String::new(),
+            if l.sniffers.is_empty() {
+                String::new()
+            } else {
+                format!("\tsniffers={}", l.sniffers.join(","))
             },
         ));
     }
@@ -630,7 +629,7 @@ mod tests {
         sniffers_dir: Option<std::path::PathBuf>,
     ) -> (String, Runtime) {
         let cfg = gsp_config::parse_str(yaml).unwrap();
-        let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
         let prometheus = PrometheusBuilder::new().build_recorder().handle();
         let app = router(AdminState {
             runtime: runtime.handle(),

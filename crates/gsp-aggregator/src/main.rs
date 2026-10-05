@@ -29,10 +29,38 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9902")]
     listen: SocketAddr,
 
-    /// Bearer token every request except /healthz must present. Omit to
-    /// leave this aggregator's own API open (network-boundary-only auth).
+    /// Bearer token every request except /healthz must present, at least 16
+    /// bytes. Omit to leave this aggregator's own API open, which is only
+    /// accepted on a loopback `--listen` (or with `--insecure-no-auth`).
     #[arg(long)]
     auth_token: Option<String>,
+
+    /// Bearer token `POST /ingest` accepts instead of `--auth-token`, at least
+    /// 16 bytes, so the proxies that push telemetry do not hold a credential
+    /// that also unlocks `/fleet/*` (including drain and backend edits). It
+    /// unlocks only `/ingest`; `--auth-token` then gates `/fleet/*` alone.
+    /// Required whenever `--auth-token` is set, and must differ from it.
+    #[arg(long)]
+    ingest_token: Option<String>,
+
+    /// Which `admin_url` hosts an ingested push may report (the fan-out calls
+    /// them with `--instance-token`): an IP/CIDR (`10.0.0.0/8`), a hostname, or
+    /// `*.suffix`; repeat or comma-separate. Omitted: the URL's host must be
+    /// an IP literal equal to the pushing connection's source address.
+    #[arg(long, value_delimiter = ',')]
+    instance_url_allow: Vec<String>,
+
+    /// Bearer token `GET /metrics` accepts instead of `--auth-token`, at least
+    /// 16 bytes, so a Prometheus scraper need not hold the admin token. It
+    /// unlocks only `/metrics`. Omitted: `/metrics` is gated by `--auth-token`
+    /// like the rest of the API.
+    #[arg(long)]
+    metrics_token: Option<String>,
+
+    /// Allow a non-loopback `--listen` with no `--auth-token`. Only for
+    /// deployments where the network boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
 
     /// Bearer token this aggregator presents when fanning intent verbs out
     /// to each instance's admin API (`settings.admin.auth_token` on `gsp`).
@@ -66,6 +94,25 @@ struct Args {
     /// addition to the built-in Mozilla roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    tls: gsp_http::tls::TlsArgs,
+}
+
+/// `--auth-token` must come with a distinct `--ingest-token`: otherwise the
+/// admin token would also push telemetry (and every pusher would hold it).
+fn check_ingest_token(auth: Option<&str>, ingest: Option<&str>) -> Result<(), String> {
+    match (auth, ingest) {
+        (Some(_), None) => Err(
+            "--auth-token requires --ingest-token: the proxies that push to /ingest must not \
+             hold the token that unlocks /fleet/* (drain, backend edits); give them a separate one"
+                .into(),
+        ),
+        (Some(a), Some(i)) if a == i => {
+            Err("--ingest-token must differ from --auth-token, or it separates nothing".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[tokio::main]
@@ -75,22 +122,44 @@ async fn main() -> anyhow::Result<()> {
     if args.parent_url.is_some() && args.tier_name.is_none() {
         anyhow::bail!("--parent-url requires --tier-name");
     }
+    gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--ingest-token", args.ingest_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    check_ingest_token(args.auth_token.as_deref(), args.ingest_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let admin_url_policy = gsp_aggregator::trust::AdminUrlPolicy::new(&args.instance_url_allow)
+        .map_err(|e| anyhow::anyhow!("--instance-url-allow: {e}"))?;
+    gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("GSP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    let prometheus = gsp_http::metrics::install("gsp-aggregator", env!("CARGO_PKG_VERSION"))?;
+    gsp_http::policy::check_exposure(
+        "gsp-aggregator",
+        args.listen,
+        args.auth_token.is_some(),
+        args.insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(path) = &args.ca_file {
         let certs = gsp_http::init_ca_file(path)?;
         tracing::info!(certs, path = %path.display(), "trusting extra CAs from --ca-file");
     }
+    // Load (and validate) the serving certificate before anything else starts.
+    let tls_cert = args.tls.load()?;
 
     // No data-dir, no persistence — the store is deliberately in-memory
     // only (see the "stateless and ephemeral by design" note in lib.rs).
     let store = Arc::new(IngestStore::new());
     let state = AppState::new(store)
         .with_auth_token(args.auth_token.clone())
+        .with_ingest_token(args.ingest_token.clone())
+        .with_admin_url_policy(admin_url_policy)
         .with_instance_token(args.instance_token);
 
     tracing::info!(
@@ -111,11 +180,40 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .merge(gsp_http::metrics::router(
+            prometheus,
+            gsp_http::server::BearerAuth::new(
+                args.metrics_token.as_deref().or(args.auth_token.as_deref()),
+            ),
+        ))
         .merge(api::router(state));
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(listen = %args.listen, "gsp-aggregator listening");
-    axum::serve(listener, app).await?;
+    gsp_http::tls::serve(
+        args.listen,
+        app,
+        tls_cert,
+        args.tls.limits(),
+        "gsp-aggregator",
+    )
+    .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_ingest_token;
+
+    #[test]
+    fn an_auth_token_needs_its_own_ingest_token() {
+        assert!(check_ingest_token(None, None).is_ok());
+        assert!(check_ingest_token(None, Some("i")).is_ok());
+        assert!(check_ingest_token(Some("a"), Some("i")).is_ok());
+        assert!(check_ingest_token(Some("a"), None)
+            .unwrap_err()
+            .contains("requires --ingest-token"));
+        assert!(check_ingest_token(Some("a"), Some("a"))
+            .unwrap_err()
+            .contains("must differ"));
+    }
 }

@@ -34,7 +34,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -46,7 +46,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::ingest::{IngestPayload, IngestStore, PoolSummary, SessionCounts};
-use crate::util::now_ms;
+use crate::trust::AdminUrlPolicy;
+use crate::util::unix_ms;
 
 /// How long since an instance's last push before `/fleet/healthz` calls it
 /// `stale` — roughly 3x `gsp`'s default `--aggregator-interval-sec` (10s),
@@ -75,6 +76,13 @@ pub struct AppState {
     /// Bearer token every request except `GET /healthz` must present
     /// (`--auth-token`); `None` leaves this aggregator's own API open.
     pub auth_token: Option<String>,
+    /// Bearer token `POST /ingest` requires (`--ingest-token`), so the proxies
+    /// that push telemetry do not hold a credential that also unlocks
+    /// `/fleet/*`. `main` insists it is set whenever `auth_token` is; `None`
+    /// leaves `/ingest` open (the all-open, loopback case).
+    pub ingest_token: Option<String>,
+    /// Which `admin_url`s an ingested payload may carry (see [`crate::trust`]).
+    pub admin_url_policy: AdminUrlPolicy,
     /// Bearer token `crate::fanout` presents to every instance's admin API
     /// (`--instance-token`) — a separate secret from `auth_token`: one gates
     /// calls *into* this aggregator, the other is what this aggregator
@@ -90,8 +98,15 @@ impl AppState {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
-            http: gsp_http::client(),
+            // No redirects: a followed 3xx would carry the instance token to
+            // wherever an instance's admin API points it.
+            http: gsp_http::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("the extra roots were validated by init_ca_file, so the client builds"),
             auth_token: None,
+            ingest_token: None,
+            admin_url_policy: AdminUrlPolicy::default(),
             instance_token: None,
             updates,
         }
@@ -102,6 +117,16 @@ impl AppState {
         self
     }
 
+    pub fn with_ingest_token(mut self, ingest_token: Option<String>) -> Self {
+        self.ingest_token = ingest_token;
+        self
+    }
+
+    pub fn with_admin_url_policy(mut self, policy: AdminUrlPolicy) -> Self {
+        self.admin_url_policy = policy;
+        self
+    }
+
     pub fn with_instance_token(mut self, instance_token: Option<String>) -> Self {
         self.instance_token = instance_token;
         self
@@ -109,18 +134,25 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/ingest", post(ingest))
+    // Two bearer layers: `/ingest` accepts only `--ingest-token`, everything
+    // under `/fleet` only `--auth-token`.
+    let ingest = Router::new().route("/ingest", post(ingest)).route_layer(
+        axum::middleware::from_fn_with_state(
+            gsp_http::server::BearerAuth::new(state.ingest_token.as_deref()),
+            gsp_http::server::require_bearer,
+        ),
+    );
+    let fleet = Router::new()
         .route("/fleet/pools", get(fleet_pools))
         .route("/fleet/sessions", get(fleet_sessions))
         .route("/fleet/healthz", get(fleet_healthz))
         .route("/fleet/subscribe", get(subscribe_fleet))
         .merge(crate::fanout::router())
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require_bearer,
-        ))
-        .with_state(state)
+            gsp_http::server::BearerAuth::new(state.auth_token.as_deref()),
+            gsp_http::server::require_bearer,
+        ));
+    ingest.merge(fleet).with_state(state)
 }
 
 #[derive(Serialize)]
@@ -131,8 +163,14 @@ struct ErrorResponse {
 /// `POST /ingest` — body is one [`IngestPayload`] as JSON. `instance` must
 /// be non-empty (it's the key everything is stored and overwritten under);
 /// anything else in the payload is accepted as-is, this is a summary a proxy
-/// self-reports, not something the aggregator validates against reality.
-async fn ingest(State(state): State<AppState>, Json(payload): Json<IngestPayload>) -> Response {
+/// self-reports, not something the aggregator validates against reality —
+/// except `admin_url`, which later receives the instance token and so must pass
+/// the [`AdminUrlPolicy`].
+async fn ingest(
+    State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<gsp_http::tls::PeerAddr>>>,
+    Json(payload): Json<IngestPayload>,
+) -> Response {
     if payload.instance.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -141,6 +179,11 @@ async fn ingest(State(state): State<AppState>, Json(payload): Json<IngestPayload
             }),
         )
             .into_response();
+    }
+    let peer_ip = peer.map(|Extension(ConnectInfo(p))| p.0.ip());
+    if let Err(why) = state.admin_url_policy.check(&payload.admin_url, peer_ip) {
+        tracing::warn!(instance = %payload.instance, ?peer_ip, admin_url = %payload.admin_url, %why, "rejected an ingest push");
+        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: why })).into_response();
     }
     let instance = payload.instance.clone();
     state.store.ingest(payload);
@@ -165,7 +208,7 @@ struct FleetPools {
 /// pushed-first is not the order here; [`IngestStore::snapshot`] already
 /// sorts by instance name for a stable table.
 async fn fleet_pools(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetPools> = state
         .store
         .snapshot()
@@ -192,7 +235,7 @@ struct FleetSessions {
 /// full live registry — see the module doc's note on `IngestPayload` being a
 /// summary; an instance's own `GET /sessions` still has the detail).
 async fn fleet_sessions(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetSessions> = state
         .store
         .snapshot()
@@ -223,7 +266,7 @@ struct FleetHealth {
 /// from any one instance's `GET /healthz` (that instance's own liveness) —
 /// it answers "when did *we* last hear from each instance."
 async fn fleet_healthz(State(state): State<AppState>) -> Response {
-    let now = now_ms();
+    let now = unix_ms();
     let out: Vec<FleetHealth> = state
         .store
         .snapshot()
@@ -255,7 +298,7 @@ struct FleetInstanceView {
 /// `GET /fleet/*` endpoints report, combined into one payload so `gsp-ui`
 /// doesn't need three separate subscriptions.
 fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
-    let now = now_ms();
+    let now = unix_ms();
     store
         .snapshot()
         .into_iter()
@@ -338,8 +381,11 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Accepts the loopback `admin_url`s these tests push (a oneshot request
+    /// has no source address, so the default rule would refuse them).
     fn test_state() -> AppState {
         AppState::new(Arc::new(IngestStore::new()))
+            .with_admin_url_policy(AdminUrlPolicy::new(&["127.0.0.0/8"]).unwrap())
     }
 
     fn payload_json(instance: &str) -> String {
@@ -511,11 +557,11 @@ mod tests {
         let state = test_state();
         state.store.insert_state(InstanceState {
             payload: full_payload("stale-1"),
-            received_at_ms: now_ms().saturating_sub(STALE_AFTER_MS + 5_000),
+            received_at_ms: unix_ms().saturating_sub(STALE_AFTER_MS + 5_000),
         });
         state.store.insert_state(InstanceState {
             payload: full_payload("fresh-1"),
-            received_at_ms: now_ms(),
+            received_at_ms: unix_ms(),
         });
         let app = router(state);
 
@@ -541,8 +587,9 @@ mod tests {
         // /healthz lives outside `api::router` in `main.rs`, so it's not
         // part of what's under test here — only confirming everything
         // *inside* this router is gated when a token is set.
-        let state =
-            AppState::new(Arc::new(IngestStore::new())).with_auth_token(Some("secret".into()));
+        let state = AppState::new(Arc::new(IngestStore::new()))
+            .with_auth_token(Some("secret".into()))
+            .with_ingest_token(Some("ingest".into()));
         let app = router(state);
 
         let resp = app
@@ -574,6 +621,143 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn status_of(app: Router, req: Request<Body>) -> StatusCode {
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    fn push(token: Option<&str>, instance: &str) -> Request<Body> {
+        let mut req = Request::post("/ingest").header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        req.body(Body::from(payload_json(instance))).unwrap()
+    }
+
+    fn get(path: &str, token: &str) -> Request<Body> {
+        Request::get(path)
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_ingest_token_unlocks_only_ingest() {
+        let app = router(
+            test_state()
+                .with_auth_token(Some("admin".into()))
+                .with_ingest_token(Some("ingest".into())),
+        );
+
+        assert_eq!(
+            status_of(app.clone(), push(Some("ingest"), "a")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_of(app.clone(), push(Some("admin"), "a")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of(app.clone(), push(None, "a")).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        for path in ["/fleet/pools", "/fleet/sessions", "/fleet/healthz"] {
+            assert_eq!(
+                status_of(app.clone(), get(path, "ingest")).await,
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            );
+            assert_eq!(
+                status_of(app.clone(), get(path, "admin")).await,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
+        // A write verb is a /fleet route too: the ingest token cannot drain.
+        let drain = |t: &str| {
+            Request::post("/fleet/instances/a/drain")
+                .header("Authorization", format!("Bearer {t}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            status_of(app.clone(), drain("ingest")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_ne!(
+            status_of(app, drain("admin")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    fn push_from(peer: &str, admin_url: &str) -> Request<Body> {
+        let mut req = Request::post("/ingest")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&IngestPayload {
+                    instance: "p".into(),
+                    admin_url: admin_url.into(),
+                    pools: vec![],
+                    sessions: SessionCounts::default(),
+                    group: None,
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(gsp_http::tls::PeerAddr(
+                format!("{peer}:4000").parse().unwrap(),
+            )));
+        req
+    }
+
+    #[tokio::test]
+    async fn by_default_an_instance_can_only_report_its_own_address() {
+        let state = AppState::new(Arc::new(IngestStore::new()));
+        let store = state.store.clone();
+        let app = router(state);
+
+        // The attack from #102: point admin_url at a host the pusher controls.
+        let resp = app
+            .clone()
+            .oneshot(push_from("10.0.0.4", "http://evil.example:9900"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = app
+            .clone()
+            .oneshot(push_from("10.0.0.4", "http://10.9.9.9:9900"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(store.get("p").is_none());
+
+        let resp = app
+            .oneshot(push_from("10.0.0.4", "http://10.0.0.4:9900"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(store.get("p").is_some());
+    }
+
+    #[tokio::test]
+    async fn the_allowlist_decides_when_given() {
+        let state = AppState::new(Arc::new(IngestStore::new()))
+            .with_admin_url_policy(AdminUrlPolicy::new(&["*.nodes.example"]).unwrap());
+        let app = router(state);
+        let resp = app
+            .clone()
+            .oneshot(push_from("10.0.0.4", "http://n1.nodes.example:9900"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .oneshot(push_from("10.0.0.4", "http://10.0.0.4:9900"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

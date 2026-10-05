@@ -106,7 +106,7 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root must exist")
 }
 
-fn build_gsp_release() -> Result<PathBuf> {
+pub(crate) fn build_gsp_release() -> Result<PathBuf> {
     let status = std::process::Command::new("cargo")
         .args(["build", "--release", "-p", "gsp"])
         .current_dir(workspace_root())
@@ -122,13 +122,13 @@ fn build_gsp_release() -> Result<PathBuf> {
     Ok(bin)
 }
 
-struct ProxyProcess {
+pub(crate) struct ProxyProcess {
     child: std::process::Child,
     config_path: PathBuf,
 }
 
 impl ProxyProcess {
-    fn spawn(gsp_bin: &Path, config_path: PathBuf) -> Result<Self> {
+    pub(crate) fn spawn(gsp_bin: &Path, config_path: PathBuf) -> Result<Self> {
         let child = std::process::Command::new(gsp_bin)
             .arg("--config")
             .arg(&config_path)
@@ -139,14 +139,14 @@ impl ProxyProcess {
         Ok(Self { child, config_path })
     }
 
-    fn pid(&self) -> u32 {
+    pub(crate) fn pid(&self) -> u32 {
         self.child.id()
     }
 
     /// Poll a TCP connect to `ready_addr` until it succeeds or `timeout`
     /// elapses. Every generated config includes a dedicated TCP "ready"
     /// listener (even for a UDP-only ramp) exactly so this works uniformly.
-    async fn wait_ready(&self, ready_addr: SocketAddr, timeout: Duration) -> Result<()> {
+    pub(crate) async fn wait_ready(&self, ready_addr: SocketAddr, timeout: Duration) -> Result<()> {
         let start = Instant::now();
         loop {
             if TcpStream::connect(ready_addr).await.is_ok() {
@@ -161,7 +161,7 @@ impl ProxyProcess {
         }
     }
 
-    fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.config_path);
@@ -176,7 +176,7 @@ impl Drop for ProxyProcess {
     }
 }
 
-fn write_config(yaml: &str) -> Result<PathBuf> {
+pub(crate) fn write_config(yaml: &str) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!(
         "gsp-bench-concurrency-{}-{}.yaml",
         std::process::id(),
@@ -319,7 +319,7 @@ async fn tcp_ramp(gsp_bin: &Path, args: &Args) -> Result<bool> {
     let admin_addr = free_addr();
     let workers = args.workers;
     let cfg_path = write_config(&format!(
-        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600 }}\nlisteners:\n  - {{ name: l, bind: \"{tcp_addr}\", protocol: tcp, pool: p }}\n"
+        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600, health_check: {{ type: none }} }}\nlisteners:\n  - {{ name: l, bind: \"{tcp_addr}\", protocol: tcp, pool: p }}\n"
     ))?;
 
     let mut proxy = ProxyProcess::spawn(gsp_bin, cfg_path)?;
@@ -397,7 +397,7 @@ async fn udp_ramp(gsp_bin: &Path, args: &Args) -> Result<bool> {
     let tcp_backend = spawn_tcp_echo().await;
     let workers = args.workers;
     let cfg_path = write_config(&format!(
-        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600 }}\n  - {{ name: ready, targets: [\"{tcp_backend}\"] }}\nlisteners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n  - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"
+        "settings:\n  workers: {workers}\n  admin:\n    listen: \"{admin_addr}\"\npools:\n  - {{ name: p, targets: [\"{backend}\"], idle_timeout_sec: 600, health_check: {{ type: none }} }}\n  - {{ name: ready, targets: [\"{tcp_backend}\"] }}\nlisteners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n  - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"
     ))?;
 
     let mut proxy = ProxyProcess::spawn(gsp_bin, cfg_path)?;

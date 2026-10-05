@@ -56,7 +56,7 @@
 - F6.3 Admin API (HTTP/gRPC) for: register/deregister backend, set state, read config
   snapshot, trigger draining.
 - F6.4 Optional dynamic backend discovery adapter (DNS SRV, Consul, Kubernetes
-  Endpoints) behind a stable internal interface.
+  EndpointSlices) behind a stable internal interface.
 - F6.5 Validation on load; an invalid config is rejected and the old one stays active.
 
 ### F7 – Observability (details in [06](06-operations-observability.md))

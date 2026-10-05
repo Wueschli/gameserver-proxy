@@ -1,6 +1,6 @@
 //! Load / latency harness for the NFR targets in `docs/01-requirements.md`.
 //!
-//! Two modes:
+//! Three modes:
 //!
 //! - **`latency`** (default) — single-host, *in-process* harness (client,
 //!   proxy and backend all share this process's tokio runtime). Measures
@@ -16,13 +16,18 @@
 //!   of a probe connection at each step. See `concurrency.rs` for why this
 //!   exists and what it does and doesn't validate.
 //!
-//! Neither mode is NFR N3 (≥ 20 Gbit/s aggregate on real NICs — loopback
+//! - **`udp-affinity`** — session-open rate, open latency, residual state and
+//!   affinity retention against a real `gsp` process; the load test behind
+//!   issue #56 (UDP sticky table vs `consistent_hash`). See `udp_affinity.rs`.
+//!
+//! None of these modes is NFR N3 (≥ 20 Gbit/s aggregate on real NICs — loopback
 //! bandwidth exceeds this, so a local "pass" would be meaningless) or N9
 //! (HA — needs real hosts/network). See `docs/06-operations-observability.md`
 //! and this crate's `README.md`.
 
 mod common;
 mod concurrency;
+mod udp_affinity;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,6 +54,14 @@ enum Mode {
     Latency,
     /// Separate-process concurrency ramp. See `concurrency.rs`.
     Concurrency,
+    /// UDP session-open / affinity load test (issue #56). See `udp_affinity.rs`.
+    UdpAffinity,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum BalancerArg {
+    RoundRobin,
+    ConsistentHash,
 }
 
 #[derive(Parser)]
@@ -81,7 +94,32 @@ struct Args {
     /// `cat /proc/sys/net/ipv4/ip_local_port_range`) — see `concurrency.rs`.
     #[arg(long, default_value = "1000,5000,10000,20000")]
     steps: String,
-    /// Exit non-zero if an NFR target is missed.
+    /// `udp-affinity` mode: distinct clients (one loopback source IP each).
+    /// Above 65536 the per-worker sticky table overflows.
+    #[arg(long, default_value_t = 100_000)]
+    keys: usize,
+    /// `udp-affinity` mode: target session opens per second.
+    #[arg(long, default_value_t = 4_000)]
+    rate: usize,
+    /// `udp-affinity` mode: number of backends in the pool.
+    #[arg(long, default_value_t = 8)]
+    backends: usize,
+    /// `udp-affinity` mode: pool `idle_timeout_sec`.
+    #[arg(long, default_value_t = 1)]
+    idle_sec: u64,
+    /// `udp-affinity` mode: pool balancer. `round_robin` exercises the
+    /// listener's sticky table, `consistent_hash` its replacement.
+    #[arg(long, value_enum, default_value = "round-robin")]
+    balancer: BalancerArg,
+    /// `udp-affinity` mode: `src_ip` or `src_ip_port`.
+    #[arg(long, default_value = "src_ip")]
+    hash_on: String,
+    /// `udp-affinity` mode: spawn this `gsp` binary instead of building
+    /// `target/release/gsp` (A/B two builds).
+    #[arg(long)]
+    gsp_bin: Option<std::path::PathBuf>,
+    /// Exit non-zero if an NFR target is missed (`udp-affinity`: if affinity
+    /// retention falls below 99%).
     #[arg(long)]
     strict: bool,
 }
@@ -157,11 +195,7 @@ async fn run_latency(args: &Args) -> Result<bool> {
             "pools:\n  - {{ name: p, targets: [\"{backend}\"] }}\n\
              listeners:\n  - {{ name: l, bind: \"{proxy_addr}\", protocol: tcp, pool: p }}\n"
         ))?;
-        let rt = Runtime::start(
-            Snapshot::from_config(&cfg),
-            Default::default(),
-            args.workers,
-        );
+        let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), args.workers);
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let stop = Arc::new(tokio::sync::Notify::new());
@@ -201,14 +235,10 @@ async fn run_latency(args: &Args) -> Result<bool> {
         let backend = spawn_udp_echo().await;
         let proxy_addr = free_addr();
         let cfg = gsp_config::parse_str(&format!(
-            "pools:\n  - {{ name: p, targets: [\"{backend}\"] }}\n\
+            "pools:\n  - {{ name: p, targets: [\"{backend}\"], health_check: {{ type: none }} }}\n\
              listeners:\n  - {{ name: l, bind: \"{proxy_addr}\", protocol: udp, pool: p }}\n"
         ))?;
-        let rt = Runtime::start(
-            Snapshot::from_config(&cfg),
-            Default::default(),
-            args.workers,
-        );
+        let rt = Runtime::start(Snapshot::from_config(&cfg), Arc::default(), args.workers);
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let direct = Stats::of(udp_rtt(backend, args.iterations, args.payload).await?);
@@ -241,6 +271,22 @@ fn main() -> Result<()> {
             match args.mode {
                 Mode::Latency => run_latency(&args).await,
                 Mode::Concurrency => concurrency::run(&args_to_concurrency(&args, steps)).await,
+                Mode::UdpAffinity => {
+                    udp_affinity::run(&udp_affinity::Args {
+                        keys: args.keys,
+                        rate: args.rate,
+                        backends: args.backends,
+                        idle_sec: args.idle_sec,
+                        balancer: match args.balancer {
+                            BalancerArg::RoundRobin => udp_affinity::Balancer::RoundRobin,
+                            BalancerArg::ConsistentHash => udp_affinity::Balancer::ConsistentHash,
+                        },
+                        hash_on: args.hash_on.clone(),
+                        workers: args.workers,
+                        gsp_bin: args.gsp_bin.clone(),
+                    })
+                    .await
+                }
             }
         })?;
     if args.strict && !ok {

@@ -1,8 +1,8 @@
 //! A TCP + UDP echo server that runs *inside* a network namespace (on a
 //! thread that has `setns`-ed into it) plus the matching round-trip clients.
-//! Stands in for a game server in the tunnel e2e test. It binds `0.0.0.0`, so
-//! it works before the origin's WireGuard interface (and its tunnel address)
-//! exists.
+//! Stands in for a game server in the tunnel e2e test. It binds `[::]`
+//! (dual stack, so IPv4 and IPv6 tunnel addresses both reach it), so it works
+//! before the origin's WireGuard interface (and its tunnel address) exists.
 
 use std::net::SocketAddr;
 use std::thread::JoinHandle;
@@ -32,8 +32,8 @@ impl EchoServer {
                 .build()?;
             rt.block_on(async move {
                 let bound = async {
-                    let tcp = TcpListener::bind(("0.0.0.0", port)).await?;
-                    let udp = UdpSocket::bind(("0.0.0.0", port)).await?;
+                    let tcp = TcpListener::bind(("::", port)).await?;
+                    let udp = UdpSocket::bind(("::", port)).await?;
                     std::io::Result::Ok((tcp, udp))
                 }
                 .await;
@@ -76,7 +76,18 @@ impl EchoServer {
                 thread: Some(thread),
             }),
             Ok(Err(e)) => bail!("echo server failed to bind port {port}: {e}"),
-            Err(_) => bail!("echo server did not report ready within 5s"),
+            // The thread ended without reporting: `setns` into the namespace
+            // (or building the runtime) failed, and its error is the cause.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match thread.join() {
+                Ok(Err(e)) | Ok(Ok(Err(e))) => {
+                    Err(e).context(format!("echo server on port {port} could not start"))
+                }
+                Ok(Ok(Ok(()))) => bail!("echo server on port {port} exited before it was ready"),
+                Err(_) => bail!("echo server thread on port {port} panicked before it was ready"),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                bail!("echo server did not report ready within 5s")
+            }
         }
     }
 }
@@ -115,7 +126,12 @@ pub async fn tcp_roundtrip(addr: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> 
 /// One datagram out, one datagram back.
 pub async fn udp_roundtrip(addr: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> {
     timeout(Duration::from_secs(5), async {
-        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        let any = if addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let sock = UdpSocket::bind(any).await?;
         sock.connect(addr).await?;
         sock.send(payload).await?;
         let mut buf = vec![0u8; 65536];

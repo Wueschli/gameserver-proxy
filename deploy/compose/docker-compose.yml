@@ -11,6 +11,7 @@ x-build: &build
   dockerfile: deploy/Dockerfile
   args:
     BIN_SOURCE: ${BIN_SOURCE:-builder}   # `prebuilt` = binaries from deploy/prebuilt (CI)
+    GSP_GIT_SHA: ${GSP_GIT_SHA:-}   # shown as commit= in gsp_build_info (builder only)
 
 services:
   controller:
@@ -30,6 +31,11 @@ services:
     command:
       - --listen=0.0.0.0:9902
       - --auth-token=${GSP_AGGREGATOR_TOKEN:?set GSP_AGGREGATOR_TOKEN in .env}
+      # gsp pushes with this one; it cannot read or drive /fleet/*.
+      - --ingest-token=${GSP_INGEST_TOKEN:?set GSP_INGEST_TOKEN in .env}
+      # gsp (host network) reports http://127.0.0.1:9900, which is not the
+      # address the aggregator sees it connect from (the bridge gateway).
+      - --instance-url-allow=127.0.0.0/8
     ports: ["127.0.0.1:9902:9902"]
     restart: unless-stopped
 
@@ -78,7 +84,7 @@ services:
       - --controller=http://127.0.0.1:9901
       - --controller-token=${GSP_CONTROLLER_TOKEN}
       - --aggregator=http://127.0.0.1:9902
-      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
+      - --aggregator-token=${GSP_INGEST_TOKEN}
       - --aggregator-instance=demo-gsp
     depends_on:
       seed: { condition: service_completed_successfully }

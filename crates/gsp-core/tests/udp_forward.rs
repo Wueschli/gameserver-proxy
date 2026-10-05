@@ -1,5 +1,5 @@
 //! End-to-end UDP: datagrams flow client -> proxy -> backend -> client, with
-//! per-client sessions, `src_ip` backend affinity, and idle-timeout eviction
+//! per-client sessions, `consistent_hash` backend affinity, and idle-timeout eviction
 //! that releases the backend slot.
 
 use std::time::Duration;
@@ -32,6 +32,27 @@ fn free_udp_addr() -> std::net::SocketAddr {
         .unwrap()
 }
 
+/// Send `payload` on `sock` until the echo comes back, for the first datagram
+/// on a fresh path. A fixed sleep after `Runtime::start` loses to listener
+/// startup under load: the datagram then lands on a port nobody reads yet and
+/// is dropped (or bounces as `ConnectionRefused`), so a bare send/recv would
+/// time out. Returns the reply length.
+async fn first_reply(sock: &UdpSocket, payload: &[u8], buf: &mut [u8]) -> usize {
+    for _ in 0..40 {
+        // `send` can fail with ConnectionRefused from an earlier ICMP bounce.
+        if sock.send(payload).await.is_ok() {
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(250), sock.recv(buf)).await
+            {
+                return n;
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    panic!("the listener never answered the first datagram");
+}
+
 #[tokio::test]
 async fn forwards_udp_datagrams_and_reuses_the_session() {
     let b1 = echo_backend(1).await;
@@ -43,6 +64,8 @@ async fn forwards_udp_datagrams_and_reuses_the_session() {
 pools:
   - name: p
     targets: ["{b1}", "{b2}"]
+    health_check:
+      type: none
     balancer: round_robin
 listeners:
   - name: l
@@ -52,7 +75,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -80,6 +103,7 @@ listeners:
 }
 
 #[tokio::test]
+#[allow(clippy::items_after_statements)] // test-local items sit next to their only use
 async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
     let b1 = echo_backend(1).await;
     let proxy_addr = free_udp_addr();
@@ -88,6 +112,8 @@ async fn forwards_a_burst_of_datagrams_that_land_in_one_recvmmsg() {
 pools:
   - name: p
     targets: ["{b1}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -96,7 +122,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -141,6 +167,8 @@ async fn sessions_registry_lists_a_live_udp_session_with_its_pool_and_backend() 
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -149,7 +177,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     let handle = runtime.handle();
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -192,6 +220,7 @@ pools:
     targets: ["{backend}"]
     idle_timeout_sec: 1
     per_backend: {{ max_sessions: 1 }}
+    health_check: {{ type: udp_probe, send_hex: "00" }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -200,7 +229,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let roundtrip = |src_port_marker: &'static [u8]| async move {
@@ -238,7 +267,11 @@ async fn an_active_session_survives_past_its_idle_window_then_expires() {
     let backend = echo_backend(7).await;
     let proxy_addr = free_udp_addr();
     // idle_timeout 1s; one slot — a second client only gets in once the first
-    // session is evicted, so "B still refused" proves A is still alive.
+    // session is evicted, so "B still refused" proves A is still alive. The
+    // echo backend is UDP-only, so probe it over UDP: the default `tcp_connect`
+    // check fails against it and, with `fall: 3` at 2 s, marks it unhealthy about
+    // 4 s in. That races the eviction this test waits for: B then gets
+    // "no healthy backend" instead of the freed slot.
     let yaml = format!(
         r#"
 pools:
@@ -246,6 +279,7 @@ pools:
     targets: ["{backend}"]
     idle_timeout_sec: 1
     per_backend: {{ max_sessions: 1 }}
+    health_check: {{ type: udp_probe, send_hex: "00" }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -254,12 +288,17 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     a.connect(proxy_addr).await.unwrap();
     let mut buf = [0u8; 32];
+
+    // The listener may not be up yet; get A's session established first. The
+    // idle clock starts at the first datagram that reaches the proxy.
+    let n = first_reply(&a, b"a", &mut buf).await;
+    assert_eq!(&buf[..n], &[7, b'a']);
 
     // Keep A busy for ~2.5s — well past the 1s idle window. The timing wheel
     // must re-file it on every tick instead of evicting it.
@@ -309,8 +348,12 @@ async fn first_bytes_prefix_routes_to_its_pool() {
 pools:
   - name: query
     targets: ["{query}"]
+    health_check:
+      type: none
   - name: game
     targets: ["{game}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -323,7 +366,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let recv_tag = |payload: &'static [u8]| async move {
@@ -357,8 +400,12 @@ async fn first_bytes_length_routes_short_vs_long_datagrams() {
 pools:
   - name: short
     targets: ["{short}"]
+    health_check:
+      type: none
   - name: long
     targets: ["{long}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -371,7 +418,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let tag = |bytes: Vec<u8>| async move {
@@ -406,8 +453,12 @@ async fn udp_prefix_listener_routes_by_destination_ip_and_replies_from_it() {
 pools:
   - name: a
     targets: ["{a}"]
+    health_check:
+      type: none
   - name: b
     targets: ["{b}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "0.0.0.0:{port}"
@@ -423,7 +474,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The client `connect`s to the sub-address, so it only accepts a reply whose
@@ -459,6 +510,8 @@ async fn shutdown_drains_udp_sessions_then_returns() {
 pools:
   - name: p
     targets: ["{b}"]
+    health_check:
+      type: none
     idle_timeout_sec: 1
 listeners:
   - name: l
@@ -468,7 +521,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -530,6 +583,8 @@ async fn prepends_a_v2_udp_proxy_header_to_the_first_datagram_only() {
 pools:
   - name: p
     targets: ["{backend}"]
+    health_check:
+      type: none
     proxy_protocol: v2-udp
 listeners:
   - name: l
@@ -539,7 +594,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -593,6 +648,8 @@ async fn first_packet_gate_drops_unrecognised_datagrams() {
 pools:
   - name: p
     targets: ["{b}"]
+    health_check:
+      type: none
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -606,7 +663,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Unrecognised first datagram: no session, no reply.
@@ -649,7 +706,7 @@ async fn icmp_port_unreachable_marks_the_backend_unhealthy() {
 pools:
   - name: p
     targets: ["{dead}"]
-    health_check: {{ interval_sec: 1, timeout_ms: 200, rise: 1, fall: 1 }}
+    health_check: {{ type: tcp_connect, interval_sec: 1, timeout_ms: 200, rise: 1, fall: 1 }}
 listeners:
   - name: l
     bind: "{proxy_addr}"
@@ -658,7 +715,7 @@ listeners:
 "#
     );
     let cfg = parse_str(&yaml).unwrap();
-    let runtime = Runtime::start(Snapshot::from_config(&cfg), Default::default(), 1);
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let backend = runtime
@@ -691,6 +748,216 @@ listeners:
         "port-unreachable should mark the backend unhealthy"
     );
 
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// An echo backend with a full-size receive buffer, so large datagrams make
+/// the round trip.
+async fn big_echo_backend() -> std::net::SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_536];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            let _ = sock.send_to(&buf[..n], peer).await;
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn replies_of_every_size_reach_their_own_client_intact() {
+    let backend = big_echo_backend().await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check:
+      type: none
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Concurrent sessions, each with its own fill byte and datagram size, from
+    // a tiny one up to near the UDP maximum. The reply pumps interleave on the
+    // runtime, so any shared reply buffer must not mix their payloads up.
+    let sizes = [1usize, 64, 1_200, 9_000, 30_000, 60_000, 65_000, 100];
+    let mut tasks = Vec::new();
+    for (i, size) in sizes.into_iter().enumerate() {
+        tasks.push(tokio::spawn(async move {
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.connect(proxy_addr).await.unwrap();
+            let payload = vec![i as u8 + 1; size];
+            let mut buf = vec![0u8; 65_536];
+            let n = first_reply(&client, &payload, &mut buf).await;
+            assert_eq!(&buf[..n], &payload[..], "session {i} got a corrupted reply");
+            for round in 0..20 {
+                client.send(&payload).await.unwrap();
+                let n = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+                    .await
+                    .expect("reply timed out")
+                    .unwrap();
+                assert_eq!(&buf[..n], &payload[..], "session {i} round {round}");
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn consistent_hash_keeps_a_client_ip_on_one_backend_across_ports() {
+    let b1 = echo_backend(1).await;
+    let b2 = echo_backend(2).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b1}", "{b2}"]
+    health_check:
+      type: none
+    balancer: consistent_hash
+    hash_on: src_ip
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 2);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Each socket is a new source port (a new session, possibly on another
+    // worker); `src_ip` hashing must still send them all to the same backend.
+    let mut tags = Vec::new();
+    for _ in 0..12 {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(proxy_addr).await.unwrap();
+        let mut buf = [0u8; 32];
+        let n = first_reply(&client, b"hi", &mut buf).await;
+        assert_eq!(&buf[1..n], b"hi");
+        tags.push(buf[0]);
+    }
+    assert!(
+        tags.windows(2).all(|w| w[0] == w[1]),
+        "one client IP must hash to one backend, got {tags:?}"
+    );
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// A UDP socket that swallows every datagram: the connected send succeeds
+/// locally, but the backend never answers.
+async fn silent_backend() -> std::net::SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while sock.recv_from(&mut buf).await.is_ok() {}
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_stream_of_new_sessions_does_not_hide_a_failing_active_check() {
+    // The backend's port has no TCP listener, so the explicit `tcp_connect`
+    // probe fails every second; the backend takes datagrams but never answers.
+    // A passive "success" per new session used to wipe the failure streak.
+    let backend = silent_backend().await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check: {{ type: tcp_connect, interval_sec: 1, timeout_ms: 200, rise: 2, fall: 2 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let be = runtime
+        .handle()
+        .snapshot()
+        .pool("p")
+        .unwrap()
+        .backend(backend)
+        .unwrap()
+        .clone();
+
+    let mut flipped = false;
+    for _ in 0..120 {
+        // A fresh client (new session) every 50 ms.
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let _ = client.send_to(b"hi", proxy_addr).await;
+        if !be.is_healthy() {
+            flipped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        flipped,
+        "failing probes must take the backend down despite traffic"
+    );
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn health_check_none_keeps_a_udp_only_backend_in_rotation() {
+    // The #124 setup: a UDP-only backend and no probe payload. It must stay
+    // healthy well past `fall` x `interval`, and keep answering new sessions.
+    let backend = echo_backend(3).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check: {{ type: none, interval_sec: 1, fall: 1 }}
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(proxy_addr).await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = first_reply(&client, b"x", &mut buf).await;
+    assert_eq!(&buf[..n], &[3, b'x']);
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;

@@ -49,6 +49,17 @@ ui_login() {
 }
 retry "ui login" ui_login
 
+# gsp_build_info carries the commit the image was built from. `unknown` means the
+# build had no commit (build-images.sh / release.yml didn't pass GSP_GIT_SHA).
+has_commit() { # <name> <url> [bearer token]
+  body=$(curl -fsS ${3:+-H "Authorization: Bearer $3"} "$2") || return 1
+  echo "$body" | grep '^gsp_build_info' | grep -q 'commit="' || return 1
+  ! echo "$body" | grep '^gsp_build_info' | grep -q 'commit="unknown"'
+}
+retry "controller gsp_build_info has a commit" has_commit controller "$CTRL/metrics" "$GSP_CONTROLLER_TOKEN"
+retry "aggregator gsp_build_info has a commit" has_commit aggregator "$AGG/metrics" "$GSP_AGGREGATOR_TOKEN"
+retry "gsp gsp_build_info has a commit" has_commit gsp "$GSP_ADMIN/metrics"
+
 # A wrong token must be refused (the gate is actually on).
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' "$CTRL/config")
 [ "$code" = 401 ] || fail "controller accepted a wrong token (HTTP $code)"
