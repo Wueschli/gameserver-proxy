@@ -123,7 +123,7 @@ short-lived `src_ip → pool` mapping.
   - `sni` (generic, see above)
   - `minecraft` → handshake hostname + protocol version
   - `a2s` / `source-query` → Valve query recognized (route to a query pool)
-  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`, no hostname: the payload is encrypted)
+  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`). The plugin also decrypts the Initial (its keys derive from the packet's own destination connection ID and a public salt, RFC 9001 §5.2) and returns the TLS SNI as the hint's `host` (v1, v2 and drafts 29 to 34). When the SNI cannot be read (an older draft, or a ClientHello split across Initial packets with the SNI in a later one) only the key is set, so a `host:` route does not match and an empty-`host:` route still does
   - `wireguard` → handshake initiation recognized (key `wireguard`)
   - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal: about 3 in 256 random datagrams match, so it makes the first-packet gate leaky and belongs after stronger plugins in the sniffer list)
   - `raknet` → RakNet offline handshake recognized by its magic (Minecraft Bedrock and other RakNet games; key `raknet`)
