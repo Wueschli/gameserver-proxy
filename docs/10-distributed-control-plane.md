@@ -621,7 +621,7 @@ what order," which a stateless replica set cannot give.
   link. `openraft`'s async network trait is implemented as a thin
   `reqwest`-based client, matching every other outbound HTTP call in these
   crates.
-- **A `slave` tier's upward relay runs only on the leader.** `parent_client`
+- **A `slave` tier's upward relay runs only on the leader (built 2026-10-05).** `parent_client`
   / `intent::relay` (slices 1 and 4) become leader-only tasks — every
   follower would otherwise apply the same parent revision independently and
   each assign it a *different* local revision number, corrupting the
@@ -632,6 +632,17 @@ what order," which a stateless replica set cannot give.
   `Store`, committed alongside each relayed entry) instead of a
   process-local variable. This is the one genuinely new piece of state HA
   introduces beyond "replicate what already exists."
+  As built: the cursor is a `relay_cursor` tree beside each log, written in the
+  same `sled` transaction as the relayed revision and replaced by a snapshot
+  install; the leader proposes `RelayConfig`/`RelayIntent` entries carrying the
+  parent revision; the state machine skips an entry whose parent revision is
+  not above the cursor (a deposed leader's late proposal), so no replica applies
+  a parent revision twice. A new leader seeds a cold tier from the parent's
+  current config once (cursor `0`), then subscribes from the cursor. A
+  `--role slave` tier keeps the cursor without HA too, so a restart no longer
+  replays the parent's intent history. `POST /admin/adopt` is refused on an HA
+  controller: the role is a per-process setting, and a replicated role flip is
+  not built.
 - **Cluster membership: static at bootstrap, dynamic afterwards (built 2026-10-03).**
   `--ha-peers 1=host1:9901,2=host2:9901,...` (or `1=https://host1:8443,...`,
   built 2026-10-02 — docs/12 "HA replicas over TLS") on every

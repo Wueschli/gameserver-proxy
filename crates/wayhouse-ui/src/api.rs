@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -82,6 +83,9 @@ pub struct AppState {
     /// Mark the session cookie `Secure` — set exactly when this UI serves HTTPS
     /// itself (`--tls-cert`); on plain HTTP a browser would drop such a cookie.
     pub secure_cookie: bool,
+    /// How often an open `/ws/fleet` socket re-validates its session
+    /// ([`crate::ws`]); it is also checked before every outgoing message.
+    pub ws_session_recheck: Duration,
     /// Throttles `POST /ui/login` per client address and per username.
     pub login_limiter: Arc<LoginLimiter>,
     /// Bounds concurrent Argon2 verifications, so a flood of logins can't
@@ -107,6 +111,7 @@ impl AppState {
             controller: None,
             fleet_feed: None,
             secure_cookie: false,
+            ws_session_recheck: Duration::from_secs(30),
             login_limiter: Arc::new(LoginLimiter::default()),
             verify_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES)),
         }
@@ -139,6 +144,11 @@ impl AppState {
 
     pub fn with_secure_cookie(mut self, secure: bool) -> Self {
         self.secure_cookie = secure;
+        self
+    }
+
+    pub fn with_ws_session_recheck(mut self, every: Duration) -> Self {
+        self.ws_session_recheck = every;
         self
     }
 
@@ -358,8 +368,14 @@ async fn session_status(
 /// [`logout`] and [`crate::auth::check_role`]. Every `cookie` header counts:
 /// over HTTP/2 a browser may send one per cookie (RFC 9113 §8.2.3).
 pub fn session_id_from(req: &Request) -> Option<String> {
+    session_id_from_headers(req.headers())
+}
+
+/// [`session_id_from`] for a bare header map (the WebSocket upgrade handler
+/// has no `Request`).
+pub fn session_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
     let prefix = format!("{SESSION_COOKIE}=");
-    req.headers()
+    headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())

@@ -58,7 +58,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::role::{Role, RoleHandle};
-use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
+use crate::store::{Applied, RelayCursor, RevisionBytes, SiblingWrite, Store, StoreError};
 
 /// Capacity of the update-notification broadcast: how many accepted
 /// submissions can land between two ticks of a subscriber's tail loop before
@@ -146,10 +146,12 @@ pub struct AppState {
     pub actors: sled::Tree,
     /// `Some` when `--ha-peers` is set (phase 12 slice 6): `submit()`
     /// proposes via Raft instead of writing `store` directly. `None` (the
-    /// default, `replicas: 1`) is today's behaviour, byte-for-byte —
-    /// see `crate::ha`'s module doc for the scope cut (HA and `slave` are
-    /// mutually exclusive in this slice).
+    /// default, `replicas: 1`) is today's behaviour, byte-for-byte.
     pub ha: Option<Arc<crate::ha::HaHandle>>,
+    /// How far this tier's upward relay got in the parent's config log
+    /// (`slave` role only; stays `0` otherwise). Lands in the same
+    /// transaction as the revision it covers.
+    pub relay: RelayCursor,
 }
 
 impl AppState {
@@ -161,8 +163,9 @@ impl AppState {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         // A sibling tree in the exact same `sled` database `store` opened —
         // see `Store::db`'s doc.
-        let stage = store.db().open_tree("stage")?;
-        let actors = store.db().open_tree("actors")?;
+        let store_db = store.db().clone();
+        let stage = store_db.open_tree("stage")?;
+        let actors = store_db.open_tree("actors")?;
         Ok(AppState {
             store,
             stage,
@@ -171,6 +174,7 @@ impl AppState {
             role,
             actors,
             ha: None,
+            relay: RelayCursor::open(&store_db)?,
         })
     }
 
@@ -276,6 +280,89 @@ impl AppState {
             }
             Applied::AlreadyApplied => Ok(None),
         }
+    }
+
+    /// Persists `bytes` as a promoted revision relayed from the parent's
+    /// revision `parent_revision` and moves the relay cursor with it, in
+    /// one transaction. `Ok(None)` when the cursor is already at or past
+    /// `parent_revision` (a duplicate). The non-HA form of
+    /// [`Self::apply_relayed_entry`].
+    pub fn apply_relayed(
+        &self,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        if parent_revision <= self.relay.get()? {
+            return Ok(None);
+        }
+        let stage_bytes = stage_bytes(&Stage::promoted());
+        let revision = self.store.put_with(bytes, &|revision| {
+            let mut writes = self.stage_and_actor_writes(revision, &stage_bytes, None);
+            writes.push(self.relay.write(parent_revision));
+            writes
+        })?;
+        let _ = self.updates.send(revision);
+        Ok(Some(revision))
+    }
+
+    /// The Raft-apply form of [`Self::apply_relayed`] for the entry at log
+    /// `index`. A duplicate (cursor already at or past `parent_revision`,
+    /// e.g. a proposal of a deposed leader that lost the race to its
+    /// successor's) only advances the applied index. `Ok(None)` = nothing
+    /// written.
+    pub fn apply_relayed_entry(
+        &self,
+        index: u64,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        if parent_revision <= self.relay.get()? {
+            self.store.mark_applied(index)?;
+            return Ok(None);
+        }
+        let stage_bytes = stage_bytes(&Stage::promoted());
+        let applied = self.store.put_applied_with(bytes, index, &|revision| {
+            let mut writes = self.stage_and_actor_writes(revision, &stage_bytes, None);
+            writes.push(self.relay.write(parent_revision));
+            writes
+        })?;
+        match applied {
+            Applied::Written(revision) => {
+                let _ = self.updates.send(revision);
+                Ok(Some(revision))
+            }
+            Applied::AlreadyApplied => Ok(None),
+        }
+    }
+
+    /// Lands one revision relayed from the parent: written directly without
+    /// HA, proposed through Raft with HA (this node must be the leader).
+    pub async fn relay_revision(
+        &self,
+        bytes: RevisionBytes,
+        parent_revision: u64,
+    ) -> Result<(), crate::relay::RelayError> {
+        match &self.ha {
+            None => self.apply_relayed(bytes, parent_revision).map(drop)?,
+            Some(ha) => {
+                crate::relay::propose(
+                    ha,
+                    crate::ha::WriteRequest::RelayConfig {
+                        bytes,
+                        parent_revision,
+                    },
+                )
+                .await?
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this node should run the upward relay: always without HA,
+    /// else only the Raft leader. Followers get the relayed revisions
+    /// through the log.
+    pub fn is_relay_leader(&self) -> bool {
+        self.ha.as_ref().is_none_or(|h| h.is_leader())
     }
 
     /// The Raft-apply form of [`Self::promote_revision`] for the entry at

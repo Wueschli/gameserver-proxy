@@ -40,8 +40,12 @@ export function useFleetSocket(): {
           // Ignore an unparseable frame rather than crash the dashboard.
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         setConnected(false);
+        // 1008: the server ended the socket because the session is gone.
+        // Reconnecting would just be refused; the next gated request sends
+        // the user back to login.
+        if (event.code === 1008) return;
         if (!cancelled.current) {
           retryTimer = setTimeout(connect, 2000);
         }
