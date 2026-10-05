@@ -471,6 +471,20 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
 - **Fans out the phase-5 intent verbs** (drain, add/remove backend,
   route-hint, drain an instance) to every instance in its subtree at once,
   reporting partial success per instance rather than failing the whole call.
+- **Trust model.** Two credentials keep telemetry and control apart:
+  `--ingest-token` unlocks only `POST /ingest` (what every `gsp` and child tier
+  pushes with), `--auth-token` gates `GET /fleet/*` and every fan-out verb. A
+  pusher can therefore report state but not drain or edit anyone. Each push's
+  self-reported `admin_url` is where the fan-out later sends `--instance-token`,
+  so it is checked at ingest: with `--instance-url-allow` (CIDR, hostname or
+  `*.suffix`, repeatable) its host must match an entry; without, it must be an
+  IP literal equal to the pushing connection's source address, i.e. an instance
+  can only name itself (a push through NAT, a load balancer or a TLS terminator,
+  or a tier relaying its children, needs the allowlist). A refused push is a
+  `400`. The fan-out also refuses to forward a path parameter that is empty,
+  `.`/`..`, or holds `/`, `\`, `?`, `#` (a `400`), and percent-encodes the rest
+  when building the instance URL, so a verb cannot be steered to another admin
+  path.
 - Carries **no authority** — it never decides anything, only observes and
   relays observations up, and relays operator intent verbs down to the
   instances that actually hold the atomics. The controller (Tier 1) is the

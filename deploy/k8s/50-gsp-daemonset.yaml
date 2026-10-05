@@ -15,7 +15,7 @@ spec:
           args:
             - --config=/etc/gsp/gsp.yaml
             - --aggregator=http://gsp-aggregator.gsp.svc:9902
-            - --aggregator-token=$(AGGREGATOR_TOKEN)
+            - --aggregator-token=$(INGEST_TOKEN)
             # Default instance name is the admin listen addr (0.0.0.0:9900 on every
             # node) — all nodes would overwrite one aggregator entry.
             - --aggregator-instance=$(NODE_NAME)
@@ -28,8 +28,8 @@ spec:
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
             - name: NODE_IP
               valueFrom: { fieldRef: { fieldPath: status.hostIP } }
-            - name: AGGREGATOR_TOKEN
-              valueFrom: { secretKeyRef: { name: gsp-tokens, key: aggregator-token } }
+            - name: INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: gsp-tokens, key: ingest-token } }
           # With settings.admin.tls set, add `scheme: HTTPS` to both probes.
           readinessProbe: { httpGet: { path: /healthz, port: 9900 } }
           livenessProbe: { httpGet: { path: /healthz, port: 9900 }, initialDelaySeconds: 10 }

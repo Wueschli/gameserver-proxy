@@ -35,6 +35,22 @@ struct Args {
     #[arg(long)]
     auth_token: Option<String>,
 
+    /// Bearer token `POST /ingest` accepts instead of `--auth-token`, at least
+    /// 16 bytes, so the proxies that push telemetry do not hold a credential
+    /// that also unlocks `/fleet/*` (including drain and backend edits). It
+    /// unlocks only `/ingest`; `--auth-token` then gates `/fleet/*` alone.
+    /// Must differ from `--auth-token`. Omitted: `/ingest` is gated by
+    /// `--auth-token` like the rest of the API.
+    #[arg(long)]
+    ingest_token: Option<String>,
+
+    /// Which `admin_url` hosts an ingested push may report (the fan-out calls
+    /// them with `--instance-token`): an IP/CIDR (`10.0.0.0/8`), a hostname, or
+    /// `*.suffix`; repeat or comma-separate. Omitted: the URL's host must be
+    /// an IP literal equal to the pushing connection's source address.
+    #[arg(long, value_delimiter = ',')]
+    instance_url_allow: Vec<String>,
+
     /// Bearer token `GET /metrics` accepts instead of `--auth-token`, at least
     /// 16 bytes, so a Prometheus scraper need not hold the admin token. It
     /// unlocks only `/metrics`. Omitted: `/metrics` is gated by `--auth-token`
@@ -93,6 +109,13 @@ async fn main() -> anyhow::Result<()> {
     }
     gsp_http::policy::check_optional_secret("--auth-token", args.auth_token.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
+    gsp_http::policy::check_optional_secret("--ingest-token", args.ingest_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if args.ingest_token.is_some() && args.ingest_token == args.auth_token {
+        anyhow::bail!("--ingest-token must differ from --auth-token, or it separates nothing");
+    }
+    let admin_url_policy = gsp_aggregator::trust::AdminUrlPolicy::new(&args.instance_url_allow)
+        .map_err(|e| anyhow::anyhow!("--instance-url-allow: {e}"))?;
     gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -121,6 +144,8 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(IngestStore::new());
     let state = AppState::new(store)
         .with_auth_token(args.auth_token.clone())
+        .with_ingest_token(args.ingest_token.clone())
+        .with_admin_url_policy(admin_url_policy)
         .with_instance_token(args.instance_token);
 
     tracing::info!(

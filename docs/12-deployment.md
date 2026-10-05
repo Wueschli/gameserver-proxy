@@ -75,6 +75,17 @@ k8s DaemonSet reports `http://<node IP>:9900`, and the aggregator presents
 fan-out: its `gsp` admin API listens on the host's loopback only, which the
 bridge-networked aggregator cannot reach.
 
+The aggregator separates the credentials: give it `--ingest-token` for the `gsp`
+instances to push with (`--aggregator-token` on `gsp`; it unlocks only
+`POST /ingest`) and keep `--auth-token` for `gsp-ui` and operators (`/fleet/*`).
+It only stores an `admin_url` whose host is the pushing connection's own source
+IP, or one covered by `--instance-url-allow` (CIDR, hostname or `*.suffix`,
+repeatable); set the allowlist when the aggregator sees a different source
+address than the one reported (NAT, a load balancer, a TLS terminator, the
+compose bridge, or a child tier relaying through `--parent-url`). A refused push
+gets a `400` and a warning in the aggregator's log. See `docs/10`, "The
+aggregator".
+
 ## Networking: a proxy that binds many, changing ports
 
 `gsp` is designed to add and remove listeners live — `ListenerManager`
