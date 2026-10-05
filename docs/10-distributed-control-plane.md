@@ -473,11 +473,13 @@ operational verbs, entirely separate from the controller's Tier-1 write path.
   reporting partial success per instance rather than failing the whole call.
 - **Trust model.** Two credentials keep telemetry and control apart:
   `--ingest-token` unlocks only `POST /ingest` (what every `gsp` and child tier
-  pushes with), `--auth-token` gates `GET /fleet/*` and every fan-out verb. A
+  pushes with), `--auth-token` gates `GET /fleet/*` and every fan-out verb;
+  setting `--auth-token` without a different `--ingest-token` is refused at startup. A
   pusher can therefore report state but not drain or edit anyone. Each push's
   self-reported `admin_url` is where the fan-out later sends `--instance-token`,
   so it is checked at ingest: with `--instance-url-allow` (CIDR, hostname or
-  `*.suffix`, repeatable) its host must match an entry; without, it must be an
+  `*.suffix`, repeatable) its host must match an entry (a hostname entry trusts
+  whoever controls DNS for that name); without, it must be an
   IP literal equal to the pushing connection's source address, i.e. an instance
   can only name itself (a push through NAT, a load balancer or a TLS terminator,
   or a tier relaying its children, needs the allowlist). A refused push is a

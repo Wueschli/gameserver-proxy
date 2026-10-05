@@ -39,8 +39,7 @@ struct Args {
     /// 16 bytes, so the proxies that push telemetry do not hold a credential
     /// that also unlocks `/fleet/*` (including drain and backend edits). It
     /// unlocks only `/ingest`; `--auth-token` then gates `/fleet/*` alone.
-    /// Must differ from `--auth-token`. Omitted: `/ingest` is gated by
-    /// `--auth-token` like the rest of the API.
+    /// Required whenever `--auth-token` is set, and must differ from it.
     #[arg(long)]
     ingest_token: Option<String>,
 
@@ -100,6 +99,22 @@ struct Args {
     tls: gsp_http::tls::TlsArgs,
 }
 
+/// `--auth-token` must come with a distinct `--ingest-token`: otherwise the
+/// admin token would also push telemetry (and every pusher would hold it).
+fn check_ingest_token(auth: Option<&str>, ingest: Option<&str>) -> Result<(), String> {
+    match (auth, ingest) {
+        (Some(_), None) => Err(
+            "--auth-token requires --ingest-token: the proxies that push to /ingest must not \
+             hold the token that unlocks /fleet/* (drain, backend edits); give them a separate one"
+                .into(),
+        ),
+        (Some(a), Some(i)) if a == i => {
+            Err("--ingest-token must differ from --auth-token, or it separates nothing".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -111,9 +126,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     gsp_http::policy::check_optional_secret("--ingest-token", args.ingest_token.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
-    if args.ingest_token.is_some() && args.ingest_token == args.auth_token {
-        anyhow::bail!("--ingest-token must differ from --auth-token, or it separates nothing");
-    }
+    check_ingest_token(args.auth_token.as_deref(), args.ingest_token.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
     let admin_url_policy = gsp_aggregator::trust::AdminUrlPolicy::new(&args.instance_url_allow)
         .map_err(|e| anyhow::anyhow!("--instance-url-allow: {e}"))?;
     gsp_http::policy::check_optional_secret("--metrics-token", args.metrics_token.as_deref())
@@ -184,4 +198,22 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_ingest_token;
+
+    #[test]
+    fn an_auth_token_needs_its_own_ingest_token() {
+        assert!(check_ingest_token(None, None).is_ok());
+        assert!(check_ingest_token(None, Some("i")).is_ok());
+        assert!(check_ingest_token(Some("a"), Some("i")).is_ok());
+        assert!(check_ingest_token(Some("a"), None)
+            .unwrap_err()
+            .contains("requires --ingest-token"));
+        assert!(check_ingest_token(Some("a"), Some("a"))
+            .unwrap_err()
+            .contains("must differ"));
+    }
 }

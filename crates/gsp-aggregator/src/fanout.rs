@@ -977,4 +977,48 @@ mod tests {
             ["/admin/sniffers?name=a%26x%3D1"]
         );
     }
+
+    /// The fan-out must not follow a redirect: it would carry the instance
+    /// token to wherever the instance (or whoever answers for it) points.
+    #[tokio::test]
+    async fn a_redirect_from_an_instance_is_not_followed() {
+        let hit = Arc::new(Mutex::new(0u32));
+        let hit2 = hit.clone();
+        let target = Router::new().fallback(move || {
+            let hit = hit2.clone();
+            async move {
+                *hit.lock().unwrap() += 1;
+                "elsewhere"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
+
+        let redirector = Router::new().fallback(move || async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", format!("http://{target_addr}/"))],
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, redirector).await.unwrap() });
+
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("a", &format!("http://{addr}")));
+        let app = crate::api::router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/fleet/instances/a/drain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(*hit.lock().unwrap(), 0);
+    }
 }

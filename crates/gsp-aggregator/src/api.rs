@@ -76,10 +76,10 @@ pub struct AppState {
     /// Bearer token every request except `GET /healthz` must present
     /// (`--auth-token`); `None` leaves this aggregator's own API open.
     pub auth_token: Option<String>,
-    /// Bearer token `POST /ingest` accepts instead of `auth_token`
-    /// (`--ingest-token`), so the proxies that push telemetry do not hold a
-    /// credential that also unlocks `/fleet/*`. `None`: `/ingest` is gated by
-    /// `auth_token` like the rest.
+    /// Bearer token `POST /ingest` requires (`--ingest-token`), so the proxies
+    /// that push telemetry do not hold a credential that also unlocks
+    /// `/fleet/*`. `main` insists it is set whenever `auth_token` is; `None`
+    /// leaves `/ingest` open (the all-open, loopback case).
     pub ingest_token: Option<String>,
     /// Which `admin_url`s an ingested payload may carry (see [`crate::trust`]).
     pub admin_url_policy: AdminUrlPolicy,
@@ -98,7 +98,12 @@ impl AppState {
         let (updates, _rx) = broadcast::channel(UPDATES_CAPACITY);
         AppState {
             store,
-            http: gsp_http::client(),
+            // No redirects: a followed 3xx would carry the instance token to
+            // wherever an instance's admin API points it.
+            http: gsp_http::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("the extra roots were validated by init_ca_file, so the client builds"),
             auth_token: None,
             ingest_token: None,
             admin_url_policy: AdminUrlPolicy::default(),
@@ -129,16 +134,11 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    // Two bearer layers: `/ingest` accepts `--ingest-token` (falling back to
-    // `--auth-token`), everything under `/fleet` only `--auth-token`.
+    // Two bearer layers: `/ingest` accepts only `--ingest-token`, everything
+    // under `/fleet` only `--auth-token`.
     let ingest = Router::new().route("/ingest", post(ingest)).route_layer(
         axum::middleware::from_fn_with_state(
-            gsp_http::server::BearerAuth::new(
-                state
-                    .ingest_token
-                    .as_deref()
-                    .or(state.auth_token.as_deref()),
-            ),
+            gsp_http::server::BearerAuth::new(state.ingest_token.as_deref()),
             gsp_http::server::require_bearer,
         ),
     );
@@ -587,8 +587,9 @@ mod tests {
         // /healthz lives outside `api::router` in `main.rs`, so it's not
         // part of what's under test here — only confirming everything
         // *inside* this router is gated when a token is set.
-        let state =
-            AppState::new(Arc::new(IngestStore::new())).with_auth_token(Some("secret".into()));
+        let state = AppState::new(Arc::new(IngestStore::new()))
+            .with_auth_token(Some("secret".into()))
+            .with_ingest_token(Some("ingest".into()));
         let app = router(state);
 
         let resp = app
@@ -687,19 +688,6 @@ mod tests {
         );
         assert_ne!(
             status_of(app, drain("admin")).await,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-
-    #[tokio::test]
-    async fn without_an_ingest_token_the_auth_token_still_unlocks_ingest() {
-        let app = router(test_state().with_auth_token(Some("admin".into())));
-        assert_eq!(
-            status_of(app.clone(), push(Some("admin"), "a")).await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            status_of(app, push(None, "a")).await,
             StatusCode::UNAUTHORIZED
         );
     }
