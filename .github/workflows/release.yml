@@ -97,10 +97,16 @@ jobs:
               --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
               -t "$REGISTRY/$owner/$t:$VERSION" -
           done
+          # Every :VERSION first, then the moving tags, so a registry error part
+          # way through never moves `latest` onto a mixed-version set.
           for t in $IMAGES; do
-            image="$REGISTRY/$owner/$t"
-            for tag in $tags; do
-              [ "$tag" = "$VERSION" ] || docker tag "$image:$VERSION" "$image:$tag"
+            docker push "$REGISTRY/$owner/$t:$VERSION"
+          done
+          for tag in $tags; do
+            [ "$tag" = "$VERSION" ] && continue
+            for t in $IMAGES; do
+              image="$REGISTRY/$owner/$t"
+              docker tag "$image:$VERSION" "$image:$tag"
               docker push "$image:$tag"
             done
           done
