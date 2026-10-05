@@ -23,6 +23,7 @@
 //! proxy that predates the registry or a deployment too small to bother
 //! with it.
 
+use crate::live_interface::LiveInterface;
 use defguard_wireguard_rs::net::IpAddrMask;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -168,11 +169,8 @@ fn remove_peer(wg: &(dyn WireguardInterfaceApi + Send + Sync), name: &str, pubke
 /// `defguard_boringtun`'s userspace backend panics on a same-pubkey
 /// `configure_peer`, and re-registering on a fixed interval would otherwise
 /// tear down a just-established handshake every cycle).
-pub async fn run(
-    controller_url: String,
-    token: Option<String>,
-    wg: Arc<dyn WireguardInterfaceApi + Send + Sync>,
-) {
+pub async fn run(controller_url: String, token: Option<String>, live: Arc<LiveInterface>) {
+    let wg = live.api();
     let mut backoff = RECONNECT_MIN;
     let mut last_applied: HashMap<String, ProxyRegistration> = HashMap::new();
     loop {
@@ -180,6 +178,7 @@ pub async fn run(
             &controller_url,
             token.as_deref(),
             wg.as_ref(),
+            &live,
             &mut last_applied,
         )
         .await
@@ -208,6 +207,7 @@ async fn subscribe_once(
     base_url: &str,
     token: Option<&str>,
     wg: &(dyn WireguardInterfaceApi + Send + Sync),
+    live: &LiveInterface,
     last_applied: &mut HashMap<String, ProxyRegistration>,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/proxy-peers/subscribe");
@@ -240,24 +240,44 @@ async fn subscribe_once(
 
         while let Some(event) = buf.next_event() {
             if let Some(ev) = parse_sse_event(&event) {
-                match plan(last_applied, &ev) {
-                    Action::Skip => {}
-                    Action::Reconcile(reg) => {
-                        if let Some(old) = replaced_pubkey(last_applied, reg) {
-                            remove_peer(wg, &reg.name, old);
-                        }
-                        reconcile_peer(wg, reg);
-                        last_applied.insert(reg.name.clone(), reg.clone());
-                    }
-                    Action::Remove(pubkey) => {
-                        if let Event::Removed(name) = &ev {
-                            remove_peer(wg, name, &pubkey);
-                            last_applied.remove(name);
-                        }
-                    }
-                }
+                apply(wg, live, last_applied, &ev);
             }
         }
+    }
+}
+
+/// Applies one event to the device and records it in `applied`. A peer the
+/// event removes or supersedes is also dropped from `live`'s lost peers, so a
+/// later repair cannot bring back a proxy that is gone.
+fn apply(
+    wg: &(dyn WireguardInterfaceApi + Send + Sync),
+    live: &LiveInterface,
+    applied: &mut HashMap<String, ProxyRegistration>,
+    ev: &Event,
+) {
+    match plan(applied, ev) {
+        Action::Skip => {}
+        Action::Reconcile(reg) => {
+            if let Some(old) = replaced_pubkey(applied, reg) {
+                remove_peer(wg, &reg.name, old);
+                forget(live, old);
+            }
+            reconcile_peer(wg, reg);
+            applied.insert(reg.name.clone(), reg.clone());
+        }
+        Action::Remove(pubkey) => {
+            if let Event::Removed(name) = ev {
+                remove_peer(wg, name, &pubkey);
+                forget(live, &pubkey);
+                applied.remove(name);
+            }
+        }
+    }
+}
+
+fn forget(live: &LiveInterface, pubkey: &str) {
+    if let Ok(key) = Key::try_from(pubkey) {
+        live.forget_peer(&key);
     }
 }
 
@@ -469,5 +489,60 @@ mod tests {
         let mut new = old.clone();
         new.pubkey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into();
         assert_eq!(replaced_pubkey(&applied, &new), Some(old.pubkey.as_str()));
+    }
+
+    #[test]
+    fn a_removed_proxy_is_not_re_added_by_a_later_repair() {
+        use crate::live_interface::testing::*;
+        let key = Key::new([1; 32]);
+        let mut proxy = reg(Some("fd00::1"));
+        proxy.pubkey = key.to_string();
+        let device_peer = to_wg_peer(&proxy).unwrap();
+        let log = Log::default();
+        let live = live_with_flaky_peers(std::slice::from_ref(&device_peer), &[(&key, 2)], &log);
+        live.renew_peers().unwrap(); // the peer is lost
+        let mut applied = HashMap::new();
+        applied.insert(proxy.name.clone(), proxy.clone());
+        apply(
+            live.api().as_ref(),
+            &live,
+            &mut applied,
+            &Event::Removed(proxy.name.clone()),
+        );
+        assert!(live.repair_peers().is_empty());
+        assert!(!live
+            .api()
+            .read_interface_data()
+            .unwrap()
+            .peers
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn a_proxy_re_registered_under_a_new_key_drops_the_old_keys_lost_entry() {
+        use crate::live_interface::testing::*;
+        let old_key = Key::new([1; 32]);
+        let mut old = reg(Some("fd00::1"));
+        old.pubkey = old_key.to_string();
+        let log = Log::default();
+        let live = live_with_flaky_peers(&[to_wg_peer(&old).unwrap()], &[(&old_key, 2)], &log);
+        live.renew_peers().unwrap();
+        let mut applied = HashMap::new();
+        applied.insert(old.name.clone(), old.clone());
+        let mut new = old.clone();
+        new.pubkey = Key::new([2; 32]).to_string();
+        apply(
+            live.api().as_ref(),
+            &live,
+            &mut applied,
+            &Event::Registered(new),
+        );
+        assert!(live.repair_peers().is_empty());
+        assert!(!live
+            .api()
+            .read_interface_data()
+            .unwrap()
+            .peers
+            .contains_key(&old_key));
     }
 }

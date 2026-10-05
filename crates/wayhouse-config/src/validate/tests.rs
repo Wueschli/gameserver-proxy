@@ -2094,3 +2094,29 @@ listeners:
     let err = parse_str(yaml).unwrap_err().to_string();
     assert!(err.contains("idle_timeout_sec"), "{err}");
 }
+
+#[test]
+fn duplicate_pool_targets_are_rejected() {
+    let inline = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9001"]
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+    let err = parse_str(inline).unwrap_err().to_string();
+    assert!(
+        err.contains("duplicate target") && err.contains("127.0.0.1:9001"),
+        "{err}"
+    );
+    let via_source = r#"
+backend_sources:
+  - { name: s, type: static, targets: ["10.0.0.1:1", "10.0.0.1:1"] }
+pools:
+  - { name: p, source: s }
+listeners:
+  - { name: l, bind: "0.0.0.0:7777", pool: p }
+"#;
+    let err = parse_str(via_source).unwrap_err().to_string();
+    assert!(err.contains("duplicate target"), "{err}");
+}

@@ -19,6 +19,18 @@ enum ResolvedSource {
     Dynamic(SourceConfig),
 }
 
+/// A pool shares one backend's live state (health, admin state, active count)
+/// per address, so the same address twice is never what anyone meant.
+fn reject_duplicate_targets(what: &str, addrs: &[SocketAddr]) -> Result<(), ConfigError> {
+    let mut seen = BTreeSet::new();
+    match addrs.iter().find(|a| !seen.insert(**a)) {
+        Some(dup) => Err(ConfigError::Invalid(format!(
+            "{what}: duplicate target: {dup}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
     use ConfigError::Invalid;
 
@@ -91,6 +103,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                         ))
                     })?);
                 }
+                reject_duplicate_targets(&format!("backend_sources {}", s.name), &addrs)?;
                 ResolvedSource::Static(addrs)
             }
             "dns_srv" => {
@@ -234,6 +247,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                     })?;
                     targets.push(addr);
                 }
+                reject_duplicate_targets(&format!("pool {}", p.name), &targets)?;
                 (targets, None)
             }
         };
