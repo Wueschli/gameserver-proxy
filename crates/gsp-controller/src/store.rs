@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use sled::transaction::{ConflictableTransactionError, TransactionError};
 use sled::Transactional;
 use thiserror::Error;
 
@@ -104,24 +105,49 @@ impl Store {
     /// Callers (the slice-2 submit API) run `gsp_config::validate` *before*
     /// calling this — the store itself does not parse or validate `bytes`.
     pub fn put(&self, bytes: RevisionBytes) -> Result<u64, StoreError> {
-        let next = match self.current_revision()? {
-            Some(rev) => rev.checked_add(1).ok_or(StoreError::CounterOverflow)?,
-            None => 1,
-        };
+        self.put_with(bytes, &[])
+    }
 
-        (&self.revisions, &self.meta)
-            .transaction(|(revisions, meta)| {
-                revisions.insert(&encode_rev(next), bytes.as_slice())?;
-                meta.insert(CURRENT_KEY, &encode_rev(next))?;
-                Ok::<_, sled::transaction::ConflictableTransactionError<sled::Error>>(())
+    /// [`Store::put`], additionally writing `value` under the new revision's
+    /// key in each `(tree, value)` of `side` in the *same* transaction (the
+    /// canary stage and the actor, `crate::api::AppState`). A reader can
+    /// never observe the revision without its side entries.
+    ///
+    /// The next revision number is read inside the transaction, which `sled`
+    /// serialises: two overlapping puts conflict and the loser re-runs
+    /// against the winner's `current`, so every put gets a distinct number.
+    pub fn put_with(
+        &self,
+        bytes: RevisionBytes,
+        side: &[(&sled::Tree, Vec<u8>)],
+    ) -> Result<u64, StoreError> {
+        let mut trees: Vec<&sled::Tree> = vec![&self.revisions, &self.meta];
+        trees.extend(side.iter().map(|(t, _)| *t));
+
+        let next = trees[..]
+            .transaction(|txs| {
+                let next =
+                    match txs[1].get(CURRENT_KEY)? {
+                        Some(v) => decode_rev(&v).checked_add(1).ok_or(
+                            ConflictableTransactionError::Abort(StoreError::CounterOverflow),
+                        )?,
+                        None => 1,
+                    };
+                txs[0].insert(&encode_rev(next), bytes.as_slice())?;
+                txs[1].insert(CURRENT_KEY, &encode_rev(next))?;
+                for (tx, (_, value)) in txs[2..].iter().zip(side) {
+                    tx.insert(&encode_rev(next), value.as_slice())?;
+                }
+                Ok(next)
             })
             .map_err(|e| match e {
-                sled::transaction::TransactionError::Storage(e) => StoreError::Sled(e),
-                sled::transaction::TransactionError::Abort(e) => StoreError::Sled(e),
+                TransactionError::Storage(e) => StoreError::Sled(e),
+                TransactionError::Abort(e) => e,
             })?;
 
-        self.revisions.flush()?;
-        self.meta.flush()?;
+        for tree in trees {
+            tree.flush()?;
+        }
         Ok(next)
     }
 }
@@ -198,6 +224,29 @@ mod tests {
         );
 
         assert!(store.revisions_after(rev3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_puts_each_get_a_distinct_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+        const N: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.put(format!("config: {i}").into_bytes()).unwrap()
+                })
+            })
+            .collect();
+        let mut revs: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        revs.sort_unstable();
+        assert_eq!(revs, (1..=N as u64).collect::<Vec<_>>());
+        assert_eq!(store.revisions_after(0).unwrap().len(), N);
+        assert_eq!(store.current_revision().unwrap(), Some(N as u64));
     }
 
     #[test]

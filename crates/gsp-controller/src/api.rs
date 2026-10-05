@@ -93,6 +93,15 @@ impl Stage {
         }
     }
 
+    /// Visible to nobody: what a revision with a missing or unreadable stage
+    /// entry is treated as.
+    pub fn hidden() -> Self {
+        Stage {
+            promoted: false,
+            canary_groups: Vec::new(),
+        }
+    }
+
     fn canary(group: String) -> Self {
         Stage {
             promoted: false,
@@ -203,9 +212,11 @@ impl AppState {
         stage: Stage,
         actor: Option<&str>,
     ) -> Result<u64, StoreError> {
-        let revision = self.store.put(bytes)?;
-        self.set_stage(revision, &stage)?;
-        self.set_actor(revision, actor)?;
+        let mut side = vec![(&self.stage, encode_stage(&stage))];
+        if let Some(actor) = actor {
+            side.push((&self.actors, actor.as_bytes().to_vec()));
+        }
+        let revision = self.store.put_with(bytes, &side)?;
         let _ = self.updates.send(revision);
         Ok(revision)
     }
@@ -226,21 +237,16 @@ impl AppState {
         Ok(true)
     }
 
-    /// `revision`'s current [`Stage`] — [`Stage::promoted`] if never
-    /// explicitly staged (every revision from before this slice, and every
-    /// plain `POST /config`).
+    /// `revision`'s current [`Stage`]. A missing, unreadable or undecodable
+    /// entry is [`Stage::hidden`] (fail closed): hiding a revision is
+    /// recoverable, leaking a canary fleet-wide is not.
     pub fn stage_of(&self, revision: u64) -> Stage {
-        self.stage
-            .get(encode_rev(revision))
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_slice(&v).ok())
-            .unwrap_or_else(Stage::promoted)
+        read_stage(&self.stage, revision)
     }
 
     fn set_stage(&self, revision: u64, stage: &Stage) -> Result<(), StoreError> {
-        let bytes = serde_json::to_vec(stage).expect("Stage always serializes");
-        self.stage.insert(encode_rev(revision), bytes)?;
+        self.stage
+            .insert(encode_rev(revision), encode_stage(stage))?;
         self.stage.flush()?;
         Ok(())
     }
@@ -253,13 +259,6 @@ impl AppState {
             .ok()
             .flatten()
             .map(|v| String::from_utf8_lossy(&v).into_owned())
-    }
-
-    fn set_actor(&self, revision: u64, actor: Option<&str>) -> Result<(), StoreError> {
-        let Some(actor) = actor else { return Ok(()) };
-        self.actors.insert(encode_rev(revision), actor.as_bytes())?;
-        self.actors.flush()?;
-        Ok(())
     }
 
     /// Is `revision` visible to a subscriber reporting `group` (`None` =
@@ -819,13 +818,30 @@ async fn catch_up(
 /// time) rather than a whole `AppState`, so its tests don't need to spin up
 /// everything else `AppState` carries just to check visibility.
 fn is_visible(stage: &sled::Tree, revision: u64, group: Option<&str>) -> bool {
-    stage
-        .get(encode_rev(revision))
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_slice::<Stage>(&v).ok())
-        .unwrap_or_else(Stage::promoted)
-        .visible_to(group)
+    read_stage(stage, revision).visible_to(group)
+}
+
+fn encode_stage(stage: &Stage) -> Vec<u8> {
+    serde_json::to_vec(stage).expect("Stage always serializes")
+}
+
+/// Reads `revision`'s [`Stage`], failing closed ([`Stage::hidden`], logged)
+/// when the entry is missing, unreadable or undecodable.
+fn read_stage(stage: &sled::Tree, revision: u64) -> Stage {
+    match stage.get(encode_rev(revision)) {
+        Ok(Some(v)) => serde_json::from_slice(&v).unwrap_or_else(|e| {
+            tracing::error!(revision, error = %e, "undecodable stage entry; hiding the revision");
+            Stage::hidden()
+        }),
+        Ok(None) => {
+            tracing::error!(revision, "revision has no stage entry; hiding it");
+            Stage::hidden()
+        }
+        Err(e) => {
+            tracing::error!(revision, error = %e, "unreadable stage entry; hiding the revision");
+            Stage::hidden()
+        }
+    }
 }
 
 fn store_error_response(e: StoreError) -> Response {
@@ -937,27 +953,32 @@ listeners:
         );
     }
 
-    /// A fresh, empty `stage` tree — every revision the tests below put
-    /// straight into a bare `Store` (bypassing `AppState`) is unstaged,
-    /// which `Stage::promoted`'s default already makes visible to everyone,
-    /// so these pre-slice-7 tests need no other changes.
-    fn test_stage_tree() -> sled::Tree {
-        let dir = tempfile::tempdir().unwrap();
-        sled::open(dir.path()).unwrap().open_tree("stage").unwrap()
+    /// The `stage` tree in `store`'s own database, as `AppState::new` opens it.
+    fn test_stage_tree(store: &Store) -> sled::Tree {
+        store.db().open_tree("stage").unwrap()
+    }
+
+    /// Puts `bytes` as a promoted revision — a revision with no stage entry
+    /// is hidden (fail closed), so bare-`Store` tests must stage explicitly.
+    fn put_promoted(store: &Store, bytes: &[u8]) -> u64 {
+        let tree = test_stage_tree(store);
+        store
+            .put_with(bytes.to_vec(), &[(&tree, encode_stage(&Stage::promoted()))])
+            .unwrap()
     }
 
     #[tokio::test]
     async fn subscribe_worker_sends_the_catch_up_range_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let rev1 = store.put(b"one".to_vec()).unwrap();
-        let rev2 = store.put(b"two".to_vec()).unwrap();
+        let rev1 = put_promoted(&store, b"one");
+        let rev2 = put_promoted(&store, b"two");
 
         let (_updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(subscribe_worker(
-            store,
-            test_stage_tree(),
+            store.clone(),
+            test_stage_tree(&store),
             None,
             updates_rx,
             0,
@@ -972,13 +993,13 @@ listeners:
     async fn subscribe_worker_tails_a_revision_accepted_after_it_started() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let rev1 = store.put(b"one".to_vec()).unwrap();
+        let rev1 = put_promoted(&store, b"one");
 
         let (updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(subscribe_worker(
             store.clone(),
-            test_stage_tree(),
+            test_stage_tree(&store),
             None,
             updates_rx,
             0,
@@ -987,7 +1008,7 @@ listeners:
 
         assert_eq!(rx.recv().await.unwrap(), (rev1, b"one".to_vec()));
 
-        let rev2 = store.put(b"two".to_vec()).unwrap();
+        let rev2 = put_promoted(&store, b"two");
         updates_tx.send(rev2).unwrap();
         assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
     }
@@ -996,14 +1017,14 @@ listeners:
     async fn subscribe_worker_since_a_revision_skips_everything_up_to_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let rev1 = store.put(b"one".to_vec()).unwrap();
-        let rev2 = store.put(b"two".to_vec()).unwrap();
+        let rev1 = put_promoted(&store, b"one");
+        let rev2 = put_promoted(&store, b"two");
 
         let (_updates_tx, updates_rx) = broadcast::channel(8);
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(subscribe_worker(
-            store,
-            test_stage_tree(),
+            store.clone(),
+            test_stage_tree(&store),
             None,
             updates_rx,
             rev1,
@@ -1017,13 +1038,13 @@ listeners:
     async fn a_lagged_subscriber_replays_from_the_store_instead_of_losing_revisions() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let rev1 = store.put(b"one".to_vec()).unwrap();
+        let rev1 = put_promoted(&store, b"one");
 
         let (updates_tx, updates_rx) = broadcast::channel(1);
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(subscribe_worker(
             store.clone(),
-            test_stage_tree(),
+            test_stage_tree(&store),
             None,
             updates_rx,
             0,
@@ -1039,8 +1060,8 @@ listeners:
         // the race and see `rev2` directly) is a scheduling detail — either
         // way it must end up delivering *both* rev2 and rev3, never skip
         // straight to rev3.
-        let rev2 = store.put(b"two".to_vec()).unwrap();
-        let rev3 = store.put(b"three".to_vec()).unwrap();
+        let rev2 = put_promoted(&store, b"two");
+        let rev3 = put_promoted(&store, b"three");
         updates_tx.send(rev2).unwrap();
         updates_tx.send(rev3).unwrap();
 
@@ -1523,14 +1544,13 @@ listeners:
     async fn subscribe_worker_holds_back_an_unpromoted_canary_revision_until_promoted() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path()).unwrap());
-        let rev1 = store.put(b"one".to_vec()).unwrap();
-        let stage_tree = test_stage_tree();
+        let rev1 = put_promoted(&store, b"one");
+        let stage_tree = test_stage_tree(&store);
         // rev2 is canary-only, not visible to a group-less subscriber.
-        let rev2 = store.put(b"two".to_vec()).unwrap();
-        stage_tree
-            .insert(
-                encode_rev(rev2),
-                serde_json::to_vec(&Stage::canary("region-a".into())).unwrap(),
+        let rev2 = store
+            .put_with(
+                b"two".to_vec(),
+                &[(&stage_tree, encode_stage(&Stage::canary("region-a".into())))],
             )
             .unwrap();
 
@@ -1563,5 +1583,27 @@ listeners:
             .unwrap();
         updates_tx.send(rev2).unwrap();
         assert_eq!(rx.recv().await.unwrap(), (rev2, b"two".to_vec()));
+    }
+
+    #[test]
+    fn a_revision_with_no_stage_entry_is_hidden_from_everyone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let stage_tree = store.db().open_tree("stage").unwrap();
+        let rev = store.put(b"one".to_vec()).unwrap();
+        assert!(!is_visible(&stage_tree, rev, None));
+        assert!(!is_visible(&stage_tree, rev, Some("canary")));
+    }
+
+    #[test]
+    fn an_undecodable_stage_entry_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let stage_tree = store.db().open_tree("stage").unwrap();
+        let rev = store.put(b"one".to_vec()).unwrap();
+        stage_tree
+            .insert(encode_rev(rev), b"not json".to_vec())
+            .unwrap();
+        assert!(!is_visible(&stage_tree, rev, None));
     }
 }
