@@ -7,7 +7,9 @@
 //! against the running groups by name:
 //!
 //! - name present, [`ListenerConfig`] unchanged → keep running;
-//! - name present, config changed → bind a new group, then stop the old one;
+//! - name present, config changed → bind a new group, then stop the old one
+//!   (a UDP group keeps draining its sessions in the background, see
+//!   `ListenerManager::retired`; the reload does not wait for it);
 //! - name only in the new config → bind and spawn;
 //! - name only in the running set → stop.
 //!
@@ -97,12 +99,20 @@ struct Group {
 }
 
 impl Group {
-    /// Fire the stop channel and wait for the accept tasks to unwind.
-    async fn stop(self) {
+    /// Fire the stop channel; the tasks start unwinding.
+    fn signal(&self) {
         let _ = self.stop.send(true);
+    }
+
+    /// Wait for the tasks to finish (after [`Group::signal`]).
+    async fn join(self) {
         for t in self.tasks {
             let _ = t.await;
         }
+    }
+
+    fn finished(&self) -> bool {
+        self.tasks.iter().all(JoinHandle::is_finished)
     }
 
     fn abort(&self) {
@@ -122,6 +132,11 @@ pub struct ListenerManager {
     sniffers: Arc<Sniffers>,
     workers: usize,
     groups: Mutex<HashMap<String, Group>>,
+    /// Replaced UDP groups still draining their sessions. A UDP worker only
+    /// returns once every session idled out, which a chatty client can delay
+    /// indefinitely, so `reconcile` must not await them; they are reaped here
+    /// and awaited by [`ListenerManager::stop_all`].
+    retired: Mutex<Vec<Group>>,
 }
 
 impl ListenerManager {
@@ -146,6 +161,7 @@ impl ListenerManager {
             sniffers,
             workers,
             groups: Mutex::new(HashMap::new()),
+            retired: Mutex::new(Vec::new()),
         })
     }
 
@@ -347,11 +363,21 @@ impl ListenerManager {
             (stopped, failed)
         };
 
-        // Phase 2 (lock released): wait for the stopped groups' tasks.
+        // Phase 2 (lock released): stop the old groups. A TCP accept task
+        // returns at once, so wait for it. A UDP worker keeps serving its live
+        // sessions until they idle out, so hand it to `retired` instead of
+        // holding the reload (and everything queued behind it) on it.
         let n_stopped = stopped.len();
         for g in stopped {
             tracing::info!(listener = %g.cfg.name, bind = %g.cfg.bind, "stopping listener");
-            g.stop().await;
+            g.signal();
+            if g.cfg.protocol == Protocol::Udp && !g.finished() {
+                let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+                retired.retain(|r| !r.finished());
+                retired.push(g);
+            } else {
+                g.join().await;
+            }
         }
         let running = self
             .groups
@@ -365,14 +391,19 @@ impl ListenerManager {
         }
     }
 
-    /// Stop every listener group and wait for the accept tasks to finish.
+    /// Stop every listener group, including retired UDP groups still
+    /// draining, and wait for the tasks to finish.
     pub async fn stop_all(&self) {
-        let drained: Vec<Group> = {
+        let mut drained: Vec<Group> = {
             let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             groups.drain().map(|(_, g)| g).collect()
         };
+        drained.append(&mut self.retired.lock().unwrap_or_else(PoisonError::into_inner));
+        for g in &drained {
+            g.signal();
+        }
         for g in drained {
-            g.stop().await;
+            g.join().await;
         }
     }
 
@@ -384,6 +415,14 @@ impl ListenerManager {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
+        {
+            g.abort();
+        }
+        for g in self
+            .retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
         {
             g.abort();
         }

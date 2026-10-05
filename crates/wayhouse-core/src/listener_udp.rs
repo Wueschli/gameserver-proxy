@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -91,8 +91,14 @@ const PENDING_BYTES_MAX: usize = 1024 * 1024;
 type SessionKey = (SocketAddr, Option<SocketAddr>);
 
 struct Session {
+    /// Distinguishes this session from an earlier one under the same key, so a
+    /// stale [`IdleWheel`] entry never evicts or re-files its replacement.
+    id: u64,
     upstream: Arc<UdpSocket>,
     last_ms: Arc<AtomicU64>,
+    /// Set by the reply pump when it exits. A session whose pump is gone can no
+    /// longer answer its client, so the next client datagram replaces it.
+    dead: Arc<AtomicBool>,
     backend: SocketAddr,
     /// Idle-eviction threshold, read once from the routed pool at creation.
     idle_ms: u64,
@@ -256,7 +262,7 @@ pub async fn run_udp_listener(
                             }
                         }
                         let now = mono_ms();
-                        wheel.schedule(key, now + session.idle_ms, now);
+                        wheel.schedule(key, session.id, now + session.idle_ms, now);
                         sessions.insert(key, session);
                         metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                             .increment(1.0);
@@ -312,6 +318,18 @@ pub async fn run_udp_listener(
                     // would take this very branch, so the whole run goes out
                     // in one `sendmmsg`.
                     if let Some(s) = sessions.get(&key) {
+                        if s.dead.load(Ordering::Relaxed) {
+                            // The reply pump is gone (#168): this session can
+                            // no longer answer. Drop it and open a fresh one
+                            // (re-picking a backend) from this datagram.
+                            tracing::debug!(
+                                listener = %cfg.name, %client, backend = %s.backend,
+                                "udp session replaced: reply pump ended"
+                            );
+                            sessions.remove(&key);
+                            metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
+                                .decrement(1.0);
+                        } else {
                         s.last_ms.store(mono_ms(), Ordering::Relaxed);
                         let up = s.upstream.clone();
                         let mut end = i + 1;
@@ -322,6 +340,7 @@ pub async fn run_udp_listener(
                         let run: Vec<&[u8]> = (i..end).map(|j| rbatch.at(j).0).collect();
                         forward_run(&up, &run, &cfg.name, client, &s.health).await;
                         continue;
+                        }
                     }
 
                     // Route still resolving: buffer behind the first datagram.
@@ -443,7 +462,7 @@ pub async fn run_udp_listener(
                     match open_session(&cfg, &snapshot, &conns, &sock, src_guard, limit_guard, client, dst, routed, data).await {
                         Ok(session) => {
                             let now = mono_ms();
-                            wheel.schedule(key, now + session.idle_ms, now);
+                            wheel.schedule(key, session.id, now + session.idle_ms, now);
                             sessions.insert(key, session);
                             metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                                 .increment(1.0);
@@ -706,7 +725,7 @@ const WHEEL_SLOTS: usize = 512;
 /// deadline. The per-datagram hot path is untouched — it still only bumps the
 /// atomic `last_ms`. Exactly one wheel entry exists per live session.
 struct IdleWheel {
-    slots: Vec<Vec<SessionKey>>,
+    slots: Vec<Vec<(SessionKey, u64)>>,
     hand: usize,
 }
 
@@ -720,11 +739,11 @@ impl IdleWheel {
 
     /// File `key` in the slot for `deadline_ms`, at least one slot ahead so it is
     /// never processed on the current tick.
-    fn schedule(&mut self, key: SessionKey, deadline_ms: u64, now: u64) {
+    fn schedule(&mut self, key: SessionKey, id: u64, deadline_ms: u64, now: u64) {
         let secs_ahead = (deadline_ms.saturating_sub(now) / 1000) as usize;
         let ahead = secs_ahead.clamp(1, WHEEL_SLOTS - 1);
         let slot = (self.hand + ahead) % WHEEL_SLOTS;
-        self.slots[slot].push(key);
+        self.slots[slot].push((key, id));
     }
 
     /// Advance one slot; evict genuinely-idle sessions, re-file the rest. Returns
@@ -738,9 +757,9 @@ impl IdleWheel {
         self.hand = (self.hand + 1) % WHEEL_SLOTS;
         let due = std::mem::take(&mut self.slots[self.hand]);
         let mut evicted = 0;
-        for key in due {
-            let Some(s) = sessions.get(&key) else {
-                continue; // session already gone by another path
+        for (key, id) in due {
+            let Some(s) = sessions.get(&key).filter(|s| s.id == id) else {
+                continue; // session already gone, or replaced under the same key
             };
             let deadline = s.last_ms.load(Ordering::Relaxed) + s.idle_ms;
             if now >= deadline {
@@ -751,7 +770,7 @@ impl IdleWheel {
                 sessions.remove(&key);
                 evicted += 1;
             } else {
-                self.schedule(key, deadline, now);
+                self.schedule(key, id, deadline, now);
             }
         }
         evicted
@@ -966,6 +985,7 @@ async fn open_session(
 
     let health = guard.as_ref().map(super::pool::BackendGuard::backend);
     let last_ms = Arc::new(AtomicU64::new(mono_ms()));
+    let dead = Arc::new(AtomicBool::new(false));
     let reply_task = spawn_reply(
         cfg.name.clone(),
         down.clone(),
@@ -981,6 +1001,7 @@ async fn open_session(
             dst.map(|d| d.ip())
         },
         last_ms.clone(),
+        dead.clone(),
     );
 
     tracing::debug!(listener = %cfg.name, %client, ?dst, %backend, "udp session opened");
@@ -992,8 +1013,10 @@ async fn open_session(
     });
     conn_guard.set_target(Some(pool_label.as_str()), backend);
     Ok(Session {
+        id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
         upstream,
         last_ms,
+        dead,
         backend,
         idle_ms,
         health,
@@ -1031,8 +1054,7 @@ async fn connect_upstream(
 /// Feed a passive unhealthy observation when a connected upstream UDP socket
 /// reports `ConnectionRefused` (on Linux, the ICMP port-unreachable the backend
 /// host sends when nothing is listening). Other errors are ignored, and a
-/// resolver `target` has no backend to mark; the idle sweep reaps the session
-/// either way.
+/// resolver `target` has no backend to mark.
 fn note_port_unreachable(listener: &str, health: &Option<Arc<Backend>>, err: &io::Error) {
     if err.kind() != io::ErrorKind::ConnectionRefused {
         return;
@@ -1060,9 +1082,24 @@ fn note_first_reply(listener: &str, health: &Option<Arc<Backend>>) {
     }
 }
 
-/// Pump backend → client until the upstream socket errors (e.g. ICMP
-/// port-unreachable) or the client send fails. The idle sweep reaps the
-/// session entry afterwards.
+/// Source of [`Session::id`].
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Marks a session dead when its reply pump exits, by whatever path.
+struct DeadOnDrop(Arc<AtomicBool>);
+
+impl Drop for DeadOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Pump backend → client until the upstream socket fails for good or the client
+/// send fails. An ICMP port-unreachable (`ConnectionRefused`) on the upstream
+/// socket is transient (the backend may be restarting): it feeds passive health
+/// and the pump keeps going. When the pump does exit it marks the session dead,
+/// so the next client datagram replaces it instead of feeding a pump-less
+/// session until idle-out.
 ///
 /// - transparent mode: `reply_sock` is the `IP_TRANSPARENT` socket bound to the
 ///   original destination; replies go out with a plain `send_to`.
@@ -1079,8 +1116,10 @@ fn spawn_reply(
     client: SocketAddr,
     reply_src: Option<IpAddr>,
     last_ms: Arc<AtomicU64>,
+    dead: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let _dead = DeadOnDrop(dead);
         let out = reply_sock.as_deref().unwrap_or(down.as_ref());
         // Once per session, not per reply packet.
         let packets_s2c =
@@ -1129,6 +1168,9 @@ fn spawn_reply(
                 },
                 Err(e) => {
                     note_port_unreachable(&listener, &health, &e);
+                    if e.kind() == io::ErrorKind::ConnectionRefused {
+                        continue;
+                    }
                     tracing::debug!(%listener, %client, error = %e, "udp upstream recv ended");
                     return;
                 }
@@ -1482,8 +1524,10 @@ mod tests {
         let limits = GlobalLimits::new(&wayhouse_config::GlobalLimits::default());
         let src = SourceLimiter::new(None);
         Session {
+            id: 0,
             upstream,
             last_ms: Arc::new(AtomicU64::new(last_ms)),
+            dead: Arc::new(AtomicBool::new(false)),
             backend: addr("127.0.0.1:9"),
             idle_ms,
             _guard: None,
@@ -1502,7 +1546,7 @@ mod tests {
     }
 
     fn slot_of(w: &IdleWheel, key: &SessionKey) -> Option<usize> {
-        w.slots.iter().position(|s| s.contains(key))
+        w.slots.iter().position(|s| s.iter().any(|(k, _)| k == key))
     }
 
     #[test]
@@ -1518,7 +1562,7 @@ mod tests {
         let mut w = IdleWheel::new();
         let k: SessionKey = (addr("10.0.0.1:1"), None);
         // Deadline already passed: must still not land on the current hand.
-        w.schedule(k, 1_000, 5_000);
+        w.schedule(k, 0, 1_000, 5_000);
         assert_eq!(slot_of(&w, &k), Some(1));
     }
 
@@ -1526,7 +1570,7 @@ mod tests {
     fn schedule_rounds_down_to_whole_seconds() {
         let mut w = IdleWheel::new();
         let k: SessionKey = (addr("10.0.0.1:1"), None);
-        w.schedule(k, 10_000 + 3_999, 10_000);
+        w.schedule(k, 0, 10_000 + 3_999, 10_000);
         assert_eq!(slot_of(&w, &k), Some(3));
     }
 
@@ -1536,7 +1580,7 @@ mod tests {
         w.hand = WHEEL_SLOTS - 2;
         let k: SessionKey = (addr("10.0.0.1:1"), None);
         // Far beyond the wheel span: clamped to WHEEL_SLOTS - 1, wrapping round.
-        w.schedule(k, 10_000_000, 0);
+        w.schedule(k, 0, 10_000_000, 0);
         let expect = (WHEEL_SLOTS - 2 + WHEEL_SLOTS - 1) % WHEEL_SLOTS;
         assert_eq!(slot_of(&w, &k), Some(expect));
         assert_ne!(expect, w.hand, "clamped entry must not alias the hand");
@@ -1546,13 +1590,28 @@ mod tests {
     fn tick_skips_sessions_already_gone() {
         let mut w = IdleWheel::new();
         let k: SessionKey = (addr("10.0.0.1:1"), None);
-        w.schedule(k, 1_000, 0);
+        w.schedule(k, 0, 1_000, 0);
         let mut sessions = HashMap::new();
         assert_eq!(w.tick("t", 1_000, &mut sessions), 0);
         assert!(
             w.slots.iter().all(std::vec::Vec::is_empty),
             "stale key dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn tick_ignores_a_stale_entry_of_a_replaced_session() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        // The wheel still holds the dead session's entry (id 7); the key now
+        // belongs to its replacement (id 8), which is idle but has its own entry.
+        w.schedule(k, 7, 1_000, 0);
+        let mut replacement = session(k.0, 0, 1_000).await;
+        replacement.id = 8;
+        let mut sessions = HashMap::from([(k, replacement)]);
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 0, "stale entry skipped");
+        assert_eq!(sessions.len(), 1);
+        assert!(w.slots.iter().all(std::vec::Vec::is_empty));
     }
 
     #[tokio::test]
@@ -1564,7 +1623,7 @@ mod tests {
         let s = session_tracked(&tracker, client, 0, 1_000).await;
         let mut sessions = HashMap::new();
         sessions.insert(k, s);
-        w.schedule(k, 1_000, 0);
+        w.schedule(k, 0, 1_000, 0);
         assert_eq!(tracker.active(), 1);
         assert_eq!(w.tick("t", 999, &mut sessions), 0, "not idle yet: re-filed");
         assert_eq!(tracker.active(), 1);
@@ -1583,7 +1642,7 @@ mod tests {
         let last = s.last_ms.clone();
         let mut sessions = HashMap::new();
         sessions.insert(k, s);
-        w.schedule(k, 2_000, 0);
+        w.schedule(k, 0, 2_000, 0);
 
         // A datagram at t=1.5s pushes the deadline to 3.5s.
         last.store(1_500, Ordering::Relaxed);
@@ -1605,7 +1664,7 @@ mod tests {
         let s = session(client, 0, span_ms * 2).await;
         let mut sessions = HashMap::new();
         sessions.insert(k, s);
-        w.schedule(k, span_ms * 2, 0);
+        w.schedule(k, 0, span_ms * 2, 0);
 
         let mut now = 0;
         let mut evicted = 0;
