@@ -188,8 +188,9 @@ pub struct AddressSync {
 impl AddressSync {
     /// Applies the address the controller reported to the live interface:
     /// moves it when the address (or the network prefix) changed, and records
-    /// the new address so a restart while the controller is down starts from
-    /// it. `Ok(true)` when the interface moved.
+    /// the address so a restart while the controller is down starts from it
+    /// (rewritten whenever the file differs, so a failed save is retried).
+    /// `Ok(true)` when the interface moved.
     pub fn apply(&self, reported: &Registered) -> anyhow::Result<bool> {
         let cidr = tunnel_address::interface_cidr(
             &reported.tunnel_address,
@@ -199,12 +200,16 @@ impl AddressSync {
         let new: IpAddrMask = cidr
             .parse()
             .map_err(|e| anyhow::anyhow!("tunnel address {cidr:?} is not a valid ip/cidr: {e}"))?;
-        if !self.live.needs_readdress(&new) {
-            return Ok(false);
+        let moved = self.live.needs_readdress(&new);
+        if moved {
+            self.live.readdress(&new)?;
         }
-        self.live.readdress(&new)?;
-        tunnel_address::save(&self.path, &cidr)?;
-        Ok(true)
+        // Whether or not the interface moved this time: a save that failed
+        // after an earlier move would otherwise never be retried.
+        if tunnel_address::load(&self.path).as_deref() != Some(cidr.as_str()) {
+            tunnel_address::save(&self.path, &cidr)?;
+        }
+        Ok(moved)
     }
 }
 
@@ -338,17 +343,47 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_is_retried_on_the_next_apply_even_though_the_interface_moved() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("tunnel-address");
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        let sync = sync(&live, None, &path);
+        assert!(sync.apply(&reported("10.60.0.7")).is_err());
+        assert_eq!(live.address().to_string(), "10.60.0.7/24");
+
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        assert!(!sync.apply(&reported("10.60.0.7")).unwrap());
+        assert_eq!(tunnel_address::load(&path).as_deref(), Some("10.60.0.7/24"));
+    }
+
+    #[test]
+    fn a_stale_saved_address_is_rewritten_when_the_interface_already_has_the_new_one() {
+        use crate::live_interface::testing::{live, Log};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        tunnel_address::save(&path, "10.60.0.5/24").unwrap();
+        let log = Log::default();
+        let live = Arc::new(live(&[], &[], &log));
+        assert!(!sync(&live, None, &path)
+            .apply(&reported("10.60.0.2"))
+            .unwrap());
+        assert_eq!(tunnel_address::load(&path).as_deref(), Some("10.60.0.2/24"));
+    }
+
+    #[test]
     fn an_unchanged_address_touches_nothing() {
         use crate::live_interface::testing::{live, Log};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tunnel-address");
         let log = Log::default();
         let live = Arc::new(live(&[], &[], &log));
+        tunnel_address::save(&path, "10.60.0.2/24").unwrap();
         assert!(!sync(&live, None, &path)
             .apply(&reported("10.60.0.2"))
             .unwrap());
         assert!(log.lock().unwrap().is_empty());
-        assert!(!path.exists());
     }
 
     #[test]

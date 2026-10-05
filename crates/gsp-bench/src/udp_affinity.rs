@@ -1,12 +1,12 @@
 //! UDP session-open / affinity harness — the load test behind issue #56
-//! ("retire the UDP sticky table via `consistent_hash`").
+//! (retire the UDP sticky table, which `consistent_hash` replaced).
 //!
-//! Every UDP listener keeps a worker-local sticky table (`listener_udp.rs`,
-//! `STICKY_MAX` entries, cleared wholesale when full) that remembers which
-//! backend a client's key (`src_ip`, or `src_ip_port`) was last sent to, so a
-//! client whose idle session was evicted lands on the same backend when it
-//! comes back. A `consistent_hash` pool gives the same affinity from a
-//! rendezvous hash, with no table. This mode measures the path #56 is about:
+//! UDP affinity now comes only from the pool's balancer: a `consistent_hash`
+//! pool pins a client to a backend with a rendezvous hash, so a client whose
+//! idle session was evicted lands on the same backend when it comes back. A
+//! `round_robin` pool has no affinity at all and serves as the baseline (the
+//! per-worker sticky table that used to sit in front of it retained only
+//! ~34% with 4 workers, see the README). This mode measures:
 //!
 //! 1. **Cold wave** — `--keys` distinct clients (one loopback source IP each,
 //!    `127.x.y.z`) open a session at `--rate` sessions/s against a real,
@@ -14,15 +14,13 @@
 //!    percentiles, the proxy's RSS / fds, and the backend spread.
 //! 2. **Drain** — wait out `--idle-sec` so every session is evicted, then
 //!    sample the proxy's RSS again: what is left is the per-worker state that
-//!    outlives sessions (the sticky table, allocator slack).
+//!    outlives sessions (allocator slack).
 //! 3. **Warm wave** — the *same* clients come back, in a shuffled order; reports the share that
 //!    lands on the same backend as before (**retention**) and the open
-//!    latency again. Retention is the user-visible property the sticky table
-//!    exists for; with `--keys` above `STICKY_MAX` a table that clears
-//!    wholesale cannot keep it, a rendezvous hash always does.
+//!    latency again.
 //!
 //! Run it once per candidate configuration (`--balancer round_robin` is the
-//! sticky-table path, `--balancer consistent_hash` the replacement), and
+//! no-affinity baseline, `--balancer consistent_hash` the real thing), and
 //! A/B two proxy builds with `--gsp-bin`. Loopback, one host — it measures
 //! the proxy's own per-open cost, not a NIC or a kernel under real load.
 
@@ -64,7 +62,7 @@ pub struct Args {
     /// last datagram (plus up to two 1 s wheel ticks).
     pub idle_sec: u64,
     pub balancer: Balancer,
-    /// `src_ip` or `src_ip_port` (listener affinity and pool `hash_on`).
+    /// `src_ip` or `src_ip_port` (the `consistent_hash` pool's `hash_on`).
     pub hash_on: String,
     pub workers: usize,
     /// Use this `gsp` binary instead of building `target/release/gsp`.
@@ -111,7 +109,7 @@ pub async fn run(args: &Args) -> Result<bool> {
         "settings:\n  workers: {workers}\n\
          pools:\n  - name: p\n    targets: [{targets}]\n    balancer: {balancer}\n    idle_timeout_sec: {idle}\n\
          \x20 - {{ name: ready, targets: [\"{tcp_backend}\"] }}\n\
-         listeners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p, affinity: {{ hash_on: {hash_on} }} }}\n\
+         listeners:\n  - {{ name: l, bind: \"{udp_addr}\", protocol: udp, pool: p }}\n\
          \x20 - {{ name: ready, bind: \"{ready_addr}\", protocol: tcp, pool: ready }}\n"
     ))?;
     let mut proxy = ProxyProcess::spawn(&gsp_bin, cfg_path)?;
@@ -205,8 +203,8 @@ pub async fn run(args: &Args) -> Result<bool> {
         if ok { "STABLE" } else { "LOST" }
     );
     println!(
-        "(loopback, single host; per-worker sticky table cap is 65536 keys — \
-         compare --balancer round_robin with --balancer consistent_hash, see udp_affinity.rs)"
+        "(loopback, single host; compare --balancer round_robin with \
+         --balancer consistent_hash, see udp_affinity.rs)"
     );
     proxy.kill();
     Ok(ok)

@@ -33,8 +33,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   single-level timing wheel (perf pass, ADR 19). `sendmmsg` egress batching is
   still deferred.
 - ✅ Per-session `connect(2)` upstream socket + a reply-pump task per session.
-- ✅ Session affinity (`hash_on: src_ip | src_ip_port` + per-worker sticky
-  table). (`consistent_hash` balancer deferred.)
+- ✅ Session affinity: a `consistent_hash` pool (`hash_on: src_ip | src_ip_port`).
+  The per-worker sticky table that first provided it was removed (#56): with
+  `SO_REUSEPORT` it kept only ~34% of clients on 4 workers.
 - ✅ `udp_probe` health check (`send_hex` / `expect_hex_prefix`).
 - ✅ Per-backend session caps (shared with TCP) + per-pool idle timeout;
   amplification guard (no reply without an established session).

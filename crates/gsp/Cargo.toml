@@ -23,8 +23,6 @@ dns-srv = ["dep:hickory-resolver"]
 # Tier-2 regional health fabric (`settings.gossip`); pulls in `foca`, `postcard`
 # and `hmac` through `gsp-core`.
 gossip = ["gsp-core/gossip"]
-# gRPC external resolver (`resolvers[].kind: grpc`); pulls in `tonic`/`prost` and
-# needs `protoc` at build time.
 # WireGuard backend transport (`--tunnel-*`, `backend_sources[].type: tunnel`);
 # pulls in `defguard_wireguard_rs` and the netlink crates.
 tunnel = [
@@ -34,6 +32,8 @@ tunnel = [
     "dep:netlink-sys",
     "dep:rand",
 ]
+# gRPC external resolver (`resolvers[].kind: grpc`); pulls in `tonic`/`prost` and
+# needs `protoc` at build time.
 grpc-resolver = ["dep:tonic", "dep:prost", "dep:tonic-prost", "dep:tonic-prost-build"]
 
 [lints]

@@ -159,6 +159,7 @@ pub async fn start(tc: TunnelConfig) -> anyhow::Result<Running> {
         wg,
         address,
         crate::netlink_addr::deleter(tc.iface.clone()),
+        crate::netlink_addr::link_deleter(tc.iface.clone()),
     ));
     tracing::info!(
         iface = %tc.iface,

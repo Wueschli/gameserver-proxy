@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       keys:
-        description: "Distinct UDP clients (the per-worker sticky table holds 65536)"
+        description: "Distinct UDP clients"
         default: "100000"
       rate:
         description: "UDP session opens per second (at most ~5000 on a 20000-fd runner)"
