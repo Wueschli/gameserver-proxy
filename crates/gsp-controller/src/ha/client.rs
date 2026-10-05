@@ -35,6 +35,36 @@ pub fn forward_client(timeout: Duration) -> reqwest::Client {
         .expect("the extra roots were validated by init_ca_file, so the client builds")
 }
 
+/// The request headers a follower re-sends with a forwarded write: the
+/// caller's own `Authorization` (the leader's handler sits behind the same
+/// bearer check and re-checks it — never swapped for `--ha-token`),
+/// `Content-Type`, and phase 12 slice 8's `X-Actor`, so the leader's handler
+/// — which re-parses them independently, exactly as if the browser/`gsp`/
+/// `curl` had called the leader directly — sees the same request.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardHeaders {
+    pub authorization: Option<String>,
+    pub content_type: Option<String>,
+    pub actor: Option<String>,
+}
+
+impl ForwardHeaders {
+    /// Picks the forwarded headers out of an incoming request's.
+    pub fn from_headers(headers: &axum::http::HeaderMap) -> Self {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        Self {
+            authorization: get("Authorization"),
+            content_type: get("Content-Type"),
+            actor: get("X-Actor"),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
@@ -44,22 +74,19 @@ struct ErrorBody {
 /// entry's [`WriteResponse`], so each route keeps its own response shape.
 /// `path` is this write's own route (`/config`, `/intent`, `/peers`, …) —
 /// used only to forward `body` to the leader's copy of the same route (as a
-/// `POST`) if this replica isn't it; `actor` (phase 12 slice 8's `X-Actor`, if
-/// any) rides along on that forward so the leader's own handler — which
-/// re-parses it independently, exactly as if the browser/`gsp`/`curl` had
-/// called the leader directly — attributes the write to the same actor.
+/// `POST`) if this replica isn't it; `headers` ride along on that forward.
 pub async fn propose_write<F>(
     ha: &HaHandle,
     req: WriteRequest,
     path: &str,
     body: String,
-    actor: Option<&str>,
+    headers: &ForwardHeaders,
     map: F,
 ) -> Response
 where
     F: FnOnce(WriteResponse) -> Response,
 {
-    propose_write_as(ha, req, Method::POST, path, body, actor, map).await
+    propose_write_as(ha, req, Method::POST, path, body, headers, map).await
 }
 
 /// [`propose_write`] for a route whose forward to the leader uses `method`
@@ -70,7 +97,7 @@ pub async fn propose_write_as<F>(
     method: Method,
     path: &str,
     body: String,
-    actor: Option<&str>,
+    headers: &ForwardHeaders,
     map: F,
 ) -> Response
 where
@@ -78,7 +105,7 @@ where
 {
     match ha.raft.client_write(req).await {
         Ok(resp) => map(resp.data),
-        Err(e) => handle_write_error(ha, e, method, path, body, actor).await,
+        Err(e) => handle_write_error(ha, e, method, path, body, headers).await,
     }
 }
 
@@ -104,7 +131,7 @@ async fn handle_write_error(
     method: Method,
     path: &str,
     body: String,
-    actor: Option<&str>,
+    headers: &ForwardHeaders,
 ) -> Response {
     let openraft::error::RaftError::APIError(api_err) = err else {
         return service_unavailable("raft internal error; retry shortly");
@@ -116,7 +143,9 @@ async fn handle_write_error(
     };
 
     match forward_target(leader_id, leader_node, ha.node_id) {
-        Ok(leader) => forward_to_leader(&ha.forward, &leader.addr, method, path, body, actor).await,
+        Ok(leader) => {
+            forward_to_leader(&ha.forward, &leader.addr, method, path, body, headers).await
+        }
         Err(msg) => service_unavailable(msg),
     }
 }
@@ -142,12 +171,18 @@ async fn forward_to_leader(
     method: Method,
     path: &str,
     body: String,
-    actor: Option<&str>,
+    headers: &ForwardHeaders,
 ) -> Response {
     let url = super::peers::peer_url(leader_addr, path);
     let mut req = client.request(method, &url).body(body);
-    if let Some(actor) = actor {
-        req = req.header("X-Actor", actor);
+    for (name, value) in [
+        ("Authorization", &headers.authorization),
+        ("Content-Type", &headers.content_type),
+        ("X-Actor", &headers.actor),
+    ] {
+        if let Some(value) = value {
+            req = req.header(name, value);
+        }
     }
     // The client's timeout covers the body too, so read it before relaying.
     let relayed = match req.send().await {
@@ -235,7 +270,7 @@ mod tests {
                 Method::POST,
                 "/config",
                 "{}".into(),
-                None,
+                &ForwardHeaders::default(),
             ),
         )
         .await
@@ -246,5 +281,65 @@ mod tests {
             .unwrap();
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("did not answer in time"), "{body}");
+    }
+
+    #[test]
+    fn forward_headers_pick_only_the_three_the_leader_needs() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("Authorization", "Bearer tok".parse().unwrap());
+        h.insert("Content-Type", "application/json".parse().unwrap());
+        h.insert("X-Actor", "alice".parse().unwrap());
+        h.insert("Cookie", "secret".parse().unwrap());
+        let got = ForwardHeaders::from_headers(&h);
+        assert_eq!(got.authorization.as_deref(), Some("Bearer tok"));
+        assert_eq!(got.content_type.as_deref(), Some("application/json"));
+        assert_eq!(got.actor.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn a_forward_carries_the_callers_authorization_content_type_and_actor() {
+        use axum::extract::State;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<axum::http::HeaderMap>>> = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/config",
+                axum::routing::post(
+                    |State(seen): State<Arc<Mutex<Option<axum::http::HeaderMap>>>>,
+                     headers: axum::http::HeaderMap| async move {
+                        *seen.lock().unwrap() = Some(headers);
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let headers = ForwardHeaders {
+            authorization: Some("Bearer caller-token".into()),
+            content_type: Some("application/json".into()),
+            actor: Some("alice".into()),
+        };
+        let resp = forward_to_leader(
+            &forward_client(Duration::from_secs(5)),
+            &addr.to_string(),
+            Method::POST,
+            "/config",
+            "{}".into(),
+            &headers,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let got = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the leader was reached");
+        assert_eq!(got["authorization"], "Bearer caller-token");
+        assert_eq!(got["content-type"], "application/json");
+        assert_eq!(got["x-actor"], "alice");
     }
 }

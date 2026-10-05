@@ -41,6 +41,7 @@ use tracing::Instrument;
 
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, unix_secs, AddressBook, ClaimError, Rejection, Role};
+use crate::ha::client::ForwardHeaders;
 use crate::store::{Applied, RevisionBytes, SiblingWrite, Store, StoreError};
 
 mod ha;
@@ -468,6 +469,7 @@ fn not_registered(noun: &str, name: &str) -> Response {
 async fn register<R: Registration>(
     State(state): State<RegistryState<R>>,
     OriginalUri(uri): OriginalUri,
+    headers: axum::http::HeaderMap,
     body: String,
 ) -> Response {
     let words = wording(R::ROLE);
@@ -479,7 +481,15 @@ async fn register<R: Registration>(
         return unprocessable(e);
     }
     if let Some(ha) = &state.ha {
-        return ha::register(&state, ha, reg, uri.path(), body).await;
+        return ha::register(
+            &state,
+            ha,
+            reg,
+            uri.path(),
+            body,
+            &ForwardHeaders::from_headers(&headers),
+        )
+        .await;
     }
 
     let guard = state
@@ -572,9 +582,16 @@ async fn delete_one<R: Registration>(
     State(state): State<RegistryState<R>>,
     OriginalUri(uri): OriginalUri,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     if let Some(ha) = &state.ha {
-        return ha::release::<R>(ha, name, uri.path()).await;
+        return ha::release::<R>(
+            ha,
+            name,
+            uri.path(),
+            &ForwardHeaders::from_headers(&headers),
+        )
+        .await;
     }
     let words = wording(R::ROLE);
     let guard = state

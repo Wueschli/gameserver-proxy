@@ -110,7 +110,11 @@ struct ErrorResponse {
 /// `POST /intent` — body is one JSON [`IntentOp`]. Validated
 /// ([`IntentOp::validate`]) and structurally parsed before it ever reaches
 /// the store — a malformed or invalid op is rejected here, never broadcast.
-async fn submit_intent(State(state): State<IntentState>, body: String) -> Response {
+async fn submit_intent(
+    State(state): State<IntentState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> Response {
     if state.role.get() == Role::Slave {
         return (
             StatusCode::FORBIDDEN,
@@ -149,7 +153,7 @@ async fn submit_intent(State(state): State<IntentState>, body: String) -> Respon
             crate::ha::WriteRequest::Intent(body.clone().into_bytes()),
             "/intent",
             body,
-            None, // intent has no audit-trail actor in this slice — config only
+            &crate::ha::client::ForwardHeaders::from_headers(&headers),
             crate::ha::client::revision_response,
         )
         .await;
