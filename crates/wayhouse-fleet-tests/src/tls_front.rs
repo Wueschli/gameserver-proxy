@@ -43,9 +43,10 @@ pub async fn tls_front(upstream: SocketAddr) -> Result<(SocketAddr, JoinHandle<(
     Ok((addr, task))
 }
 
-/// [`tls_front`], plus a count of TCP connections accepted so far — how a
+/// [`tls_front`], plus a count of TLS handshakes completed so far — how a
 /// test tells a client that reuses its connections from one that dials anew
-/// for every request.
+/// for every request. A TCP connection that never finishes a handshake is not
+/// counted.
 pub async fn tls_front_counted(
     upstream: SocketAddr,
 ) -> Result<(SocketAddr, JoinHandle<()>, Arc<AtomicUsize>)> {
@@ -64,12 +65,13 @@ pub async fn tls_front_counted(
     let counter = accepted.clone();
     let task = tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
-            counter.fetch_add(1, Ordering::Relaxed);
             let acceptor = acceptor.clone();
+            let counter = counter.clone();
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
+                counter.fetch_add(1, Ordering::Relaxed);
                 let Ok(mut up) = TcpStream::connect(upstream).await else {
                     return;
                 };
