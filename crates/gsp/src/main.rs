@@ -19,9 +19,12 @@ mod grpc_resolver;
 #[path = "grpc_resolver_disabled.rs"]
 mod grpc_resolver;
 mod intent_client;
+#[cfg(feature = "tunnel")]
 mod live_interface;
+#[cfg(feature = "tunnel")]
 mod netlink_addr;
 mod procinfo;
+#[cfg(feature = "tunnel")]
 mod proxy_register;
 mod reload;
 mod resolver;
@@ -30,14 +33,25 @@ mod sniffer_loader;
 #[cfg(not(feature = "wasm-sniffers"))]
 #[path = "sniffer_loader_disabled.rs"]
 mod sniffer_loader;
+#[cfg(feature = "tunnel")]
 mod tunnel_address;
+#[cfg(feature = "tunnel")]
+mod tunnel_boot;
+#[cfg(not(feature = "tunnel"))]
+#[path = "tunnel_boot_disabled.rs"]
+mod tunnel_boot;
+#[cfg(feature = "tunnel")]
 mod tunnel_client;
+#[cfg(feature = "tunnel")]
+mod tunnel_source;
+#[cfg(not(feature = "tunnel"))]
+#[path = "tunnel_source_disabled.rs"]
+mod tunnel_source;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -177,22 +191,6 @@ struct Args {
     ca_file: Option<PathBuf>,
 }
 
-/// Resolved `--tunnel-*` settings, built once in `async_main` after
-/// validating the flag combination — `run` doesn't need to re-check
-/// `tunnel_address`/`tunnel_controller_url` are `Some` a second time.
-struct TunnelConfig {
-    iface: String,
-    listen_port: u16,
-    address: Option<String>,
-    key_file: PathBuf,
-    controller_url: String,
-    controller_token: Option<String>,
-    userspace: bool,
-    name: String,
-    endpoint: String,
-    register_interval: Duration,
-}
-
 /// Where this process's config comes from, decided once at startup from
 /// `Args`. `reload`/`controller_client` each own the live-update side of one
 /// variant; nothing else branches on this after `run` dispatches on it once.
@@ -224,34 +222,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
-    let tunnel_config = match &args.tunnel_iface {
-        Some(iface) => {
-            let controller_url = args.tunnel_controller_url.clone().ok_or_else(|| {
-                anyhow::anyhow!("--tunnel-iface requires --tunnel-controller-url")
-            })?;
-            let name = args
-                .tunnel_name
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-name"))?;
-            let endpoint = args
-                .tunnel_endpoint
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--tunnel-iface requires --tunnel-endpoint"))?;
-            Some(TunnelConfig {
-                iface: iface.clone(),
-                listen_port: args.tunnel_listen_port,
-                address: args.tunnel_address.clone(),
-                key_file: args.tunnel_key_file.clone(),
-                controller_url,
-                controller_token: args.tunnel_controller_token.clone(),
-                userspace: args.tunnel_userspace,
-                name,
-                endpoint,
-                register_interval: Duration::from_secs(args.tunnel_register_interval_sec),
-            })
-        }
-        None => None,
-    };
+    let tunnel_config = tunnel_boot::config(&args)?;
 
     let (config_source, cfg, initial_revision) = match &args.controller {
         Some(url) => {
@@ -320,6 +291,23 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         cfg.admin_listen,
     )?;
 
+    // The resolver clients and discovery adapters are built before `--check`
+    // returns: constructing them is what refuses a setting this build cannot
+    // run (a missing cargo feature, a bad endpoint URL, a malformed source),
+    // and `--check` is the pre-deploy gate (issue #127). Building does not fetch.
+    // Phase 14 slice 5 (docs/11): a `tunnel` backend_sources entry resolves
+    // an origin's currently-registered backends from the same backend-peers
+    // registry the tunnel reconcile task (below) subscribes to — reuses
+    // `--tunnel-controller-url`/`--tunnel-controller-token` rather than a
+    // second pair of flags, since it's the identical registry. Borrowed
+    // (not moved) so `run` can still consume `tunnel_config` by value.
+    let tunnel_registry = tunnel_config.as_ref().map(tunnel_boot::registry);
+
+    let resolvers = Arc::new(gsp_core::Resolvers::from_map(resolver::build_resolvers(
+        &cfg,
+    )?));
+    let sources = discovery::build_sources(&cfg, tunnel_registry.as_ref())?;
+
     if args.check {
         println!(
             "config OK: {} listener(s), {} pool(s){}{}{}",
@@ -364,6 +352,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         sniffers,
         aggregator_push,
         tunnel_config,
+        tunnel_registry,
+        resolvers,
+        sources,
         admin_tls,
     )
     .await
@@ -378,35 +369,22 @@ async fn run(
     sniffer_loader: Option<Arc<sniffer_loader::SnifferLoader>>,
     sniffers: Arc<gsp_core::sniff::Sniffers>,
     aggregator_push: Option<aggregator_client::PushConfig>,
-    tunnel_config: Option<TunnelConfig>,
+    tunnel_config: Option<tunnel_boot::TunnelConfig>,
+    tunnel_registry: Option<tunnel_source::TunnelRegistry>,
+    resolvers: Arc<gsp_core::Resolvers>,
+    sources: Vec<Arc<dyn gsp_core::BackendSource>>,
     admin_tls: Option<Arc<gsp_http::tls::ReloadingCert>>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
-    let resolvers = Arc::new(gsp_core::Resolvers::from_map(resolver::build_resolvers(
-        &cfg,
-    )?));
     if !resolvers.is_empty() {
         tracing::info!(count = resolvers.len(), "external resolvers ready");
     }
-
-    // Phase 14 slice 5 (docs/11): a `tunnel` backend_sources entry resolves
-    // an origin's currently-registered backends from the same backend-peers
-    // registry the tunnel reconcile task (below) subscribes to — reuses
-    // `--tunnel-controller-url`/`--tunnel-controller-token` rather than a
-    // second pair of flags, since it's the identical registry. Borrowed
-    // (not moved) here so the bring-up block further down can still
-    // consume `tunnel_config` by value.
-    let tunnel_registry = tunnel_config.as_ref().map(|tc| discovery::TunnelRegistry {
-        controller_url: tc.controller_url.clone(),
-        token: tc.controller_token.clone(),
-    });
 
     // Backend discovery (phase 8): build one source per pool with a `source`,
     // do a best-effort initial fetch so the first snapshot has real backends,
     // then let the runtime run a refresh task per source.
     let discovery = Arc::new(gsp_core::Discovery::new());
-    let sources = discovery::build_sources(&cfg, tunnel_registry.as_ref())?;
     if !sources.is_empty() {
         tracing::info!(count = sources.len(), "backend discovery sources ready");
         for s in &sources {
@@ -448,112 +426,7 @@ async fn run(
     // forwards tunneled traffic, and shouldn't leave listeners bound behind
     // a startup error either.
     let tunnel = match tunnel_config {
-        Some(tc) => {
-            let private_key = tunnel_client::load_or_generate_key(&tc.key_file)
-                .with_context(|| format!("loading tunnel key from {:?}", tc.key_file))?;
-            let pubkey = private_key.public_key().to_string();
-
-            // The controller is the address authority: register BEFORE the
-            // interface exists (the answer is its address) and before any
-            // listener binds — a failure here is a failing `--tunnel-*`.
-            let pinned_cidr = tc.address.clone();
-            if let Some(c) = pinned_cidr.as_deref() {
-                tunnel_address::tunnel_ip(tunnel_address::ip_of(c)).map_err(|e| {
-                    anyhow::anyhow!("--tunnel-address {c:?} must be an ip/prefix: {e}")
-                })?;
-            }
-            let reg = proxy_register::Registration {
-                name: tc.name.clone(),
-                pubkey,
-                endpoint: tc.endpoint.clone(),
-                address: pinned_cidr
-                    .as_deref()
-                    .map(|c| tunnel_address::ip_of(c).to_string()),
-                boot_id: proxy_register::new_boot_id(),
-            };
-            let client = proxy_register::http_client();
-            let addr_path = {
-                let mut p = tc.key_file.clone().into_os_string();
-                p.push(".address");
-                PathBuf::from(p)
-            };
-            let outcome = proxy_register::register_with_retry(
-                &client,
-                &tc.controller_url,
-                tc.controller_token.as_deref(),
-                &reg,
-                Duration::from_secs(30),
-            )
-            .await;
-            let start = tunnel_address::resolve_startup(
-                outcome,
-                pinned_cidr.as_deref(),
-                tunnel_address::load(&addr_path),
-            )?;
-            match start.source {
-                tunnel_address::Source::Controller => {
-                    tunnel_address::save(&addr_path, &start.cidr)?
-                }
-                tunnel_address::Source::Saved {
-                    ref cause,
-                    ref pin_ignored,
-                } => {
-                    tracing::warn!(
-                        address = %start.cidr,
-                        error = %cause,
-                        "controller unreachable; starting with the last saved tunnel address"
-                    );
-                    if let Some(msg) = pin_ignored {
-                        tracing::warn!("{msg}");
-                    }
-                }
-            }
-            let address: defguard_wireguard_rs::net::IpAddrMask = start
-                .cidr
-                .parse()
-                .map_err(|e| anyhow::anyhow!("tunnel address {:?} is invalid: {e}", start.cidr))?;
-            let wg: Arc<dyn defguard_wireguard_rs::WireguardInterfaceApi + Send + Sync> =
-                Arc::from(tunnel_client::bring_up(
-                    &tc.iface,
-                    &private_key,
-                    tc.listen_port,
-                    address.clone(),
-                    tc.userspace,
-                )?);
-            let live = Arc::new(live_interface::LiveInterface::new(
-                wg,
-                address,
-                netlink_addr::deleter(tc.iface.clone()),
-            ));
-            tracing::info!(
-                iface = %tc.iface,
-                port = tc.listen_port,
-                address = %start.cidr,
-                pubkey = %private_key.public_key(),
-                controller = %tc.controller_url,
-                "wireguard tunnel interface up; subscribing to backend-peers updates"
-            );
-            let task = tokio::spawn(tunnel_client::run(
-                tc.controller_url.clone(),
-                tc.controller_token.clone(),
-                live.api(),
-            ));
-            // Register ourselves (periodically) so every origin's `gsp-agent`
-            // can peer with us — the mirror image of `task` above.
-            let register_task = tokio::spawn(proxy_register::run(
-                client,
-                tc.controller_url,
-                tc.controller_token,
-                reg,
-                tc.register_interval,
-                proxy_register::AddressSync {
-                    live: live.clone(),
-                    pinned_cidr,
-                    path: addr_path,
-                },
-            ));
-            Some((task, register_task, live))
-        }
+        Some(tc) => Some(tunnel_boot::start(tc).await?),
         None => None,
     };
 
@@ -670,12 +543,8 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
-    if let Some((task, register_task, live)) = tunnel {
-        task.abort();
-        register_task.abort();
-        if let Err(e) = live.remove() {
-            tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
-        }
+    if let Some(tunnel) = tunnel {
+        tunnel.stop();
     }
     tracing::info!("stopped");
     Ok(())

@@ -15,7 +15,7 @@ path = "src/main.rs"
 # `cargo build -p gsp --no-default-features`. Everything is on by default;
 # turning one off makes a config that needs it fail at startup, never silently
 # run without it.
-default = ["wasm-sniffers", "grpc-resolver", "dns-srv", "gossip"]
+default = ["wasm-sniffers", "grpc-resolver", "dns-srv", "gossip", "tunnel"]
 # WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
 wasm-sniffers = ["dep:wasmtime"]
 # `backend_sources[].type: dns_srv`; pulls in `hickory-resolver`.
@@ -25,6 +25,15 @@ dns-srv = ["dep:hickory-resolver"]
 gossip = ["gsp-core/gossip"]
 # gRPC external resolver (`resolvers[].kind: grpc`); pulls in `tonic`/`prost` and
 # needs `protoc` at build time.
+# WireGuard backend transport (`--tunnel-*`, `backend_sources[].type: tunnel`);
+# pulls in `defguard_wireguard_rs` and the netlink crates.
+tunnel = [
+    "dep:defguard_wireguard_rs",
+    "dep:netlink-packet-core",
+    "dep:netlink-packet-route",
+    "dep:netlink-sys",
+    "dep:rand",
+]
 grpc-resolver = ["dep:tonic", "dep:prost", "dep:tonic-prost", "dep:tonic-prost-build"]
 
 [lints]
@@ -55,12 +64,12 @@ hickory-resolver = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 sha2.workspace = true
 nix.workspace = true
-defguard_wireguard_rs.workspace = true
-netlink-packet-core.workspace = true
-netlink-packet-route.workspace = true
-netlink-sys.workspace = true
+defguard_wireguard_rs = { workspace = true, optional = true }
+netlink-packet-core = { workspace = true, optional = true }
+netlink-packet-route = { workspace = true, optional = true }
+netlink-sys = { workspace = true, optional = true }
 # `--tunnel-*`: the per-process boot id `proxy_register` sends.
-rand.workspace = true
+rand = { workspace = true, optional = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true, optional = true }

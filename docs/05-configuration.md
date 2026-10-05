@@ -45,8 +45,8 @@
 > bytes (TCP `MSG_PEEK` / first UDP datagram; at least one of `prefix` / `length`),
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
 > from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
-> `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (one sniffer
-> per listener) but matches nothing until a sniffer plugin is loaded — no
+> `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (a listener
+> may use several sniffers, see `docs/03-routing.md`) but matches nothing until a sniffer plugin is loaded — no
 > sniffers are built in; the name is checked at listener start, not by
 > `validate()`. The sniffer loader is Phase 9; regex-over-first-bytes is a Phase
 > 9 plugin concern, not a `first_bytes` sub-form.
