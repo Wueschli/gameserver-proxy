@@ -34,12 +34,7 @@ the `FROM` line); the Dockerfile header says how to bump one.
 HEAD, and `release.yml` the tagged commit; an `unknown` commit fails
 `deploy/check-image-commit.sh` (builder builds) and `deploy/smoke.sh`.
 
-**Releasing.** Set `[workspace.package] version` in `Cargo.toml` (and `Cargo.lock`) to the
-new version, merge to main, wait for CI, then push the tag `v<version>`. `release.yml`
-refuses a tag that is not `v` + the workspace version, a commit that is not on main or has
-no green CI run (run CI by hand for a docs-only commit), builds all six images on a native
-amd64 and a native arm64 runner, checks `--version` and the commit on each and runs the
-compose smoke test on both, and only then pushes (`publish` job).
+**Releasing.** `release.yml` publishes the images when a `v<version>` tag is pushed; the steps and the branching models are in [`RELEASING.md`](../RELEASING.md).
 
 **First release.** The release path has never run end to end (the `publish` job only runs on a tag), so make the first tag a pre-release such as `v0.1.0-rc.1`: it publishes the images but never moves `latest`.
 
