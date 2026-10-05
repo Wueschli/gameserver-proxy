@@ -47,6 +47,10 @@ ROOTS = {
 # cargo config affect every Rust job.
 RUSTWIDE = re.compile(r"^(Cargo\.toml|rust-toolchain\.toml)$|^\.cargo/")
 
+# A change touching only these needs no code job (test, audit, ...); they only
+# exist as a PR gate. Mirrors the push trigger's paths-ignore in ci.yml.
+DOCS_ONLY = re.compile(r"\.md$|^docs/|^LICENSE-")
+
 # Non-Cargo paths per area, on top of the package graph.
 EXTRA = {
     "ui": re.compile(r"^crates/wayhouse-ui/web/"),
@@ -197,19 +201,28 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
     return {a: out.get(a, False) for a in AREAS}
 
 
+def is_code(files: List[str]) -> bool:
+    """False when every changed file is documentation (or the list is empty)."""
+    return any(f and not DOCS_ONLY.search(f) for f in files)
+
+
 def main(argv, stdin, stdout, stderr, loader=load_graph) -> None:
     if "--all" in argv:
         result = {a: True for a in AREAS}
+        code = True
     else:
         files = stdin.read().splitlines()
+        code = is_code(files)
         try:
             result = areas(files, loader(os.getcwd()))
         except MetadataError as e:
             # A GitHub annotation, so a broken detector isn't just a silently full run.
             print(f"::warning title=change detection::{e}; running every job", file=stderr)
             result = {a: True for a in AREAS}
+            code = True
     for a in AREAS:
         print(f"{a}={'true' if result[a] else 'false'}", file=stdout)
+    print(f"code={'true' if code else 'false'}", file=stdout)
 
 
 if __name__ == "__main__":
