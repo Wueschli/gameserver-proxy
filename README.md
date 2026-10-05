@@ -37,6 +37,7 @@ examples) or from an external routing service you control.
 
 ## Contents
 
+- [How it fits together](#how-it-fits-together)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Documentation](#documentation)

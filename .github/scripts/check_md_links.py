@@ -17,7 +17,7 @@ INLINE_CODE = re.compile(r"`[^`]*`")
 
 def slug(heading: str) -> str:
     """GitHub's heading anchor: lowercase, drop punctuation, spaces to dashes."""
-    h = re.sub(r"[`*_]", "", heading.strip().lower())
+    h = re.sub(r"[`*]", "", heading.strip().lower())
     h = re.sub(r"[^\w\- ]", "", h)
     return h.replace(" ", "-")
 

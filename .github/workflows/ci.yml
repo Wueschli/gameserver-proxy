@@ -788,9 +788,6 @@ jobs:
           path: crates/wayhouse-config/fuzz/artifacts/**
           if-no-files-found: ignore
 
-  # The one check the `protect-main` ruleset requires. Always runs (also on
-  # docs-only PRs, where every other job is skipped); skipped jobs count as
-  # passed, a failed or cancelled one fails the gate.
   # Markdown formatting (Prettier, version pinned in the Makefile) and relative links.
   docs:
     needs: changes
@@ -803,6 +800,9 @@ jobs:
       - name: Relative links and anchors resolve
         run: make docs-links
 
+  # The one check the `protect-main` ruleset requires. Always runs (also on
+  # docs-only PRs, where every other job is skipped); skipped jobs count as
+  # passed, a failed or cancelled one fails the gate.
   ci-ok:
     if: always()
     needs: [changes, test, musl, build-release, build-release-arm64, plugins, plugins-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs]

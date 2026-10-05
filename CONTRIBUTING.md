@@ -62,7 +62,7 @@ The full command table (tunnel e2e, deploy images, audit, and so on) is in
 - **Design first for larger work.** Write a spec in `docs/superpowers/specs/` and a plan in
   `docs/superpowers/plans/` before the code.
 - **Commits and PR titles** use conventional commits (`feat:`, `fix:`, `docs:`, `ci:`, ...); the
-  release tooling reads them.
+  release tooling (#188) will read them.
 - **Markdown** is formatted with Prettier: `make docs-fmt` writes, `make docs-fmt-check` verifies.
 
 ## Pull requests

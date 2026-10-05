@@ -57,6 +57,7 @@ class LinksTest(unittest.TestCase):
         self.assertEqual(slug("Build and test"), "build-and-test")
         self.assertEqual(slug("Model A: trunk (default)"), "model-a-trunk-default")
         self.assertEqual(slug("`make check`"), "make-check")
+        self.assertEqual(slug("foo_bar baz"), "foo_bar-baz")
 
 
 if __name__ == "__main__":

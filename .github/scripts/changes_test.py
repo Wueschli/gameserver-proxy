@@ -244,7 +244,7 @@ class Main(unittest.TestCase):
         self.assertTrue(changes.is_code(["Cargo.lock"]))
 
     def test_docs_is_true_for_markdown_and_its_tooling(self):
-        for f in ["README.md", "deploy/README.md", ".prettierrc.json", ".prettierignore",
+        for f in ["README.md", "deploy/README.md", ".prettierrc.json", ".prettierignore", "Makefile",
                   ".github/scripts/check_md_links.py", ".github/workflows/ci.yml"]:
             self.assertTrue(changes.is_docs([f]), f)
         self.assertFalse(changes.is_docs(["crates/wayhouse/src/main.rs", "Cargo.lock"]))

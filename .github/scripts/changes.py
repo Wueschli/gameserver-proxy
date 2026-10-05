@@ -203,8 +203,10 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
     return {a: out.get(a, False) for a in AREAS}
 
 
-# What the `docs` CI job (Prettier and the link check) depends on.
-DOCS_JOB = re.compile(r"\.md$|^\.prettier(rc\.json|ignore)$|^\.github/")
+# What the `docs` CI job (Prettier and the link check) depends on. The Makefile holds the
+# Prettier pin. `.prettierrc.json` and `.prettierignore` are not in DOCS_ONLY on purpose:
+# they are config, so a PR touching only them also runs the code jobs.
+DOCS_JOB = re.compile(r"\.md$|^\.prettier(rc\.json|ignore)$|^Makefile$|^\.github/")
 
 
 def is_docs(files: List[str]) -> bool:
