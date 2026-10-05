@@ -2,15 +2,15 @@
 """Enforces the version policy (RELEASING.md, "Versioning").
 
 - `[workspace.package] version` is MAJOR.MINOR.PATCH[-prerelease] and MAJOR is 0.
-  Going to 1.0 is the maintainer's explicit call: set WAYHOUSE_ALLOW_MAJOR=1 (or edit
-  this script); no tool, release PR or bot may get there on its own.
+  Going to 1.0 is the maintainer's explicit call: it needs a reviewed edit of this
+  script (there is deliberately no environment switch the workflows could carry);
+  no tool, release PR or bot may get there on its own.
 - Cargo.lock agrees with Cargo.toml for every workspace member, so a version bump
   that forgot `cargo update --workspace` fails here instead of in `cargo --locked`.
 
 Usage: check_version_policy.py [Cargo.toml] [Cargo.lock]   (prints the version on success)
 Tested by check_version_policy_test.py.
 """
-import os
 import re
 import sys
 import tomllib
@@ -31,7 +31,7 @@ def check(cargo_toml_text: str, cargo_lock_text: str, allow_major: bool = False)
         raise ValueError(
             f"version {version} is not 0.x: versions stay 0.x until the maintainer "
             "decides on 1.0 (RELEASING.md, Versioning). Revert the bump; the maintainer "
-            "moves to 1.0 deliberately by setting WAYHOUSE_ALLOW_MAJOR=1 or editing this script."
+            "moves to 1.0 deliberately by editing this script."
         )
     members = {p.rstrip("/").rsplit("/", 1)[-1] for p in ws.get("members", [])}
     locked = {
@@ -60,6 +60,6 @@ if __name__ == "__main__":
     lock_path = sys.argv[2] if len(sys.argv) > 2 else "Cargo.lock"
     try:
         with open(toml_path) as t, open(lock_path) as l:
-            print(check(t.read(), l.read(), os.environ.get("WAYHOUSE_ALLOW_MAJOR") == "1"))
+            print(check(t.read(), l.read()))
     except ValueError as e:
         sys.exit(f"error: {e}")

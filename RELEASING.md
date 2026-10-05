@@ -18,7 +18,7 @@ Versions stay `0.x`. Under 0.x:
 Moving to 1.0 is the maintainer's explicit call, never something tooling does.
 `.github/scripts/check_version_policy.py` (CI job `release-policy`, and `release.yml`)
 fails any `Cargo.toml` that says `1.x` or more, and any `Cargo.lock` that disagrees with
-`Cargo.toml`. Going to 1.0 means a deliberate edit of that script or `WAYHOUSE_ALLOW_MAJOR=1`.
+`Cargo.toml`. Going to 1.0 means a deliberate, reviewed edit of that script (there is no environment switch).
 What changes at 1.0 (the stability promise) is not decided here.
 
 ## Cutting a release
