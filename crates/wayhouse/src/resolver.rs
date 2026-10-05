@@ -56,8 +56,6 @@ struct WireResponse {
     #[serde(default)]
     target: Option<String>,
     #[serde(default)]
-    sticky_key: Option<String>,
-    #[serde(default)]
     ttl_sec: Option<u64>,
 }
 
@@ -147,7 +145,6 @@ impl Resolver for HttpResolver {
         Ok(Resolution {
             pool: w.pool,
             target,
-            sticky_key: w.sticky_key,
             ttl_sec: w.ttl_sec,
         })
     }
@@ -190,5 +187,14 @@ mod tests {
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(base64_encode(&[0xff, 0xff, 0xff, 0xff]), "/////w==");
+    }
+
+    #[test]
+    fn a_response_that_still_carries_sticky_key_parses() {
+        // The field was removed (#54); resolvers that keep sending it must not break.
+        let w: WireResponse =
+            serde_json::from_str(r#"{"pool":"p","sticky_key":"player:42","ttl_sec":5}"#).unwrap();
+        assert_eq!(w.pool.as_deref(), Some("p"));
+        assert_eq!(w.ttl_sec, Some(5));
     }
 }

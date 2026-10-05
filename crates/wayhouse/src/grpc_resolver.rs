@@ -85,7 +85,6 @@ impl Resolver for GrpcResolver {
         Ok(Resolution {
             pool: opt(r.pool),
             target,
-            sticky_key: opt(r.sticky_key),
             ttl_sec: (r.ttl_sec != 0).then_some(r.ttl_sec as u64),
         })
     }

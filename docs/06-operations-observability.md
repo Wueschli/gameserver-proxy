@@ -160,7 +160,6 @@ One event on session **close** (plus optionally on start), sampleable:
   "resolver": "matchmaker",
   "pool": "match-eu",
   "backend": "10.1.0.12:7777",
-  "sticky_key": "player:42",
   "bytes_c2s": 184320,
   "bytes_s2c": 942080,
   "pkts_c2s": 1440,
@@ -227,7 +226,8 @@ Flow for swapping a backend without dropping players:
 1. Register the new backend (`POST /pools/{p}/backends`) → `healthy` after `rise`
    checks.
 2. Set the old backend `PATCH state=draining` → the LB assigns no new sessions there;
-   sticky keys pointing to it are re-resolved on next contact.
+   a client whose resolver answer pointed at it is re-resolved once the cached
+   answer expires.
 3. Wait until `wayhouse_backend_active_sessions` = 0 **or** `drain_deadline` is reached.
 4. After the deadline: end remaining sessions with `close_reason=drain`.
 5. Remove the old backend.

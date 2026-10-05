@@ -58,9 +58,8 @@
 > and a route `action: { resolver: <name> }` (exactly
 > one of `pool` / `resolver` per action). The proxy `POST`s `{listener, src, dst,
 > sni?, first_bytes_b64, routing_key?}` and expects `{pool?, target?,
-> sticky_key?, ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
-> straight to that instance (no pool / health / cap); `sticky_key` is not yet
-> used. `proxy_protocol: none | v1 | v2 | v2-udp` (default `none`) is the PROXY
+> ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
+> straight to that instance (no pool / health / cap). `proxy_protocol: none | v1 | v2 | v2-udp` (default `none`) is the PROXY
 > protocol header to prepend to a `target` connection — there is no pool to read
 > it from — so the backend still sees the real client IP; a resolver-chosen
 > *pool* uses that pool's own `proxy_protocol`. Same transport rule as pools:
