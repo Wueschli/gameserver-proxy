@@ -1,6 +1,6 @@
 # Plugin registry, install and update design (#183, #184)
 
-Status: design for review. Decisions from the maintainer are marked **[decided]**; everything else is a recommendation the implementation plans follow unless the maintainer changes it.
+Status: design for review (brainstormed 2026-10-05). Decisions from the maintainer are marked **[decided]**; everything else is a recommendation the implementation plans follow unless the maintainer changes it.
 
 ## Goal
 
@@ -17,6 +17,8 @@ Sandboxing changes (the WASM sandbox stays: no imports, memory cap, call timeout
 - **[decided]** Update discovery is on demand from the UI only (no background polling).
 - **[decided]** Plugins repo is bootstrapped after v0.1.0. ABI version lands before v0.1.0.
 - **[decided]** Pinned-only updates by default.
+- **[decided 2026-10-05]** The registry client (download, verification) lives in the UI backend, not on each proxy. Alternative considered: each proxy fetches itself (no UI dependency, but every edge proxy needs internet egress and its own trust config).
+- **[settled in brainstorming]** Pinned instances get a copy-paste pin snippet in the UI; automatic config edits are out of scope for the first cut.
 
 ## ABI version
 
@@ -56,7 +58,7 @@ A registry is a static HTTPS location serving `index.json` (the same format for 
 
 Per-plugin source manifest (`plugins/<name>/manifest.toml` in the plugins repo) holds `name`, `description`, `license`, `version`, `abi`, `min_proxy`, `limits`, `config`; CI turns manifests plus built artifacts into `index.json` (sha256, size, urls) so nobody edits hashes by hand. Rules: `name` matches `[A-Za-z0-9_-]+` (the loader's module name rule), `version` is SemVer, `url` must be `https`, `sha256` is lowercase hex, `size` at most `MAX_MODULE_BYTES`, versions sorted newest first by the generator.
 
-## Where the client lives (differs from the transition plan, recommended)
+## Where the client lives (differs from the transition plan; decided)
 
 The transition plan put `POST /admin/sniffers/install` on every proxy. Recommendation: the **fetch and verify step lives once in the UI backend** (`wayhouse-ui`, which already holds `reqwest`, the aggregator proxy and the fleet upload fan-out `POST /api/fleet/sniffers`), and the proxies keep only the upload endpoint they already have. Reasons: proxies need no outbound internet access (they are the DDoS-exposed edge), trust decisions are made in one place, and the per-node validator from #171 still re-checks every module that arrives. Trade-off: the UI backend needs egress to registries. The install flow:
 
@@ -91,4 +93,4 @@ The transition plan put `POST /admin/sniffers/install` on every proxy. Recommend
 - Egress and secret handling for the UI backend (new outbound dependency). Mitigation: registries are opt-in by config, the default official URL can be disabled by a flag `--no-default-registry`.
 - `minisign-verify` crate vetting: check its maintenance status and `cargo audit` before adding (the repo has an audit job).
 - GitHub release asset URLs redirect to a CDN host; the redirect policy must allow `https` redirects across hosts while refusing downgrade to `http`.
-- Pinned instances need the manual pin step; revisit with controller-managed pins.
+- Pinned instances need the manual pin step (settled for the first cut); revisit with controller-managed pins.

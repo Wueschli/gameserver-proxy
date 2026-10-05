@@ -1,6 +1,6 @@
 # Component versioning and rolling upgrades design (#185)
 
-Status: design for review. Phase A (version fields) is planned in `docs/superpowers/plans/2026-10-05-protocol-and-config-versions.md`; Phase B (this design's behaviour) in `2026-10-05-component-upgrades.md`.
+Status: design for review (brainstormed 2026-10-05). Phase A (version fields) is planned in `docs/superpowers/plans/2026-10-05-protocol-and-config-versions.md`; Phase B (this design's behaviour) in `2026-10-05-component-upgrades.md`.
 
 ## Goal
 
@@ -45,7 +45,11 @@ The UI fleet view shows each node's `wayhouse_build_info` version and protocol (
 
 A fleet test in `crates/wayhouse-fleet-tests` that starts a controller at the current version and a proxy built with an injected older protocol minor (a test-only env override of `PROTOCOL_MINOR`) and asserts: works, no newer fields sent; and with a different major: refused with a clear log line and the mismatch counter incremented. A docs test (`docs/upgrading.md` must list every protocol version bump in a table; checked by a small script against `version.rs`).
 
+## Decisions and settled questions
+
+- **[decided 2026-10-05]** Window is N and N-1 product minors. Alternative considered: same minor only (no shims, but every upgrade is a fleet-wide flag day).
+- **[settled in brainstorming]** Raft has no separate version gate: `/raft/*` carries the same `X-Wayhouse-Protocol` header check, and changing a raft RPC payload type counts as a breaking wire change (protocol major bump).
+
 ## Open questions
 
-- Whether raft needs its own version gate beyond the header on `/raft/*` routes (the openraft RPC payload types change with the crate version).
-- Whether the window should be one product minor or two; this design says N/N-1 as proposed in #185; revisit at the first real incompatible change.
+- Whether the raft log and snapshot storage need their own on-disk version beyond the store marker; decide when the openraft dependency next changes.
