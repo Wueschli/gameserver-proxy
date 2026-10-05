@@ -19,9 +19,7 @@ use crate::server::{require_bearer, BearerAuth};
 /// freshly started binary is never empty.
 pub const BUILD_INFO: &str = "wayhouse_build_info";
 
-/// Short git SHA this workspace was built from (`build.rs`), or `"unknown"`
-/// when `.git` was unavailable (a source tarball).
-pub const COMMIT: &str = env!("WAYHOUSE_GIT_SHA");
+pub use crate::COMMIT;
 
 /// Set [`BUILD_INFO`] on whichever recorder is installed. `wayhouse` installs its
 /// own recorder and calls this directly; the fleet binaries go through

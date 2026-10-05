@@ -43,7 +43,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(
     name = "wayhouse-agent",
-    version,
+    version = wayhouse_http::LONG_VERSION,
     about = "Origin-side WireGuard agent for wayhouse's backend transport (phase 14, docs/11)"
 )]
 struct Args {

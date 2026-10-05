@@ -1,6 +1,6 @@
 #!/bin/sh
 # check-image-commit.sh <image> <sha>: fail unless the image's binary has <sha>
-# compiled in (the commit= label of wayhouse_build_info, crates/wayhouse-http/build.rs).
+# compiled in (the commit in `--version` and the commit= label of wayhouse_build_info, crates/wayhouse-http/build.rs).
 # The images are distroless (no shell), so copy the binary out and look for it.
 set -eu
 img=$1 sha=$2
