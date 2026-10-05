@@ -48,10 +48,10 @@ use arc_swap::ArcSwap;
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
-use gsp_config::ListenerConfig;
+use gsp_config::{Action, ListenerConfig, RouteHint};
 
 use crate::drain::{ConnGuard, ConnTracker};
 use crate::error::ListenerError;
@@ -72,6 +72,13 @@ use crate::util::mono_ms;
 const MAX_DATAGRAM: usize = 64 * 1024;
 /// Idle-eviction timing-wheel tick cadence (also the eviction granularity).
 const WHEEL_TICK: Duration = Duration::from_secs(1);
+/// Max new sessions per worker whose external resolver call is still in flight.
+/// Past it, first datagrams are dropped (`pending_full`): a resolver outage or a
+/// spoofed-source flood cannot grow the buffered state without bound.
+const PENDING_MAX: usize = 1024;
+/// Max datagrams buffered per pending session (the first, plus a few that
+/// arrive before the route is known); later ones are dropped (`pending_full`).
+const PENDING_PACKETS: usize = 4;
 
 /// Session table key: the client address, plus (in prefix / transparent mode)
 /// the destination address the datagram was sent to.
@@ -106,6 +113,16 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.reply_task.abort();
     }
+}
+
+/// A new session whose route is being resolved off the receive loop. Holds the
+/// session-cap guards so a pending session counts against the same limits.
+struct Pending {
+    /// Datagrams received so far, in order; the first goes out with the
+    /// session's PROXY header, the rest are flushed after it.
+    packets: Vec<Vec<u8>>,
+    src_guard: SourceGuard,
+    limit_guard: LimitGuard,
 }
 
 // Plumbing entry point: each argument is a distinct shared handle wired in by
@@ -143,7 +160,11 @@ pub async fn run_udp_listener(
         "udp listener started"
     );
 
+    let cfg = Arc::new(cfg);
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
+    let mut pending: HashMap<SessionKey, Pending> = HashMap::new();
+    // One task per pending session; dropping the set (listener exit) aborts them.
+    let mut resolving: JoinSet<(SessionKey, Option<Routed>)> = JoinSet::new();
     let mut rbatch = RecvBatch::new();
     let mut wheel = IdleWheel::new();
     let mut wheel_tick = interval(WHEEL_TICK);
@@ -158,7 +179,7 @@ pub async fn run_udp_listener(
     let mut draining = false;
 
     loop {
-        if draining && sessions.is_empty() {
+        if draining && sessions.is_empty() && pending.is_empty() {
             tracing::info!(listener = %cfg.name, worker = worker_id, "udp listener drained");
             return Ok(());
         }
@@ -177,6 +198,58 @@ pub async fn run_udp_listener(
                 if evicted > 0 {
                     metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                         .decrement(evicted as f64);
+                }
+            }
+            Some(done) = resolving.join_next(), if !resolving.is_empty() => {
+                let (key, routed) = match done {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // A resolver task panicked: its key is lost, so release
+                        // every pending slot rather than leak them.
+                        tracing::error!(listener = %cfg.name, error = %e, "udp resolve task failed");
+                        pending.clear();
+                        continue;
+                    }
+                };
+                let Some(p) = pending.remove(&key) else { continue };
+                let dropped = p.packets.len() as u64;
+                let reason = if draining {
+                    Err("draining")
+                } else {
+                    routed.ok_or("no_route")
+                };
+                let session = match reason {
+                    Ok(routed) => {
+                        open_session(
+                            &cfg, &snapshot, &conns, &sock, p.src_guard,
+                            p.limit_guard, key.0, key.1, routed, &p.packets[0],
+                        ).await
+                    }
+                    Err(r) => Err(r),
+                };
+                match session {
+                    Ok(session) => {
+                        for extra in &p.packets[1..] {
+                            if let Err(e) = session.upstream.send(extra).await {
+                                note_port_unreachable(&cfg.name, &session.health, &e);
+                                metrics::counter!(
+                                    m::DATAGRAMS_DROPPED,
+                                    "listener" => cfg.name.clone(), "reason" => "upstream_send",
+                                ).increment(1);
+                            }
+                        }
+                        let now = mono_ms();
+                        wheel.schedule(key, now + session.idle_ms, now);
+                        sessions.insert(key, session);
+                        metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
+                            .increment(1.0);
+                    }
+                    Err(reason) => {
+                        metrics::counter!(
+                            m::DATAGRAMS_DROPPED,
+                            "listener" => cfg.name.clone(), "reason" => reason,
+                        ).increment(dropped);
+                    }
                 }
             }
             recv = rbatch.recv(&sock, mode) => {
@@ -226,6 +299,19 @@ pub async fn run_udp_listener(
                                 listener = %cfg.name, %client, error = %e,
                                 "udp forward to backend failed"
                             );
+                        }
+                        continue;
+                    }
+
+                    // Route still resolving: buffer behind the first datagram.
+                    if let Some(p) = pending.get_mut(&key) {
+                        if p.packets.len() < PENDING_PACKETS {
+                            p.packets.push(data.to_vec());
+                        } else {
+                            metrics::counter!(
+                                m::DATAGRAMS_DROPPED,
+                                "listener" => cfg.name.clone(), "reason" => "pending_full",
+                            ).increment(1);
                         }
                         continue;
                     }
@@ -291,7 +377,43 @@ pub async fn run_udp_listener(
                             continue;
                         }
                     };
-                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, src_guard, limit_guard, client, dst, data).await {
+                    let local = local_addr(&cfg, &sock, dst);
+                    let routed = match prepare_route(&cfg, &snapshot, &hints, &sniffers, client, local, data) {
+                        Ok(Prepared::Routed(r)) => r,
+                        Ok(Prepared::Resolve(hit)) => {
+                            // Resolve off the receive loop so a slow resolver
+                            // never stalls the other sessions on this worker.
+                            if pending.len() >= PENDING_MAX {
+                                metrics::counter!(
+                                    m::DATAGRAMS_DROPPED,
+                                    "listener" => cfg.name.clone(), "reason" => "pending_full",
+                                ).increment(1);
+                                continue;
+                            }
+                            let first = data.to_vec();
+                            pending.insert(key, Pending {
+                                packets: vec![first.clone()],
+                                src_guard,
+                                limit_guard,
+                            });
+                            let (cfg, resolvers) = (cfg.clone(), resolvers.clone());
+                            resolving.spawn(async move {
+                                let routed = resolve_pending(
+                                    &cfg, &resolvers, client, local, &first, hit.as_ref(),
+                                ).await;
+                                (key, routed)
+                            });
+                            continue;
+                        }
+                        Err(reason) => {
+                            metrics::counter!(
+                                m::DATAGRAMS_DROPPED,
+                                "listener" => cfg.name.clone(), "reason" => reason,
+                            ).increment(1);
+                            continue;
+                        }
+                    };
+                    match open_session(&cfg, &snapshot, &conns, &sock, src_guard, limit_guard, client, dst, routed, data).await {
                         Ok(session) => {
                             let now = mono_ms();
                             wheel.schedule(key, now + session.idle_ms, now);
@@ -602,26 +724,36 @@ impl IdleWheel {
     }
 }
 
-/// Pick a backend (affinity comes from the pool's balancer), bind the upstream socket, send the
-/// first datagram, and spawn the reply pump. On failure returns the
-/// `gsp_datagrams_dropped_total` `reason` label to record.
-#[allow(clippy::too_many_arguments)]
-async fn open_session(
+/// Outcome of the synchronous half of routing a new session.
+enum Prepared {
+    /// Route known without any await (hint, or the first matching route is a
+    /// static pool).
+    Routed(Routed),
+    /// The first matching route is an external resolver: the call must run off
+    /// the receive loop. Carries the sniffer hit for the resolve request.
+    Resolve(Option<(String, RouteHint)>),
+}
+
+/// The destination address this datagram was sent to (for a plain listener, the
+/// bound address).
+fn local_addr(cfg: &ListenerConfig, down: &UdpSocket, dst: Option<SocketAddr>) -> SocketAddr {
+    dst.unwrap_or_else(|| down.local_addr().unwrap_or(cfg.bind))
+}
+
+/// Everything that decides a new session's route without awaiting: sniffer,
+/// first-packet gate, push-resolver hint, and the route walk up to its first
+/// match. Never touches the network, so it is safe on the receive loop. On
+/// failure returns the `gsp_datagrams_dropped_total` `reason` label.
+fn prepare_route(
     cfg: &ListenerConfig,
     snapshot: &Arc<ArcSwap<Snapshot>>,
     hints: &Arc<RouteHints>,
-    conns: &Arc<ConnTracker>,
-    resolvers: &Arc<Resolvers>,
     sniffers: &Arc<Sniffers>,
-    down: &Arc<UdpSocket>,
-    src_guard: SourceGuard,
-    limit_guard: LimitGuard,
     client: SocketAddr,
-    dst: Option<SocketAddr>,
+    local: SocketAddr,
     first: &[u8],
-) -> Result<Session, &'static str> {
+) -> Result<Prepared, &'static str> {
     let snap = snapshot.load_full();
-    let local = dst.unwrap_or_else(|| down.local_addr().unwrap_or(cfg.bind));
     let hit = crate::sniff::sniff_first(&cfg.sniffers, sniffers, first);
     let mctx = gsp_config::MatchContext {
         src: client,
@@ -649,15 +781,58 @@ async fn open_session(
         .then(|| hints.lookup(client.ip()))
         .flatten()
         .filter(|p| snap.pool(p).is_some());
-    if hinted.is_some() {
+    if let Some(p) = hinted {
         metrics::counter!(m::ROUTE_HINTS_APPLIED, "listener" => cfg.name.clone()).increment(1);
+        return Ok(Prepared::Routed(Routed::Pool(p)));
     }
-    let routed = match hinted {
-        Some(p) => Routed::Pool(p),
-        None => resolve_route(cfg, resolvers, &mctx, first)
-            .await
-            .ok_or("no_route")?,
+    // The walk ends at the first matching `Pool` and only reaches the next route
+    // after a resolver call, so the first match alone says whether to await.
+    let first_action = cfg.matching_routes(&mctx).next().map(|r| r.action.clone());
+    match first_action {
+        None => Err("no_route"),
+        Some(Action::Pool(p)) => Ok(Prepared::Routed(Routed::Pool(p))),
+        Some(Action::Resolver(_)) => Ok(Prepared::Resolve(hit.map(|(n, h)| (n.to_string(), h)))),
+    }
+}
+
+/// Run the full route walk, including the external resolver call. Called from a
+/// spawned task, never from the receive loop.
+async fn resolve_pending(
+    cfg: &ListenerConfig,
+    resolvers: &Resolvers,
+    client: SocketAddr,
+    local: SocketAddr,
+    first: &[u8],
+    hit: Option<&(String, RouteHint)>,
+) -> Option<Routed> {
+    let mctx = gsp_config::MatchContext {
+        src: client,
+        local,
+        first_bytes: first,
+        sniff: hit.map(|(n, h)| (n.as_str(), h)),
     };
+    resolve_route(cfg, resolvers, &mctx, first).await
+}
+
+/// Pick a backend (affinity comes from the pool's balancer), bind the upstream
+/// socket, send the first datagram, and spawn the reply pump, for an
+/// already-routed session. On failure returns the `gsp_datagrams_dropped_total`
+/// `reason` label to record.
+#[allow(clippy::too_many_arguments)]
+async fn open_session(
+    cfg: &ListenerConfig,
+    snapshot: &Arc<ArcSwap<Snapshot>>,
+    conns: &Arc<ConnTracker>,
+    down: &Arc<UdpSocket>,
+    src_guard: SourceGuard,
+    limit_guard: LimitGuard,
+    client: SocketAddr,
+    dst: Option<SocketAddr>,
+    routed: Routed,
+    first: &[u8],
+) -> Result<Session, &'static str> {
+    let snap = snapshot.load_full();
+    let local = local_addr(cfg, down, dst);
 
     // Resolve the route to a concrete backend address, plus (for a pool) a
     // `BackendGuard` holding the session slot. A `target` has neither pool nor
