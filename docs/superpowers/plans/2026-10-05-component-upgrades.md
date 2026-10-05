@@ -22,7 +22,8 @@
 - A proxy older by one minor than its controller must keep working with the controller sending only baseline fields (assert on the wire in the fleet test, not just "no error").
 - A skew flag must not flap: red only after a mismatch counter increased in the last 5 minutes, yellow whenever versions differ.
 - The upgrade doc's order must be consistent with the code: a test reads `docs/upgrading.md` table rows against `PROTOCOL_MAJOR`/`MINOR` and the product version (script test).
-- HA: upgrading the follower first, failing over, then upgrading the former leader must be exercised by a fleet test with two controllers (skip with a documented reason if raft test support makes it infeasible; then the runbook states it as untested).
+- Controller tiers (parent to slave, relay upward) and raft HA inside a tier are different mechanisms; the runbook and tests treat them separately. Raft follower-first is exercised by a fleet test if raft test support allows; otherwise the runbook says it is untested.
+- The docs must not claim the N / N-1 window is enforced by the header check (it checks majors only); say what is tested: injected minors always, previous-release images in `compat` once two releases exist.
 
 ---
 
@@ -33,10 +34,10 @@
 - Modify: `crates/wayhouse-http/src/lib.rs`, `protocol.rs` (client middleware records the response header), no call site changes here; Task 3 adds the first real use.
 
 **Interfaces:**
-- Consumes: `ProtocolVersion` (`wayhouse_config::version`).
-- Produces: `pub struct PeerVersions` (cheap `Clone`, `Arc<Mutex<HashMap<String, ProtocolVersion>>>`), `pub fn record(&self, peer: &str, v: ProtocolVersion)`, `pub fn get(&self, peer: &str) -> Option<ProtocolVersion>`, `pub fn peer_supports(&self, peer: &str, minor: u16) -> bool` (unknown peer = false: baseline until the first response), `pub fn forget(&self, peer: &str)`; a `reqwest` response hook helper `pub fn observe(&self, peer: &str, resp: &reqwest::Response)`.
+- Consumes: `ProtocolVersion` (`wayhouse_config::version`), `PeerProtocol` request extension from the Phase A layer (the receiver's version as seen by a server).
+- Produces: both directions of gating: server side `pub fn receiver_supports(ext: &PeerProtocol, minor: u16) -> bool` (a handler or SSE stream checks it once on connect, per stream), client side `pub struct PeerVersions` (cheap `Clone`, `Arc<Mutex<HashMap<String, ProtocolVersion>>>`), `pub fn record(&self, peer: &str, v: ProtocolVersion)`, `pub fn get(&self, peer: &str) -> Option<ProtocolVersion>`, `pub fn peer_supports(&self, peer: &str, minor: u16) -> bool` (unknown peer = false: baseline until the first response), `pub fn forget(&self, peer: &str)`; a `reqwest` response hook helper `pub fn observe(&self, peer: &str, resp: &reqwest::Response)`.
 
-- [ ] **Step 1: Write failing tests**: `unknown_peer_does_not_support_new_minor`, `records_and_gates_by_minor`, `older_response_lowers_support` (peer downgraded), `observe_reads_the_header`, `garbage_header_is_ignored`.
+- [ ] **Step 1: Write failing tests**: `unknown_peer_does_not_support_new_minor`, `records_and_gates_by_minor`, `older_response_lowers_support` (peer downgraded), `receiver_supports_reads_the_request_extension`, `missing_extension_means_baseline`, `observe_reads_the_header`, `garbage_header_is_ignored`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-http peers`. Expected: FAIL. **Step 3: Implement. Step 4: Run.** Expected: PASS. **Commit** `feat: remember peer protocol versions (#185)`.
 
 ### Task 2: Build info carries the protocol; the aggregator and UI show skew
@@ -55,12 +56,12 @@
 ### Task 3: Fleet tests for mixed versions
 
 **Files:**
-- Create: `crates/wayhouse-fleet-tests/tests/mixed_versions.rs`
+- Create: `crates/wayhouse-fleet-tests/tests/mixed_versions.rs`, `.github/workflows/compat.yml` (non-required: once a previous release exists, runs the previous release's images against the current ones in the compose demo and `make deploy-smoke`; before that it is a no-op with a notice)
 - Modify: the crates' `Cargo.toml` for the `test-protocol-override` feature, `wayhouse-config::version` (the override hook)
 
 **Interfaces:**
 - Consumes: the fleet-test harness in `crates/wayhouse-fleet-tests/src/lib.rs` (look at `tests/fleet.rs` for starting a controller and a proxy).
-- Produces: tests `proxy_one_minor_behind_registers_and_gets_baseline_fields` (the controller's response body to the older proxy contains no field newer than that minor; assert via a recorded exchange), `other_major_proxy_is_refused_with_readable_log_and_counter`, `controller_follower_first_upgrade_then_failover` (two controllers, if supported).
+- Produces: tests `proxy_one_minor_behind_registers_and_gets_baseline_fields` (the controller's response body to the older proxy contains no field newer than that minor; assert via a recorded exchange), `other_major_proxy_is_refused_with_readable_log_and_counter`, `slave_tier_older_than_parent_gets_baseline_fields` (parent tier with a child tier whose injected minor is older; this is the tier path, distinct from raft), `raft_follower_first_upgrade_then_leader_change` (two controllers in one tier, if raft test support allows).
 
 - [ ] **Step 1: Write the failing tests** as above, plus the build assertion `release_images_do_not_enable_test_protocol_override` (a shell-level check in `deploy/lint.sh`).
 - [ ] **Step 2: Run** `cargo test -p wayhouse-fleet-tests mixed_versions --features test-protocol-override`. Expected: FAIL.
@@ -74,7 +75,7 @@
 - Modify: `docs/README.md`, `docs/10-distributed-control-plane.md` (link), `deploy/README.md` (link), `AGENTS.md` (row: changing `PROTOCOL_*` or `CONFIG_SCHEMA_VERSION` requires a row in `docs/upgrading.md`), `.github/workflows/ci.yml` (run the script in the `docs` job from the docs-overhaul plan, or in `release-policy` if that job does not exist)
 
 **Interfaces:**
-- Produces: `docs/upgrading.md` sections: Compatibility rules (window, majors, minors), Version table (rows: product version, protocol `major.minor`, config `schema_version`, store format, ABI; one row per release, newest first), Order of operations (the four steps from the spec), HA controller runbook (follower first, fail over, former leader), Proxy runbook (drain, upgrade, rejoin; link to the #186 fix), Agents, Kubernetes (rolling update with readiness; flagged "pending #88" until it lands), Rollback, Troubleshooting (the 426 message and what it means, the config `schema_version` error, the store `FormatTooNew` error). `check_upgrading_doc.py` fails when the newest table row does not equal the current `PROTOCOL_MAJOR.MINOR`, `CONFIG_SCHEMA_VERSION` and `STORE_FORMAT` constants parsed from the Rust source (regex on `pub const`), and warns for the product version.
+- Produces: `docs/upgrading.md` sections: Compatibility rules (window, majors, minors), Version table (rows: product version, protocol `major.minor`, config `schema_version`, store format, ABI; one row per release, newest first), Order of operations (the four steps from the spec), Controller tiers (leaf slave tiers first, then the root), raft HA inside a tier (followers first, move leadership, former leader last), Proxy runbook (drain, upgrade, rejoin; link to the #186 fix), Agents, Kubernetes (rolling update with readiness; flagged "pending #88" until it lands), Rollback, Troubleshooting (the 426 message and what it means, the config `schema_version` error, the store `FormatTooNew` error). `check_upgrading_doc.py` fails when the newest table row does not equal the current `PROTOCOL_MAJOR.MINOR`, `CONFIG_SCHEMA_VERSION` and `STORE_FORMAT` constants parsed from the Rust source (regex on `pub const`), and warns for the product version.
 
 - [ ] **Step 1: Write failing tests** for the script: `passes_when_table_matches_constants`, `fails_when_protocol_row_is_stale`, `fails_when_no_table`.
 - [ ] **Step 2: Run** `python3 .github/scripts/check_upgrading_doc_test.py`. Expected: FAIL. **Step 3: Implement the script and write the doc. Step 4: Run** both tests and the script. Expected: PASS.

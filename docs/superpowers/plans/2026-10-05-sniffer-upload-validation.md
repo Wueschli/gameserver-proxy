@@ -24,6 +24,7 @@
 - Two concurrent uploads of the same name must not interleave bytes (atomic rename).
 - The default axum body limit (2 MiB) must not silently reject a valid 3 MiB plugin with a confusing error.
 - A garbage file already in `dir` must not stop the other modules from loading at startup.
+- On an instance with pins, an upload that the pins would reject must never reach the disk: a stray unpinned file makes the next startup fatal (`build_sniffers(...)?` in `main.rs`) and blocks every other module's rescan.
 
 ---
 
@@ -68,9 +69,9 @@
 
 **Interfaces:**
 - Consumes: `SnifferLoader::validate`, `MAX_MODULE_BYTES`.
-- Produces: `AdminState.sniffer_validator: Option<std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>>`; HTTP behaviour: `400` plain-text `invalid sniffer module: <ModuleError>` for any validation error, `413` above `MAX_MODULE_BYTES`, `200` as before on success.
+- Produces: `AdminState.sniffer_pins: std::sync::Arc<dyn Fn() -> Vec<wayhouse_config::SnifferModulePin> + Send + Sync>` (reads the live config snapshot, so a reload that changes pins is seen; find how `sniffers_dir` is kept current and follow that), and `AdminState.sniffer_validator: Option<std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>>`; HTTP behaviour: `400` plain-text `invalid sniffer module: <ModuleError>` for any validation error, `413` above `MAX_MODULE_BYTES`, `409` `pinned: ...` (body names the expected pin, or says the name is not pinned, with the sha256 of the upload) when `sniffer_pins()` is non-empty and the upload's name is unpinned or its sha256 differs, **writing nothing**; `200` as before on success.
 
-- [ ] **Step 1: Write failing tests** `upload_rejects_garbage_with_400_and_writes_nothing` (assert the dir is empty afterwards), `upload_rejects_empty_body`, `upload_rejects_oversize_with_413`, `upload_accepts_valid_module_larger_than_2mib` (pad a valid module with a custom section to 3 MiB; this pins the body limit), `upload_writes_via_rename_and_leaves_no_tmp_file`.
+- [ ] **Step 1: Write failing tests** `upload_rejects_garbage_with_400_and_writes_nothing` (assert the dir is empty afterwards), `upload_rejects_empty_body`, `upload_rejects_oversize_with_413`, `upload_accepts_valid_module_larger_than_2mib` (pad a valid module with a custom section to 3 MiB; this pins the body limit), `upload_writes_via_rename_and_leaves_no_tmp_file`, `upload_to_pinned_instance_with_other_hash_is_409_and_writes_nothing`, `upload_unpinned_name_on_pinned_instance_is_409_and_writes_nothing`, `upload_matching_pin_is_accepted`, `pin_check_uses_live_pins_after_reload`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse admin::tests::upload`. Expected: FAIL.
 - [ ] **Step 3: Implement**: add `DefaultBodyLimit::max(MAX_MODULE_BYTES)` on the upload route only; validate via `sniffer_validator` (if `None`, behave as today only when the sniffers dir exists, which cannot happen without the loader; return 409 `sniffers_disabled()`); write to `<dir>/.<name>.wasm.tmp` then `std::fs::rename` to `<name>.wasm` (scan only reads `*.wasm`, so the dotfile is ignored); on rename error remove the tmp file. `main.rs` builds the closure from the loader (`Arc<SnifferLoader>` clone) and `cfg.sniffers.max_memory_bytes`; the `test-minimal` build passes `None`.
 - [ ] **Step 4: Run** the same command plus `make check`. Expected: PASS.

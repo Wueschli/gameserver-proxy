@@ -15,7 +15,7 @@
 - Discovery is **on demand only**: no timers, no background fetches (decided).
 - Pinned-only by default: an update never changes a pin; instances with pins get the pin snippet as in the install plan.
 - `.prev` names: `.<name>.wasm.prev`; exactly one previous version is kept; the dotfile must be skipped by `list_sniffers` and `scan` (both filter on the `.wasm` extension, and `.prev` has a different extension, test it anyway).
-- Rollback and automatic fallback must not touch pin enforcement: with pins set, a `.prev` is only loaded when its sha256 matches the pin.
+- Pins: an update upload on a pinned instance is refused by the proxy (`409 pinned`, nothing written; see the upload-validation plan). Rollback with pins set swaps `.prev` back **only if its sha256 equals the pin**, else `409` and nothing changes; the automatic fallback likewise loads `.prev` only when it matches the pin. A rolled-back or replaced file must never leave a state that `scan` would reject, because that makes the next startup fatal.
 - New admin route is admin-authenticated like the others; fleet fan-out route in the aggregator and UI proxy mirrors `DELETE /fleet/sniffers/{name}`.
 - `make check`, `make ui-test` pass.
 
@@ -38,7 +38,7 @@
 **Interfaces:**
 - Produces: `POST /admin/sniffers/{name}/rollback` -> `200` plain text `rolled back <name>`; `404` when there is no previous; reload requested after a swap. `SnifferInfo.has_previous`.
 
-- [ ] **Step 1: Write failing tests**: `upload_over_existing_keeps_previous`, `second_upload_replaces_previous_not_accumulates`, `rollback_restores_previous_and_requests_reload`, `rollback_without_previous_is_404`, `list_hides_dotfiles_and_reports_has_previous`, `delete_removes_previous_too`.
+- [ ] **Step 1: Write failing tests**: `upload_over_existing_keeps_previous`, `second_upload_replaces_previous_not_accumulates`, `rollback_restores_previous_and_requests_reload`, `rollback_without_previous_is_404`, `rollback_on_pinned_instance_with_nonmatching_previous_is_409_and_changes_nothing`, `list_hides_dotfiles_and_reports_has_previous`, `delete_removes_previous_too`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse admin::tests::rollback admin::tests::upload`. Expected: FAIL.
 - [ ] **Step 3: Implement**: in upload, before the atomic rename, `rename(<name>.wasm -> .<name>.wasm.prev)` when a current file exists (copy semantics if the cross-step must be crash-safe: write new file to tmp first, then `rename(current, prev)`, then `rename(tmp, current)`; document the tiny window and that a crash in it leaves `.prev` plus tmp, recoverable by the scan fallback below). Rollback swaps with a temp name.
 - [ ] **Step 4: Run** the same command. Expected: PASS. **Commit** `feat: sniffer upload keeps the previous module, rollback endpoint (#184)`.

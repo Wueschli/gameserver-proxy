@@ -22,12 +22,12 @@
 
 ## Review Focus
 
-- SSRF: a registry URL pointing at `https://127.0.0.1/...`, `https://169.254.169.254/...` or `https://[::1]/` is refused (private, loopback, link-local, unspecified, unique-local ranges), with the test using literal IPs and a resolver-level guard for hostnames that resolve to those (custom `reqwest` resolver or connect-time check on the resolved addr).
+- SSRF: a registry URL **or a redirect from a registry** (`302` to `https://127.0.0.1/...`) is refused; the guard sits in the resolver, so it applies to every hop. A registry URL pointing at `https://127.0.0.1/...`, `https://169.254.169.254/...` or `https://[::1]/` is refused (private, loopback, link-local, unspecified, unique-local ranges), with the test using literal IPs and a resolver-level guard for hostnames that resolve to those (custom `reqwest` resolver or connect-time check on the resolved addr).
 - A registry that serves a huge or never-ending body must be cut off by the caps, with a clear error.
 - Install for a version whose `abi` does not match must not upload anything, and the response says why.
 - A partial fan-out (3 of 5 proxies accepted) is reported per instance, never as success.
 - Two operators adding the same registry URL: second add is a no-op with a 200 and the same id, not a duplicate.
-- Pinned instances (non-empty `settings.sniffers.modules`) are called out with the pin line to add.
+- Pinned instances (non-empty `settings.sniffers.modules`) answer `409 pinned` from the proxy and write nothing (upload-validation plan, Task 3); the UI shows the pin line to add per instance and offers to install again afterwards. A refused instance is not a failure of the install overall: report it as `pinned`.
 
 ---
 
@@ -55,7 +55,7 @@
 - Consumes: `wayhouse_http::builder()`, `wayhouse_registry::{parse_index, Index}`.
 - Produces: `pub struct RegistryClient`, `pub fn new() -> Self`, `pub async fn fetch_index(&self, url: &str) -> Result<Index, FetchError>` (in-memory cache keyed by URL, 5 minutes, `pub fn invalidate(&self, url: &str)`), `pub async fn fetch_artifact(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, FetchError>`, `pub async fn fetch_signature(&self, url: &str) -> Result<Vec<u8>, FetchError>` (max 4 KiB), `pub enum FetchError { Scheme, PrivateAddress(IpAddr), Timeout, TooLarge, Status(u16), Index(IndexError), Io(String) }`.
 
-- [ ] **Step 1: Write failing tests**: `fetches_and_parses_index`, `index_is_cached_for_five_minutes` (injectable clock or a request counter on the test server with a zero TTL variant), `oversize_index_is_cut_off`, `artifact_larger_than_max_bytes_is_cut_off_while_streaming` (server sends endless body; client stops at the cap), `non_200_is_status_error`, `refuses_private_literal_ips` (127.0.0.1, 10.0.0.1, 169.254.169.254, ::1, fc00::1, 0.0.0.0), `refuses_https_to_http_redirect`, `slow_server_times_out`.
+- [ ] **Step 1: Write failing tests**: `fetches_and_parses_index`, `index_is_cached_for_five_minutes` (injectable clock or a request counter on the test server with a zero TTL variant), `oversize_index_is_cut_off`, `artifact_larger_than_max_bytes_is_cut_off_while_streaming` (server sends endless body; client stops at the cap), `non_200_is_status_error`, `refuses_private_literal_ips` (127.0.0.1, 10.0.0.1, 169.254.169.254, ::1, fc00::1, 0.0.0.0), `refuses_https_to_http_redirect`, `refuses_redirect_to_private_address`, `slow_server_times_out`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-ui registry_client`. Expected: FAIL.
 - [ ] **Step 3: Implement** streaming reads with a byte counter, redirect policy as in Global Constraints, and the address guard via a custom DNS resolver wrapper that filters resolved addresses.
 - [ ] **Step 4: Run.** Expected: PASS. **Commit** `feat(ui): guarded registry HTTP client (#183)`.
@@ -74,7 +74,7 @@
   - `GET /api/registries/{id}/plugins` -> index plugins with, per plugin, `compatible: {version, reason?}` computed by `select`
   - `POST /api/registries/{id}/install {name, version?}` -> `{plugin, version, signed, risk, results:[{instance, ok, error?}], pinned_instances:[{instance, pin:{name,sha256}}]}`; status `200` when every instance accepted, `207` when partial, `422` for compatibility or verification failure with `{"error": "<reason>"}`, `502` when the registry is unreachable.
 
-- [ ] **Step 1: Write failing tests** with a fake registry server and a fake aggregator (the existing `aggregator_proxy` tests show the pattern): `lists_registries_with_risk_flag`, `add_then_list_then_delete`, `plugins_listing_marks_incompatible_with_reason`, `install_happy_path_uploads_verified_bytes_under_the_plugin_name`, `install_refuses_sha_mismatch_and_uploads_nothing`, `install_refuses_abi_mismatch_and_uploads_nothing`, `install_refuses_module_with_import`, `install_reports_partial_fanout_as_207`, `install_external_registry_response_carries_risk_external`, `mutating_routes_need_the_mutating_role` (reuse the role test helpers), `install_unknown_registry_is_404`.
+- [ ] **Step 1: Write failing tests** with a fake registry server and a fake aggregator (the existing `aggregator_proxy` tests show the pattern): `lists_registries_with_risk_flag`, `add_then_list_then_delete`, `plugins_listing_marks_incompatible_with_reason`, `min_proxy_check_is_skipped_with_a_note_when_no_instance_versions`, `install_happy_path_uploads_verified_bytes_under_the_plugin_name`, `install_refuses_sha_mismatch_and_uploads_nothing`, `install_refuses_abi_mismatch_and_uploads_nothing`, `install_refuses_module_with_import`, `install_reports_partial_fanout_as_207`, `install_reports_pinned_instance_from_409_without_marking_it_failed`, `install_external_registry_response_carries_risk_external`, `mutating_routes_need_the_mutating_role` (reuse the role test helpers), `install_unknown_registry_is_404`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-ui registry_api`. Expected: FAIL.
 - [ ] **Step 3: Implement** the handlers; install order: select version, fetch artifact, fetch signature if listed, `verify_artifact` (key from `registry_keys`), then `fan_out_upload`. Log `actor`, registry id, plugin, version and result at info.
 - [ ] **Step 4: Run** the same command and `cargo test -p wayhouse-ui`. Expected: PASS. **Commit** `feat(ui): browse registries and install verified plugins (#183)`.
