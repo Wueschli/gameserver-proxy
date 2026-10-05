@@ -190,9 +190,18 @@ fn apply(op: &IntentOp, handle: &RuntimeHandle) -> Result<(), String> {
             let pool = snap
                 .pool(pool)
                 .ok_or_else(|| format!("unknown pool {pool}"))?;
-            let backend = pool
-                .backend(addr)
-                .ok_or_else(|| format!("unknown backend {addr} in pool {}", pool.name))?;
+            let Some(backend) = pool.backend(addr) else {
+                // `backend_add` only edits the overlay; the snapshot holding
+                // the new backend is rebuilt later. Park the state so that
+                // build applies it, instead of losing the op on a replay.
+                if handle
+                    .backend_overlay()
+                    .set_pending_admin(&pool.name, addr, state)
+                {
+                    return Ok(());
+                }
+                return Err(format!("unknown backend {addr} in pool {}", pool.name));
+            };
             backend.set_admin_state(state);
             Ok(())
         }
@@ -265,5 +274,83 @@ listeners:
             addr: "127.0.0.1:2".into(),
         };
         assert!(apply(&op, &runtime.handle()).is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_patch_right_after_backend_add_survives_the_next_rebuild() {
+        // Regression (#172): `backend_add` only edits the overlay, the snapshot
+        // is rebuilt later, so a replayed `backend_patch` for the new backend
+        // found nothing and was dropped.
+        use wayhouse_core::{Runtime, Snapshot};
+
+        const YAML: &str = r#"
+pools:
+  - name: p
+    targets: ["127.0.0.1:1"]
+listeners:
+  - name: main
+    bind: "127.0.0.1:0"
+    protocol: tcp
+    pool: p
+"#;
+        let cfg = wayhouse_config::parse_str(YAML).unwrap();
+        let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+        let handle = runtime.handle();
+        let addr: SocketAddr = "127.0.0.1:19".parse().unwrap();
+
+        apply(
+            &IntentOp::BackendAdd {
+                pool: "p".into(),
+                addr: addr.to_string(),
+            },
+            &handle,
+        )
+        .unwrap();
+        apply(
+            &IntentOp::BackendPatch {
+                pool: "p".into(),
+                addr: addr.to_string(),
+                state: "disabled".into(),
+            },
+            &handle,
+        )
+        .expect("a patch for a just-added backend must not be dropped");
+
+        // The reload task's rebuild.
+        let rebuilt = Snapshot::build_with_sources(
+            &cfg,
+            Some(&handle.snapshot()),
+            handle.backend_overlay(),
+            handle.discovery(),
+        );
+        let backend = rebuilt.pool("p").unwrap().backend(addr).cloned().unwrap();
+        assert_eq!(backend.admin_state(), BackendState::Disabled);
+
+        // A second rebuild keeps it (carried by address), and a later direct
+        // patch is not overridden by a stale pending entry.
+        let again = Snapshot::build_with_sources(
+            &cfg,
+            Some(&rebuilt),
+            handle.backend_overlay(),
+            handle.discovery(),
+        );
+        let b = again.pool("p").unwrap().backend(addr).cloned().unwrap();
+        assert_eq!(b.admin_state(), BackendState::Disabled);
+        b.set_admin_state(BackendState::Enabled);
+        let third = Snapshot::build_with_sources(
+            &cfg,
+            Some(&again),
+            handle.backend_overlay(),
+            handle.discovery(),
+        );
+        assert_eq!(
+            third
+                .pool("p")
+                .unwrap()
+                .backend(addr)
+                .unwrap()
+                .admin_state(),
+            BackendState::Enabled
+        );
     }
 }

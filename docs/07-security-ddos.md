@@ -117,17 +117,13 @@ Two independent bounds cap what a *misbehaving* (buggy or malicious) plugin
 can cost the process, checked every call, not just at load time:
 
 - **Time**: `wasmtime` epoch interruption. A dedicated ticker thread bumps
-  the engine's epoch every `call_timeout_ms`; each call sets a one-tick
-  deadline before running, so a call still executing at the next tick traps
-  (`wayhouse_sniffer_calls_total{result="timeout"}`). This is a *ceiling*, not a
-  per-call guarantee of the full budget — a call that starts a moment before
-  a tick gets whatever's left, which can legitimately be far less than
-  `call_timeout_ms` (`sniffer_loader::tests::
-  wasm_plugin_call_times_out_under_the_epoch_deadline` proves the mechanism
-  fires; a rare boundary-straddling trap on an otherwise-fast call is
-  expected behaviour, not a bug — see the comment in
-  `wasm_boundary_latency_vs_nfr_n1` for how the phase 9 latency bench works
-  around it to get a clean measurement).
+  the engine's epoch every `call_timeout_ms / 2`; each call sets a two-tick
+  deadline before running, so a call still executing at the second tick traps
+  (`wayhouse_sniffer_calls_total{result="timeout"}`). This is a *ceiling*, not
+  an exact limit: the first tick lands anywhere after the call starts, so a
+  call gets between `call_timeout_ms / 2` and `call_timeout_ms`. A call well
+  under half the timeout never traps
+  (`sniffer_loader::tests::short_calls_never_time_out_under_the_shipped_ticker`).
 - **Memory**: a `StoreLimits` cap (`max_memory_bytes`) on the `Store` — a
   plugin that tries to grow its linear memory past the cap gets a failed
   `memory.grow` (WASM-spec `-1`), not more memory.
