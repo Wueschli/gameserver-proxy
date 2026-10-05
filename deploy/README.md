@@ -41,6 +41,8 @@ no green CI run (run CI by hand for a docs-only commit), builds all six images o
 amd64 and a native arm64 runner, checks `--version` and the commit on each and runs the
 compose smoke test on both, and only then pushes (`publish` job).
 
+**First release.** The release path has never run end to end (the `publish` job only runs on a tag), so make the first tag a pre-release such as `v0.1.0-rc.1`: it publishes the images but never moves `latest`.
+
 **Multi-arch.** `ghcr.io/<owner>/<image>:<version>` (and `:latest` for a non-pre-release) is
 a manifest list for `linux/amd64` and `linux/arm64`; `docker pull` picks the host's. The
 per-architecture images stay available as `:<version>-amd64` and `:<version>-arm64`. There

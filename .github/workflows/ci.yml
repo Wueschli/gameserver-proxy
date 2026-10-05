@@ -661,9 +661,9 @@ jobs:
           if-no-files-found: ignore
 
   # The trivy job over the arm64 images. Trivy reads the image tarballs without
-    # running them, so it stays on the amd64 runner (its pinned image is the one
-    # whose signature is verified below). Reports carry an -arm64 suffix
-    # (TRIVY_ARCH, deploy/scan-images.sh); the lockfiles are not scanned twice.
+  # running them, so it stays on the amd64 runner (its pinned image is the one
+  # whose signature is verified below). Reports carry an -arm64 suffix
+  # (TRIVY_ARCH, deploy/scan-images.sh); the lockfiles are not scanned twice.
   trivy-arm64:
     name: trivy (arm64)
     needs: [changes, deploy-arm64]
