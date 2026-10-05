@@ -35,11 +35,7 @@ async fn forwards_tcp_bytes_end_to_end() {
         }
     });
 
-    // Grab a free port for the proxy listener, then release it.
-    let proxy_addr = {
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        probe.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
 
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
@@ -91,10 +87,7 @@ async fn splice_forwards_a_large_stream_and_propagates_half_close() {
         }
     });
 
-    let proxy_addr = {
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        probe.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
@@ -154,15 +147,9 @@ async fn routes_around_a_dead_backend() {
         }
     });
 
-    // A dead address: bind then release so nothing is listening there.
-    let dead_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    // A dead address: reserved but never listened on, so connects are refused.
+    let dead_addr = free_port().await;
+    let proxy_addr = free_port().await;
 
     // Dead backend is first in round-robin. fall=1 so one failed connect (the
     // passive signal from the first request) marks it unhealthy immediately.
@@ -228,28 +215,86 @@ async fn marker_backend(mark: u8) -> std::net::SocketAddr {
     addr
 }
 
+/// Sockets backing every port `free_port` handed out, kept for the life of the
+/// test process. Dropping them straight away would let the kernel give the same
+/// port to a later call or to a test running in parallel, and since the proxy
+/// binds with `SO_REUSEPORT` two listeners would then share the port silently.
+static RESERVED_PORTS: std::sync::Mutex<Vec<socket2::Socket>> = std::sync::Mutex::new(Vec::new());
+
+/// Bind (but do not listen on) `127.0.0.1:port`, `0` meaning "any free port",
+/// and hold it. The reservation sets `SO_REUSEPORT` like the proxy does, so the
+/// proxy can bind the same port later, while any other bind is refused.
+fn reserve_port(port: u16) -> std::io::Result<std::net::SocketAddr> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    // No `SO_REUSEADDR`: with it, a plain `TcpListener::bind` could still take
+    // the port next to this idle socket.
+    sock.set_reuse_port(true)?;
+    sock.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], port)).into())?;
+    let addr = sock.local_addr()?.as_socket().expect("an IPv4 address");
+    RESERVED_PORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(sock);
+    Ok(addr)
+}
+
+/// A port on 127.0.0.1 that nothing listens on yet and nobody else can take.
 async fn free_port() -> std::net::SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
+    reserve_port(0).unwrap()
 }
 
 /// Two adjacent free ports on 127.0.0.1, for the bind-range test — retries a
 /// few times since "port N+1 is also free right now" isn't guaranteed by a
-/// single ephemeral-port grab.
+/// single ephemeral-port grab (the kernel hands out even ports to `bind(0)` and
+/// favours odd ones for outgoing connections, so the neighbour is often busy). A
+/// `lo` whose neighbour is taken stays reserved (a few idle sockets for the rest
+/// of the process), which is harmless.
 async fn free_port_pair() -> (u16, u16) {
-    for _ in 0..20 {
+    for _ in 0..200 {
         let lo = free_port().await.port();
         if lo == u16::MAX {
             continue;
         }
-        if TcpListener::bind(("127.0.0.1", lo + 1)).await.is_ok() {
+        if reserve_port(lo + 1).is_ok() {
             return (lo, lo + 1);
         }
     }
-    panic!("couldn't find two adjacent free ports after 20 tries");
+    panic!("couldn't find two adjacent free ports after 200 tries");
+}
+
+#[tokio::test]
+async fn free_port_hands_out_each_port_once_and_keeps_it_reserved() {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..200 {
+        let addr = free_port().await;
+        assert!(
+            seen.insert(addr.port()),
+            "port {} handed out twice",
+            addr.port()
+        );
+        // Nobody else can take the port while the test is still preparing to bind it.
+        assert!(
+            std::net::TcpListener::bind(addr).is_err(),
+            "port {} was free to take after free_port returned it",
+            addr.port()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_port_from_free_port_can_still_be_bound_by_the_proxy_and_refuses_until_then() {
+    let addr = free_port().await;
+    assert!(
+        TcpStream::connect(addr).await.is_err(),
+        "nothing listens on a reserved port yet"
+    );
+    let listener = gsp_core::net::bind_reuseport_tcp(addr, 16, false, false)
+        .expect("the proxy's SO_REUSEPORT bind must coexist with the reservation");
+    assert_eq!(listener.local_addr().unwrap(), addr);
 }
 
 #[tokio::test]
@@ -888,10 +933,7 @@ async fn prepends_a_proxy_protocol_v1_header_to_the_backend() {
         }
     });
 
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n    proxy_protocol: v1\n\
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n"
@@ -958,10 +1000,7 @@ async fn acl_deny_drops_the_connection_before_routing() {
         }
     });
 
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n    deny: [\"127.0.0.1/32\"]\n"
@@ -1004,10 +1043,7 @@ async fn rate_limit_drops_connections_past_the_burst() {
         }
     });
 
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     // 1 permit/sec, burst 2: at most 2 of a quick run of connections get through.
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
@@ -1060,10 +1096,7 @@ async fn global_max_connections_caps_live_tcp() {
         }
     });
 
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     let yaml = format!(
         "settings:\n  limits:\n    max_connections: 2\n\
          pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
@@ -1126,10 +1159,7 @@ async fn geo_filter_denies_unlisted_country() {
             });
         }
     });
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     // `allow: [SE]` — the loopback client resolves to no country in the test DB,
     // so a non-empty allow list fails it closed.
     let yaml = format!(
@@ -1179,10 +1209,7 @@ async fn per_source_cap_limits_concurrent_connections_from_one_ip() {
             });
         }
     });
-    let proxy_addr = {
-        let p = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        p.local_addr().unwrap()
-    };
+    let proxy_addr = free_port().await;
     let yaml = format!(
         "pools:\n  - name: p\n    targets: [\"{backend_addr}\"]\n\
          listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    pool: p\n\
