@@ -46,9 +46,12 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
-use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{
+    Config, Engine, ExternType, FuncType, Instance, Module, Store, StoreLimits, StoreLimitsBuilder,
+    ValType,
+};
 
-use wayhouse_config::{RouteHint, SniffersConfig};
+use wayhouse_config::{RouteHint, SnifferModulePin, SniffersConfig};
 use wayhouse_core::metrics_defs as m;
 use wayhouse_core::sniff::{Sniffer, Sniffers};
 
@@ -114,14 +117,7 @@ impl Sniffer for WasmSniffer {
 
 impl WasmSniffer {
     fn call(&self, first: &[u8]) -> Result<Option<RouteHint>, CallError> {
-        let state = StoreState {
-            limits: StoreLimitsBuilder::new()
-                .memory_size(self.max_memory_bytes)
-                .build(),
-        };
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
-        store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+        let mut store = new_store(&self.engine, self.max_memory_bytes);
 
         let instance = Instance::new(&mut store, &self.module, &[]).map_err(classify)?;
         let memory = instance
@@ -168,6 +164,54 @@ impl WasmSniffer {
             .ok_or(CallError::BadOutput)
     }
 }
+
+/// A fresh per-call `Store` with the memory cap and epoch deadline applied.
+/// Shared by `sniff` calls and by [`SnifferLoader::validate`] so the limits a
+/// module is vetted under cannot drift from the ones it runs under.
+fn new_store(engine: &Engine, max_memory_bytes: usize) -> Store<StoreState> {
+    let state = StoreState {
+        limits: StoreLimitsBuilder::new()
+            .memory_size(max_memory_bytes)
+            .build(),
+    };
+    let mut store = Store::new(engine, state);
+    store.limiter(|s| &mut s.limits);
+    store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+    store
+}
+
+/// Largest module the loader and the admin upload accept.
+pub const MAX_MODULE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Why a byte string is not a loadable sniffer module.
+#[derive(Debug)]
+pub enum ModuleError {
+    TooLarge { len: usize, max: usize },
+    Empty,
+    Compile(String),
+    UnexpectedImport(String),
+    MissingExport(&'static str),
+    WrongSignature(&'static str),
+    Instantiate(String),
+}
+
+impl std::fmt::Display for ModuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge { len, max } => write!(f, "module is {len} bytes, the limit is {max}"),
+            Self::Empty => write!(f, "module is empty"),
+            Self::Compile(e) => write!(f, "not a valid wasm module: {e}"),
+            Self::UnexpectedImport(i) => {
+                write!(f, "module imports {i}, but sniffer modules take no imports")
+            }
+            Self::MissingExport(n) => write!(f, "module does not export `{n}`"),
+            Self::WrongSignature(n) => write!(f, "export `{n}` has the wrong type"),
+            Self::Instantiate(e) => write!(f, "module does not instantiate: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ModuleError {}
 
 #[allow(clippy::needless_pass_by_value)] // `map_err` callback, which hands the error over by value
 fn classify(e: wasmtime::Error) -> CallError {
@@ -220,6 +264,9 @@ fn decode_route_hint(bytes: &[u8]) -> Option<RouteHint> {
 /// the process, like `settings.workers`.
 pub struct SnifferLoader {
     engine: Arc<Engine>,
+    /// `settings.sniffers.modules` as of the latest [`SnifferLoader::scan`],
+    /// so the admin upload can refuse what the next scan would reject.
+    pins: std::sync::Mutex<Vec<SnifferModulePin>>,
 }
 
 impl SnifferLoader {
@@ -244,7 +291,81 @@ impl SnifferLoader {
                 })
                 .context("spawning the sniffer epoch-ticker thread")?;
         }
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            pins: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The module pins of the latest scan (empty: no pinning).
+    pub fn pins(&self) -> Vec<SnifferModulePin> {
+        self.pins.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Check that `bytes` is a module this loader would accept: within
+    /// [`MAX_MODULE_BYTES`], no imports, the three ABI exports with the right
+    /// types, and it instantiates under `max_memory_bytes`. `sniff` is not called.
+    pub fn validate(&self, bytes: &[u8], max_memory_bytes: usize) -> Result<(), ModuleError> {
+        self.compile_checked(bytes, max_memory_bytes).map(drop)
+    }
+
+    fn compile_checked(
+        &self,
+        bytes: &[u8],
+        max_memory_bytes: usize,
+    ) -> Result<Module, ModuleError> {
+        if bytes.is_empty() {
+            return Err(ModuleError::Empty);
+        }
+        if bytes.len() > MAX_MODULE_BYTES {
+            return Err(ModuleError::TooLarge {
+                len: bytes.len(),
+                max: MAX_MODULE_BYTES,
+            });
+        }
+        let module =
+            Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
+        if let Some(i) = module.imports().next() {
+            return Err(ModuleError::UnexpectedImport(format!(
+                "{}::{}",
+                i.module(),
+                i.name()
+            )));
+        }
+        let want = |name: &'static str, params: &[ValType], results: &[ValType]| match module
+            .get_export(name)
+        {
+            Some(ExternType::Func(ft)) => {
+                let expected = FuncType::new(
+                    &self.engine,
+                    params.iter().cloned(),
+                    results.iter().cloned(),
+                );
+                if FuncType::eq(&ft, &expected) {
+                    Ok(())
+                } else {
+                    Err(ModuleError::WrongSignature(name))
+                }
+            }
+            Some(_) => Err(ModuleError::WrongSignature(name)),
+            None => Err(ModuleError::MissingExport(name)),
+        };
+        match module.get_export("memory") {
+            Some(ExternType::Memory(_)) => {}
+            Some(_) => return Err(ModuleError::WrongSignature("memory")),
+            None => return Err(ModuleError::MissingExport("memory")),
+        }
+        want("alloc", &[ValType::I32], &[ValType::I32])?;
+        want(
+            "sniff",
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            &[ValType::I64],
+        )?;
+
+        let mut store = new_store(&self.engine, max_memory_bytes);
+        Instance::new(&mut store, &module, &[])
+            .map_err(|e| ModuleError::Instantiate(e.to_string()))?;
+        Ok(module)
     }
 
     /// Scan `cfg.dir` for `*.wasm` modules and compile each into a
@@ -252,11 +373,13 @@ impl SnifferLoader {
     /// named after its file stem (`a2s.wasm` → sniffer `a2s`). When
     /// `cfg.modules` is non-empty every loaded file must have a matching pin
     /// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the
-    /// whole scan (an old, still-pinned registry should be kept by the
+    /// whole scan; a file that is not a loadable module (see
+    /// [`SnifferLoader::validate`]) is logged and skipped, never fatal (an old, still-pinned registry should be kept by the
     /// caller rather than left half-updated). A module's `modules[].config`
     /// string, if any, is baked onto its `WasmSniffer` here and handed to the
     /// guest on every `sniff` call.
     pub fn scan(&self, cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
+        *self.pins.lock().unwrap_or_else(|e| e.into_inner()) = cfg.modules.clone();
         let mut modules = HashMap::new();
         let entries = fs::read_dir(&cfg.dir)
             .with_context(|| format!("settings.sniffers.dir {:?}", cfg.dir))?;
@@ -289,8 +412,13 @@ impl SnifferLoader {
                 .unwrap_or_default()
                 .into_bytes();
 
-            let module = Module::new(&self.engine, &bytes)
-                .map_err(|e| anyhow::anyhow!("compiling {}: {e}", path.display()))?;
+            let module = match self.compile_checked(&bytes, cfg.max_memory_bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!(sniffer = %name, error = %e, "sniffer module rejected, skipping");
+                    continue;
+                }
+            };
             let sniffer: Arc<dyn Sniffer> = Arc::new(WasmSniffer {
                 name: name.clone(),
                 engine: self.engine.clone(),
@@ -1074,6 +1202,142 @@ listeners:
         runtime
             .shutdown_with_grace(std::time::Duration::from_millis(100))
             .await;
+    }
+
+    fn loader() -> SnifferLoader {
+        SnifferLoader::new(Duration::from_millis(50)).unwrap()
+    }
+
+    fn wat_bytes(wat: &str) -> Vec<u8> {
+        wat::parse_str(wat).unwrap()
+    }
+
+    const MEM: usize = 1 << 20;
+
+    #[test]
+    fn validate_accepts_the_host_fixture() {
+        loader()
+            .validate(&wat_bytes(HOST_SNIFFER_WAT), MEM)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_empty() {
+        assert!(matches!(
+            loader().validate(&[], MEM),
+            Err(ModuleError::Empty)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_garbage_bytes() {
+        let e = loader().validate(b"not wasm", MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::Compile(_)), "{e}");
+    }
+
+    #[test]
+    fn validate_rejects_oversize() {
+        let big = vec![0u8; MAX_MODULE_BYTES + 1];
+        let e = loader().validate(&big, MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::TooLarge { .. }), "{e}");
+    }
+
+    #[test]
+    fn validate_rejects_import() {
+        let wat = r#"(module
+          (import "wasi_snapshot_preview1" "fd_write" (func))
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
+        let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::UnexpectedImport(_)), "{e}");
+        assert!(e.to_string().contains("fd_write"), "{e}");
+    }
+
+    #[test]
+    fn validate_rejects_missing_sniff() {
+        let wat = r#"(module
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0)))"#;
+        let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::MissingExport("sniff")), "{e}");
+    }
+
+    #[test]
+    fn validate_rejects_wrong_sniff_signature() {
+        let wat = r#"(module
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32) (result i64) (i64.const 0)))"#;
+        let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::WrongSignature("sniff")), "{e}");
+    }
+
+    #[test]
+    fn validate_rejects_start_function_that_traps() {
+        let wat = r#"(module
+          (memory (export "memory") 1)
+          (func $f unreachable)
+          (start $f)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
+        let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::Instantiate(_)), "{e}");
+    }
+
+    #[test]
+    fn scan_skips_garbage_file_and_loads_the_rest() {
+        let dir = tempdir();
+        std::fs::write(dir.join("good.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        std::fs::write(dir.join("junk.wasm"), b"not wasm").unwrap();
+        let map = loader().scan(&cfg(&dir)).unwrap();
+        let mut names: Vec<_> = map.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["good"]);
+    }
+
+    #[test]
+    fn scan_skips_module_with_import() {
+        let dir = tempdir();
+        std::fs::write(dir.join("good.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let wat = r#"(module (import "env" "x" (func))
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
+        std::fs::write(dir.join("imp.wasm"), wat_bytes(wat)).unwrap();
+        let map = loader().scan(&cfg(&dir)).unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("good"));
+    }
+
+    #[test]
+    fn scan_still_fails_on_pin_mismatch() {
+        let dir = tempdir();
+        std::fs::write(dir.join("good.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let mut c = cfg(&dir);
+        c.modules.push(wayhouse_config::SnifferModulePin {
+            name: "good".into(),
+            sha256: "0".repeat(64),
+            config: None,
+        });
+        assert!(loader().scan(&c).is_err());
+    }
+
+    #[test]
+    fn scan_records_the_live_pins() {
+        let dir = tempdir();
+        let l = loader();
+        assert!(l.pins().is_empty());
+        let mut c = cfg(&dir);
+        c.modules.push(wayhouse_config::SnifferModulePin {
+            name: "x".into(),
+            sha256: "1".repeat(64),
+            config: None,
+        });
+        let _ = l.scan(&c);
+        assert_eq!(l.pins().len(), 1);
+        let _ = l.scan(&cfg(&dir));
+        assert!(l.pins().is_empty(), "a reload that drops the pins is seen");
     }
 
     /// A tiny per-test-process unique scratch dir under the system temp dir.
