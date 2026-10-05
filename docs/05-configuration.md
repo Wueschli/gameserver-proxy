@@ -58,9 +58,8 @@
 > and a route `action: { resolver: <name> }` (exactly
 > one of `pool` / `resolver` per action). The proxy `POST`s `{listener, src, dst,
 > sni?, first_bytes_b64, routing_key?}` and expects `{pool?, target?,
-> sticky_key?, ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
-> straight to that instance (no pool / health / cap); `sticky_key` is not yet
-> used. `proxy_protocol: none | v1 | v2 | v2-udp` (default `none`) is the PROXY
+> ttl_sec?}` — `target` ("ip:port") wins over `pool` and connects
+> straight to that instance (no pool / health / cap). `proxy_protocol: none | v1 | v2 | v2-udp` (default `none`) is the PROXY
 > protocol header to prepend to a `target` connection — there is no pool to read
 > it from — so the backend still sees the real client IP; a resolver-chosen
 > *pool* uses that pool's own `proxy_protocol`. Same transport rule as pools:
@@ -208,6 +207,21 @@
 > and no sticky table (removed in #56: it was per worker, so `SO_REUSEPORT` kept
 > only ~34% of clients on 4 workers). A `round_robin` pool gives a returning
 > client a new backend. See `config.example.yaml`.
+>
+> **Handshake-only sniffers (UDP, #131):** the `quic`, `wireguard`, `openvpn`,
+> `raknet` and `teamspeak3` plugins recognise only a flow's handshake datagram.
+> The route is decided when a session opens, not per connection, so a flow whose
+> session was evicted by `idle_timeout_sec` (or whose NAT mapping changed, or
+> that reached this proxy after a restart or an ECMP move) reopens on a
+> transport datagram that no sniffer recognises. Without a gate it falls to the
+> next matching route; with `first_packet_gate: true` it is dropped until the
+> client handshakes again (WireGuard rekeys after about two minutes). Per
+> protocol: keep the pool's `idle_timeout_sec` well above the keepalive (the
+> config warns below 60 s, at load, reload and `--check`); a catch-all `always`
+> route after such a sniffer that goes to a different pool is rejected unless
+> `first_packet_gate: true` is set; and use `route_hint`, or a pool with
+> `balancer: consistent_hash` (`hash_on: src_ip`), so a reopened session still
+> reaches the same backend. The check goes by the plugin's module name.
 >
 > **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
 > (a flat string, not the target schema's `auth: { mode, token }` object
@@ -479,6 +493,9 @@ rolling update of many pods costs one fetch, not one per event.
   traffic — omit the key for no cap).
 - `first_packet_gate: true` is UDP-only and needs at least one `first_bytes`
   route or a `sniffer` on the listener.
+- A UDP listener with a handshake-only sniffer (`quic`, `wireguard`, `openvpn`,
+  `raknet`, `teamspeak3`) must not have a later `always` route to a different
+  action unless `first_packet_gate: true` is set (#131).
 - A listener `geo` filter requires `settings.geo_db`, a non-empty `allow` or
   `deny`, and 2-letter country codes; the DB file must open at startup / `--check`.
 - `consistent_hash` requires `hash_on`.

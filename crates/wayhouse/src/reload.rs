@@ -139,6 +139,9 @@ pub(crate) async fn apply_config(
     sniffers: &Sniffers,
     source_desc: &str,
 ) {
+    for w in cfg.warnings() {
+        tracing::warn!(source = source_desc, "{w}");
+    }
     let prev = handle.current();
     let listeners_changed = cfg.listeners != prev.listeners;
     let resolvers_changed = cfg.resolvers != prev.resolvers;

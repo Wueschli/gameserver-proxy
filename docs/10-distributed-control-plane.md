@@ -1042,9 +1042,9 @@ Still open:
 - **Tier-2 transport**: an existing gossip crate (`foca` for SWIM, a
   `memberlist`-style mesh) vs. a minimal hand-rolled CRDT sync. Measure message
   volume with realistic backend / instance counts before committing.
-- **Affinity as Tier-2 state**: should the resolver result cache / `sticky_key`
+- **Affinity as Tier-2 state**: should the resolver result cache
   become shared-within-a-domain state (so a rehashed client keeps its instance's
-  affinity)? Overlaps chapter 03 scheme C and the deferred `sticky_key` design.
+  affinity)? Overlaps chapter 03 scheme C. (`sticky_key` was removed, #54.)
 - **Region-scoped intent**: is "drain backend X" ever meant to apply to one
   domain only, needing intent records with a failure-domain selector? Also
   now a prerequisite for region-scoped RBAC (see "RBAC and audit" above,

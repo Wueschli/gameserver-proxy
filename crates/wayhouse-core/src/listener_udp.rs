@@ -20,14 +20,16 @@
 //! `recv_from` / `send_to`, sessions keyed by client only.
 //!
 //! The ingress path batches: one `recvmmsg(2)` on Linux pulls up to
-//! [`RECV_BATCH`] datagrams per wakeup (see [`RecvBatch`]); non-Linux and the
-//! per-session reply pump still do one datagram per syscall.
+//! [`RECV_BATCH`] datagrams per wakeup (see [`RecvBatch`]). Egress batches too
+//! (`sendmmsg(2)`, [`send_batch`]): a run of consecutive datagrams of one
+//! session goes upstream in one call, and the reply pump moves up to
+//! `REPLY_BATCH_SIZE` datagrams per wakeup through a per-thread [`ReplyBatch`].
+//! Non-Linux does one datagram per syscall.
 //!
 //! Idle expiry is a single-level timing wheel ([`IdleWheel`], 1 s slots) —
 //! O(slot) work per tick instead of an O(sessions) scan.
 //!
 //! v0 simplifications still open (see `HANDOVER.md`, "Phase 2"):
-//! - the reply pump and the upstream forward are not `sendmmsg`-batched;
 //! - one spawned reply task per session (recorded in the latency ledger);
 //! - the stickiness table is bounded by a hard cap and cleared wholesale when
 //!   exceeded (no LRU).
@@ -39,7 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -280,7 +282,12 @@ pub async fn run_udp_listener(
                 }
                 // One `recvmmsg` (Linux) pulled up to `RECV_BATCH` datagrams;
                 // route / forward each. `continue` skips to the next datagram.
+                let mut run_end = 0;
                 for i in 0..count {
+                    // Already forwarded as part of the previous session's run.
+                    if i < run_end {
+                        continue;
+                    }
                     let (data, client, dst) = rbatch.at(i);
 
                     // Prefix mode: drop datagrams to a destination outside the
@@ -300,21 +307,20 @@ pub async fn run_udp_listener(
 
                     let key: SessionKey = (client, dst);
 
-                    // Existing session: forward and refresh liveness.
+                    // Existing session: forward and refresh liveness. The
+                    // datagrams after this one from the same (client, dst)
+                    // would take this very branch, so the whole run goes out
+                    // in one `sendmmsg`.
                     if let Some(s) = sessions.get(&key) {
                         s.last_ms.store(mono_ms(), Ordering::Relaxed);
                         let up = s.upstream.clone();
-                        if let Err(e) = up.send(data).await {
-                            note_port_unreachable(&cfg.name, &s.health, &e);
-                            metrics::counter!(
-                                m::DATAGRAMS_DROPPED,
-                                "listener" => cfg.name.clone(), "reason" => "upstream_send",
-                            ).increment(1);
-                            tracing::warn!(
-                                listener = %cfg.name, %client, error = %e,
-                                "udp forward to backend failed"
-                            );
+                        let mut end = i + 1;
+                        while end < count && rbatch.same_flow(end, client, dst) {
+                            end += 1;
                         }
+                        run_end = end;
+                        let run: Vec<&[u8]> = (i..end).map(|j| rbatch.at(j).0).collect();
+                        forward_run(&up, &run, &cfg.name, client, &s.health).await;
                         continue;
                     }
 
@@ -566,6 +572,13 @@ impl RecvBatch {
     fn at(&self, i: usize) -> (&[u8], SocketAddr, Option<SocketAddr>) {
         let d = &self.meta[i];
         (&self.bufs[i][..d.len], d.client, d.dst)
+    }
+
+    /// Whether datagram `i` is from `client` to `dst`, i.e. belongs to the same
+    /// session as a datagram with that key.
+    fn same_flow(&self, i: usize, client: SocketAddr, dst: Option<SocketAddr>) -> bool {
+        let d = &self.meta[i];
+        d.client == client && d.dst == dst
     }
 
     /// Await readability and receive a batch; returns how many datagrams landed.
@@ -1075,40 +1088,45 @@ fn spawn_reply(
         let mut answered = false;
         loop {
             // Receive and forward inside one synchronous section so a single
-            // per-thread buffer serves every session (#122): a buffer per
-            // session cost 64 KiB each and stayed resident after a burst. The
-            // closure goes through `async_io` with `ERROR` interest, as
-            // tokio's own `recv` does: an ICMP port-unreachable is a socket error
-            // with no data and must wake the pump.
+            // per-thread batch serves every session (#122): a buffer per
+            // session cost 64 KiB each and stayed resident after a burst. One
+            // `recvmmsg` pulls whatever is queued and one `sendmmsg` hands it to
+            // the client (every datagram of a session goes to the same client
+            // from the same source, so the batch shares its addressing). The
+            // closure goes through `async_io` with `ERROR` interest, as tokio's
+            // own `recv` does: an ICMP port-unreachable is a socket error with
+            // no data and must wake the pump.
             let relayed = up
                 .async_io(Interest::READABLE | Interest::ERROR, || {
-                    REPLY_BUF.with_borrow_mut(|buf| {
+                    REPLY_BATCH.with_borrow_mut(|batch| {
                         // Raw recv, not `try_recv`: that re-checks readiness and
                         // would skip the syscall for an error-only wakeup.
-                        let n = nix::sys::socket::recv(
-                            up.as_raw_fd(),
-                            buf,
-                            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
-                        )
-                        .map_err(io::Error::from)?;
-                        Ok(match try_send_reply(out, &buf[..n], client, reply_src) {
-                            Ok(_) => Relay::Sent,
-                            // Client socket full: park a right-sized copy and
-                            // await writability outside the borrow.
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                Relay::Blocked(buf[..n].to_vec())
-                            }
-                            Err(e) => Relay::Failed(e),
-                        })
+                        let n = batch.recv(up.as_raw_fd())?;
+                        Ok(relay_batch(out, batch, n, client, reply_src))
                     })
                 })
                 .await;
-            let sent = match relayed {
-                Ok(Relay::Sent) => Ok(()),
-                Ok(Relay::Blocked(data)) => {
-                    send_reply(out, &data, client, reply_src).await.map(drop)
-                }
-                Ok(Relay::Failed(e)) => Err(e),
+            let (sent, result) = match relayed {
+                Ok(Relay { sent, rest }) => match rest {
+                    Rest::Done => (sent, Ok(())),
+                    Rest::Failed(e) => (sent, Err(e)),
+                    // Client socket full: the unsent tail was copied out of
+                    // the batch, so await writability outside the borrow.
+                    Rest::Blocked(tail) => {
+                        let mut sent = sent;
+                        let mut result = Ok(());
+                        for data in tail {
+                            match send_reply(out, &data, client, reply_src).await {
+                                Ok(_) => sent += 1,
+                                Err(e) => {
+                                    result = Err(e);
+                                    break;
+                                }
+                            }
+                        }
+                        (sent, result)
+                    }
+                },
                 Err(e) => {
                     note_port_unreachable(&listener, &health, &e);
                     tracing::debug!(%listener, %client, error = %e, "udp upstream recv ended");
@@ -1116,45 +1134,275 @@ fn spawn_reply(
                 }
             };
             last_ms.store(mono_ms(), Ordering::Relaxed);
-            if !answered && sent.is_ok() {
+            if !answered && sent > 0 {
                 answered = true;
                 note_first_reply(&listener, &health);
             }
-            if let Err(e) = sent {
+            packets_s2c.increment(sent as u64);
+            if let Err(e) = result {
                 tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
                 return;
             }
-            packets_s2c.increment(1);
         }
     })
 }
 
 thread_local! {
-    /// Scratch buffer for the reply pumps of every session on this thread; only
+    /// Receive batch for the reply pumps of every session on this thread; only
     /// ever borrowed inside a synchronous section, never across an `.await`.
-    static REPLY_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; MAX_DATAGRAM]);
+    static REPLY_BATCH: RefCell<ReplyBatch> = RefCell::new(ReplyBatch::new());
 }
 
-enum Relay {
-    Sent,
-    /// The datagram, to send once the client socket is writable.
-    Blocked(Vec<u8>),
+/// Outcome of relaying one received batch to the client.
+struct Relay {
+    /// Datagrams already sent.
+    sent: usize,
+    rest: Rest,
+}
+
+enum Rest {
+    /// The whole batch went out.
+    Done,
+    /// The unsent tail, to send once the client socket is writable.
+    Blocked(Vec<Vec<u8>>),
     /// Sending to the client failed.
     Failed(io::Error),
 }
 
-/// Non-blocking [`send_reply`]: `WouldBlock` if the socket's send buffer is full.
-fn try_send_reply(
-    sock: &UdpSocket,
-    data: &[u8],
+/// Send the first `n` datagrams of `batch` to `client`, one `sendmmsg` at a time
+/// until the batch is out or the socket stops taking datagrams.
+fn relay_batch(
+    out: &UdpSocket,
+    batch: &ReplyBatch,
+    n: usize,
     client: SocketAddr,
     src: Option<IpAddr>,
+) -> Relay {
+    let msgs: Vec<&[u8]> = (0..n).map(|i| batch.at(i)).collect();
+    let mut sent = 0;
+    while sent < n {
+        match out.try_io(Interest::WRITABLE, || {
+            send_batch(out.as_raw_fd(), &msgs[sent..], Some(client), src)
+        }) {
+            Ok(k) => sent += k,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let tail = msgs[sent..].iter().map(|m| m.to_vec()).collect();
+                return Relay {
+                    sent,
+                    rest: Rest::Blocked(tail),
+                };
+            }
+            Err(e) => {
+                return Relay {
+                    sent,
+                    rest: Rest::Failed(e),
+                }
+            }
+        }
+    }
+    Relay {
+        sent,
+        rest: Rest::Done,
+    }
+}
+
+/// Max datagrams a reply pump moves per wakeup.
+const REPLY_BATCH_SIZE: usize = 16;
+
+/// Per-thread receive buffers of the reply pumps (`REPLY_BATCH_SIZE` x
+/// `MAX_DATAGRAM`, ~1 MiB per worker thread, not per session). Elsewhere than
+/// Linux it holds one buffer and degrades to one `recv` per call.
+struct ReplyBatch {
+    bufs: Vec<Vec<u8>>,
+    lens: Vec<usize>,
+}
+
+impl ReplyBatch {
+    fn new() -> Self {
+        let cap = if cfg!(target_os = "linux") {
+            REPLY_BATCH_SIZE
+        } else {
+            1
+        };
+        Self {
+            bufs: (0..cap).map(|_| vec![0u8; MAX_DATAGRAM]).collect(),
+            lens: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Payload of the `i`-th datagram from the last `recv`.
+    fn at(&self, i: usize) -> &[u8] {
+        &self.bufs[i][..self.lens[i]]
+    }
+
+    /// Non-blocking receive on a connected socket; returns how many datagrams
+    /// landed (at least one), or the socket error / `WouldBlock`.
+    #[cfg(target_os = "linux")]
+    fn recv(&mut self, fd: RawFd) -> io::Result<usize> {
+        use nix::sys::socket::{recvmmsg, MsgFlags, MultiHeaders};
+
+        let Self { bufs, lens } = self;
+        lens.clear();
+        let mut headers = MultiHeaders::<()>::preallocate(bufs.len(), None);
+        let mut iovs: Vec<[IoSliceMut<'_>; 1]> = bufs
+            .iter_mut()
+            .map(|b| [IoSliceMut::new(b.as_mut_slice())])
+            .collect();
+        let results = recvmmsg(
+            fd,
+            &mut headers,
+            iovs.iter_mut(),
+            MsgFlags::MSG_DONTWAIT,
+            None::<nix::sys::time::TimeSpec>,
+        )
+        .map_err(io::Error::from)?;
+        lens.extend(results.map(|m| m.bytes));
+        Ok(lens.len())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn recv(&mut self, fd: RawFd) -> io::Result<usize> {
+        self.lens.clear();
+        let n = nix::sys::socket::recv(
+            fd,
+            &mut self.bufs[0],
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+        )
+        .map_err(io::Error::from)?;
+        self.lens.push(n);
+        Ok(1)
+    }
+}
+
+/// Send `msgs` in order in as few syscalls as possible and return how many went
+/// out (at least one, or the error of the first). Every datagram shares the
+/// addressing: `dest` is the peer (`None` on a connected socket) and `src`, when
+/// set, is the source address to send from (pktinfo, prefix mode). Linux uses one
+/// `sendmmsg(2)`; elsewhere only the first datagram is sent per call and callers
+/// loop on the returned count.
+fn send_batch(
+    fd: RawFd,
+    msgs: &[&[u8]],
+    dest: Option<SocketAddr>,
+    src: Option<IpAddr>,
 ) -> io::Result<usize> {
-    match src {
-        None => sock.try_send_to(data, client),
-        Some(src) => sock.try_io(Interest::WRITABLE, || {
-            sendmsg_pktinfo(sock, data, client, src)
-        }),
+    #[cfg(target_os = "linux")]
+    if msgs.len() > 1 {
+        return sendmmsg_batch(fd, msgs, dest, src);
+    }
+    send_one(fd, msgs[0], dest, src)?;
+    Ok(1)
+}
+
+fn send_one(
+    fd: RawFd,
+    data: &[u8],
+    dest: Option<SocketAddr>,
+    src: Option<IpAddr>,
+) -> io::Result<usize> {
+    use nix::sys::socket::{send, sendto, MsgFlags, SockaddrStorage};
+
+    match (dest, src) {
+        (Some(dest), Some(src)) => sendmsg_pktinfo(fd, data, dest, src),
+        (Some(dest), None) => sendto(fd, data, &SockaddrStorage::from(dest), MsgFlags::empty())
+            .map_err(io::Error::from),
+        (None, _) => send(fd, data, MsgFlags::empty()).map_err(io::Error::from),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sendmmsg_batch(
+    fd: RawFd,
+    msgs: &[&[u8]],
+    dest: Option<SocketAddr>,
+    src: Option<IpAddr>,
+) -> io::Result<usize> {
+    use nix::sys::socket::{sendmmsg, ControlMessage, MsgFlags, MultiHeaders, SockaddrStorage};
+
+    let iovs: Vec<[IoSlice<'_>; 1]> = msgs.iter().map(|m| [IoSlice::new(m)]).collect();
+    let addrs = vec![dest.map(SockaddrStorage::from); msgs.len()];
+    let pi4;
+    let pi6;
+    let (cmsgs, space) = match src {
+        None => (Vec::new(), None),
+        Some(IpAddr::V4(v4)) => {
+            pi4 = pktinfo_v4(v4);
+            (
+                vec![ControlMessage::Ipv4PacketInfo(&pi4)],
+                Some(nix::cmsg_space!(nix::libc::in_pktinfo)),
+            )
+        }
+        Some(IpAddr::V6(v6)) => {
+            pi6 = pktinfo_v6(v6);
+            (
+                vec![ControlMessage::Ipv6PacketInfo(&pi6)],
+                Some(nix::cmsg_space!(nix::libc::in6_pktinfo)),
+            )
+        }
+    };
+    let mut headers = MultiHeaders::<SockaddrStorage>::preallocate(msgs.len(), space);
+    let results = sendmmsg(
+        fd,
+        &mut headers,
+        iovs.iter(),
+        addrs,
+        cmsgs,
+        MsgFlags::empty(),
+    )
+    .map_err(io::Error::from)?;
+    Ok(results.count())
+}
+
+fn pktinfo_v4(v4: Ipv4Addr) -> nix::libc::in_pktinfo {
+    nix::libc::in_pktinfo {
+        ipi_ifindex: 0,
+        ipi_spec_dst: nix::libc::in_addr {
+            s_addr: u32::from_ne_bytes(v4.octets()),
+        },
+        ipi_addr: nix::libc::in_addr { s_addr: 0 },
+    }
+}
+
+fn pktinfo_v6(v6: Ipv6Addr) -> nix::libc::in6_pktinfo {
+    nix::libc::in6_pktinfo {
+        ipi6_addr: nix::libc::in6_addr {
+            s6_addr: v6.octets(),
+        },
+        ipi6_ifindex: 0,
+    }
+}
+
+/// Forward `run` (all from `client`, in order) on the session's connected
+/// upstream socket with as few `sendmmsg` calls as possible. A datagram the
+/// socket rejects (e.g. a pending ICMP port-unreachable) is counted and
+/// skipped; the rest still go out.
+async fn forward_run(
+    up: &UdpSocket,
+    run: &[&[u8]],
+    listener: &str,
+    client: SocketAddr,
+    health: &Option<Arc<Backend>>,
+) {
+    let mut off = 0;
+    while off < run.len() {
+        match up
+            .async_io(Interest::WRITABLE, || {
+                send_batch(up.as_raw_fd(), &run[off..], None, None)
+            })
+            .await
+        {
+            Ok(k) => off += k,
+            Err(e) => {
+                note_port_unreachable(listener, health, &e);
+                metrics::counter!(
+                    m::DATAGRAMS_DROPPED,
+                    "listener" => listener.to_owned(), "reason" => "upstream_send",
+                )
+                .increment(1);
+                tracing::warn!(%listener, %client, error = %e, "udp forward to backend failed");
+                off += 1;
+            }
+        }
     }
 }
 
@@ -1170,7 +1418,7 @@ async fn send_reply(
     loop {
         sock.writable().await?;
         match sock.try_io(Interest::WRITABLE, || {
-            sendmsg_pktinfo(sock, data, client, src)
+            sendmsg_pktinfo(sock.as_raw_fd(), data, client, src)
         }) {
             Ok(n) => return Ok(n),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
@@ -1179,28 +1427,17 @@ async fn send_reply(
     }
 }
 
-fn sendmsg_pktinfo(
-    sock: &UdpSocket,
-    data: &[u8],
-    client: SocketAddr,
-    src: IpAddr,
-) -> io::Result<usize> {
+fn sendmsg_pktinfo(fd: RawFd, data: &[u8], client: SocketAddr, src: IpAddr) -> io::Result<usize> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, SockaddrStorage};
 
     let iov = [IoSlice::new(data)];
     let dest = SockaddrStorage::from(client);
 
-    let n = match src {
+    match src {
         IpAddr::V4(v4) => {
-            let pi = nix::libc::in_pktinfo {
-                ipi_ifindex: 0,
-                ipi_spec_dst: nix::libc::in_addr {
-                    s_addr: u32::from_ne_bytes(v4.octets()),
-                },
-                ipi_addr: nix::libc::in_addr { s_addr: 0 },
-            };
+            let pi = pktinfo_v4(v4);
             sendmsg::<SockaddrStorage>(
-                sock.as_raw_fd(),
+                fd,
                 &iov,
                 &[ControlMessage::Ipv4PacketInfo(&pi)],
                 MsgFlags::empty(),
@@ -1208,14 +1445,9 @@ fn sendmsg_pktinfo(
             )
         }
         IpAddr::V6(v6) => {
-            let pi = nix::libc::in6_pktinfo {
-                ipi6_addr: nix::libc::in6_addr {
-                    s6_addr: v6.octets(),
-                },
-                ipi6_ifindex: 0,
-            };
+            let pi = pktinfo_v6(v6);
             sendmsg::<SockaddrStorage>(
-                sock.as_raw_fd(),
+                fd,
                 &iov,
                 &[ControlMessage::Ipv6PacketInfo(&pi)],
                 MsgFlags::empty(),
@@ -1223,8 +1455,7 @@ fn sendmsg_pktinfo(
             )
         }
     }
-    .map_err(io::Error::from)?;
-    Ok(n)
+    .map_err(io::Error::from)
 }
 
 #[cfg(test)]
@@ -1399,5 +1630,92 @@ mod tests {
         }
         assert_eq!(evicted, 1);
         assert!(now >= span_ms * 2, "evicted early at {now}");
+    }
+    fn nonblocking_pair() -> (std::net::UdpSocket, std::net::UdpSocket) {
+        let a = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for s in [&a, &b] {
+            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        }
+        (a, b)
+    }
+
+    fn recv_all(sock: &std::net::UdpSocket, n: usize) -> Vec<(Vec<u8>, SocketAddr)> {
+        let mut buf = [0u8; 256];
+        (0..n)
+            .map(|_| {
+                let (len, from) = sock.recv_from(&mut buf).unwrap();
+                (buf[..len].to_vec(), from)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn send_batch_delivers_every_datagram_in_order_to_a_destination() {
+        let (tx, rx) = nonblocking_pair();
+        let msgs: [&[u8]; 4] = [b"one", b"", b"three", b"four"];
+        let sent = send_batch(tx.as_raw_fd(), &msgs, Some(rx.local_addr().unwrap()), None).unwrap();
+        assert_eq!(
+            sent, 4,
+            "one sendmmsg takes the whole batch on an idle socket"
+        );
+        let got = recv_all(&rx, 4);
+        let payloads: Vec<&[u8]> = got.iter().map(|(p, _)| p.as_slice()).collect();
+        assert_eq!(payloads, msgs);
+        assert!(got
+            .iter()
+            .all(|(_, from)| *from == tx.local_addr().unwrap()));
+    }
+
+    #[test]
+    fn send_batch_on_a_connected_socket_needs_no_destination() {
+        let (tx, rx) = nonblocking_pair();
+        tx.connect(rx.local_addr().unwrap()).unwrap();
+        let msgs: [&[u8]; 3] = [b"a", b"bb", b"ccc"];
+        assert_eq!(send_batch(tx.as_raw_fd(), &msgs, None, None).unwrap(), 3);
+        let got = recv_all(&rx, 3);
+        let payloads: Vec<&[u8]> = got.iter().map(|(p, _)| p.as_slice()).collect();
+        assert_eq!(payloads, msgs);
+    }
+
+    #[test]
+    fn send_batch_sets_the_source_address_from_pktinfo() {
+        // Wildcard-bound sender, like the prefix-mode listen socket.
+        let tx = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let msgs: [&[u8]; 3] = [b"x", b"y", b"z"];
+        let src = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let sent = send_batch(
+            tx.as_raw_fd(),
+            &msgs,
+            Some(rx.local_addr().unwrap()),
+            Some(src),
+        )
+        .unwrap();
+        assert_eq!(sent, 3);
+        for (_, from) in recv_all(&rx, 3) {
+            assert_eq!(from.ip(), src, "every datagram carries the pktinfo source");
+        }
+    }
+
+    #[test]
+    fn reply_batch_recv_pulls_every_queued_datagram_in_one_call() {
+        let (tx, rx) = nonblocking_pair();
+        tx.connect(rx.local_addr().unwrap()).unwrap();
+        rx.connect(tx.local_addr().unwrap()).unwrap();
+        rx.set_nonblocking(true).unwrap();
+        for i in 0..5u8 {
+            tx.send(&vec![i; usize::from(i) + 1]).unwrap();
+        }
+        // Loopback delivery is synchronous, so all five are queued already.
+        let mut batch = ReplyBatch::new();
+        let n = batch.recv(rx.as_raw_fd()).unwrap();
+        assert_eq!(n, 5);
+        for i in 0..n {
+            assert_eq!(batch.at(i), vec![i as u8; i + 1].as_slice());
+        }
+        let err = batch.recv(rx.as_raw_fd()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
     }
 }

@@ -2120,3 +2120,80 @@ listeners:
     let err = parse_str(via_source).unwrap_err().to_string();
     assert!(err.contains("duplicate target"), "{err}");
 }
+
+/// A udp listener with a handshake-only sniffer route (`quic`) and an optional
+/// catch-all, for the #131 checks. `{idle}` is the sniffed pool's idle timeout.
+fn handshake_listener(idle: u64, tail: &str) -> String {
+    format!(
+        r#"
+pools:
+  - name: quic
+    targets: ["127.0.0.1:1"]
+    idle_timeout_sec: {idle}
+    health_check: {{ type: none }}
+  - name: other
+    targets: ["127.0.0.1:2"]
+    health_check: {{ type: none }}
+listeners:
+  - name: l
+    bind: "0.0.0.0:443"
+    protocol: udp
+{tail}
+    routes:
+      - match: {{ type: sniffer, sniffer: quic }}
+        action: {{ pool: quic }}
+      - match: {{ type: always }}
+        action: {{ pool: other }}
+"#
+    )
+}
+
+#[test]
+fn rejects_always_fallback_after_a_handshake_only_sniffer() {
+    let e = parse_str(&handshake_listener(90, ""))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("listener l"), "{e}");
+    assert!(e.contains("quic"), "{e}");
+    assert!(e.contains("first_packet_gate"), "{e}");
+}
+
+#[test]
+fn accepts_always_fallback_that_cannot_misroute() {
+    // the gate drops an unrecognised first datagram instead of falling through
+    assert!(parse_str(&handshake_listener(90, "    first_packet_gate: true")).is_ok());
+    // the catch-all goes where the sniffer route goes
+    let same = handshake_listener(90, "").replace("pool: other", "pool: quic");
+    assert!(parse_str(&same).is_ok());
+    // a per-datagram sniffer (a2s) is recognised on every packet
+    let a2s = handshake_listener(90, "").replace("sniffer: quic", "sniffer: a2s");
+    assert!(parse_str(&a2s).is_ok());
+    // a tcp listener has no sessions to evict
+    let tcp = handshake_listener(90, "").replace("protocol: udp", "protocol: tcp");
+    assert!(parse_str(&tcp).is_ok());
+}
+
+#[test]
+fn warns_on_a_short_idle_timeout_behind_a_handshake_only_sniffer() {
+    let gated = "    first_packet_gate: true";
+    let cfg = parse_str(&handshake_listener(30, gated)).unwrap();
+    let w = cfg.warnings();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(
+        w[0].contains("listener l") && w[0].contains("pool quic"),
+        "{w:?}"
+    );
+    assert!(w[0].contains("idle_timeout_sec"), "{w:?}");
+    // the default (90 s) and anything from 60 s up is quiet
+    assert!(parse_str(&handshake_listener(90, gated))
+        .unwrap()
+        .warnings()
+        .is_empty());
+    assert!(parse_str(&handshake_listener(60, gated))
+        .unwrap()
+        .warnings()
+        .is_empty());
+    // a pool no handshake-only sniffer routes to is not warned about
+    let other = handshake_listener(30, gated).replace("pool: quic", "pool: other");
+    assert!(parse_str(&other).unwrap().warnings().is_empty());
+}

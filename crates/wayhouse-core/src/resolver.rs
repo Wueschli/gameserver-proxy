@@ -8,10 +8,10 @@
 //!
 //! Done: HTTP + gRPC transports (in `wayhouse`), `pool` **and `target`** results,
 //! `on_error` (`reject` / `fallback_route` / `stale_ok`), and the
-//! [`CachedResolver`] TTL'd LRU cache. Pending: `Resolution::sticky_key` (a
-//! resolver-chosen affinity key — overlaps the request-keyed cache, the
-//! `route_hint` table and UDP affinity; needs its own design for how a later
-//! request recovers the key without re-calling the resolver).
+//! [`CachedResolver`] TTL'd LRU cache. There is deliberately no resolver-chosen
+//! affinity key: a later request cannot recover one without re-calling the
+//! resolver, and `consistent_hash` pools plus the result cache already cover
+//! affinity (#54).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -48,9 +48,6 @@ pub struct Resolution {
     /// Or route straight to this instance, bypassing pools — no health check,
     /// no per-backend cap. Takes precedence over `pool`.
     pub target: Option<SocketAddr>,
-    /// Affinity key to remember the decision by. **Not yet used** (see the
-    /// module docs).
-    pub sticky_key: Option<String>,
     /// Positive cache TTL hint (overrides the resolver's `positive_ttl_sec`).
     pub ttl_sec: Option<u64>,
 }
