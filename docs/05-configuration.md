@@ -545,7 +545,9 @@ rolling update of many pods costs one fetch, not one per event.
   from passive observations alone: a UDP ICMP port-unreachable, a failed upstream
   send or a TCP connect failure counts against a backend, and a backend marked
   unhealthy is given another chance after one `interval_sec` (re-admitted after
-  `rise` such intervals), since nothing else could ever bring it back.
+  `rise` such intervals), since nothing else could ever bring it back. A truly dead
+  backend therefore flaps: down on passive failures, back up after `rise` intervals,
+  down again on the next failure.
 - For UDP, a successful `send()` is **not** a passive success (it succeeds whether or
   not anything listens). The first reply datagram of a session is.
 - A proxy-side shortage (`EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS`, `EADDRNOTAVAIL`)

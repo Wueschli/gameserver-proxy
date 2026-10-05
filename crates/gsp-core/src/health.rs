@@ -102,7 +102,7 @@ fn sweep(
     let snap = snapshot.load_full();
     let now = mono_ms();
 
-    'pools: for (pool_name, pool) in &snap.pools {
+    for (pool_name, pool) in &snap.pools {
         for backend in pool.backends() {
             if *backend.check_kind() == HealthCheckKind::None {
                 // No probe to run: an unhealthy backend gets a fresh chance each
@@ -125,9 +125,9 @@ fn sweep(
             if !backend.is_due(now) {
                 continue;
             }
-            // Out of permits: the rest stay due and go in a later sweep.
+            // Out of permits: this one stays due and goes in a later sweep.
             let Ok(permit) = permits.clone().try_acquire_owned() else {
-                break 'pools;
+                continue;
             };
             if !backend.begin_probe(now) {
                 continue;
