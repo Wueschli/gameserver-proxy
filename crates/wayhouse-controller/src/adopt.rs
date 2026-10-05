@@ -88,6 +88,15 @@ async fn adopt(State(state): State<AdoptState>, Json(req): Json<AdoptRequest>) -
     if state.role.get() == Role::Slave {
         return conflict("this tier is already a slave");
     }
+    if state.config.ha.is_some() {
+        // The role is a per-process cell; flipping it on one replica would
+        // leave the others standalone. A replicated role change is not
+        // built: start an HA slave tier with `--role slave` instead.
+        return conflict(
+            "adoption is not supported on an HA controller (the role flip is per node); \
+             start the tier with --role slave instead",
+        );
+    }
     let config_empty = matches!(state.config.store.current_revision(), Ok(None));
     let intent_empty = matches!(state.intent.store.current_revision(), Ok(None));
     if !config_empty || !intent_empty {
@@ -101,7 +110,7 @@ async fn adopt(State(state): State<AdoptState>, Json(req): Json<AdoptRequest>) -
     match crate::parent_client::fetch_initial(&req.parent_url, req.parent_token.as_deref()).await {
         Ok(Some((revision, config))) => {
             seeded_config_revision = Some(revision);
-            if let Err(e) = state.config.apply_revision(config.into_bytes()) {
+            if let Err(e) = state.config.apply_relayed(config.into_bytes(), revision) {
                 return store_error_response(e);
             }
         }
@@ -124,7 +133,6 @@ async fn adopt(State(state): State<AdoptState>, Json(req): Json<AdoptRequest>) -
     tokio::spawn(crate::parent_client::run(
         req.parent_url.clone(),
         req.parent_token.clone(),
-        seeded_config_revision.unwrap_or(0),
         state.config.clone(),
     ));
     tokio::spawn(crate::intent::relay::run(
@@ -266,6 +274,29 @@ mod tests {
             Role::Standalone,
             "a refused adoption must not flip the role"
         );
+    }
+
+    #[tokio::test]
+    async fn adopting_an_ha_tier_is_refused_without_flipping_the_role() {
+        let (state, _c, _i) = test_state();
+        let (handle, _cluster, _dir) = crate::ha::test_support::single_node(1, "127.0.0.1:1").await;
+        let state = AdoptState {
+            config: Arc::new((*state.config).clone().with_ha(Some(handle))),
+            ..state
+        };
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                HttpRequest::post("/admin/adopt")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"parent_url":"http://127.0.0.1:1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(state.role.get(), Role::Standalone);
     }
 
     #[tokio::test]

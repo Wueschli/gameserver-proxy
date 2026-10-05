@@ -19,17 +19,29 @@ use std::time::Duration;
 
 use crate::intent::api::IntentState;
 use crate::intent::IntentOp;
+use crate::relay::RelayError;
 
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Runs forever, reconnecting to the parent's intent log with backoff.
 /// `tokio::spawn`ed by `main.rs` alongside `parent_client::run` when
-/// `--role slave`; never returns under normal operation.
+/// `--role slave`; never returns under normal operation. Each subscription
+/// resumes from the relay cursor stored with the log, so a restart does not
+/// replay the parent's whole history, and with HA only the Raft leader runs
+/// it (see [`crate::relay`]).
 pub async fn run(base_url: String, token: Option<String>, state: Arc<IntentState>) {
-    let mut cursor = 0u64;
     let mut backoff = RECONNECT_MIN;
     loop {
+        crate::relay::wait_until_leader(|| state.is_relay_leader()).await;
+        let mut cursor = match state.relay.get() {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                tracing::error!(error = %e, "reading the intent relay cursor");
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+        };
         match subscribe_once(&base_url, token.as_deref(), &mut cursor, &state).await {
             Ok(()) => {
                 backoff = RECONNECT_MIN;
@@ -86,8 +98,16 @@ async fn subscribe_once(
             .map_err(|e| anyhow::anyhow!("subscribe stream from {base_url}: {e}"))?;
 
         while let Some(event) = buf.next_event() {
-            if let Some(revision) = apply_sse_event(&event, state) {
-                *cursor = revision;
+            // A deposed leader must not keep a stream whose events it would
+            // skip: dropping it makes the next term resume from the cursor.
+            if !state.is_relay_leader() {
+                return Ok(());
+            }
+            match apply_sse_event(&event, state).await {
+                Ok(Some(revision)) => *cursor = revision,
+                Ok(None) => {}
+                Err(RelayError::NotLeader) => return Ok(()),
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -110,34 +130,33 @@ fn parse_sse_event(event: &str) -> Option<SseIntent> {
 }
 
 /// Lands one parsed op in this tier's own intent store via
-/// [`IntentState::apply_revision`] — the sanctioned bypass of the `slave`
+/// [`IntentState::relay_revision`] — the sanctioned bypass of the `slave`
 /// write gate, same as `parent_client::apply_sse_event`'s handling of
 /// config. Re-serializes the parsed [`IntentOp`] (rather than forwarding the
 /// raw JSON text byte-for-byte) so a further-down `slave` subscribing to
 /// *this* tier always sees the same canonical shape this tier itself would
-/// have produced from a direct submission.
-fn apply_sse_event(event: &str, state: &IntentState) -> Option<u64> {
-    let SseIntent { revision, op } = parse_sse_event(event)?;
+/// have produced from a direct submission. The parent revision becomes the
+/// relay cursor in the same write, so a failed write is retried. `Ok(None)`
+/// for a keep-alive or malformed block.
+async fn apply_sse_event(event: &str, state: &IntentState) -> Result<Option<u64>, RelayError> {
+    let Some(SseIntent { revision, op }) = parse_sse_event(event) else {
+        return Ok(None);
+    };
     let bytes = match serde_json::to_vec(&op) {
         Ok(b) => b,
         Err(e) => {
+            // Cannot happen for a value that just deserialized; skip it
+            // rather than wedge the relay on it.
             tracing::error!(error = %e, parent_revision = revision, "failed to re-serialize a relayed intent op");
-            return Some(revision);
+            return Ok(Some(revision));
         }
     };
-    match state.apply_revision(bytes) {
-        Ok(local_revision) => {
-            tracing::info!(
-                parent_revision = revision,
-                local_revision,
-                "relayed an intent op from the parent controller"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, parent_revision = revision, "store error relaying a parent intent op");
-        }
-    }
-    Some(revision)
+    state.relay_revision(bytes, revision).await?;
+    tracing::info!(
+        parent_revision = revision,
+        "relayed an intent op from the parent controller"
+    );
+    Ok(Some(revision))
 }
 
 #[cfg(test)]
@@ -173,8 +192,8 @@ mod tests {
 
         let event =
             r#"data: {"revision":9,"op":{"op":"backend_remove","pool":"mc","addr":"127.0.0.1:1"}}"#;
-        let parent_revision = apply_sse_event(event, &state).unwrap();
-        assert_eq!(parent_revision, 9);
+        let parent_revision = apply_sse_event(event, &state).await.unwrap();
+        assert_eq!(parent_revision, Some(9));
 
         let (local_revision, bytes) = state.store.current().unwrap().unwrap();
         assert_eq!(
@@ -189,5 +208,10 @@ mod tests {
                 addr: "127.0.0.1:1".into()
             }
         );
+        assert_eq!(state.relay.get().unwrap(), 9, "the cursor moves with it");
+
+        // The same parent revision again (a resubscribe overlap) is skipped.
+        apply_sse_event(event, &state).await.unwrap();
+        assert_eq!(state.store.current_revision().unwrap(), Some(1));
     }
 }
