@@ -392,6 +392,23 @@ jobs:
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
           ./kubeconform -strict -summary deploy/k8s
 
+  # The release publishes linux/arm64 images next to amd64 (release.yml, issue
+  # #88); building them only at release time would find an arm64-only break too
+  # late. Same trigger as `deploy`, on a native arm64 runner: the self-contained
+  # builder path (no shared release build exists for arm64) plus the compose
+  # smoke test.
+  deploy-arm64:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-24.04-arm   # free for public repos
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build all six images (compiled in Docker) and run --version on each
+        run: make deploy-images
+      - name: Compose smoke test
+        run: make deploy-smoke
+
   # RustSec advisories for every Cargo.lock in the repo (cargo audit): the check
   # Trivy can't do for crates (it sees GHSA only). No build, just the lockfiles
   # and the advisory DB, so it runs on every push / PR and nightly, path-scoped
