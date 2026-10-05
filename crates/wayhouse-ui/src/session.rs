@@ -146,6 +146,16 @@ impl SessionStore {
         self.get(id).is_some()
     }
 
+    /// Whether `id` is currently valid, *without* counting as activity: the
+    /// idle clock is left alone and nothing is dropped. For a long-lived
+    /// connection (`/ws/fleet`) that re-checks its session on a timer — a
+    /// connection merely staying open must not keep an idle session alive.
+    pub fn is_live(&self, id: &str) -> bool {
+        let now = Instant::now();
+        let map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(id).is_some_and(|e| self.live(e, now))
+    }
+
     pub fn revoke(&self, id: &str) {
         self.sessions
             .lock()
