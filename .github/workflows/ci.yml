@@ -105,23 +105,23 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features
-      # Alone, gsp-agent pulls gsp-http without its default `server` feature;
+      # Alone, wayhouse-agent pulls wayhouse-http without its default `server` feature;
       # every other build here unifies it on, so this is the only one that
       # proves the client-only build still compiles.
-      - name: Check gsp-agent (gsp-http without `server`)
-        run: cargo check -p gsp-agent --locked
+      - name: Check wayhouse-agent (wayhouse-http without `server`)
+        run: cargo check -p wayhouse-agent --locked
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
       - name: Test
         run: cargo nextest run --profile ci --workspace
-      # The minimal edge build (issue #62): every optional `gsp` cargo feature off.
+      # The minimal edge build (issue #62): every optional `wayhouse` cargo feature off.
       - name: Minimal build (clippy + tests)
         run: |
-          cargo clippy -p gsp --no-default-features --all-targets
-          cargo nextest run --profile ci -p gsp --no-default-features
-          cargo clippy -p gsp-core --no-default-features --all-targets
-          cargo nextest run --profile ci -p gsp-core --no-default-features
+          cargo clippy -p wayhouse --no-default-features --all-targets
+          cargo nextest run --profile ci -p wayhouse --no-default-features
+          cargo clippy -p wayhouse-core --no-default-features --all-targets
+          cargo nextest run --profile ci -p wayhouse-core --no-default-features
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "test" target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
@@ -152,11 +152,11 @@ jobs:
       - name: Build the binaries for musl
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --locked --target x86_64-unknown-linux-musl -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
+        run: cargo build --locked --target x86_64-unknown-linux-musl -p wayhouse -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui -p wayhouse-agent
       - name: Socket options on musl
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo test --locked --target x86_64-unknown-linux-musl -p gsp-core --lib -- net
+        run: cargo test --locked --target x86_64-unknown-linux-musl -p wayhouse-core --lib -- net
 
   # One release compile shared by the jobs that need release binaries: the
   # plugins tests restore this job's cache snapshot (same `release` namespace and
@@ -182,30 +182,30 @@ jobs:
       # scan sees the crates (deploy/scan-images.sh). Same version as the Dockerfile.
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.7
-      # The minimal edge build of gsp (issue #62) first, set aside as gsp-minimal for
-      # the gsp-minimal image; the full build then leaves target/release/gsp the full one.
-      - name: Build the minimal gsp
+      # The minimal edge build of wayhouse (issue #62) first, set aside as wayhouse-minimal for
+      # the wayhouse-minimal image; the full build then leaves target/release/wayhouse the full one.
+      - name: Build the minimal wayhouse
         run: |
-          cargo auditable build --release --locked -p gsp --no-default-features
-          cp target/release/gsp target/release/gsp-minimal
+          cargo auditable build --release --locked -p wayhouse --no-default-features
+          cp target/release/wayhouse target/release/wayhouse-minimal
       - name: Build the release binaries
-        run: cargo auditable build --release --locked -p gsp -p gsp-controller -p gsp-aggregator -p gsp-ui -p gsp-agent
-      # Cargo unifies features per invocation, so the plugins job's `-p gsp` test
+        run: cargo auditable build --release --locked -p wayhouse -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui -p wayhouse-agent
+      # Cargo unifies features per invocation, so the plugins job's `-p wayhouse` test
       # build (dev-dependencies included) needs different dependency artifacts than
       # the five-binary build above; without this it recompiled ~290 crates even on
       # an exact cache hit. Compile them here so the shared snapshot holds both.
       - name: Warm the dependency set the plugins tests need
-        run: cargo test -p gsp --release --locked --no-run
+        run: cargo test -p wayhouse --release --locked --no-run
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-binaries
           path: |
-            target/release/gsp
-            target/release/gsp-minimal
-            target/release/gsp-controller
-            target/release/gsp-aggregator
-            target/release/gsp-ui
-            target/release/gsp-agent
+            target/release/wayhouse
+            target/release/wayhouse-minimal
+            target/release/wayhouse-controller
+            target/release/wayhouse-aggregator
+            target/release/wayhouse-ui
+            target/release/wayhouse-agent
           if-no-files-found: error
           retention-days: 1
 
@@ -242,11 +242,11 @@ jobs:
       - name: Size check (informational)
         working-directory: crates/plugins
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm
-      - name: Load the built plugins through the real gsp loader (phase 9 slices 5–7)
-        # Runs the #[ignore]d gsp tests that need crates/plugins built above:
+      - name: Load the built plugins through the real wayhouse loader (phase 9 slices 5–7)
+        # Runs the #[ignore]d wayhouse tests that need crates/plugins built above:
         # the end-to-end artifact test and the WASM-boundary latency bench
         # vs. NFR N1 (release matters for real numbers — see docs/07).
-        run: cargo nextest run -p gsp --release --profile ci --run-ignored only --no-capture
+        run: cargo nextest run -p wayhouse --release --profile ci --run-ignored only --no-capture
       - name: Test report
         if: always()
         run: python3 .github/scripts/test_summary.py --title "plugins" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
@@ -261,33 +261,33 @@ jobs:
           if-no-files-found: ignore
 
   ui:
-    # gsp-ui frontend (crates/gsp-ui/web) — a standalone npm project, so it
+    # wayhouse-ui frontend (crates/wayhouse-ui/web) — a standalone npm project, so it
     # gets its own job rather than riding on `make check`.
     needs: changes
     if: needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     defaults:
       run:
-        working-directory: crates/gsp-ui/web
+        working-directory: crates/wayhouse-ui/web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: crates/gsp-ui/web/package-lock.json
+          cache-dependency-path: crates/wayhouse-ui/web/package-lock.json
       - run: npm ci
       - name: Tests
         run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
       - name: Test report
         if: always()
         working-directory: .
-        run: python3 .github/scripts/test_summary.py --title "ui (vitest)" crates/gsp-ui/web/junit.xml >> "$GITHUB_STEP_SUMMARY"
+        run: python3 .github/scripts/test_summary.py --title "ui (vitest)" crates/wayhouse-ui/web/junit.xml >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: junit-ui
-          path: crates/gsp-ui/web/junit.xml
+          path: crates/wayhouse-ui/web/junit.xml
           retention-days: 7
           if-no-files-found: ignore
       - name: Typecheck + build
@@ -377,8 +377,8 @@ jobs:
       - name: Save the images for the trivy job
         run: |
           mkdir -p "$RUNNER_TEMP/images"
-          for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
-            docker save -o "$RUNNER_TEMP/images/$t.tar" "gsp-deploy/$t:local"
+          for t in wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent; do
+            docker save -o "$RUNNER_TEMP/images/$t.tar" "wayhouse-deploy/$t:local"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -533,16 +533,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: crates/gsp-config/fuzz
+          workspaces: crates/wayhouse-config/fuzz
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Build fuzz targets
-        working-directory: crates/gsp-config
+        working-directory: crates/wayhouse-config
         # `+nightly` overrides the repo's stable rust-toolchain.toml, which
         # cargo-fuzz's sanitizer flags need.
         run: cargo +nightly fuzz build
       - name: Smoke-run each target
-        working-directory: crates/gsp-config
+        working-directory: crates/wayhouse-config
         run: |
           for t in extract_sni route_match parse_config; do
             mkdir -p "fuzz/corpus/$t"
@@ -553,5 +553,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-artifacts
-          path: crates/gsp-config/fuzz/artifacts/**
+          path: crates/wayhouse-config/fuzz/artifacts/**
           if-no-files-found: ignore

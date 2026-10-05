@@ -1,17 +1,17 @@
-# gsp sniffer plugins
+# wayhouse sniffer plugins
 
 First-party sniffer plugins for the phase 9 WASM loader
-(`crates/gsp/src/sniffer_loader.rs`, `docs/08-roadmap.md` Phase 9). This is a
+(`crates/wayhouse/src/sniffer_loader.rs`, `docs/08-roadmap.md` Phase 9). This is a
 **standalone workspace**, deliberately outside the main one — the same reason
-as `crates/gsp-config/fuzz`: these crates build for
-`wasm32-unknown-unknown`, are never a dependency of `gsp` / `gsp-core`, and
+as `crates/wayhouse-config/fuzz`: these crates build for
+`wasm32-unknown-unknown`, are never a dependency of `wayhouse` / `wayhouse-core`, and
 `make check` on the main workspace must not require the wasm target to be
 installed.
 
 ## Layout
 
-- `gsp-sniffer-abi` — guest-side helper library implementing the write side of
-  the ABI the host documents (`crates/gsp/src/sniffer_loader.rs` module doc):
+- `wayhouse-sniffer-abi` — guest-side helper library implementing the write side of
+  the ABI the host documents (`crates/wayhouse/src/sniffer_loader.rs` module doc):
   an `alloc(len) -> ptr` export backed by the module's normal global allocator,
   `input`/`config` to borrow the two regions the host writes before each call
   (the peeked bytes and this module's `settings.sniffers.modules[].config`
@@ -93,10 +93,10 @@ Copy the built `.wasm` files into the directory named by
 sniffer after its file stem):
 
 ```sh
-mkdir -p /etc/gsp/sniffers
+mkdir -p /etc/wayhouse/sniffers
 cp crates/plugins/target/wasm32-unknown-unknown/release/a2s.wasm \
    crates/plugins/target/wasm32-unknown-unknown/release/minecraft.wasm \
-   /etc/gsp/sniffers/
+   /etc/wayhouse/sniffers/
 ```
 
 Then reference them by name in a listener's routes:
@@ -104,7 +104,7 @@ Then reference them by name in a listener's routes:
 ```yaml
 settings:
   sniffers:
-    dir: "/etc/gsp/sniffers"
+    dir: "/etc/wayhouse/sniffers"
 
 listeners:
   - name: mc
@@ -135,9 +135,9 @@ curl -X DELETE "http://<admin-listen>/admin/sniffers/a2s"
 
 This writes into the same `settings.sniffers.dir` the manual `cp` workflow
 above uses, then triggers the same live rescan — the two approaches are
-interchangeable, not alternatives with different behavior. `gsp-aggregator`
+interchangeable, not alternatives with different behavior. `wayhouse-aggregator`
 fans the same upload/delete out to every known instance at once
-(`POST`/`DELETE /fleet/sniffers[/{name}]`), and `gsp-ui`'s Plugins page calls
+(`POST`/`DELETE /fleet/sniffers[/{name}]`), and `wayhouse-ui`'s Plugins page calls
 that fan-out. All three routes are `409` on an instance with no
 `settings.sniffers` block at all — turning sniffing on from nothing is still
 startup-only (see `docs/05-configuration.md`); this endpoint only manages

@@ -1,4 +1,4 @@
-# Tunnel address authority — `gsp-controller` allocates tunnel addresses
+# Tunnel address authority — `wayhouse-controller` allocates tunnel addresses
 
 Date: 2026-10-02 · Status: implemented (slices 1–6, 2026-10-02) · Roadmap item 3 of 3 (after `deploy/`
 and the docs/12 TLS section). Resolves the "Tunnel-internal address collision/exhaustion"
@@ -8,14 +8,14 @@ open question in [`docs/11`](../../11-backend-transport.md) and the
 ## Intent
 
 Today every tunnel address is chosen by an operator and self-reported: an origin states
-its own interface address and its fronted backends (`gsp-agent --address`, `--backends`),
+its own interface address and its fronted backends (`wayhouse-agent --address`, `--backends`),
 a proxy states `--tunnel-address`. Nothing checks them against each other, so two peers
 that copy the same example config get an undefined, last-write-wins route. Separately,
-`ProxyRegistration` carries no tunnel address, so `gsp-agent` gives every proxy peer
-`AllowedIPs = 0.0.0.0/0` (`crates/gsp-agent/src/proxy_subscribe.rs:58`) and a second
+`ProxyRegistration` carries no tunnel address, so `wayhouse-agent` gives every proxy peer
+`AllowedIPs = 0.0.0.0/0` (`crates/wayhouse-agent/src/proxy_subscribe.rs:58`) and a second
 proxy on the same origin steals the first one's route.
 
-Make `gsp-controller` the **address authority**: it hands out unique tunnel addresses at
+Make `wayhouse-controller` the **address authority**: it hands out unique tunnel addresses at
 registration time, enforces uniqueness for hand-picked ones, and publishes each peer's
 address so every other peer can route to it with a `/32`.
 
@@ -47,7 +47,7 @@ each later:
   `--ha-peers` is refused at startup. Pin-only mode under `--ha-peers` is allowed but
   enforces uniqueness per controller node only (startup warning), as the registries are not replicated.
 - **Automatic lease expiry / auto-release** (v1: explicit release + stale warning).
-- **A `gsp-ui` view** of `GET /tunnel/addresses`.
+- **A `wayhouse-ui` view** of `GET /tunnel/addresses`.
 - ~~**Changing a live peer's address without a restart**~~ (built 2026-10-04: the
   old address deleted and new one assigned in place, peers kept, see `docs/11` "Address
   authority"; v1 logged the mismatch and kept running on the old address).
@@ -61,7 +61,7 @@ the address table, and per-pool subnet partitioning.
 
 ### Configuration
 
-- `gsp-controller --tunnel-network <CIDR>` (e.g. `10.60.0.0/16`) enables allocation.
+- `wayhouse-controller --tunnel-network <CIDR>` (e.g. `10.60.0.0/16`) enables allocation.
   IPv4 only; the prefix must be `/30` or shorter. Invalid → startup error.
 - Without it the controller runs in **pin-only mode**: pinned addresses are still checked
   for uniqueness, nothing is allocated, and a registration that omits its address is
@@ -81,7 +81,7 @@ matching the existing pattern), with two trees:
 
 Names are unique per role; **addresses are unique globally**, because origins and proxies
 share one tunnel network. Both registries hold one `Arc<AddressBook>` (new module
-`crates/gsp-controller/src/addresses.rs`). A claim or allocation is one short critical
+`crates/wayhouse-controller/src/addresses.rs`). A claim or allocation is one short critical
 section plus one sled transaction across both trees, so a crash cannot leave them
 disagreeing.
 
@@ -144,7 +144,7 @@ an unknown name). Allocation, pin and release are logged at `info`.
 Trust model is unchanged: anyone holding the registry token is trusted; they can claim
 free addresses but not take another owner's.
 
-## Clients (`gsp-agent` and `gsp --tunnel-*`)
+## Clients (`wayhouse-agent` and `wayhouse --tunnel-*`)
 
 ### Startup order (both)
 
@@ -175,18 +175,18 @@ running** (it must not kill live traffic over a registry change); a restart appl
 
 ### Routing (the bug fix)
 
-- `gsp-agent` builds each proxy peer with `AllowedIPs = <proxy.tunnel_address>/32`
+- `wayhouse-agent` builds each proxy peer with `AllowedIPs = <proxy.tunnel_address>/32`
   instead of `0.0.0.0/0`.
-- `gsp`'s `tunnel_client::to_wg_peer` uses `<origin.tunnel_address>/32` instead of deriving
+- `wayhouse`'s `tunnel_client::to_wg_peer` uses `<origin.tunnel_address>/32` instead of deriving
   routes from the backend list, so an origin with no backends yet is still reachable.
 - On a tombstone both remove the WireGuard peer (looking its pubkey up in `last_applied`)
   and drop the entry. This is the "gone for good" signal that did not exist before.
 
 ## Repository changes
 
-- Code: new `crates/gsp-controller/src/addresses.rs`; changes to `peers.rs`,
+- Code: new `crates/wayhouse-controller/src/addresses.rs`; changes to `peers.rs`,
   `peers/api.rs`, `proxy_peers.rs`, `proxy_peers/api.rs`, controller `main.rs`;
-  `gsp-agent` `main.rs`, `register.rs`, `proxy_subscribe.rs`; `gsp` `main.rs`,
+  `wayhouse-agent` `main.rs`, `register.rs`, `proxy_subscribe.rs`; `wayhouse` `main.rs`,
   `tunnel_client.rs`, `proxy_register.rs`.
 - Docs: `docs/11` (the open question becomes a resolved "Address authority" section),
   `docs/08`, `docs/12` (tunnel section), `README.md`, `AGENTS.md` (module list, commands),

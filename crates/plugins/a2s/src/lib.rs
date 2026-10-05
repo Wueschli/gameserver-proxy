@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: Source-engine A2S query packets.
+//! `wayhouse` sniffer plugin: Source-engine A2S query packets.
 //!
 //! A2S ("Any 2 Source", the Steam query protocol used by Source/GoldSrc
 //! servers — CS:GO, TF2, Garry's Mod, Rust, …) queries are UDP datagrams
@@ -20,14 +20,14 @@ const A2S_GETCHALLENGE: u8 = b'W';
 /// Recognise an A2S query in `first`. Pure and host-independent so it's unit
 /// tested directly (no wasm runtime needed); `sniff` below is the thin ABI
 /// wrapper the host actually calls.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     let &[0xff, 0xff, 0xff, 0xff, kind, ..] = first else {
         return None;
     };
     if !matches!(kind, A2S_INFO | A2S_PLAYER | A2S_RULES | A2S_GETCHALLENGE) {
         return None;
     }
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         key: Some("a2s"),
         ..Default::default()
     })
@@ -37,14 +37,14 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// `cfg_*` params are ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note — the pointer/length pairs must be
+/// See `wayhouse_sniffer_abi::input`'s safety note — the pointer/length pairs must be
 /// exactly what the host passed to this export.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

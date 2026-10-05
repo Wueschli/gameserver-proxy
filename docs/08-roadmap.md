@@ -5,7 +5,7 @@ Incremental. Each phase is usable on its own.
 Status legend: ✅ done · 🔜 next · ⬜ planned.
 
 ## Phase 0 – Skeleton ✅
-- ✅ Project setup (Cargo workspace: `gsp-config`, `gsp-core`, `gsp`), CI (fmt +
+- ✅ Project setup (Cargo workspace: `wayhouse-config`, `wayhouse-core`, `wayhouse`), CI (fmt +
   clippy `-D warnings` + tests), test harness.
 - ✅ Config loading + validation + immutable snapshot behind `ArcSwap`.
 - ✅ Structured logging (`tracing`), `/healthz`, `/readyz`, `/metrics`, `build_info`.
@@ -56,7 +56,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   (`prefix: <cidr>`, one wildcard `IP_PKTINFO` socket serving the whole routed
   prefix, replies from the hit address) + TCP `freebind`. ✅ push resolver
   (`POST /route-hint`, per-listener `route_hint: true`).
-- ✅ Sniffer API **seam** — `gsp_core::sniff::Sniffer` → `RouteHint`, the
+- ✅ Sniffer API **seam** — `wayhouse_core::sniff::Sniffer` → `RouteHint`, the
   `sniffer` matcher, and the listener wiring that feeds a hint into routing.
   **No built-in sniffers ship** (game-specific parsing does not belong in the
   proxy binary); a `sniffer:` route only matches once a plugin is loaded. The
@@ -71,7 +71,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   taken default port) and for scheme B (subdomain-per-port) at real scale.
   This requirement was written down at project start and not carried into an
   implementation slice for a long time — caught by a documentation audit, not
-  by design — then closed out right after. `gsp_config::ListenerConfig::bind`
+  by design — then closed out right after. `wayhouse_config::ListenerConfig::bind`
   (primary/lowest port) + `extra_binds` (the rest); capped at 1024 ports per
   range. Mutually exclusive with `prefix` (which needs exactly one wildcard
   socket). The `port` *route* matcher (which already supported a `"lo-hi"`
@@ -80,8 +80,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 
 ## Phase 4 – External routing logic ✅ (sticky_key deferred)
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
-  `Resolver` trait + async routing loop in `gsp-core`; `HttpResolver` (reqwest)
-  in `gsp`; `pool` results; `on_error: reject | fallback_route`.
+  `Resolver` trait + async routing loop in `wayhouse-core`; `HttpResolver` (reqwest)
+  in `wayhouse`; `pool` results; `on_error: reject | fallback_route`.
 - ✅ **Slice 2**: result cache — configurable key (`src_ip` / `src_ip_port` /
   `sni` / `routing_key` / `first_bytes:a:b`), positive/negative TTL,
   `max_entries` LRU (`lru` crate), `on_error: stale_ok`.
@@ -92,17 +92,17 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity;
   needs its own design).
 - ✅ **Post-phase (data-plane completion)**: `resolvers:` reloads live —
-  `gsp_core::Resolvers` gained `ArcSwap` interior mutability (like `Sniffers`),
+  `wayhouse_core::Resolvers` gained `ArcSwap` interior mutability (like `Sniffers`),
   and the reload task rebuilds + swaps the clients when (only when)
   `ResolverConfig` differs. Trade-off: a rebuild resets each `CachedResolver`'s
   LRU cache.
 - ✅ **Post-phase (data-plane completion)**: `backend_sources:` reloads live —
-  `gsp_core::SourceManager` (the discovery analogue of `ListenerManager`) owns
+  `wayhouse_core::SourceManager` (the discovery analogue of `ListenerManager`) owns
   one refresh task per pool `source` behind a private stop channel and
   reconciles them on every reload by diffing `Snapshot::sources`
   (pool → `SourceConfig`, newly echoed). Added / removed / re-parameterised
   entries start / stop / restart their task; a removed pool also drops its
-  cached discovered set. `gsp-core` stays HTTP-free — the `gsp` binary supplies
+  cached discovered set. `wayhouse-core` stays HTTP-free — the `wayhouse` binary supplies
   a `SourceFactory` (`DiscoveryFactory`) that rebuilds the concrete adapter.
 - **Result**: matchmaker integration, token→instance routing.
 
@@ -111,7 +111,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 1**: `enabled` / `draining` / `disabled` backend states —
   `AdminState` on `Backend`, excluded from new-session selection (incl. UDP
   affinity) while existing sessions drain; carried across reload by address;
-  `PATCH /pools/{p}/backends/{addr}`; `gsp_pool_backends{state=draining|disabled}`.
+  `PATCH /pools/{p}/backends/{addr}`; `wayhouse_pool_backends{state=draining|disabled}`.
 - ✅ **Slice 3**: `POST /admin/drain` / `POST /admin/undrain` (flip `readyz`
   without stopping the data path) + `GET /config` (plaintext snapshot view with
   `draining` / `active_conns`).
@@ -138,7 +138,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 ## Phase 6 – Client-IP preservation ✅
 - ✅ **Slice 1**: PROXY protocol v1/v2 (TCP) — per-pool `proxy_protocol:
   none | v1 | v2`; one header prepended to the upstream connection before any
-  client bytes (`gsp_core::proxy_protocol`), `gsp_proxy_protocol_headers_total`.
+  client bytes (`wayhouse_core::proxy_protocol`), `wayhouse_proxy_protocol_headers_total`.
 - ✅ **Slice 2**: v2-UDP variant — `proxy_protocol: v2-udp` (UDP-only, validated)
   prepends the v2 binary header to the **first datagram** of each session; later
   datagrams are untouched.
@@ -158,36 +158,36 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 1**: CIDR allow/deny filter chain — per-listener `allow` / `deny`
   CIDR lists, checked on the client source IP before routing (TCP accept + UDP
   first datagram). `deny` wins; a non-empty `allow` is default-deny. Blocked =
-  silent drop + `gsp_filter_blocked_total{listener,filter="acl"}`. Linear scan of
+  silent drop + `wayhouse_filter_blocked_total{listener,filter="acl"}`. Linear scan of
   the (small) `Cidr` list; established UDP sessions are not re-checked per
   datagram. (Slice 6 replaced the scan with a radix trie.)
 - ✅ **Slice 2**: per-listener token-bucket rate limit on new connections / new
   UDP sessions — `rate_limit: { per_ip, per_net }` (`rate` permits/s + `burst`),
   `per_net` keyed by /24 (v4) / /64 (v6), checked after the ACL. A permit needs
   every configured bucket; excess dropped silently +
-  `gsp_filter_blocked_total{filter="rate_ip"|"rate_net"}`. One `Mutex<HashMap>`
+  `wayhouse_filter_blocked_total{filter="rate_ip"|"rate_net"}`. One `Mutex<HashMap>`
   per listener shared across workers, lazy prune of idle buckets. Established UDP
   sessions keep a scan-free steady path.
 - ✅ **Slice 3**: global caps — `settings.limits.{max_connections,
   max_udp_sessions, max_new_sessions_per_sec}` (all optional; startup-only). Live
   `AtomicUsize` counters for TCP conns / UDP sessions + a token bucket for the
-  new-session rate, held in one `gsp_core::limits::GlobalLimits` shared by every
+  new-session rate, held in one `wayhouse_core::limits::GlobalLimits` shared by every
   worker. A new connection / session over a cap is refused before allocation
-  (existing untouched) + `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
+  (existing untouched) + `wayhouse_filter_blocked_total{filter="max_conn"|"max_udp"|
   "max_new_rate"}`. RAII `LimitGuard` releases the slot on connection / session
   end.
 - ✅ **Slice 4**: UDP first-packet gate — `first_packet_gate: true` on a UDP
   listener opens a session only when the first datagram is positively recognised
   (a non-`reject` sniffer hint, or a matching `first_bytes` route). Checked
   before the `route_hint` lookup; unrecognised ⇒ no session, no reply,
-  `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. `validate()`
+  `wayhouse_datagrams_dropped_total{reason="first_packet_gate"}`. `validate()`
   rejects it on TCP or with nothing to gate on.
 - ✅ **Slice 5**: automated amplifier-checklist tests
-  (`crates/gsp-core/tests/amplification.rs`) — no unsolicited / duplicated
+  (`crates/wayhouse-core/tests/amplification.rs`) — no unsolicited / duplicated
   replies, no error reply to a dropped datagram, reply size == backend payload
   (proxy adds nothing toward the client), rate limit enforced before any state
   change. Checklist in `docs/07` now ticked.
-- ✅ **Slice 6**: ACL longest-prefix-match trie — `gsp_config::CidrSet`, a binary
+- ✅ **Slice 6**: ACL longest-prefix-match trie — `wayhouse_config::CidrSet`, a binary
   radix trie over address bits (v4 / v6 separate), built once per listener spawn
   from the `allow` / `deny` lists. `Acl::permits` now does a bounded bit-walk
   instead of a linear `Cidr` scan, so large threat-feed block lists cost the
@@ -196,11 +196,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 7**: optional GeoIP country filter — `settings.geo_db` (a MaxMind
   Country `.mmdb`, opened once at startup / `--check`) + per-listener
   `geo: { allow, deny }` (ISO 3166-1 alpha-2), checked right after the CIDR ACL
-  on the client source IP, same precedence. `gsp_config::GeoAcl` holds the
-  decision; `gsp_core::geo::GeoDb` (dep: `maxminddb`) does the lookup. Fails
-  closed if the DB isn't loaded. `gsp_filter_blocked_total{filter="geo"}`.
+  on the client source IP, same precedence. `wayhouse_config::GeoAcl` holds the
+  decision; `wayhouse_core::geo::GeoDb` (dep: `maxminddb`) does the lookup. Fails
+  closed if the DB isn't loaded. `wayhouse_filter_blocked_total{filter="geo"}`.
 - ✅ **Slice 8**: `cargo-fuzz` harnesses for the untrusted-input parsers
-  (`crates/gsp-config/fuzz/`): `extract_sni` (TLS ClientHello reader),
+  (`crates/wayhouse-config/fuzz/`): `extract_sni` (TLS ClientHello reader),
   `route_match` (matchers + `extract_sni` + host patterns over a fuzzed
   first-bytes buffer), `parse_config` (`parse_str` on arbitrary input). Seeds in
   `fuzz/seeds/`, `make fuzz`, and a nightly CI job. No crashes in the initial
@@ -208,10 +208,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 9**: per-source concurrent connection / session cap —
   `per_source: { max_per_ip, max_per_net }` on a listener bounds how many
   connections / UDP sessions are live at once from one client IP / /24 (v4) /
-  /64 (v6), where `rate_limit` bounds the *rate*. `gsp_core::src_conns::SourceLimiter`
+  /64 (v6), where `rate_limit` bounds the *rate*. `wayhouse_core::src_conns::SourceLimiter`
   (live counters + RAII `SourceGuard`), checked after `rate_limit`, released on
-  connection close / session eviction. `gsp_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}`.
-- ✅ **Slice 10**: `crates/gsp-bench` — a single-host latency/load harness
+  connection close / session eviction. `wayhouse_filter_blocked_total{filter="src_conn_ip"|"src_conn_net"}`.
+- ✅ **Slice 10**: `crates/wayhouse-bench` — a single-host latency/load harness
   (`make bench`) that measures the proxy's *added* request→response latency
   (p50 / p99) against **NFR N1** (`< 0.5 ms`) / **N2** (`< 2 ms`), with an
   optional busy-connection load knob, informational single-stream throughput and
@@ -221,8 +221,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   measurable via `make bench`.
 
 ## Phase 8 – Discovery & scaling ✅
-- ✅ `BackendSource` seam in `gsp-core` (`discovery.rs`: trait + `Discovery`
-  last-known-good cache + `refresh_loop`), concrete adapters in the `gsp` binary
+- ✅ `BackendSource` seam in `wayhouse-core` (`discovery.rs`: trait + `Discovery`
+  last-known-good cache + `refresh_loop`), concrete adapters in the `wayhouse` binary
   (`discovery.rs`: `DnsSrvSource` via `hickory-resolver`, `ConsulSource` /
   `KubernetesSource` via `reqwest`). Same HTTP-free seam as resolvers.
 - ✅ **Level-triggered**: a source returns the current address set; the runtime
@@ -234,8 +234,8 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   Precedence: `discovered set (or file seed) ∪ overlay-added − overlay-removed`,
   then health / admin state.
 - ✅ Degrade to last-known-good: an errored / empty refresh keeps the previous
-  set (never clears the pool) + `gsp_discovery_refresh_total{result}` /
-  `gsp_discovery_backends`.
+  set (never clears the pool) + `wayhouse_discovery_refresh_total{result}` /
+  `wayhouse_discovery_backends`.
 - ✅ Config: top-level `backend_sources:` list referenced by `pools[].source`
   (exactly one of `targets` / `source`). `static` is folded into the pool's
   targets at load time.
@@ -266,9 +266,9 @@ loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) liv
   traps. (Fuel is optional on top.)
 - **Memory bound:** `StoreLimits` `max_memory` + one instance per call, from
   `settings.sniffers.max_memory_bytes`.
-- **Host lives in the `gsp` binary.** `wasmtime` is a binary-only dep, like
+- **Host lives in the `wayhouse` binary.** `wasmtime` is a binary-only dep, like
   `reqwest` / `hickory-resolver`; the `Sniffer` trait and the
-  `MatchContext.sniff` wiring stay in `gsp-core` (crate-boundary rule 7).
+  `MatchContext.sniff` wiring stay in `wayhouse-core` (crate-boundary rule 7).
 - **Registry threading.** The free fn `sniff::sniffer(name)` (global, `'static`)
   becomes an `Arc<Sniffers>` map (`HashMap<String, Arc<dyn Sniffer>>`) threaded
   runtime → `ListenerManager` → workers, exactly like `Arc<Resolvers>` /
@@ -289,13 +289,13 @@ route's `peek_len()` ≤ `PEEK_MAX`.
 
 ### Slices (all done — see `HANDOVER.md` codebase map + git history for detail)
 - ✅ **Slice 1**: registry threading (pure refactor) — `sniff::sniffer` global fn
-  → `gsp_core::sniff::Sniffers`, an `Arc<Sniffers>` threaded to every listener
+  → `wayhouse_core::sniff::Sniffers`, an `Arc<Sniffers>` threaded to every listener
   worker like `Arc<Resolvers>` / `Option<Arc<GeoDb>>`. No built-in sniffers
   register in production; no `wasmtime` yet.
 - ✅ **Slice 2**: `settings.sniffers` schema (`dir`, `call_timeout_ms`,
-  `max_memory_bytes`, `modules: [{ name, sha256 }]`) → `gsp_config::SniffersConfig`.
+  `max_memory_bytes`, `modules: [{ name, sha256 }]`) → `wayhouse_config::SniffersConfig`.
   Config-only — nothing reads it yet.
-- ✅ **Slice 3**: `WasmSniffer` (`crates/gsp/src/sniffer_loader.rs`) — a shared
+- ✅ **Slice 3**: `WasmSniffer` (`crates/wayhouse/src/sniffer_loader.rs`) — a shared
   `wasmtime::Engine` (epoch interruption) + epoch-ticker thread, a fresh
   `Store`/`Instance` per call under a `StoreLimits` memory cap and a one-tick
   epoch deadline. ABI: guest exports `memory`, `alloc(len) -> ptr`,
@@ -303,14 +303,14 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   compact `RouteHint` — any bad pointer/length/UTF-8 is `bad_output`, never a
   panic. `build_sniffers(&SniffersConfig)` scans `dir`, verifies `sha256`
   pins, fails closed on a bad plugin (like `geo_db`).
-  `gsp_sniffer_calls_total{name,result}` / `gsp_sniffer_call_seconds{name}`.
+  `wayhouse_sniffer_calls_total{name,result}` / `wayhouse_sniffer_call_seconds{name}`.
 - ✅ **Slice 4**: live `dir` rescanning on reload — `Sniffers` gained
   `ArcSwap` interior mutability (mirrors `RouteHints`) so `replace()` from the
   reload task is visible to every worker instantly; a scan error keeps the
   previous plugin set. Engine params stay startup-only.
 - ✅ **Slice 5**: first-party plugin crates in the standalone
   `crates/plugins/` workspace (own `[workspace]`, never a dep of
-  `gsp`/`gsp-core`) — `gsp-sniffer-abi` (guest-side ABI helper) + `a2s`
+  `wayhouse`/`wayhouse-core`) — `wayhouse-sniffer-abi` (guest-side ABI helper) + `a2s`
   (Source-engine query packets), `minecraft` (Handshake `server address`,
   the BungeeCord/Velocity virtual-host trick), `regex-firstbytes` (a bounded
   pattern-matcher template, later made genuinely configurable by ADR 16a).
@@ -363,15 +363,15 @@ aggregator's intent fan-out (below) is a thin proxy to each instance's
 existing admin verbs, not a new durable intent store. Moving intent into the
 controller's revision log is a follow-on once this ships.
 
-### Controller slices (`gsp-controller`, structural config distribution)
+### Controller slices (`wayhouse-controller`, structural config distribution)
 1. ✅ Skeleton binary + `store::Store` — Tier-1 store as an embedded KV
    (`sled`, ADR 20), single node, no Raft/etcd for this release. `open` /
    `current_revision` / `get` / `current` / `put`; `put` assigns the next
    monotonic revision and persists it + the `current` pointer in one `sled`
-   transaction, then flushes. `gsp-controller` binary opens the store and
-   serves `GET /healthz` (same observability floor as `gsp`). Nothing calls
+   transaction, then flushes. `wayhouse-controller` binary opens the store and
+   serves `GET /healthz` (same observability floor as `wayhouse`). Nothing calls
    `POST /config` yet — that's slice 2.
-2. ✅ `POST /config`: runs the **same `gsp_config::parse_str`** (parse +
+2. ✅ `POST /config`: runs the **same `wayhouse_config::parse_str`** (parse +
    `validate()`) a proxy runs on a file reload, then `Store::put`. Rejects
    (`422`, error body) and leaves the current revision untouched on an
    invalid submission. `GET /config` returns the current revision's raw text
@@ -383,9 +383,9 @@ controller's revision log is a follow-on once this ships.
    forgets a revision, so there is no delivery state on the writer side
    (`docs/10` principle 5). 5 new tests, incl. one that forces a lag and
    confirms no revision is skipped.
-4. ✅ `gsp` gains `--controller <url>` (mutually exclusive with `--config` via
+4. ✅ `wayhouse` gains `--controller <url>` (mutually exclusive with `--config` via
    clap `conflicts_with`). `controller_client::fetch_current` does the
-   initial `GET /config` (mirrors `gsp_config::load` in file mode);
+   initial `GET /config` (mirrors `wayhouse_config::load` in file mode);
    `controller_client::run` then holds the subscribe connection and feeds
    every accepted revision through a new shared `reload::apply_config` (the
    rebuild/reconcile tail `reload::apply` and the controller path both call —
@@ -397,7 +397,7 @@ controller's revision log is a follow-on once this ships.
    while retrying). An invalid pushed revision is logged and skipped (cursor
    still advances — it must not be replayed forever on every reconnect), the
    same "bad reload keeps the old snapshot" rule as a file reload.
-   `--controller-token` (added later, slice 11f testing) is what `gsp`
+   `--controller-token` (added later, slice 11f testing) is what `wayhouse`
    presents to a `--auth-token`-protected controller — every other
    cross-service link in this fleet has a token pairing, and this one was
    missing until driving the real UI against a real fleet surfaced it.
@@ -409,15 +409,15 @@ controller's revision log is a follow-on once this ships.
    rewrites history** — re-submits that revision's bytes through the same
    validate-then-`Store::put` path as `POST /config`, so it's just an
    ordinary new revision to every subscriber, no special-casing anywhere
-   else). `--auth-token <token>` on `gsp-controller` gates the whole
+   else). `--auth-token <token>` on `wayhouse-controller` gates the whole
    `/config*` surface with a bearer-token check (`/healthz` stays open); a
    shared secret, not RBAC — appropriate for this release's one-controller
    scope. 8 new tests; verified live end-to-end over real HTTP (401 without
    the token, history/diff/rollback all round-tripped against
    `config.example.yaml`).
 
-### Aggregator slices (`gsp-aggregator`, fleet view + operational verbs)
-6. ✅ Skeleton binary (new crate, no `gsp-core`/`gsp-config` dependency — the
+### Aggregator slices (`wayhouse-aggregator`, fleet view + operational verbs)
+6. ✅ Skeleton binary (new crate, no `wayhouse-core`/`wayhouse-config` dependency — the
    aggregator stays fully decoupled from the data-plane crates) +
    `POST /ingest`. `ingest::IngestStore`: an in-memory, latest-write-wins
    map keyed by self-reported `instance` — deliberately never persisted,
@@ -427,15 +427,15 @@ controller's revision log is a follow-on once this ships.
    session *counts*), not the full live session registry — that already
    exists per-instance (`GET /sessions`), break-glass style. 12 new tests;
    verified live over real HTTP.
-7. ✅ `gsp` gains `--aggregator <url>` (+ `--aggregator-instance`,
+7. ✅ `wayhouse` gains `--aggregator <url>` (+ `--aggregator-instance`,
    `--aggregator-interval-sec`, default 10s) — independent of `--controller`,
    pushing state and pulling config are unrelated axes. `aggregator_client`
    builds an `IngestPayload` straight from the live `RuntimeHandle`
    (`snapshot().pools` for pool/backend summaries, `sessions()` filtered by
    `Proto` for TCP/UDP counts) and `POST`s it every tick; the wire shape is
-   duplicated in `gsp` rather than adding `gsp-aggregator` as a dependency
+   duplicated in `wayhouse` rather than adding `wayhouse-aggregator` as a dependency
    (same reasoning as `controller_client` hand-parsing the controller's SSE
-   JSON instead of depending on `gsp-controller`). **No retry buffer** — a
+   JSON instead of depending on `wayhouse-controller`). **No retry buffer** — a
    deliberate deviation from this line's original wording: `IngestStore` is
    latest-write-wins state, not an event log, so replaying an old failed push
    after a fresher one already landed would make the aggregator's view
@@ -443,25 +443,25 @@ controller's revision log is a follow-on once this ships.
    fresher snapshot. (Push, not pull — see "Fleet topology" in `docs/10` for
    why: no inbound network path to a proxy's admin port is ever needed, at
    any deployment size.) 1 new test (`build_payload` against a real
-   `Runtime`); verified live end-to-end over real HTTP (`GSP_LOG=debug`
+   `Runtime`); verified live end-to-end over real HTTP (`WAYHOUSE_LOG=debug`
    showed two successful pushes 2s apart, matching `--aggregator-interval-sec
    2`).
 8. ✅ `GET /fleet/pools` / `/fleet/sessions` / `/fleet/healthz` — served
    directly from `IngestStore` (no fan-out RPC needed, the data already
    arrived), each entry carrying `last_seen_ms_ago` (the aggregator's own
-   clock). `/fleet/healthz` flags an instance `stale` past 30s (~3x `gsp`'s
+   clock). `/fleet/healthz` flags an instance `stale` past 30s (~3x `wayhouse`'s
    default push interval) — the threshold `IngestStore` itself deliberately
    doesn't have. **No `GET /fleet/config`** in this release: `IngestPayload`
    is state, not config content — the controller already owns that
    (`GET /config`/`/config/revisions`). A fleet-wide "which revision is each
    instance running" view is real and useful (an optional `config_revision`
    field on `IngestPayload`) but needs `controller_client` and
-   `aggregator_client` to share state inside `gsp` that today are
+   `aggregator_client` to share state inside `wayhouse` that today are
    deliberately independent — deferred, not dropped. 8 new tests (incl. a
    test-only `IngestStore::insert_state` seam to test the staleness
    threshold without a real 30s wait); verified live end-to-end over real
    HTTP.
-9. ✅ Intent-verb fan-out (`gsp-aggregator/src/fanout.rs`), thin and
+9. ✅ Intent-verb fan-out (`wayhouse-aggregator/src/fanout.rs`), thin and
    stateless — the aggregator decides nothing, stores no intent, just relays
    using each instance's self-reported `admin_url` (a new `IngestPayload`
    field, `http://{settings.admin.listen}`). Two shapes: **targeted**
@@ -486,16 +486,16 @@ controller's revision log is a follow-on once this ships.
    the real instance's `/readyz` to `503`; broadcast add-backend landed on
    the instance's real `/pools`).
 10. ✅ Bearer-token auth, three independent secrets for three independent
-    hops (never one token threaded through everything): `gsp-aggregator
+    hops (never one token threaded through everything): `wayhouse-aggregator
     --auth-token` gates its own API (`/ingest`, `/fleet/*`, fan-out writes;
-    `/healthz` stays open); `settings.admin.auth_token` (new `gsp-config`
-    field) closes the "admin API has zero auth" gap on `gsp`'s own admin API
+    `/healthz` stays open); `settings.admin.auth_token` (new `wayhouse-config`
+    field) closes the "admin API has zero auth" gap on `wayhouse`'s own admin API
     the same way (`admin.rs` gains a `require_bearer` middleware, mirroring
-    `gsp-controller`'s); `gsp --aggregator-token` is what a proxy presents
-    pushing to `/ingest`; `gsp-aggregator --instance-token` is the separate
+    `wayhouse-controller`'s); `wayhouse --aggregator-token` is what a proxy presents
+    pushing to `/ingest`; `wayhouse-aggregator --instance-token` is the separate
     secret the aggregator presents *out* to every instance's admin API when
     fanning out (`settings.admin.auth_token` on the instance side must
-    match). 3 new tests (admin auth gate, aggregator auth gate, `gsp-config`
+    match). 3 new tests (admin auth gate, aggregator auth gate, `wayhouse-config`
     parsing `auth_token`). Verified live end-to-end over real HTTP through
     every hop: unauthenticated aggregator read → `401`; authenticated read
     showed the real pushed data; unauthenticated instance admin call → `401`;
@@ -509,35 +509,35 @@ and docs polish.
 
 ### Web UI + tests
 
-Slice 11 is a **dedicated `gsp-ui` process — a BFF (backend-for-frontend),
+Slice 11 is a **dedicated `wayhouse-ui` process — a BFF (backend-for-frontend),
 not a static SPA calling the controller/aggregator bearer-token APIs
 directly.** Design refinement made when actually starting it, now locked in
 `docs/10` ("The admin GUI"): the browser gets its own session-cookie login
-on `gsp-ui`, wholly separate from every machine-to-machine bearer token
+on `wayhouse-ui`, wholly separate from every machine-to-machine bearer token
 (`--auth-token`/`--instance-token`/`--aggregator-token`/
-`settings.admin.auth_token`), none of which a browser ever holds — `gsp-ui`
+`settings.admin.auth_token`), none of which a browser ever holds — `wayhouse-ui`
 holds the controller's and the aggregator's tokens itself and calls both on
-the operator's behalf. `gsp-ui` has no store and no fleet data of its own
+the operator's behalf. `wayhouse-ui` has no store and no fleet data of its own
 (nothing outlives a restart beyond active sessions) — it is not a third
 authority, it authorizes nothing itself beyond "is this a valid session." A
 React + Vite + TypeScript SPA it serves itself (`tower-http::ServeDir`), one
 process, one port for the operator. No proxy admin port, and no machine
 token, is ever exposed to a human directly.
 
-11a. ✅ `gsp-aggregator` gains `GET /fleet/subscribe` (SSE, bearer-gated like
-     the rest of `/fleet/*`) — the machine-to-machine feed `gsp-ui` (11d)
+11a. ✅ `wayhouse-aggregator` gains `GET /fleet/subscribe` (SSE, bearer-gated like
+     the rest of `/fleet/*`) — the machine-to-machine feed `wayhouse-ui` (11d)
      subscribes to for live updates: current merged fleet state
      (`FleetInstanceView` — pools + sessions + a `stale` flag, one entry per
      instance) on connect, then a resend, debounced 150 ms against a burst,
      on every accepted `POST /ingest`. Reuses the exact
-     catch-up-then-broadcast shape `gsp-controller`'s `/config/subscribe`
+     catch-up-then-broadcast shape `wayhouse-controller`'s `/config/subscribe`
      already proved out, applied to *state* instead of a revision log — no
      cursor/replay semantics needed, a `Lagged` subscriber just means
      "rebuild now," same as any other signal. 3 new tests (immediate initial
      send, resend-after-debounce, a 5-push burst collapsing into exactly one
-     resend); verified live over real HTTP against a real `gsp` push loop.
-11b. ✅ New crate `gsp-ui` (lib + bin, no `gsp-core`/`gsp-config` dependency —
-     stays as decoupled as `gsp-aggregator` is). `--ui-password`:
+     resend); verified live over real HTTP against a real `wayhouse` push loop.
+11b. ✅ New crate `wayhouse-ui` (lib + bin, no `wayhouse-core`/`wayhouse-config` dependency —
+     stays as decoupled as `wayhouse-aggregator` is). `--ui-password`:
      `POST /ui/login {password}` issues a random 256-bit session id
      (`session::SessionStore`, in-memory — a restart just logs everyone out,
      the same "ephemeral, nothing durable" posture the aggregator already
@@ -551,9 +551,9 @@ token, is ever exposed to a human directly.
      verified live end-to-end over real HTTP through the whole cycle:
      unauthenticated → `401`, wrong password → `401`, right password → a
      cookie that unlocks the gated route, logout → `401` again.
-11c. ✅ `gsp-ui` proxies reads + slice-9 operational verbs to
-     `gsp-aggregator` (`--aggregator-url`/`--aggregator-token`) — a new
-     `aggregator_proxy.rs`, thin and stateless like `gsp-aggregator::fanout`
+11c. ✅ `wayhouse-ui` proxies reads + slice-9 operational verbs to
+     `wayhouse-aggregator` (`--aggregator-url`/`--aggregator-token`) — a new
+     `aggregator_proxy.rs`, thin and stateless like `wayhouse-aggregator::fanout`
      it calls through to: `GET /api/fleet/pools`/`sessions`/`healthz`,
      `POST /api/fleet/instances/{instance}/drain`|`undrain`, backend
      add/patch/delete, route-hint. Translates the browser's session cookie
@@ -566,31 +566,31 @@ token, is ever exposed to a human directly.
      request body are forwarded correctly). Verified live end-to-end over
      the real four-hop chain: unauthenticated browser call → `401`; logged
      in → `GET /api/fleet/pools` showed the real pushed data; a drain
-     through the full `gsp-ui → gsp-aggregator → gsp` path landed for real,
+     through the full `wayhouse-ui → wayhouse-aggregator → wayhouse` path landed for real,
      confirmed by the instance's own `/readyz` flipping to `503`.
-11d. ✅ `gsp-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by a
-     single shared `crate::fleet_feed` subscription to `gsp-aggregator`'s
+11d. ✅ `wayhouse-ui`'s `GET /ws/fleet`: a WebSocket to the browser, fed by a
+     single shared `crate::fleet_feed` subscription to `wayhouse-aggregator`'s
      slice-11a SSE feed (one aggregator connection total, fanned out to
-     every browser tab — not one per tab). `fleet_feed::run` reuses `gsp`'s
+     every browser tab — not one per tab). `fleet_feed::run` reuses `wayhouse`'s
      own `controller_client`'s hand-rolled SSE parsing (a chunked-body loop
      splitting on blank lines) and reconnects with the same capped
      exponential backoff on disconnect; a `latest` cache means a browser
      connecting between two pushes gets the current view immediately rather
      than waiting for the next one. A `Lagged` WS subscriber resends
      `latest` rather than replaying — same "this is state, not a log"
-     reasoning as `gsp-aggregator`'s own `subscribe_fleet_worker`. Gated by
+     reasoning as `wayhouse-aggregator`'s own `subscribe_fleet_worker`. Gated by
      `require_session` like everything else the browser reaches (a WS
      upgrade is an ordinary `GET` until the `101` handshake). 5 new tests,
      3 of them against a *real* WebSocket client (`tokio-tungstenite`) and a
      real `axum::serve` listener, not mocks. Verified live end-to-end over
-     the full five-hop chain with a throwaway probe client: real `gsp` →
-     real `gsp-aggregator` (SSE) → real `gsp-ui` (`fleet_feed`) → a
+     the full five-hop chain with a throwaway probe client: real `wayhouse` →
+     real `wayhouse-aggregator` (SSE) → real `wayhouse-ui` (`fleet_feed`) → a
      WebSocket client, watching live pushes arrive in real time.
-11e. ✅ `gsp-ui` proxies the controller's config API too
+11e. ✅ `wayhouse-ui` proxies the controller's config API too
      (`--controller-url`/`--controller-token`, new `controller_proxy.rs`):
      `GET`/`POST /api/config`, `GET /api/config/revisions(+/{rev}(/diff))`,
      `POST /api/config/rollback/{rev}` — phase 10's "full management" GUI
-     level, straightforward since `gsp-ui` already holds a separate token
+     level, straightforward since `wayhouse-ui` already holds a separate token
      per service. The controller's `POST /config` body is raw YAML text
      (its handler takes a plain `String`, not JSON), forwarded byte-for-byte
      with no content-type forced on it, unlike the JSON bodies
@@ -598,21 +598,21 @@ token, is ever exposed to a human directly.
      query string (`?against=`) via `axum::extract::RawQuery` onto the
      proxied URL. 6 new tests. **Found and fixed a real bug along the way**:
      both proxy helpers (here and in `aggregator_proxy`, plus
-     `gsp-aggregator`'s own `fanout::proxy_to_instance`) forwarded only
+     `wayhouse-aggregator`'s own `fanout::proxy_to_instance`) forwarded only
      status + body, silently dropping every response header — caught
      immediately by a test asserting `X-Config-Revision` survived the hop,
      which it didn't. Fixed with a shared `proxy_util::forwardable_headers`
      (strips only the hop-by-hop headers `connection`/`transfer-encoding`/
      `content-length`, forwards everything else verbatim) and a matching
-     fix + regression test in `gsp-aggregator`. Verified live end-to-end
-     over the full chain against a real `gsp-controller`: submit → list
+     fix + regression test in `wayhouse-aggregator`. Verified live end-to-end
+     over the full chain against a real `wayhouse-controller`: submit → list
      revisions → diff → rollback → `GET /api/config` correctly showing
      `X-Config-Revision: 3` (the new post-rollback revision, not a rewind).
-11f. ✅ Frontend: React + Vite + TypeScript in `crates/gsp-ui/web/` (own
+11f. ✅ Frontend: React + Vite + TypeScript in `crates/wayhouse-ui/web/` (own
      `package.json`, never a Cargo workspace member — same reasoning as
      `crates/plugins/`; `make ui` runs `npm install && npm run build`,
-     output goes to `dist/`). `gsp-ui` gained `--static-dir` (default
-     `crates/gsp-ui/web/dist`), served as a fallback under whatever the API
+     output goes to `dist/`). `wayhouse-ui` gained `--static-dir` (default
+     `crates/wayhouse-ui/web/dist`), served as a fallback under whatever the API
      routes don't claim, via `tower-http::services::ServeDir` (new
      dependency). No client-side routing — one page, view state (which tab)
      lives in React state, not the URL; nothing here needs a deep link yet.
@@ -620,22 +620,22 @@ token, is ever exposed to a human directly.
      table live over 11d's WebSocket, drain/undrain, backend add/patch/
      remove, route-hint — phase 10's "operational" level), `ConfigView`
      (editor + submit + revision history/diff/rollback — phase 10's "full
-     management" level). `src/api.ts` holds every `fetch` call; `gsp-ui`'s
+     management" level). `src/api.ts` holds every `fetch` call; `wayhouse-ui`'s
      session cookie is the only credential the browser ever sends — never a
-     bearer token, per the whole point of the `gsp-ui` redesign. Verified
+     bearer token, per the whole point of the `wayhouse-ui` redesign. Verified
      live end-to-end with the **real built frontend** served by a **real
-     four-process fleet** (`gsp` + `gsp-controller` + `gsp-aggregator` +
-     `gsp-ui`, all running together for the first time): `index.html` and a
+     four-process fleet** (`wayhouse` + `wayhouse-controller` + `wayhouse-aggregator` +
+     `wayhouse-ui`, all running together for the first time): `index.html` and a
      JS asset served with correct content-type, login, a config submission
      and a fleet-pools read through the served UI's own proxy paths, and a
      drain issued through the full chain landing for real (confirmed by the
      instance's own `/readyz` flipping to `503`).
 
-- **Slice 11 (all of 11a-11f) is now complete.** The whole `gsp-ui` BFF —
+- **Slice 11 (all of 11a-11f) is now complete.** The whole `wayhouse-ui` BFF —
   session login, fleet reads/ops proxying, the live WebSocket, config
   editing/history proxying, and the actual frontend serving all of it — has
   been verified live end-to-end, repeatedly, against real running
-  `gsp`/`gsp-controller`/`gsp-aggregator` processes, not just against unit
+  `wayhouse`/`wayhouse-controller`/`wayhouse-aggregator` processes, not just against unit
   tests.
 - **The 11f frontend itself was a functional PoC, not a finished operator
   UI** (confirmed by the user actually clicking through it in a browser; since
@@ -647,20 +647,20 @@ token, is ever exposed to a human directly.
   tables and forms. **A real frontend overhaul is future, separate work** —
   tracked under "Later / optional" below — deliberately deferred rather than
   polished now, since it doesn't block anything else in this phase.
-12. ✅ Integration tests: N `gsp` instances + 1 controller + 1 aggregator —
+12. ✅ Integration tests: N `wayhouse` instances + 1 controller + 1 aggregator —
     subscribe/reconnect/freeze-on-disconnect, push/ingest, fan-out partial
-    failure, config reject-keeps-previous. New crate `crates/gsp-fleet-tests`
+    failure, config reject-keeps-previous. New crate `crates/wayhouse-fleet-tests`
     (workspace member, part of `make check`): spawns the real
-    `gsp`/`gsp-controller`/`gsp-aggregator` **binaries** as child processes on
+    `wayhouse`/`wayhouse-controller`/`wayhouse-aggregator` **binaries** as child processes on
     loopback with OS-assigned ports and drives them over real HTTP, rather
     than an in-process harness — matching how every earlier slice was
     actually verified (see HANDOVER.md) and specifically able to catch the
     wire-shape class of bug slices 11e/11f already found live. 4 tests, all
-    green. `gsp-ui` isn't spawned here — nothing in the 4 listed scenarios
+    green. `wayhouse-ui` isn't spawned here — nothing in the 4 listed scenarios
     exercises it, and it has no state of its own to assert on beyond what
     slice 11's own tests already cover.
 13. ✅ Docs: `docs/06` gained a "Fleet control plane" section (full endpoint
-    reference for `gsp-controller`/`gsp-aggregator`/`gsp-ui`, and updated the
+    reference for `wayhouse-controller`/`wayhouse-aggregator`/`wayhouse-ui`, and updated the
     now-stale "not persisted or fleet-synced today" / "no built-in fleet-wide
     view" callouts in "Multi-instance operations" to point at it); `README.md`
     status block now covers phase 10+11; this status legend; `HANDOVER.md`.
@@ -676,7 +676,7 @@ token, is ever exposed to a human directly.
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 ("Fleet topology", "Adoption"). Builds on phase 10+11's single-tier PoC —
 additive, no rework of what shipped there.
-- ✅ **Slice 1 (`gsp-controller` role)**: `standalone` / `slave` role, static
+- ✅ **Slice 1 (`wayhouse-controller` role)**: `standalone` / `slave` role, static
   and install-time (`--role`, never inferred from connectivity). A
   `standalone` tier is unchanged from phase 10+11. A `slave` tier
   (`--parent-url` + `--parent-token`) never accepts a write directly
@@ -684,7 +684,7 @@ additive, no rework of what shipped there.
   `parent_client` seeds from the parent's `GET /config` at startup, then
   subscribes to `GET /config/subscribe` and relays every accepted revision
   into its own store (its own local revision numbers, not the parent's —
-  only the payload shape is shared). Reuses `gsp`'s own
+  only the payload shape is shared). Reuses `wayhouse`'s own
   `controller_client`'s reconnect-with-backoff shape; a lost parent freezes
   the slave on last-known-good and keeps serving/relaying it downward, same
   "never clear" rule as the proxy-to-controller hop. Verified live:
@@ -694,9 +694,9 @@ additive, no rework of what shipped there.
   **Not yet built at the time**: aggregator-side hierarchy, intra-tier HA
   (Raft/etcd), intent migration into the revision log, RBAC, canary
   rollout, adoption.
-- ✅ **Slice 2 (`gsp-aggregator` hierarchy)**: `--parent-url` (+
+- ✅ **Slice 2 (`wayhouse-aggregator` hierarchy)**: `--parent-url` (+
   `--tier-name`, `--parent-token`, `--parent-push-interval-sec`) makes a
-  `gsp-aggregator` tier also push its own merged view up to a parent
+  `wayhouse-aggregator` tier also push its own merged view up to a parent
   aggregator's `POST /ingest`, on a fixed interval, via new
   `parent_push.rs` — "a tier's aggregator is itself a valid leaf to its
   parent aggregator" (`docs/10`). Deliberately namespaces rather than
@@ -714,16 +714,16 @@ additive, no rework of what shipped there.
 - ✅ **Slice 3 (operator intent → the controller's revision log)**:
   pool-scoped operator intent — backend add/remove, backend admin state,
   route-hint — now has a fleet-wide, persisted path through
-  `gsp-controller`, alongside (not replacing) direct per-instance admin API
-  calls. New `gsp-controller::intent` module: a second `sled` log (its own
+  `wayhouse-controller`, alongside (not replacing) direct per-instance admin API
+  calls. New `wayhouse-controller::intent` module: a second `sled` log (its own
   `<data_dir>/intent` database, reusing `Store` unchanged), `POST /intent`
   (validates the op's shape — addr/IP parse, known state — before it's ever
-  broadcast, since there's no `gsp_config::validate()` to lean on for a bare
+  broadcast, since there's no `wayhouse_config::validate()` to lean on for a bare
   op) and `GET /intent/subscribe`, the identical catch-up-then-tail shape
   config uses. **Deliberately excludes** whole-instance drain/undrain (it
   targets one instance, not "every instance with pool X" — stays on the
   aggregator/direct-admin path) and resolver pins (still an open question,
-  `docs/01`). New `gsp` module `intent_client.rs` subscribes whenever
+  `docs/01`). New `wayhouse` module `intent_client.rs` subscribes whenever
   `--controller` is set and applies each op through the exact same
   `RuntimeHandle` calls `crate::admin`'s handlers make — an intent op is a
   new *source* for an existing mutation, not a new code path. 15 new tests
@@ -739,14 +739,14 @@ additive, no rework of what shipped there.
   `--controller`: debounces `request_reload()` notifications and re-fetches
   + re-applies the controller's current config (rather than caching a local
   copy, so there's nothing to drift from the controller's own view).
-  Verified live end-to-end: `gsp-controller` + `gsp --controller` running
-  for real, a `POST /intent` `backend_add` landed in `gsp`'s own
+  Verified live end-to-end: `wayhouse-controller` + `wayhouse --controller` running
+  for real, a `POST /intent` `backend_add` landed in `wayhouse`'s own
   `GET /pools` output within one debounce window.
   **Not yet built at the time**: intra-tier HA, slave-tier intent relay
   (only config relayed through a parent then), RBAC, canary rollout,
   adoption.
 - ✅ **Slice 4 (slave-tier intent relay)**: the intent-log counterpart to
-  slice 1's config relay. New `gsp-controller::intent::relay`, structurally
+  slice 1's config relay. New `wayhouse-controller::intent::relay`, structurally
   identical to `parent_client` (subscribe-with-backoff, land via
   `IntentState::apply_revision` — the same role-gate bypass) with one
   difference: no `fetch_initial` seed step, since an intent log has no
@@ -755,7 +755,7 @@ additive, no rework of what shipped there.
   config's "must serve *something* the moment a fresh slave comes up." A
   `slave` tier now relays *both* logs from its parent, still never
   originating either directly (`403` on both `/config` and `/intent`
-  writes). 4 new tests. Verified live with two real `gsp-controller`
+  writes). 4 new tests. Verified live with two real `wayhouse-controller`
   processes: root submits an intent op → slave relays and serves it under
   its own local revision number; direct writes to the slave still `403`;
   killing the root freezes the slave on both logs, retrying with backoff.
@@ -775,7 +775,7 @@ additive, no rework of what shipped there.
   spawns the same `parent_client`/`intent::relay` tasks a `--role slave`
   boot would have — a freshly-adopted tier is indistinguishable from one
   that started as a slave. 6 new tests. Verified live with two real
-  `gsp-controller` processes: adopting a fresh child returned
+  `wayhouse-controller` processes: adopting a fresh child returned
   `{"seeded_config_revision":1}`, its `GET /config` immediately served the
   root's config, and a direct write to it was `403` from that point on.
   **Still not built**: intra-tier HA, RBAC, canary rollout.
@@ -784,11 +784,11 @@ additive, no rework of what shipped there.
 `docs/10` section (with wire shapes, storage layout, and rejected
 alternatives) and a `docs/09` ADR (21–23):
 
-- ✅ **Slice 6 — Intra-tier HA** (`gsp-controller` only; the aggregator's HA
+- ✅ **Slice 6 — Intra-tier HA** (`wayhouse-controller` only; the aggregator's HA
   design — stateless replicas behind one address, no consensus needed —
   stays design-only, not built): embedded `openraft` 0.9, one Raft group
   per controller tier replicating both the config and intent logs. New
-  `gsp_controller::ha` module: a `sled`-backed `LogStore`
+  `wayhouse_controller::ha` module: a `sled`-backed `LogStore`
   (`RaftLogStorage`/`RaftLogReader`, its own `<data_dir>/ha` database —
   durable across a restart, unlike `openraft`'s own in-memory reference
   implementation this was adapted from), a `StateMachineStore`
@@ -843,30 +843,30 @@ alternatives) and a `docs/09` ADR (21–23):
   `GET /config` answer too. See `docs/10` "Staged / canary rollout
   (design)", ADR 22.
 - ✅ **Slice 8 — RBAC and audit**: multi-operator accounts (`--users-file`,
-  `argon2` PHC hashes, `gsp-ui --hash-password` to produce one) and three
-  roles (`viewer`/`operator`/`admin`) enforced in `gsp-ui` — the
+  `argon2` PHC hashes, `wayhouse-ui --hash-password` to produce one) and three
+  roles (`viewer`/`operator`/`admin`) enforced in `wayhouse-ui` — the
   controller/aggregator keep their existing single shared-token gates
   unchanged, per the design's explicit continuation of the phase 10+11
   slice-11 divergence. `--ui-password` is kept (not replaced) as a legacy
-  single-shared-secret, implicitly-`admin` mode. New `gsp_ui::role::Role`
+  single-shared-secret, implicitly-`admin` mode. New `wayhouse_ui::role::Role`
   (`Viewer < Operator < Admin`, derived `Ord`) and a `SessionStore` that now
   maps a session id to `{role, username}`; `crate::auth::check_role(min)`
   gates three separately-`route_layer`ed sub-routers (`viewer`/`operator`
   from `aggregator_proxy`, `viewer`/`admin` from `controller_proxy`) — `401`
   for no/invalid session, a new `403` for a valid session below the route's
   minimum. A new `X-Actor` header (the session's username, if any) rides
-  every write `gsp-ui` proxies; `gsp-controller` records it per revision in
+  every write `wayhouse-ui` proxies; `wayhouse-controller` records it per revision in
   a new `actors` `sled` tree (`GET /config/revisions` gained an `actor`
   field — through HA too: `WriteRequest::Config` now carries `actor`
   alongside `stage`, and leader-forwarding preserves the header so
-  whichever node ends up proposing the write has it); `gsp-aggregator`
+  whichever node ends up proposing the write has it); `wayhouse-aggregator`
   forwards it to each instance and logs `(instance/pool, actor, verb)` via
   `tracing` (a convenience, not a durable record — this aggregator holds no
-  durable state by design). 17 new tests across `gsp-ui`/`gsp-controller`/
-  `gsp-aggregator`. Verified live: hashed a password with
-  `--hash-password`, logged in as that user against a real `gsp-ui` with
-  `--users-file`, submitted a config through the full `gsp-ui` → real
-  `gsp-controller` chain, and confirmed `GET /config/revisions` showed
+  durable state by design). 17 new tests across `wayhouse-ui`/`wayhouse-controller`/
+  `wayhouse-aggregator`. Verified live: hashed a password with
+  `--hash-password`, logged in as that user against a real `wayhouse-ui` with
+  `--users-file`, submitted a config through the full `wayhouse-ui` → real
+  `wayhouse-controller` chain, and confirmed `GET /config/revisions` showed
   `"actor":"alice"` on the resulting revision. See `docs/10` "RBAC and
   audit (design)", ADR 23.
 
@@ -883,7 +883,7 @@ below.
 Full design: [10-distributed-control-plane.md](10-distributed-control-plane.md)
 (Tier 2). Advisory, rebuildable, off the data path. **Fully built
 (2026-09-05)** — all 5 slices below, verified live including two real
-multi-process tests in `crates/gsp-fleet-tests`; see "Mechanism (built)" in
+multi-process tests in `crates/wayhouse-fleet-tests`; see "Mechanism (built)" in
 `docs/10` and ADR 24 in `docs/09` for the locked design this implements.
 Mechanism: membership via embedded
 `foca` (SWIM); per-backend health as a last-writer-wins `(instance,
@@ -893,22 +893,22 @@ HMAC-SHA256 over a per-domain pre-shared key, not mTLS.
 Slices:
 
 1. ✅ **Config schema** (done): `settings.failure_domain` +
-   `settings.gossip {bind, seeds, quorum_fraction, psk}` in `gsp-config`
+   `settings.gossip {bind, seeds, quorum_fraction, psk}` in `wayhouse-config`
    (raw + resolved types, `validate()` rejects one without the other),
    `config.example.yaml`, `docs/05`.
-2. ✅ **Membership** (done): new `gsp-core::gossip` module wrapping
+2. ✅ **Membership** (done): new `wayhouse-core::gossip` module wrapping
    `foca::Foca` (SWIM) over a plain UDP socket, spawned by
    `Runtime::start_with_discovery` only when `settings.gossip` is set
-   (`gsp/src/main.rs` passes `cfg.gossip.clone()`; startup-only, like
+   (`wayhouse/src/main.rs` passes `cfg.gossip.clone()`; startup-only, like
    `geo`/`sniffers` — a reload does not start or stop the mesh).
    HMAC-SHA256-tagged/authenticated datagrams (bad or missing tag ⇒ dropped
-   silently + `gsp_gossip_auth_rejected_total`); `gsp_gossip_members` /
-   `gsp_gossip_messages_total` in `metrics_defs.rs`. This slice's
+   silently + `wayhouse_gossip_auth_rejected_total`); `wayhouse_gossip_members` /
+   `wayhouse_gossip_messages_total` in `metrics_defs.rs`. This slice's
    `NoCustomBroadcast` means no application payload rides the mesh yet — pure
    membership. 8 new tests (6 unit incl. two real two-process-equivalent
    in-tokio SWIM convergence tests; a wrong-PSK-never-joins test). Verified
-   live with two real separate `gsp` processes on real sockets (not
-   in-process): both converged to `gsp_gossip_members 1` with real
+   live with two real separate `wayhouse` processes on real sockets (not
+   in-process): both converged to `wayhouse_gossip_members 1` with real
    send/receive traffic on `/metrics` within the SWIM probe period.
 3. ✅ **Per-backend health broadcast** (done): `BackendHealthRegister {addr,
    up, changed_at, origin}` is a last-writer-wins payload piggybacked via a
@@ -945,7 +945,7 @@ Slices:
    refreshed from `GossipHandle::quorum_down`. `Runtime::start_with_discovery`
    builds one `GossipFabric` (if `settings.gossip` is set) and hands it to
    both the health task and the gossip task, so `sweep` never has to reach
-   across tasks. `gsp_backend_domain_down{pool,backend}` gauge added. 5 new
+   across tasks. `wayhouse_backend_domain_down{pool,backend}` gauge added. 5 new
    tests: 3 pure `pool.rs` unit tests (domain-down overrides but local
    `rise` alone clears it; domain-down clearing never revives a locally-down
    backend; `domain_down` carries across a reload by address, mirroring how
@@ -954,8 +954,8 @@ Slices:
    single-node mesh through the full real pipeline (channel → mesh task →
    `add_broadcast` → merge) and confirming a repeated `sweep` eventually
    reads its own published verdict back and overrides the backend down.
-5. ✅ **Verification** (done, `crates/gsp-fleet-tests/tests/gossip.rs`): two
-   real multi-process tests, spawning actual `gsp` binaries the same way
+5. ✅ **Verification** (done, `crates/wayhouse-fleet-tests/tests/gossip.rs`): two
+   real multi-process tests, spawning actual `wayhouse` binaries the same way
    every other fleet slice was verified. `domain_quorum_overrides_an_
    instance_with_a_lenient_local_threshold` gives 3 real processes the
    *same* real (unreachable) backend but a per-instance-different `fall`
@@ -965,7 +965,7 @@ Slices:
    from the domain quorum, live proof of "an instance cannot ignore a
    domain-wide outage." `instances_with_different_psks_never_merge_and_
    neither_gets_stuck` confirms two real processes with mismatched PSKs
-   never converge (`gsp_gossip_members` stays `0` on both) yet each still
+   never converge (`wayhouse_gossip_members` stays `0` on both) yet each still
    correctly runs its own local-only health checks and neither process
    hangs or crashes — the "fully rebuildable, falls back to local-only"
    property with a real empty mesh, not a config that merely looks empty.
@@ -996,9 +996,9 @@ one interface per origin. `connect_backend`/`connect_upstream`/
 routable `SocketAddr` once the interface exists. An origin is modeled as a
 new `BackendSource` (ADR 12a) — `backend_sources[].type: tunnel` — not a
 new schema concept. The two genuinely new pieces: a small origin-side
-`gsp-agent` crate that manages the local WireGuard interface and registers
+`wayhouse-agent` crate that manages the local WireGuard interface and registers
 its pubkey/backend addresses, and a "backend peers" registry on the
-existing Tier-1 `gsp-controller` that distributes peer configuration to
+existing Tier-1 `wayhouse-controller` that distributes peer configuration to
 every subscribed edge proxy the same way config revisions already are.
 WireGuard's own roaming + keepalive mean only the proxy side ever needs a
 public endpoint — an origin behind a home NAT needs no port forwarding.
@@ -1006,50 +1006,50 @@ public endpoint — an origin behind a home NAT needs no port forwarding.
 Slices, ordered by dependency (each was buildable and testable before the
 next needed it; all now built):
 
-1. ✅ **Config schema**: `backend_sources[].type: tunnel` (`gsp-config` raw +
+1. ✅ **Config schema**: `backend_sources[].type: tunnel` (`wayhouse-config` raw +
    resolved types, `validate()`, `config.example.yaml`, `docs/05`) —
    parses and validates with no runtime behavior behind it yet, same
    "schema first, mechanism after" shape phase 13 slice 1 used. Fields:
    at minimum the origin's expected public key and which pool(s) it feeds;
    exact shape decided in this slice, not locked in `docs/11`.
-2. ✅ **`gsp-controller`'s backend-peers registry**: a new resource
+2. ✅ **`wayhouse-controller`'s backend-peers registry**: a new resource
    alongside the config-revision and intent logs (its own `sled` tree/DB,
    matching `Store`'s own precedent) — `POST` for an agent to register
    (pubkey, allowed backend addresses, last-known endpoint) and a
    subscribe endpoint mirroring `GET /config/subscribe`'s catch-up-then-
    tail shape. Buildable and independently testable with nothing but
-   `curl`/the crate's own HTTP tests — no real WireGuard, `gsp-agent`, or
-   `gsp` integration needed yet, same as how the config/intent logs were
+   `curl`/the crate's own HTTP tests — no real WireGuard, `wayhouse-agent`, or
+   `wayhouse` integration needed yet, same as how the config/intent logs were
    each built and tested standalone before any client integrated with
    them.
-3. ✅ **New `gsp-agent` crate**: creates/maintains one local WireGuard
+3. ✅ **New `wayhouse-agent` crate**: creates/maintains one local WireGuard
    interface via `defguard/wireguard-rs`, registers with slice 2's
    registry on startup and on change. Verifiable standalone: point a real
-   `gsp-agent` at a real `gsp-controller`, confirm its registration lands
+   `wayhouse-agent` at a real `wayhouse-controller`, confirm its registration lands
    and a real local WireGuard interface comes up with the right key.
-4. ✅ **`gsp`'s subscribe-and-reconcile task**: mirrors
+4. ✅ **`wayhouse`'s subscribe-and-reconcile task**: mirrors
    `controller_client.rs`'s shape, subscribes to slice 2's registry, and
    reconciles the proxy's own shared WireGuard interface's peer list (via
    `wireguard-rs`) to match. Verifiable standalone against slice 3's real
    agent: the proxy's interface should show the agent as a peer within one
    subscribe cycle, independent of any actual game traffic yet.
-5. ✅ **The new `tunnel` `BackendSource`** (`gsp` binary, same seam as the
+5. ✅ **The new `tunnel` `BackendSource`** (`wayhouse` binary, same seam as the
    existing DNS-SRV/Consul/Kubernetes sources): `fetch()` resolves an
    origin's currently-registered backend address(es) from the same peers
    registry slice 4 already subscribes to. This is what actually lets a
    pool's `source: <origin>` produce live, tunnel-internal backend
    addresses through the existing discovery reconcile path — no changes
    needed to `Snapshot::build_with_sources` itself.
-6. ✅ **End-to-end live verification**: a real `gsp-controller` +
-   `gsp-agent` (+ a plain TCP echo backend) + `gsp` proxy in four Docker
+6. ✅ **End-to-end live verification**: a real `wayhouse-controller` +
+   `wayhouse-agent` (+ a plain TCP echo backend) + `wayhouse` proxy in four Docker
    containers (`NET_ADMIN` + `/dev/net/tun` on the two WireGuard sides —
    this project's own dev sandbox has neither, so containers were the
    practical way to get a `CAP_NET_ADMIN`-capable host), a real payload
-   round-tripped through client → `gsp`'s public listener → WireGuard
-   tunnel (boringtun userspace backend) → `gsp-agent`'s interface → the
+   round-tripped through client → `wayhouse`'s public listener → WireGuard
+   tunnel (boringtun userspace backend) → `wayhouse-agent`'s interface → the
    echo backend → back, confirmed stable (a live handshake surviving many
    re-registration cycles, not just a one-shot connect) — see `HANDOVER.md`
-   for the two real bugs this surfaced and fixed: `gsp-agent` never added
+   for the two real bugs this surfaced and fixed: `wayhouse-agent` never added
    the edge proxy as a peer at all (closed with `--peer-pubkey`/
    `--peer-endpoint`), and `tunnel_client::run` tore down and rebuilt the
    WireGuard session on every re-registration even when nothing changed
@@ -1058,17 +1058,17 @@ next needed it; all now built):
    registration identical to the last one applied.
 
 7. ✅ **Proxy-peers registry — the mirror-image direction**: slice 6's
-   end-to-end verification shipped `gsp-agent --peer-pubkey`/
+   end-to-end verification shipped `wayhouse-agent --peer-pubkey`/
    `--peer-endpoint` as a static single-proxy pin, which proved the tunnel
    data plane but doesn't scale — a growing proxy fleet, or a proxy added
-   after an origin was already deployed, needed the origin's `gsp-agent`
+   after an origin was already deployed, needed the origin's `wayhouse-agent`
    restarted with new flags to learn about it. Closed by mirroring slices
-   2+4's mechanism in the other direction: a new `gsp-controller`
-   "proxy peers" registry (`gsp_controller::proxy_peers`, `POST`/`GET
+   2+4's mechanism in the other direction: a new `wayhouse-controller`
+   "proxy peers" registry (`wayhouse_controller::proxy_peers`, `POST`/`GET
    /proxy-peers(+/{name})`, `GET /proxy-peers/subscribe`) that every
-   `gsp --tunnel-*` instance registers itself into (new `gsp::
-   proxy_register`, mirrors `gsp-agent::register`), and a new `gsp-agent`
-   subscribe-and-reconcile task (`proxy_subscribe.rs`, mirrors `gsp`'s own
+   `wayhouse --tunnel-*` instance registers itself into (new `wayhouse::
+   proxy_register`, mirrors `wayhouse-agent::register`), and a new `wayhouse-agent`
+   subscribe-and-reconcile task (`proxy_subscribe.rs`, mirrors `wayhouse`'s own
    `tunnel_client.rs`, including the same remove-then-add + skip-unchanged
    fix slice 6 needed) that reconciles every registered proxy onto the
    origin's interface. `--peer-pubkey`/`--peer-endpoint` still work
@@ -1091,11 +1091,11 @@ slice 1.
   the phase 10–13 control plane shares config and health, never sessions.
 - eBPF/XDP pre-filter to drop floods before user space.
 - Optional TLS/DTLS wrapping (proxy terminates, backend plain).
-- **`gsp-ui` leftovers** — phase 10+11 slice 11f shipped a functional PoC; the
+- **`wayhouse-ui` leftovers** — phase 10+11 slice 11f shipped a functional PoC; the
   visual redesign (commit `d86c786`, `docs/10` "The admin GUI" → Redesign) and
   then confirmation dialogs for destructive actions, in-flight button states, a
   vitest frontend suite and a table-driven header-forwarding contract test
-  (`crates/gsp-ui/src/proxy_util.rs`) landed. Still open: a confirmation step
+  (`crates/wayhouse-ui/src/proxy_util.rs`) landed. Still open: a confirmation step
   on config *submit*, and browser-level end-to-end tests.
 - **`deploy/`** — reference Dockerfile (five targets on distroless), compose
   control-plane demo and plain k8s manifests, smoke-tested by the CI `deploy` job
@@ -1121,6 +1121,6 @@ slice 1.
   health fabric) — the multi-region, no-single-point-of-failure realization of
   the phase 10+11 PoC — see
   [10-distributed-control-plane.md](10-distributed-control-plane.md).
-- **v2.1**: + phase 14 (WireGuard backend transport — `gsp-agent`, backend /
+- **v2.1**: + phase 14 (WireGuard backend transport — `wayhouse-agent`, backend /
   proxy-peers registries; proxies reach origins on a different network) — see
   [11-backend-transport.md](11-backend-transport.md).

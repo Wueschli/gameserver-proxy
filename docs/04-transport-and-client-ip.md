@@ -89,7 +89,7 @@ By default the backend only sees the proxy IP. Options, selectable per pool:
 Set `transparent: true` on a **TCP or UDP** listener (Linux only). It is
 mutually exclusive with `prefix` (both derive the per-datagram destination).
 
-**TCP** — gsp:
+**TCP** — wayhouse:
 - binds the listen socket with `IP_TRANSPARENT` (so it accepts connections a
   TPROXY rule redirected to a non-local address; `getsockname()` on the accepted
   socket still returns the original destination, which feeds `dst` / `port`
@@ -98,7 +98,7 @@ mutually exclusive with `prefix` (both derive the per-datagram destination).
   socket with `IP_TRANSPARENT`, `bind()`s the real client `ip:port` as its
   source, then connects.
 
-**UDP** — gsp:
+**UDP** — wayhouse:
 - binds the listen socket with `IP_TRANSPARENT` + `IP_RECVORIGDSTADDR` /
   `IPV6_RECVORIGDSTADDR` and reads the original destination `ip:port` from the
   `recvmsg` control message (this, not `IP_PKTINFO`, carries the redirected

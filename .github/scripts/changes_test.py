@@ -40,35 +40,35 @@ class RealRepo(unittest.TestCase):
         self.assertEqual(self.areas(), set())
 
     def test_ui_web_only(self):
-        self.assertEqual(self.areas("crates/gsp-ui/web/src/App.tsx"), {"ui"})
+        self.assertEqual(self.areas("crates/wayhouse-ui/web/src/App.tsx"), {"ui"})
 
     def test_ui_lockfile_also_runs_deploy_for_the_image_scan(self):
         self.assertEqual(
-            self.areas("crates/gsp-ui/web/package-lock.json"),
+            self.areas("crates/wayhouse-ui/web/package-lock.json"),
             {"ui", "deploy", "release"},
         )
 
-    def test_gsp_core_reaches_plugins_and_tunnel(self):
+    def test_wayhouse_core_reaches_plugins_and_tunnel(self):
         self.assertEqual(
-            self.areas("crates/gsp-core/src/pool.rs"),
+            self.areas("crates/wayhouse-core/src/pool.rs"),
             {"plugins", "tunnel", "release"},
         )
 
-    def test_gsp_config_also_runs_fuzz(self):
+    def test_wayhouse_config_also_runs_fuzz(self):
         self.assertEqual(
-            self.areas("crates/gsp-config/src/lib.rs"),
+            self.areas("crates/wayhouse-config/src/lib.rs"),
             {"plugins", "tunnel", "fuzz", "release"},
         )
 
-    def test_gsp_http_reaches_plugins_and_tunnel(self):
+    def test_wayhouse_http_reaches_plugins_and_tunnel(self):
         self.assertEqual(
-            self.areas("crates/gsp-http/tests/fixtures/leaf.pem"),
+            self.areas("crates/wayhouse-http/tests/fixtures/leaf.pem"),
             {"plugins", "tunnel", "release"},
         )
 
     def test_fuzz_workspace_only_runs_fuzz(self):
         self.assertEqual(
-            self.areas("crates/gsp-config/fuzz/fuzz_targets/parse_config.rs"),
+            self.areas("crates/wayhouse-config/fuzz/fuzz_targets/parse_config.rs"),
             {"fuzz"},
         )
 
@@ -78,27 +78,27 @@ class RealRepo(unittest.TestCase):
     def test_plugins_workspace_root_files_run_plugins(self):
         self.assertEqual(self.areas("crates/plugins/Cargo.lock"), {"plugins", "release"})
 
-    def test_gsp_agent_is_tunnel_only(self):
-        self.assertEqual(self.areas("crates/gsp-agent/src/main.rs"), {"tunnel"})
+    def test_wayhouse_agent_is_tunnel_only(self):
+        self.assertEqual(self.areas("crates/wayhouse-agent/src/main.rs"), {"tunnel"})
 
-    def test_gsp_ui_crate_is_tunnel_only(self):
-        self.assertEqual(self.areas("crates/gsp-ui/src/lib.rs"), {"tunnel"})
+    def test_wayhouse_ui_crate_is_tunnel_only(self):
+        self.assertEqual(self.areas("crates/wayhouse-ui/src/lib.rs"), {"tunnel"})
 
     def test_fleet_tests_are_tunnel_only(self):
-        self.assertEqual(self.areas("crates/gsp-fleet-tests/tests/tunnel.rs"), {"tunnel"})
+        self.assertEqual(self.areas("crates/wayhouse-fleet-tests/tests/tunnel.rs"), {"tunnel"})
 
-    def test_gsp_bench_runs_no_scoped_job(self):
-        self.assertEqual(self.areas("crates/gsp-bench/src/main.rs"), set())
+    def test_wayhouse_bench_runs_no_scoped_job(self):
+        self.assertEqual(self.areas("crates/wayhouse-bench/src/main.rs"), set())
 
-    def test_gsp_proto_runs_plugins_and_tunnel(self):
+    def test_wayhouse_proto_runs_plugins_and_tunnel(self):
         self.assertEqual(
-            self.areas("crates/gsp/proto/resolver.proto"),
+            self.areas("crates/wayhouse/proto/resolver.proto"),
             {"plugins", "tunnel", "release"},
         )
 
     def test_an_unknown_path_under_crates_runs_every_rust_job(self):
         self.assertEqual(
-            self.areas("crates/gsp-new/src/lib.rs"),
+            self.areas("crates/wayhouse-new/src/lib.rs"),
             {"plugins", "tunnel", "fuzz", "release"},
         )
 
@@ -106,14 +106,14 @@ class RealRepo(unittest.TestCase):
         self.assertEqual(self.areas(".config/nextest.toml"), {"plugins", "tunnel", "release"})
 
     def test_root_cargo_lock_runs_its_workspace_and_deploy_not_fuzz(self):
-        # crates/gsp-config/fuzz has its own workspace and lockfile.
+        # crates/wayhouse-config/fuzz has its own workspace and lockfile.
         self.assertEqual(self.areas("Cargo.lock"), {"plugins", "tunnel", "deploy", "release"})
 
     def test_fuzz_lockfile_runs_fuzz_only(self):
-        self.assertEqual(self.areas("crates/gsp-config/fuzz/Cargo.lock"), {"fuzz"})
+        self.assertEqual(self.areas("crates/wayhouse-config/fuzz/Cargo.lock"), {"fuzz"})
 
     def test_root_manifest_runs_all_rust_and_deploy(self):
-        # Inherited by every workspace's members (gsp-config uses workspace = true).
+        # Inherited by every workspace's members (wayhouse-config uses workspace = true).
         self.assertEqual(
             self.areas("Cargo.toml"), {"plugins", "tunnel", "deploy", "fuzz", "release"}
         )
@@ -127,7 +127,7 @@ class RealRepo(unittest.TestCase):
         self.assertEqual(self.areas("Makefile"), {"tunnel", "deploy", "release"})
 
     def test_deploy_dir_dockerignore_and_trivyignore(self):
-        for f in ("deploy/compose/gsp.yaml", ".dockerignore", ".trivyignore"):
+        for f in ("deploy/compose/wayhouse.yaml", ".dockerignore", ".trivyignore"):
             with self.subTest(f=f):
                 self.assertEqual(self.areas(f), {"deploy", "release"})
 
@@ -136,13 +136,13 @@ class RealRepo(unittest.TestCase):
 
     def test_mixed_ui_web_and_deploy(self):
         self.assertEqual(
-            self.areas("crates/gsp-ui/web/package.json", "deploy/Dockerfile"),
+            self.areas("crates/wayhouse-ui/web/package.json", "deploy/Dockerfile"),
             {"ui", "deploy", "release"},
         )
 
     def test_every_package_is_loaded(self):
         names = {p.name for p in self.graph.packages.values()}
-        for n in ("gsp", "gsp-agent", "gsp-fleet-tests", "a2s", "gsp-config-fuzz"):
+        for n in ("wayhouse", "wayhouse-agent", "wayhouse-fleet-tests", "a2s", "wayhouse-config-fuzz"):
             self.assertIn(n, names)
 
 
@@ -155,39 +155,39 @@ class SyntheticGraph(unittest.TestCase):
 
     def graph(self, **extra):
         packages = {
-            "crates/gsp-config": pkg("gsp-config"),
-            "crates/gsp-core": pkg("gsp-core", "crates/gsp-config"),
-            "crates/gsp": pkg("gsp", "crates/gsp-core"),
-            "crates/gsp-agent": pkg("gsp-agent"),
-            "crates/gsp-controller": pkg("gsp-controller"),
-            "crates/gsp-aggregator": pkg("gsp-aggregator"),
-            "crates/gsp-ui": pkg("gsp-ui"),
-            "crates/gsp-fleet-tests": pkg("gsp-fleet-tests"),
-            "crates/gsp-config/fuzz": pkg("gsp-config-fuzz", "crates/gsp-config"),
+            "crates/wayhouse-config": pkg("wayhouse-config"),
+            "crates/wayhouse-core": pkg("wayhouse-core", "crates/wayhouse-config"),
+            "crates/wayhouse": pkg("wayhouse", "crates/wayhouse-core"),
+            "crates/wayhouse-agent": pkg("wayhouse-agent"),
+            "crates/wayhouse-controller": pkg("wayhouse-controller"),
+            "crates/wayhouse-aggregator": pkg("wayhouse-aggregator"),
+            "crates/wayhouse-ui": pkg("wayhouse-ui"),
+            "crates/wayhouse-fleet-tests": pkg("wayhouse-fleet-tests"),
+            "crates/wayhouse-config/fuzz": pkg("wayhouse-config-fuzz", "crates/wayhouse-config"),
             "crates/plugins/a2s": pkg("a2s"),
         }
         packages.update(extra)
         return changes.Graph(packages, {
-            "": [d for d in packages if not d.startswith(("crates/plugins/", "crates/gsp-config/fuzz"))],
+            "": [d for d in packages if not d.startswith(("crates/plugins/", "crates/wayhouse-config/fuzz"))],
             "crates/plugins": ["crates/plugins/a2s"],
-            "crates/gsp-config/fuzz": ["crates/gsp-config/fuzz"],
+            "crates/wayhouse-config/fuzz": ["crates/wayhouse-config/fuzz"],
         })
 
     def test_a_new_dependency_edge_is_followed_transitively(self):
-        # gsp-agent gains a dependency on gsp-core: a gsp-config change now
-        # reaches it through gsp-core, with no hand-written list to update.
-        g = self.graph(**{"crates/gsp-agent": pkg("gsp-agent", "crates/gsp-core")})
+        # wayhouse-agent gains a dependency on wayhouse-core: a wayhouse-config change now
+        # reaches it through wayhouse-core, with no hand-written list to update.
+        g = self.graph(**{"crates/wayhouse-agent": pkg("wayhouse-agent", "crates/wayhouse-core")})
         self.assertIn(
-            "crates/gsp-agent",
-            changes.dependents({"crates/gsp-config"}, g),
+            "crates/wayhouse-agent",
+            changes.dependents({"crates/wayhouse-config"}, g),
         )
 
     def test_the_longest_owning_package_wins(self):
         g = self.graph()
         self.assertEqual(
-            changes.owners("crates/gsp-config/fuzz/x.rs", g), {"crates/gsp-config/fuzz"}
+            changes.owners("crates/wayhouse-config/fuzz/x.rs", g), {"crates/wayhouse-config/fuzz"}
         )
-        self.assertEqual(changes.owners("crates/gsp-config/x.rs", g), {"crates/gsp-config"})
+        self.assertEqual(changes.owners("crates/wayhouse-config/x.rs", g), {"crates/wayhouse-config"})
 
     def test_a_lockfile_does_not_reach_another_workspace(self):
         g = self.graph()
@@ -196,8 +196,8 @@ class SyntheticGraph(unittest.TestCase):
         self.assertIn("tunnel", got)
 
     def test_a_crate_dir_prefix_is_not_a_partial_name_match(self):
-        # crates/gsp-core-extra is not inside crates/gsp-core.
-        self.assertIsNone(changes.owners("crates/gsp-core-extra/src/lib.rs", self.graph()))
+        # crates/wayhouse-core-extra is not inside crates/wayhouse-core.
+        self.assertIsNone(changes.owners("crates/wayhouse-core-extra/src/lib.rs", self.graph()))
 
 
 class Main(unittest.TestCase):
@@ -217,11 +217,11 @@ class Main(unittest.TestCase):
         def broken(_):
             raise changes.MetadataError("cargo metadata failed")
 
-        got = self.run_main([], "crates/gsp-agent/src/main.rs\n", broken)
+        got = self.run_main([], "crates/wayhouse-agent/src/main.rs\n", broken)
         self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
 
     def test_a_roots_entry_matching_no_package_runs_everything(self):
-        # e.g. gsp-agent renamed: a silently empty root would skip tunnel.
+        # e.g. wayhouse-agent renamed: a silently empty root would skip tunnel.
         got = self.run_main([], "README.md\n", lambda _: changes.Graph({}, {}))
         self.assertEqual({a for a, v in got.items() if v == "true"}, ALL)
 

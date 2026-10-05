@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: WireGuard handshake initiations.
+//! `wayhouse` sniffer plugin: WireGuard handshake initiations.
 //!
 //! A WireGuard peer opens a session by sending a *handshake initiation*: a
 //! UDP datagram of exactly 148 bytes whose first four bytes are the message
@@ -15,11 +15,11 @@ const MSG_HANDSHAKE_INITIATION: [u8; 4] = [1, 0, 0, 0];
 const HANDSHAKE_INITIATION_LEN: usize = 148;
 
 /// Recognise a WireGuard handshake initiation in `first`.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     if first.len() != HANDSHAKE_INITIATION_LEN || first[..4] != MSG_HANDSHAKE_INITIATION {
         return None;
     }
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         key: Some("wireguard"),
         ..Default::default()
     })
@@ -28,13 +28,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// A fixed structural check: no config, `cfg_*` ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note.
+/// See `wayhouse_sniffer_abi::input`'s safety note.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

@@ -16,9 +16,9 @@ the document was written.
 | Phase 14 tunnel end-to-end test (rootless, network namespaces) | [spec](specs/2026-10-01-tunnel-e2e-design.md) | [plan](plans/2026-10-01-tunnel-e2e.md) | Built (`make tunnel-e2e`) |
 | Custom CA support for the HTTP clients (`--ca-file`) | [spec](specs/2026-10-02-custom-ca-design.md) | [plan](plans/2026-10-02-custom-ca.md) | Built |
 | TLS-capable HA peer addresses and readable HTTP errors | [spec](specs/2026-10-02-ha-tls-peers-design.md) | [plan](plans/2026-10-02-ha-tls-peers.md) | Built |
-| Native TLS for `gsp-controller` | [spec](specs/2026-10-02-controller-native-tls-design.md) | [plan](plans/2026-10-02-controller-native-tls.md) | Built |
-| Native TLS for `gsp-aggregator`, `gsp-ui` and the `gsp` admin API | [spec](specs/2026-10-02-native-tls-other-servers-design.md) | none | Built |
-| Tunnel address authority (`gsp-controller` allocates tunnel addresses) | [spec](specs/2026-10-02-tunnel-address-authority-design.md) | [plan](plans/2026-10-02-tunnel-address-authority.md) | Built |
+| Native TLS for `wayhouse-controller` | [spec](specs/2026-10-02-controller-native-tls-design.md) | [plan](plans/2026-10-02-controller-native-tls.md) | Built |
+| Native TLS for `wayhouse-aggregator`, `wayhouse-ui` and the `wayhouse` admin API | [spec](specs/2026-10-02-native-tls-other-servers-design.md) | none | Built |
+| Tunnel address authority (`wayhouse-controller` allocates tunnel addresses) | [spec](specs/2026-10-02-tunnel-address-authority-design.md) | [plan](plans/2026-10-02-tunnel-address-authority.md) | Built |
 | TLS handshake flood limits | [spec](specs/2026-10-03-tls-handshake-limits-design.md) | none | Built |
 | CI change detection from `cargo metadata` | [spec](specs/2026-10-03-ci-change-detection-design.md) | none | Built |
 | HA-replicated tunnel address allocation and live HA membership | [spec](specs/2026-10-03-ha-replicated-address-allocation-design.md) | [plan](plans/2026-10-03-ha-replicated-address-allocation.md) | Built |

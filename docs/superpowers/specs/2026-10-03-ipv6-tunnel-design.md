@@ -83,7 +83,7 @@ open.
   one host could be held twice. A configured IPv6 network can never contain them (they are
   refused as networks), so they are already outside it.
 
-### Address book (`crates/gsp-controller/src/addresses.rs`)
+### Address book (`crates/wayhouse-controller/src/addresses.rs`)
 
 - `Network` holds a family tag plus the network as a `u128` (IPv4 in the low 32 bits) and
   the prefix; `contains`, `is_host`, `capacity`, `host(n)` work for both. `Display` prints
@@ -146,17 +146,17 @@ network/all-ones address):
 This also resolves the HANDOVER minor "stored addresses are not re-validated if
 `--tunnel-network` later changes".
 
-## Clients (`gsp-agent`, `gsp --tunnel-*`)
+## Clients (`wayhouse-agent`, `wayhouse --tunnel-*`)
 
 - **Routes:** every peer is a host route built with `IpAddrMask::host(ip)`, which is `/32`
-  for IPv4 and `/128` for IPv6: `gsp`'s `tunnel_client::to_wg_peer`, `gsp-agent`'s
-  `proxy_subscribe` peer builder, and the manual `--peer-*` peer in `gsp-agent`'s `main.rs`.
+  for IPv4 and `/128` for IPv6: `wayhouse`'s `tunnel_client::to_wg_peer`, `wayhouse-agent`'s
+  `proxy_subscribe` peer builder, and the manual `--peer-*` peer in `wayhouse-agent`'s `main.rs`.
 - **Flags:** `--address` (agent), `--tunnel-address` (proxy) and `--peer-address` (agent)
   accept IPv6 (`fd49:89c1:4b5e:60::5/64`, bare `fd49:89c1:4b5e:60::9` for `--peer-address`).
-  The IPv4-only parses in `gsp-agent/src/main.rs` and `gsp/src/main.rs` become `IpAddr`,
+  The IPv4-only parses in `wayhouse-agent/src/main.rs` and `wayhouse/src/main.rs` become `IpAddr`,
   and refuse IPv4-mapped and IPv4-compatible IPv6 addresses like the controller does.
-- **Address comparison:** both `address_change` functions (`gsp-agent/src/register.rs`,
-  `gsp/src/proxy_register.rs`) compare strings today. With IPv6 a pin written as
+- **Address comparison:** both `address_change` functions (`wayhouse-agent/src/register.rs`,
+  `wayhouse/src/proxy_register.rs`) compare strings today. With IPv6 a pin written as
   `fd49:0::5` and the controller's canonical `fd49::5` are the same address, so they parse
   both sides and compare `IpAddr`s.
 - **Interface:** brought up as `<address>/<network prefix>`, as today. The saved
@@ -167,7 +167,7 @@ This also resolves the HANDOVER minor "stored addresses are not re-validated if
   a single host (`/32` or `/128`), so its WireGuard drops a packet whose source is the
   real client's address, and its replies to the client would not be routed back into the
   tunnel. With an IPv6 tunnel there is a second, louder symptom: `connect_tcp_from`
-  (`gsp-core/src/net.rs:115`) falls back to a plain connect and logs a `warn` on every
+  (`wayhouse-core/src/net.rs:115`) falls back to a plain connect and logs a `warn` on every
   connection when the client's family differs from the backend's, which is the normal case
   for IPv4 clients reaching an IPv6 tunnel backend. docs/11 states the limitation;
   rejecting `transparent: true` on a listener whose pool uses a `tunnel` source at config
@@ -220,16 +220,16 @@ Whichever lands second adapts to the other; neither blocks the other.
 
 ## Repository changes
 
-- Code: `gsp-controller` `addresses.rs`, `addresses/api.rs`, `peers.rs`, `proxy_peers.rs`,
+- Code: `wayhouse-controller` `addresses.rs`, `addresses/api.rs`, `peers.rs`, `proxy_peers.rs`,
   `peers/api.rs`, `proxy_peers/api.rs`, `main.rs` (the new flag and startup scan);
-  `gsp-agent` `main.rs`, `register.rs`, `proxy_subscribe.rs`; `gsp` `main.rs`,
+  `wayhouse-agent` `main.rs`, `register.rs`, `proxy_subscribe.rs`; `wayhouse` `main.rs`,
   `proxy_register.rs`, `tunnel_client.rs`.
-- Tests: `gsp-fleet-tests` `src/netns.rs` (IPv6 on the lab veths, with `nodad` so they are
+- Tests: `wayhouse-fleet-tests` `src/netns.rs` (IPv6 on the lab veths, with `nodad` so they are
   usable at once), `src/tunnel.rs` (the tunnel network becomes a parameter, IPv6 by default),
   `tests/tunnel.rs`, `tests/tunnel_addresses.rs`.
 - Deploy: `deploy/compose/compose.tunnel.yml` (`--tunnel-network=fd49:89c1:4b5e:60::/64`,
   the sysctl), `deploy/lint.sh` (expects the IPv6 network), `deploy/README.md`,
-  `deploy/k8s/50-gsp-daemonset.yaml` comments if they mention the network.
+  `deploy/k8s/50-wayhouse-daemonset.yaml` comments if they mention the network.
 - Docs: `docs/11` ("Address authority" gains IPv6, the underlay note and
   `--tunnel-readdress`, and that transparent mode does not work for tunnel backends),
   `docs/12` (tunnel section: how to generate a random ULA

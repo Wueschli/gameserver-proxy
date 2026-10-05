@@ -7,19 +7,19 @@ ports actually works once it's namespaced by a container runtime.
 ## Container images
 
 The reference build is [`deploy/Dockerfile`](../deploy/Dockerfile): one file, a
-shared `rust:1-trixie` builder and six runtime targets (the five binaries plus `gsp-minimal`, below) on
+shared `rust:1-trixie` builder and six runtime targets (the five binaries plus `wayhouse-minimal`, below) on
 `gcr.io/distroless/cc-debian13:nonroot` (see [`deploy/README.md`](../deploy/README.md);
 `make deploy-images` builds all six; `make deploy-scan` runs an informational Trivy
 scan of them and of the lockfiles they're built from — CI's `deploy` and `trivy` jobs).
-`gsp-minimal` is `gsp` built with `--no-default-features` (issue #62): no WASM sniffer loader,
+`wayhouse-minimal` is `wayhouse` built with `--no-default-features` (issue #62): no WASM sniffer loader,
 gRPC resolver, `dns_srv` source, Tier-2 gossip fabric or WireGuard tunnel client, so the
-binary is much smaller. It takes the same arguments as `gsp`; a config or flag that needs a
+binary is much smaller. It takes the same arguments as `wayhouse`; a config or flag that needs a
 dropped feature (`settings.sniffers`, a `grpc` resolver, a `dns_srv` source, `settings.gossip`,
 a `tunnel` source, `--tunnel-iface`) is refused at startup and under `--check`, naming the
 cargo feature.
 
 None of these five binaries shell out to an
-external command at runtime (WireGuard interface management in `gsp`/`gsp-agent`
+external command at runtime (WireGuard interface management in `wayhouse`/`wayhouse-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
 `ip`/`wg` CLIs) — so the runtime image needs nothing but the binary and its
 dynamic library dependencies (glibc). It does not need a system CA bundle either: the
@@ -36,11 +36,11 @@ on `distroless/cc-debian13:nonroot`, CI run 36922142697, 2026-10-01):
 
 | Binary | image size |
 |---|---|
-| `gsp` | **47.4 MB** |
-| `gsp-controller` | **37.9 MB** |
-| `gsp-agent` | 34.3 MB |
-| `gsp-ui` | 34.3 MB (includes the built frontend) |
-| `gsp-aggregator` | 33.3 MB |
+| `wayhouse` | **47.4 MB** |
+| `wayhouse-controller` | **37.9 MB** |
+| `wayhouse-agent` | 34.3 MB |
+| `wayhouse-ui` | 34.3 MB (includes the built frontend) |
+| `wayhouse-aggregator` | 33.3 MB |
 
 For comparison, an earlier 2026-09-07 measurement on `cc-debian12` gave 45-65 MB.
 
@@ -54,30 +54,30 @@ runs as a fixed non-root uid (fine here — nothing in this project needs
 root once its sockets are bound; see `--tunnel-*`'s capability
 requirements below for the one exception).
 
-`gsp` and `gsp-controller` are the two heaviest either way, for real
-reasons: `gsp` links `wasmtime` (phase 9 sniffer plugins) and
+`wayhouse` and `wayhouse-controller` are the two heaviest either way, for real
+reasons: `wayhouse` links `wasmtime` (phase 9 sniffer plugins) and
 `defguard_wireguard_rs`/`boringtun` (phase 14 backend transport);
-`gsp-controller` links `openraft` + `sled` for the HA/Raft log store
-(phase 12). `gsp-agent`/`gsp-aggregator`/`gsp-ui` don't carry those.
+`wayhouse-controller` links `openraft` + `sled` for the HA/Raft log store
+(phase 12). `wayhouse-agent`/`wayhouse-aggregator`/`wayhouse-ui` don't carry those.
 
 ## Examples
 
 [`deploy/compose/`](../deploy/compose/) is a runnable control-plane demo (controller,
-aggregator, UI, one `gsp` pulling its config from the controller) with a tunnel
+aggregator, UI, one `wayhouse` pulling its config from the controller) with a tunnel
 override; [`deploy/k8s/`](../deploy/k8s/) has plain manifests (the proxy as a
 `hostNetwork` DaemonSet, plus the RBAC its `kubernetes` sources need). Both are reference only (the images themselves are published to GHCR on version tags by `.github/workflows/release.yml`). CI smoke-tests the compose demo and schema-validates the manifests (the `deploy`
 job, blocking since 2026-10-02; first green run 2026-10-01). Aggregator intent fan-out (drain etc.) goes to the `admin_url`
-each `gsp` reports, by default `http(s)://<settings.admin.listen>`; when that
+each `wayhouse` reports, by default `http(s)://<settings.admin.listen>`; when that
 address is not reachable from the aggregator (`0.0.0.0`, loopback, a container
-port mapping, a TLS terminator in front), set `gsp --aggregator-admin-url`. The
+port mapping, a TLS terminator in front), set `wayhouse --aggregator-admin-url`. The
 k8s DaemonSet reports `http://<node IP>:9900`, and the aggregator presents
 `--instance-token` (the admin `auth_token`). The compose demo cannot use
-fan-out: its `gsp` admin API listens on the host's loopback only, which the
+fan-out: its `wayhouse` admin API listens on the host's loopback only, which the
 bridge-networked aggregator cannot reach.
 
-The aggregator separates the credentials: `--ingest-token` is what the `gsp`
-instances push with (`--aggregator-token` on `gsp`; it unlocks only
-`POST /ingest`), `--auth-token` is for `gsp-ui` and operators (`/fleet/*`). Setting
+The aggregator separates the credentials: `--ingest-token` is what the `wayhouse`
+instances push with (`--aggregator-token` on `wayhouse`; it unlocks only
+`POST /ingest`), `--auth-token` is for `wayhouse-ui` and operators (`/fleet/*`). Setting
 `--auth-token` requires a different `--ingest-token`; the aggregator refuses to
 start otherwise.
 It only stores an `admin_url` whose host is the pushing connection's own source
@@ -91,8 +91,8 @@ aggregator".
 
 ## Networking: a proxy that binds many, changing ports
 
-`gsp` is designed to add and remove listeners live — `ListenerManager`
-(`crates/gsp-core/src/listeners.rs`) reconciles the running listener set
+`wayhouse` is designed to add and remove listeners live — `ListenerManager`
+(`crates/wayhouse-core/src/listeners.rs`) reconciles the running listener set
 from config on every SIGHUP/reload, and `bind: "0.0.0.0:30000-30999"`
 (`docs/01` F1.4, `docs/08` roadmap) spawns one real socket per port in a
 range under a single listener config, for fleets that hand out one port
@@ -112,13 +112,13 @@ calling `bind()`. Port exposure is a static declaration in both:
   publish ones you didn't declare either). Nothing watches a container's
   live sockets and reconciles a `Service` to match them.
 
-Two patterns actually work, and `gsp` already has one foot in each:
+Two patterns actually work, and `wayhouse` already has one foot in each:
 
 1. **Host networking** (`docker run --network host` /
    `hostNetwork: true` on the Pod) — the container shares the host's
-   network namespace directly, so every `bind()` `gsp` does is immediately
+   network namespace directly, so every `bind()` `wayhouse` does is immediately
    live with zero orchestration involvement. This is the closest match to
-   `gsp`'s own reload-driven listener reconciliation: add a `bind:` entry,
+   `wayhouse`'s own reload-driven listener reconciliation: add a `bind:` entry,
    send SIGHUP (or let file-watch pick it up), and the new listener exists
    — in a container exactly like bare metal. Cost: no network-namespace
    isolation for that pod/container — an acceptable, often expected,
@@ -128,7 +128,7 @@ Two patterns actually work, and `gsp` already has one foot in each:
    Kubernetes needs either `hostNetwork` scoped to a node-level reserved
    range, or enumerating `hostPort` per container — there's no native range
    syntax in a Pod spec) and only actually `bind()` the subset needed at
-   any given time via `gsp`'s own `bind: "host:lo-hi"` range listener. This
+   any given time via `wayhouse`'s own `bind: "host:lo-hi"` range listener. This
    is the same shape **Agones** (the standard Kubernetes game-server
    operator) uses for its `GameServer` pods — `hostNetwork: true` plus one
    port pulled from a node-level reserved pool — because Kubernetes
@@ -138,13 +138,13 @@ Two patterns actually work, and `gsp` already has one foot in each:
 Host networking is the simpler default when the proxy doesn't need
 network-namespace isolation from other workloads on the node (usually
 true for an edge process). Reach for the reserved-range pattern when
-isolation is a hard requirement, or when running many `gsp` instances per
+isolation is a hard requirement, or when running many `wayhouse` instances per
 node and the orchestrator should own port allocation/collision-avoidance
 across them.
 
 ## `--tunnel-*` (phase 14): `CAP_NET_ADMIN` and `/dev/net/tun`
 
-`gsp --tunnel-*` and `gsp-agent` create a real WireGuard interface
+`wayhouse --tunnel-*` and `wayhouse-agent` create a real WireGuard interface
 (`docs/11`) — kernel-netlink by default, falling back to `boringtun`
 userspace with `--tunnel-userspace`/`--userspace`. **Both backends need
 `CAP_NET_ADMIN`**, and the userspace fallback additionally needs
@@ -171,7 +171,7 @@ volumes:
 
 This is a real, already-verified requirement, not a guess: `docs/08`
 phase 14 slice 6's end-to-end verification ran in exactly this
-container shape (`crates/gsp-agent` + `gsp --tunnel-*` in Docker
+container shape (`crates/wayhouse-agent` + `wayhouse --tunnel-*` in Docker
 containers with `NET_ADMIN` + `/dev/net/tun`) because the project's own
 dev sandbox lacked `CAP_NET_ADMIN` even in the bounding set. A container
 without both of these fails loud at interface bring-up, before any
@@ -188,12 +188,12 @@ deployment requirement.
 
 Every fleet API is open when no token is configured. Startup now enforces:
 
-- **Non-loopback bind needs auth.** `gsp-controller`, `gsp-aggregator` and `gsp-ui`
-  (`--listen`) and `gsp`'s admin API (`settings.admin.listen`) refuse to start on a
+- **Non-loopback bind needs auth.** `wayhouse-controller`, `wayhouse-aggregator` and `wayhouse-ui`
+  (`--listen`) and `wayhouse`'s admin API (`settings.admin.listen`) refuse to start on a
   non-loopback address without a token (`--auth-token`, `--ui-password` /
   `--users-file`, `settings.admin.auth_token`). If the network boundary really is your
   only control, pass `--insecure-no-auth`; it logs a warning instead.
-- **HA needs `--ha-token`.** `gsp-controller --ha-peers` / `--ha-join` refuse to start
+- **HA needs `--ha-token`.** `wayhouse-controller --ha-peers` / `--ha-join` refuse to start
   without it, with no opt-out: `/raft/*` and `/admin/ha/members` would otherwise accept
   anyone. HA peers should use `https://` URLs (see below), since the token travels in
   each request.
@@ -204,7 +204,7 @@ Every fleet API is open when no token is configured. Startup now enforces:
 
 ## TLS for the fleet services
 
-Without the settings below, `gsp-controller`, `gsp-aggregator`, `gsp-ui` and `gsp`'s
+Without the settings below, `wayhouse-controller`, `wayhouse-aggregator`, `wayhouse-ui` and `wayhouse`'s
 admin API serve **plain HTTP**. Run as-is across a network, that exposes:
 
 - the `--auth-token` bearer token on every request, and the `/admin/adopt` calls;
@@ -215,13 +215,13 @@ admin API serve **plain HTTP**. Run as-is across a network, that exposes:
 Two ways to encrypt it: **native TLS** (below), or a **reverse proxy
 you run that terminates TLS**, with the controller listening only on loopback or a
 private network (`--listen 127.0.0.1:9901`, or a private bridge/pod network). The
-aggregator, the UI and `gsp`'s admin API serve native TLS the same way.
+aggregator, the UI and `wayhouse`'s admin API serve native TLS the same way.
 
 ### Native TLS
 
 ```sh
-gsp-controller --listen 0.0.0.0:8443 \
-  --tls-cert /etc/gsp/tls/fullchain.pem --tls-key /etc/gsp/tls/privkey.pem
+wayhouse-controller --listen 0.0.0.0:8443 \
+  --tls-cert /etc/wayhouse/tls/fullchain.pem --tls-key /etc/wayhouse/tls/privkey.pem
 ```
 
 - `--tls-cert` is a PEM chain, leaf first (a Let's Encrypt `fullchain.pem` works);
@@ -243,26 +243,26 @@ gsp-controller --listen 0.0.0.0:8443 \
   flood of idle connects cannot lock real clients out. A source may also open at most 20
   new connections a second on average (bursts of 64), so it cannot cycle connects under
   its pending cap. A limit being hit logs a warning (at most once a minute) and
-  counts into `gsp_tls_handshakes_refused_total` / `gsp_tls_handshakes_evicted_total` on
+  counts into `wayhouse_tls_handshakes_refused_total` / `wayhouse_tls_handshakes_evicted_total` on
   every binary's `/metrics` (docs/06). The limits are flags: `--tls-max-pending` (512),
   `--tls-max-pending-per-source` (16), `--tls-new-per-source-per-sec` (20; `0` turns the
   rate limit off) and `--tls-new-per-source-burst` (64); raise the per-source ones for
   a fleet that reaches the service from behind one NAT. No client certificates (mTLS).
-- **`gsp-aggregator`** takes the same two flags with the same behaviour. Instances then
+- **`wayhouse-aggregator`** takes the same two flags with the same behaviour. Instances then
   push to `--aggregator https://…` (plus `--ca-file` for a private CA), and the same
-  goes for a child tier's `--parent-url` and `gsp-ui --aggregator-url`.
-- **`gsp-ui`** takes the same two flags. Serving HTTPS itself, it marks the session
+  goes for a child tier's `--parent-url` and `wayhouse-ui --aggregator-url`.
+- **`wayhouse-ui`** takes the same two flags. Serving HTTPS itself, it marks the session
   cookie `Secure` (without the flags it doesn't — a browser drops a `Secure` cookie on
   `http://` and login would loop). The live view's WebSocket works over HTTP/2 too:
   a browser on h2 opens it as an extended `CONNECT`, which the UI accepts (and the
   session cookie counts in whichever `cookie` header h2 splits it into). Plain
   HTTP is not redirected; serve only HTTPS on the port browsers use.
-- **`gsp`'s admin API** is configured in the YAML, next to `listen`:
+- **`wayhouse`'s admin API** is configured in the YAML, next to `listen`:
   `settings.admin.tls: { cert: <chain.pem>, key: <key.pem> }` (both required, plus the
   optional handshake limits `max_pending`, `max_pending_per_source`,
   `new_per_source_per_sec`, `new_per_source_burst`, same meaning as the flags above;
-  startup-only like `listen`; the files renew like the flags above; `gsp --check`
-  loads them). The admin URL `gsp` reports to the aggregator then becomes
+  startup-only like `listen`; the files renew like the flags above; `wayhouse --check`
+  loads them). The admin URL `wayhouse` reports to the aggregator then becomes
   `https://<settings.admin.listen>`, so the certificate needs that address as a SAN
   (an IP SAN for an IP `listen`), and the aggregator takes `--ca-file` for a private
   CA. As before, the reported URL is the literal `listen` address — a wildcard bind
@@ -271,15 +271,15 @@ gsp-controller --listen 0.0.0.0:8443 \
   Health probes against the admin port must then use HTTPS (Kubernetes:
   `httpGet.scheme: HTTPS`).
 
-Verified by `gsp-fleet-tests`: `controller_native_tls.rs` (`gsp --check` fails on
+Verified by `wayhouse-fleet-tests`: `controller_native_tls.rs` (`wayhouse --check` fails on
 `UnknownIssuer` without `--ca-file` and passes with it; `/config/subscribe` streams over
-TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `gsp` pushes to an
+TLS; `--tls-cert` alone is refused), `aggregator_native_tls.rs` (a `wayhouse` pushes to an
 `https://` aggregator, read back over HTTPS), `ui_native_tls.rs` (login over HTTPS
 sets a `Secure` cookie that unlocks `/ui/session`), `admin_native_tls.rs` (an
-aggregator fans an intent verb out to an `https://` admin API; `gsp --check` names a
+aggregator fans an intent verb out to an `https://` admin API; `wayhouse --check` names a
 bad `settings.admin.tls.cert`) and `ha_tls.rs`
 `three_replicas_replicate_over_native_tls`; certificate loading, renewal and the
-listener are unit-tested in `crates/gsp-http/tests/tls_{certs,server}.rs`.
+listener are unit-tested in `crates/wayhouse-http/tests/tls_{certs,server}.rs`.
 
 ### Proxy configuration
 
@@ -323,24 +323,24 @@ server {
 > below). Check them against your proxy's version.
 
 In Kubernetes the equivalent is an Ingress (or Gateway) with TLS in front of the
-`gsp-controller` Service; make sure its response buffering and timeouts allow SSE.
+`wayhouse-controller` Service; make sure its response buffering and timeouts allow SSE.
 
 ### Pointing the clients at it
 
 Every HTTP client in the fleet uses `reqwest` with rustls and builds its requests from
 the base URL as given — no code forces a scheme — so these take an `https://` base URL:
-`gsp --controller`, `gsp --tunnel-controller-url`, `gsp-agent --controller-url`,
-`gsp-ui --controller-url` / `--aggregator-url`, `gsp-controller --parent-url`, and the
+`wayhouse --controller`, `wayhouse --tunnel-controller-url`, `wayhouse-agent --controller-url`,
+`wayhouse-ui --controller-url` / `--aggregator-url`, `wayhouse-controller --parent-url`, and the
 `parent_url` in a `POST /admin/adopt` body.
 To check it works:
 
 ```sh
 curl -fsS https://controller.example.com/healthz
-gsp --check --controller https://controller.example.com --controller-token "$TOKEN"
+wayhouse --check --controller https://controller.example.com --controller-token "$TOKEN"
 ```
 
-**Private or self-signed CA.** Every binary (`gsp`, `gsp-agent`, `gsp-controller`,
-`gsp-aggregator`, `gsp-ui`) takes `--ca-file <PATH>`: a PEM file with one or more CA
+**Private or self-signed CA.** Every binary (`wayhouse`, `wayhouse-agent`, `wayhouse-controller`,
+`wayhouse-aggregator`, `wayhouse-ui`) takes `--ca-file <PATH>`: a PEM file with one or more CA
 certificates to trust for **all** of that process's outbound HTTPS, in addition to the
 built-in Mozilla roots (it never replaces them, so public endpoints keep working).
 Non-certificate PEM sections (a private key pasted into the same file) are ignored. A
@@ -350,12 +350,12 @@ startup**: `SIGHUP` / a config reload does not re-read it, so restart the proces
 changing it (e.g. when rotating the CA).
 
 ```sh
-gsp --check --controller https://controller.internal:8443 --ca-file /etc/gsp/ca.pem
+wayhouse --check --controller https://controller.internal:8443 --ca-file /etc/wayhouse/ca.pem
 ```
 
-This exact shape — `gsp --check` against a real `gsp-controller` behind a TLS
+This exact shape — `wayhouse --check` against a real `wayhouse-controller` behind a TLS
 terminator whose certificate a private CA signed, failing without `--ca-file` and
-passing with it — is the `gsp-fleet-tests` test `ca_file.rs`, run by `make check`.
+passing with it — is the `wayhouse-fleet-tests` test `ca_file.rs`, run by `make check`.
 The two proxy snippets above are still untested.
 
 A TLS or connection failure is logged with its cause (e.g. `invalid peer certificate:
@@ -369,7 +369,7 @@ base URLs instead of `host:port` (same list on every replica), plus `--ca-file` 
 terminators' certificates come from a private CA:
 
 ```sh
-gsp-controller --listen 127.0.0.1:9901 --ha-node-id 1 --ca-file /etc/gsp/ca.pem \
+wayhouse-controller --listen 127.0.0.1:9901 --ha-node-id 1 --ca-file /etc/wayhouse/ca.pem \
   --ha-peers 1=https://ctl-1.internal:8443,2=https://ctl-2.internal:8443,3=https://ctl-3.internal:8443
 ```
 
@@ -377,7 +377,7 @@ Raft RPCs (`/raft/append`, `/raft/vote`, `/raft/snapshot`) and writes a follower
 forwards to the leader then go over HTTPS. `id=host:port` still means plain HTTP, and
 the two forms can be mixed. An entry that is not `http(s)://host[:port]` (another
 scheme, a path, a query, user info) stops the replica at startup naming the entry.
-Verified by `gsp-fleet-tests` `ha_tls.rs`: three replicas that reach each other only
+Verified by `wayhouse-fleet-tests` `ha_tls.rs`: three replicas that reach each other only
 through private-CA terminators elect a leader, forward writes and all serve the last
 one with `--ca-file`, and never elect a leader without it.
 
@@ -396,7 +396,7 @@ change to the leader. `X-Actor` is logged.
 ```sh
 # A new or replacement node always starts empty with --ha-join (never --ha-peers: a
 # node with --ha-peers calls initialize and could split the cluster).
-gsp-controller --listen 0.0.0.0:7070 --ha-node-id 4 --ha-token "$HA_TOKEN" \
+wayhouse-controller --listen 0.0.0.0:7070 --ha-node-id 4 --ha-token "$HA_TOKEN" \
   --tunnel-network 10.60.0.0/24 --ha-join
 
 curl -H "Authorization: Bearer $TOKEN" http://ctl-1:7070/admin/ha/members            # voters, learners, leader
@@ -417,7 +417,7 @@ this cluster): this keeps a node id from being pointed at another node's address
 voter, `404` unknown id, `422` removing the last voter, `503` the node is unreachable or
 there is no leader. Removing the current leader is allowed. A joined node restarts with
 `--ha-join` again. `--ha-join` and `--ha-peers` together, and `--tunnel-readdress` with
-either, are refused at startup. Verified by `gsp-fleet-tests` `ha_tunnel_addresses.rs`
+either, are refused at startup. Verified by `wayhouse-fleet-tests` `ha_tunnel_addresses.rs`
 (join, remove the leader, move a node to a new port) and `ha_snapshots.rs` (catch-up by
 snapshot after a purge).
 
@@ -475,7 +475,7 @@ leader imports exactly one node's copy, whichever node wins the first election.
   and new instances are mixed they cannot exchange membership or health, so the
   domain quorum derived from gossip is unreliable until the rollout finishes (local
   health checks keep working). Old-to-new datagrams are counted in
-  `gsp_gossip_stale_rejected_total`. Instance clocks must also agree within 30 s.
+  `wayhouse_gossip_stale_rejected_total`. Instance clocks must also agree within 30 s.
 - **The UI behind a proxy** sees plain HTTP, so its session cookie is `HttpOnly;
   SameSite=Lax` but **not** `Secure`: add it, redirect HTTP to HTTPS (and consider
   HSTS) at the proxy — or use the UI's native TLS, which sets `Secure` itself.
@@ -485,7 +485,7 @@ leader imports exactly one node's copy, whichever node wins the first election.
 ## Tunnel addressing
 
 Tunnel-internal addressing (the WireGuard-side space between proxies and origins) is
-not an open question any more: `gsp-controller --tunnel-network` allocates the
+not an open question any more: `wayhouse-controller --tunnel-network` allocates the
 addresses, so nothing here hand-picks one. See `docs/11` "Address authority".
 
 **Choosing the network.** Use an IPv6 unique local address (ULA) network by default:

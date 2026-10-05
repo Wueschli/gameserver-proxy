@@ -3,7 +3,7 @@
 # non-blocking step and renders the reports on the run page
 # (.github/scripts/trivy_summary.py). Locally the exit code is 1 if anything was
 # found, so you can tell. Run after build-images.sh (needs the
-# gsp-deploy/<t>:local images, the Docker daemon and `trivy` on PATH; CI installs
+# wayhouse-deploy/<t>:local images, the Docker daemon and `trivy` on PATH; CI installs
 # a pinned, checksum-verified release — see the deploy job).
 #
 # Reports a HIGH or CRITICAL vulnerability that has a fix available, or a secret:
@@ -38,14 +38,14 @@ scan() {
     echo "$name" >>"$out/not-scanned.txt" # an error, not findings: no report at all
   fi
 }
-for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+for t in wayhouse wayhouse-minimal wayhouse-controller wayhouse-aggregator wayhouse-ui wayhouse-agent; do
   if [ -n "${TRIVY_IMAGE_DIR:-}" ]; then
     scan "image-$t" vuln,secret image "$@" --scanners vuln,secret --input "$TRIVY_IMAGE_DIR/$t.tar"
   else
     # --image-src docker: only the image just built, never a same-named registry one.
-    scan "image-$t" vuln,secret image "$@" --image-src docker --scanners vuln,secret "gsp-deploy/$t:local"
+    scan "image-$t" vuln,secret image "$@" --image-src docker --scanners vuln,secret "wayhouse-deploy/$t:local"
   fi
 done
 scan lock-cargo vuln fs "$@" --scanners vuln Cargo.lock
-scan lock-ui-npm vuln fs "$@" --scanners vuln crates/gsp-ui/web/package-lock.json
+scan lock-ui-npm vuln fs "$@" --scanners vuln crates/wayhouse-ui/web/package-lock.json
 exit $rc

@@ -13,18 +13,18 @@ SCRIPT = os.path.join(HERE, "test_summary.py")
 
 NEXTEST_PASS = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="nextest-run" tests="2" failures="0" errors="0" uuid="u" timestamp="t" time="0.5">
-  <testsuite name="gsp-core" tests="2" disabled="0" errors="0" failures="0">
-    <testcase name="pool::tests::a" classname="gsp-core" timestamp="t" time="0.010"/>
-    <testcase name="pool::tests::b" classname="gsp-core" timestamp="t" time="0.250"/>
+  <testsuite name="wayhouse-core" tests="2" disabled="0" errors="0" failures="0">
+    <testcase name="pool::tests::a" classname="wayhouse-core" timestamp="t" time="0.010"/>
+    <testcase name="pool::tests::b" classname="wayhouse-core" timestamp="t" time="0.250"/>
   </testsuite>
 </testsuites>"""
 
 NEXTEST_FAIL = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="nextest-run" tests="3" failures="1" errors="0" time="1.0">
-  <testsuite name="gsp-config" tests="3" disabled="0" errors="0" failures="1">
-    <testcase name="ok_one" classname="gsp-config" time="0.1"/>
-    <testcase name="skipped_one" classname="gsp-config" time="0.0"><skipped/></testcase>
-    <testcase name="broken" classname="gsp-config" time="0.2">
+  <testsuite name="wayhouse-config" tests="3" disabled="0" errors="0" failures="1">
+    <testcase name="ok_one" classname="wayhouse-config" time="0.1"/>
+    <testcase name="skipped_one" classname="wayhouse-config" time="0.0"><skipped/></testcase>
+    <testcase name="broken" classname="wayhouse-config" time="0.2">
       <failure message="assertion failed: left == right" type="test failure">thread 'broken' panicked at src/lib.rs:9
 left: 1
 right: 2</failure>
@@ -68,7 +68,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("### test", out)
         self.assertIn("✅ 2 passed · 0 failed · 0 skipped", out)
-        self.assertIn("| gsp-core | 2 | 0 | 0 |", out)
+        self.assertIn("| wayhouse-core | 2 | 0 | 0 |", out)
         self.assertNotIn("Failures", out)
 
     def test_failure_is_listed_with_message_and_output(self):
@@ -76,7 +76,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(rc, 0)  # reporting never fails the job
         self.assertIn("❌ 1 passed · 1 failed · 1 skipped", out)
         self.assertIn("Failures", out)
-        self.assertIn("gsp-config::broken", out)
+        self.assertIn("wayhouse-config::broken", out)
         self.assertIn("assertion failed: left == right", out)
         self.assertIn("panicked at src/lib.rs:9", out)
         self.assertIn("captured stdout line", out)
@@ -104,7 +104,7 @@ class SummaryTests(unittest.TestCase):
         _, out = run("mixed", NEXTEST_PASS, VITEST)
         self.assertIn("✅ 4 passed · 0 failed · 0 skipped", out)
         self.assertIn("| src/App.test.tsx | 2 | 0 | 0 |", out)
-        self.assertIn("| gsp-core | 2 | 0 | 0 |", out)
+        self.assertIn("| wayhouse-core | 2 | 0 | 0 |", out)
 
     def test_missing_report_is_a_note_not_a_crash(self):
         rc, out = run("tunnel", missing=("nope.xml",))

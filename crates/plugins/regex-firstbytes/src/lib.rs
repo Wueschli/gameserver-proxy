@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: a bounded, **runtime-configured** first-bytes matcher.
+//! `wayhouse` sniffer plugin: a bounded, **runtime-configured** first-bytes matcher.
 //!
 //! As sketched in `docs/08` Phase 9 ("a generic bounded `regex-firstbytes`,
 //! keeps `regex` off the core routing path"). Since the data-plane-completion
@@ -39,7 +39,7 @@ pub const MAX_PATTERNS: usize = 32;
 /// Recognise `first` against `config` (see the module docs for the grammar).
 /// Pure and host-independent so it's unit tested directly; `sniff` below is the
 /// thin ABI wrapper the host calls.
-pub fn recognise<'a>(first: &[u8], config: &'a [u8]) -> Option<gsp_sniffer_abi::Hint<'a>> {
+pub fn recognise<'a>(first: &[u8], config: &'a [u8]) -> Option<wayhouse_sniffer_abi::Hint<'a>> {
     let config = std::str::from_utf8(config).ok()?;
     let mut segments = config.split('|').map(str::trim);
 
@@ -69,7 +69,7 @@ pub fn recognise<'a>(first: &[u8], config: &'a [u8]) -> Option<gsp_sniffer_abi::
         }
     }
 
-    matched.then_some(gsp_sniffer_abi::Hint {
+    matched.then_some(wayhouse_sniffer_abi::Hint {
         key: Some(key),
         ..Default::default()
     })
@@ -125,15 +125,15 @@ fn hex_is_prefix(hay: &[u8], hex: &str) -> Option<bool> {
 }
 
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note — the pointer/length pairs must be
+/// See `wayhouse_sniffer_abi::input`'s safety note — the pointer/length pairs must be
 /// exactly what the host passed to this export.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, cfg_ptr: u32, cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
-    let config = gsp_sniffer_abi::config(cfg_ptr, cfg_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
+    let config = wayhouse_sniffer_abi::config(cfg_ptr, cfg_len);
     match recognise(first, config) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

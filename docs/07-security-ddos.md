@@ -77,7 +77,7 @@ All steps run **before** buffer/session allocation.
 
 ## Abuse as an amplifier – checklist
 
-Guarded by `crates/gsp-core/tests/amplification.rs`:
+Guarded by `crates/wayhouse-core/tests/amplification.rs`:
 
 - [x] No reply to datagrams without an established session
       (`no_unsolicited_or_duplicated_replies`).
@@ -94,7 +94,7 @@ Guarded by `crates/gsp-core/tests/amplification.rs`:
 
 ## Sniffer plugin sandbox guarantees (phase 9)
 
-A loaded sniffer plugin (`settings.sniffers`, `crates/gsp/src/sniffer_loader.rs`)
+A loaded sniffer plugin (`settings.sniffers`, `crates/wayhouse/src/sniffer_loader.rs`)
 runs under `wasmtime` as a **core WASM module with no WASI and no host
 imports** — nothing is wired in beyond the `alloc`/`sniff` exports the plugin
 itself provides. Concretely, a plugin cannot:
@@ -119,7 +119,7 @@ can cost the process, checked every call, not just at load time:
 - **Time**: `wasmtime` epoch interruption. A dedicated ticker thread bumps
   the engine's epoch every `call_timeout_ms`; each call sets a one-tick
   deadline before running, so a call still executing at the next tick traps
-  (`gsp_sniffer_calls_total{result="timeout"}`). This is a *ceiling*, not a
+  (`wayhouse_sniffer_calls_total{result="timeout"}`). This is a *ceiling*, not a
   per-call guarantee of the full budget — a call that starts a moment before
   a tick gets whatever's left, which can legitimately be far less than
   `call_timeout_ms` (`sniffer_loader::tests::
@@ -149,10 +149,10 @@ first-party plugins in `crates/plugins/`:
 | `minecraft` | 8.9 µs | 10.2 µs | 16.9 µs | 217 µs |
 | `regex_firstbytes` | 8.3 µs | 9.1 µs | 12.0 µs | 361 µs |
 
-(Loopback numbers on the same box as `crates/gsp-bench`'s N1/N2 measurements;
+(Loopback numbers on the same box as `crates/wayhouse-bench`'s N1/N2 measurements;
 2000 calls/plugin after warmup. Reproduce with `make plugins` then
-`cargo test -p gsp --release wasm_boundary -- --ignored --nocapture` in
-`crates/gsp/src/sniffer_loader.rs`.) All three pass N1 with wide margin — a
+`cargo test -p wayhouse --release wasm_boundary -- --ignored --nocapture` in
+`crates/wayhouse/src/sniffer_loader.rs`.) All three pass N1 with wide margin — a
 fresh per-call `Store`/`Instance` (the "no state survives between
 connections" design from slice 3) turned out cheap enough on this hardware
 that the `InstancePre` / pooling-allocator / warm-instance-per-worker

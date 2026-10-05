@@ -1,0 +1,31 @@
+[package]
+name = "wayhouse-fleet-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# This crate holds no library code of its own — it exists purely to drive
+# real `wayhouse` + `wayhouse-controller` + `wayhouse-aggregator` + `wayhouse-ui` *binaries* as
+# separate processes from `tests/`, the way a human verified each phase
+# 10+11 slice live (see HANDOVER.md). Everything here is dev/test-only, but
+# lives in `[dependencies]` (not `[dev-dependencies]`) because the helper
+# module in `src/lib.rs` is itself only ever consumed by this crate's own
+# `tests/`, never by another workspace member.
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "io-std"] }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+tokio-rustls = { workspace = true }
+nix = { workspace = true, features = ["sched"] }
+
+[lib]
+test = false
+doctest = false

@@ -1,0 +1,26 @@
+# Lets wayhouse's `kubernetes` backend sources read EndpointSlices (docs/05). The Role
+# lives in the namespace the source's `namespace:` names (`games` here; edit it,
+# and create it, to match). One RoleBinding per watched namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: wayhouse, namespace: wayhouse }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: wayhouse-endpointslices, namespace: games }
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    # list: the poll and the watch's starting point; watch: instant updates
+    # (without it wayhouse still converges on refresh_interval_sec).
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: wayhouse-endpointslices, namespace: games }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wayhouse-endpointslices
+subjects:
+  - { kind: ServiceAccount, name: wayhouse, namespace: wayhouse }

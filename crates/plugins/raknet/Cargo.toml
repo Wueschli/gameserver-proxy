@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "gsp sniffer plugin: recognises RakNet offline-handshake packets (Minecraft Bedrock and other RakNet games)."
+description = "wayhouse sniffer plugin: recognises RakNet offline-handshake packets (Minecraft Bedrock and other RakNet games)."
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }

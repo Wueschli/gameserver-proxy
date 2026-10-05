@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "gsp sniffer plugin template: a bounded first-bytes pattern matcher."
+description = "wayhouse sniffer plugin template: a bounded first-bytes pattern matcher."
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }

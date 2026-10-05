@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gsp-config",
-    "crates/gsp-core",
-    "crates/gsp",
-    "crates/gsp-bench",
-    "crates/gsp-controller",
-    "crates/gsp-aggregator",
-    "crates/gsp-ui",
-    "crates/gsp-agent",
-    "crates/gsp-fleet-tests",
-    "crates/gsp-http",
+    "crates/wayhouse-config",
+    "crates/wayhouse-core",
+    "crates/wayhouse",
+    "crates/wayhouse-bench",
+    "crates/wayhouse-controller",
+    "crates/wayhouse-aggregator",
+    "crates/wayhouse-ui",
+    "crates/wayhouse-agent",
+    "crates/wayhouse-fleet-tests",
+    "crates/wayhouse-http",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Wueschli/gameserver-proxy"
+repository = "https://github.com/wayhouse-proxy/wayhouse"
 
 [workspace.dependencies]
 tokio = { version = "1", features = [
@@ -66,15 +66,15 @@ wat = "1"
 sha2 = "0.10"
 sled = "0.34"
 tempfile = "3"
-gsp-http = { path = "crates/gsp-http", default-features = false }
-# Native TLS servers (gsp-http's `server` feature) and the test TLS terminator in
-# gsp-fleet-tests; same ring provider reqwest uses.
+wayhouse-http = { path = "crates/wayhouse-http", default-features = false }
+# Native TLS servers (wayhouse-http's `server` feature) and the test TLS terminator in
+# wayhouse-fleet-tests; same ring provider reqwest uses.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-stream = "0.1"
 similar = "2"
 rand = "0.8"
-# Phase 14 backend transport (docs/11): used by both `gsp-agent` (the
-# origin-side agent) and `gsp` itself (slice 4's proxy-side reconcile task),
+# Phase 14 backend transport (docs/11): used by both `wayhouse-agent` (the
+# origin-side agent) and `wayhouse` itself (slice 4's proxy-side reconcile task),
 # so — unlike a single-crate dependency such as `foca`/`openraft` — this one
 # earns a shared workspace entry rather than two independently-pinned copies.
 defguard_wireguard_rs = "0.12"

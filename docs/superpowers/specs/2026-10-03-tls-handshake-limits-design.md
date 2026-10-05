@@ -1,8 +1,8 @@
 # TLS handshake flood limits — design
 
 Date: 2026-10-03. Closes the "Native TLS — handshake flood" half of the HANDOVER
-follow-up row. Scope: `gsp_http::tls::TlsListener`, so every fleet HTTP server that
-serves native TLS (controller, aggregator, UI, `gsp`'s admin API) gets it at once.
+follow-up row. Scope: `wayhouse_http::tls::TlsListener`, so every fleet HTTP server that
+serves native TLS (controller, aggregator, UI, `wayhouse`'s admin API) gets it at once.
 
 ## Problem
 
@@ -57,7 +57,7 @@ listener.
 ## Testing
 
 Unit tests for source keys and the admission bookkeeping (per-source refusal,
-eviction order, release). Integration tests in `crates/gsp-http/tests/tls_server.rs`
+eviction order, release). Integration tests in `crates/wayhouse-http/tests/tls_server.rs`
 over loopback with tiny limits: an over-cap source is closed while another source
 (`127.0.0.2`) still gets in; at the global cap the oldest idle connection is closed
 and a real client still succeeds; a silent client is dropped at the ClientHello
@@ -66,5 +66,5 @@ deadline, not the full timeout; a finished handshake frees its slot.
 ## Not done
 
 Rate limiting new connections per source (a source can still cycle connects); flags
-for the limits; metrics (`gsp-http` has no metrics registry — the binaries don't
+for the limits; metrics (`wayhouse-http` has no metrics registry — the binaries don't
 share one).

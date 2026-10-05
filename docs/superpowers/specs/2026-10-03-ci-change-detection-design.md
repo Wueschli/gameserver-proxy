@@ -6,9 +6,9 @@ Date: 2026-10-03. Follow-up row "CI: precise change detection" in `HANDOVER.md`.
 
 `.github/scripts/changes.sh` decided which path-scoped CI jobs run with hand-written
 regexes listing crate directories per job. They drift as crates gain dependencies: a crate
-that starts depending on `gsp-core` would not run the jobs `gsp-core` changes run until
-someone edits the regex. They were also coarser than the graph: a `crates/gsp-config/fuzz/`
-change ran `plugins` and `tunnel` (it is under `crates/gsp-config/`), and the root
+that starts depending on `wayhouse-core` would not run the jobs `wayhouse-core` changes run until
+someone edits the regex. They were also coarser than the graph: a `crates/wayhouse-config/fuzz/`
+change ran `plugins` and `tunnel` (it is under `crates/wayhouse-config/`), and the root
 `Cargo.lock` ran `fuzz`, whose workspace has its own lockfile.
 
 ## Design
@@ -18,16 +18,16 @@ same interface: changed files on stdin, `--all`, `<area>=true|false` lines on st
 
 - **Graph.** `cargo metadata --no-deps --format-version 1` for every workspace in the repo
   (found from the tracked `Cargo.toml` files, shallowest first: root, `crates/plugins`,
-  `crates/gsp-config/fuzz`). Each package is keyed by its directory, with the directories of
+  `crates/wayhouse-config/fuzz`). Each package is keyed by its directory, with the directories of
   its path dependencies (all kinds: normal, dev, build). `--no-deps` resolves nothing and
   downloads nothing.
 - **Ownership.** A changed file belongs to the package with the longest directory prefix
-  holding it. `crates/gsp-ui/web/` (a standalone npm project) belongs to none. A nested
+  holding it. `crates/wayhouse-ui/web/` (a standalone npm project) belongs to none. A nested
   workspace's own files (`crates/plugins/Cargo.toml`, `README.md`) belong to all its members.
   A workspace's `Cargo.lock` hits only that workspace's members, not dependents elsewhere.
-- **Jobs.** `ROOTS` lists what each Rust job builds or tests — `plugins`: `gsp` and every
-  package under `crates/plugins/`; `tunnel`: the five binaries and `gsp-fleet-tests`;
-  `fuzz`: `gsp-config-fuzz`. A job runs when a changed package, or any package depending on
+- **Jobs.** `ROOTS` lists what each Rust job builds or tests — `plugins`: `wayhouse` and every
+  package under `crates/plugins/`; `tunnel`: the five binaries and `wayhouse-fleet-tests`;
+  `fuzz`: `wayhouse-config-fuzz`. A job runs when a changed package, or any package depending on
   one transitively, is in its roots. Non-Cargo paths stay explicit (`EXTRA`): `ui`'s web dir,
   `deploy`'s paths (unchanged), `Makefile` for `tunnel`, `.config/` (nextest's `ci` profile)
   for `plugins` and `tunnel`. `release` = `plugins` or `deploy`, as before.
@@ -43,8 +43,8 @@ same interface: changed files on stdin, `--all`, `<area>=true|false` lines on st
   broken detector is visible rather than silently expensive.
 
 Known blind spot: files one crate reads from another crate's directory at compile or test
-time (`include_bytes!`, fixtures). Today that is only `gsp-fleet-tests` reading `gsp-http`'s
-test fixtures, and `gsp-http` is already in every job `gsp-fleet-tests` is in.
+time (`include_bytes!`, fixtures). Today that is only `wayhouse-fleet-tests` reading `wayhouse-http`'s
+test fixtures, and `wayhouse-http` is already in every job `wayhouse-fleet-tests` is in.
 
 ## Testing
 
@@ -59,4 +59,4 @@ cargo serves `cargo metadata` without installing `rust-toolchain.toml`'s compone
 ## Out of scope
 
 Narrowing a root `Cargo.lock` change by diffing the lockfile (nearly every real bump reaches
-`gsp` anyway); running `deploy` on binary source changes (a cost decision, unchanged).
+`wayhouse` anyway); running `deploy` on binary source changes (a cost decision, unchanged).

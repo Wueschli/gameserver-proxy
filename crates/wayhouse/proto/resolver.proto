@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// The external routing resolver contract. The proxy calls Resolve once per
+// pending connection / UDP session; the service returns which pool (or fixed
+// target) to use. Absent optional values are the empty string / 0.
+package wayhouse.resolver.v1;
+
+message ResolveRequest {
+  string listener = 1;
+  string src = 2;          // "ip:port"
+  string dst = 3;          // "ip:port" the client connected to
+  string sni = 4;          // TLS SNI, if any
+  bytes  first_bytes = 5;  // peeked first bytes (bounded)
+  string routing_key = 6;  // sniffer / caller-supplied key, if any
+}
+
+message Resolution {
+  string pool = 1;         // route to this pool (normal load balancing)
+  string target = 2;       // OR route straight to this "ip:port"
+  string sticky_key = 3;   // remember the decision by this key
+  uint32 ttl_sec = 4;      // positive cache TTL hint
+}
+
+service Resolver {
+  rpc Resolve(ResolveRequest) returns (Resolution);
+}

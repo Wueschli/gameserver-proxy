@@ -1,59 +1,59 @@
 # Control-plane demo: controller + aggregator + ui on a bridge network, one
-# gsp (host networking, docs/12's default for an edge process) that pulls its
+# wayhouse (host networking, docs/12's default for an edge process) that pulls its
 # config from the controller and pushes state to the aggregator.
 # Tokens come from .env; `${VAR:?}` refuses to start if one is unset.
 # NB: tokens appear in `docker inspect` — fine for a demo; use Docker/K8s
 # secrets in production.
-name: gsp-demo
+name: wayhouse-demo
 
 x-build: &build
   context: ../..
   dockerfile: deploy/Dockerfile
   args:
     BIN_SOURCE: ${BIN_SOURCE:-builder}   # `prebuilt` = binaries from deploy/prebuilt (CI)
-    GSP_GIT_SHA: ${GSP_GIT_SHA:-}   # shown as commit= in gsp_build_info (builder only)
+    WAYHOUSE_GIT_SHA: ${WAYHOUSE_GIT_SHA:-}   # shown as commit= in wayhouse_build_info (builder only)
 
 services:
   controller:
-    build: { <<: *build, target: gsp-controller }
-    image: gsp-deploy/gsp-controller:local
+    build: { <<: *build, target: wayhouse-controller }
+    image: wayhouse-deploy/wayhouse-controller:local
     command:
       - --listen=0.0.0.0:9901
       - --data-dir=/data
-      - --auth-token=${GSP_CONTROLLER_TOKEN:?set GSP_CONTROLLER_TOKEN in .env}
-    ports: ["127.0.0.1:9901:9901"]   # gsp (host network) dials it here
+      - --auth-token=${WAYHOUSE_CONTROLLER_TOKEN:?set WAYHOUSE_CONTROLLER_TOKEN in .env}
+    ports: ["127.0.0.1:9901:9901"]   # wayhouse (host network) dials it here
     volumes: ["controller-data:/data"]
     restart: unless-stopped
 
   aggregator:
-    build: { <<: *build, target: gsp-aggregator }
-    image: gsp-deploy/gsp-aggregator:local
+    build: { <<: *build, target: wayhouse-aggregator }
+    image: wayhouse-deploy/wayhouse-aggregator:local
     command:
       - --listen=0.0.0.0:9902
-      - --auth-token=${GSP_AGGREGATOR_TOKEN:?set GSP_AGGREGATOR_TOKEN in .env}
-      # gsp pushes with this one; it cannot read or drive /fleet/*.
-      - --ingest-token=${GSP_INGEST_TOKEN:?set GSP_INGEST_TOKEN in .env}
-      # gsp (host network) reports http://127.0.0.1:9900, which is not the
+      - --auth-token=${WAYHOUSE_AGGREGATOR_TOKEN:?set WAYHOUSE_AGGREGATOR_TOKEN in .env}
+      # wayhouse pushes with this one; it cannot read or drive /fleet/*.
+      - --ingest-token=${WAYHOUSE_INGEST_TOKEN:?set WAYHOUSE_INGEST_TOKEN in .env}
+      # wayhouse (host network) reports http://127.0.0.1:9900, which is not the
       # address the aggregator sees it connect from (the bridge gateway).
       - --instance-url-allow=127.0.0.0/8
     ports: ["127.0.0.1:9902:9902"]
     restart: unless-stopped
 
   ui:
-    build: { <<: *build, target: gsp-ui }
-    image: gsp-deploy/gsp-ui:local
+    build: { <<: *build, target: wayhouse-ui }
+    image: wayhouse-deploy/wayhouse-ui:local
     command:
       - --listen=0.0.0.0:9903
-      - --ui-password=${GSP_UI_PASSWORD:?set GSP_UI_PASSWORD in .env}
+      - --ui-password=${WAYHOUSE_UI_PASSWORD:?set WAYHOUSE_UI_PASSWORD in .env}
       - --controller-url=http://controller:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --aggregator-url=http://aggregator:9902
-      - --aggregator-token=${GSP_AGGREGATOR_TOKEN}
+      - --aggregator-token=${WAYHOUSE_AGGREGATOR_TOKEN}
     ports: ["127.0.0.1:9903:9903"]
     depends_on: [controller, aggregator]
     restart: unless-stopped
 
-  # One-shot: write revision 1 so `gsp --controller` has something to fetch
+  # One-shot: write revision 1 so `wayhouse --controller` has something to fetch
   # (it exits at startup against an empty controller).
   seed:
     image: curlimages/curl:8.11.1
@@ -68,24 +68,24 @@ services:
       - -X
       - POST
       - -H
-      - "Authorization: Bearer ${GSP_CONTROLLER_TOKEN}"
+      - "Authorization: Bearer ${WAYHOUSE_CONTROLLER_TOKEN}"
       - --data-binary
-      - "@/gsp.yaml"
+      - "@/wayhouse.yaml"
       - http://controller:9901/config
-    volumes: ["./gsp.yaml:/gsp.yaml:ro"]
+    volumes: ["./wayhouse.yaml:/wayhouse.yaml:ro"]
     depends_on: [controller]
     restart: "no"
 
-  gsp:
-    build: { <<: *build, target: gsp }
-    image: gsp-deploy/gsp:local
+  wayhouse:
+    build: { <<: *build, target: wayhouse }
+    image: wayhouse-deploy/wayhouse:local
     network_mode: host
     command:
       - --controller=http://127.0.0.1:9901
-      - --controller-token=${GSP_CONTROLLER_TOKEN}
+      - --controller-token=${WAYHOUSE_CONTROLLER_TOKEN}
       - --aggregator=http://127.0.0.1:9902
-      - --aggregator-token=${GSP_INGEST_TOKEN}
-      - --aggregator-instance=demo-gsp
+      - --aggregator-token=${WAYHOUSE_INGEST_TOKEN}
+      - --aggregator-instance=demo-wayhouse
     depends_on:
       seed: { condition: service_completed_successfully }
       aggregator: { condition: service_started }

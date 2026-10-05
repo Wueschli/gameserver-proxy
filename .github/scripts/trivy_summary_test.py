@@ -19,7 +19,7 @@ def report(name, results):
 
 CLEAN = report("Cargo.lock", [{"Target": "Cargo.lock", "Type": "cargo"}])
 DIRTY = report(
-    "gsp-deploy/gsp:local",
+    "wayhouse-deploy/wayhouse:local",
     [
         {
             "Target": "Cargo.lock",
@@ -46,7 +46,7 @@ DIRTY = report(
     ],
 )
 SECRET = report(
-    "gsp-deploy/gsp-ui:local",
+    "wayhouse-deploy/wayhouse-ui:local",
     [
         {
             "Target": "/web/key.pem",
@@ -103,16 +103,16 @@ class Summary(unittest.TestCase):
         self.assertEqual(rc, 0)
         lines = [l for l in out.splitlines() if l.startswith("::warning")]
         self.assertEqual(len(lines), 2, out)
-        self.assertTrue(any("gsp-deploy/gsp:local" in l and "2 " in l for l in lines), out)
+        self.assertTrue(any("wayhouse-deploy/wayhouse:local" in l and "2 " in l for l in lines), out)
 
     def test_a_target_that_failed_to_scan_is_listed(self):
-        rc, out = run([CLEAN], not_scanned=["image-gsp-ui"])
+        rc, out = run([CLEAN], not_scanned=["image-wayhouse-ui"])
         self.assertEqual(rc, 0)
         self.assertIn("Not scanned", out)
-        self.assertIn("image-gsp-ui", out)
-        rc, out = run([CLEAN], "--annotations", not_scanned=["image-gsp-ui"])
+        self.assertIn("image-wayhouse-ui", out)
+        rc, out = run([CLEAN], "--annotations", not_scanned=["image-wayhouse-ui"])
         self.assertIn("::warning", out)
-        self.assertIn("image-gsp-ui", out)
+        self.assertIn("image-wayhouse-ui", out)
 
     def test_no_annotations_when_clean(self):
         rc, out = run([CLEAN], "--annotations")

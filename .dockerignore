@@ -1,6 +1,6 @@
 .git
 **/target
 **/node_modules
-crates/gsp-ui/web/dist
-gsp-controller-data
+crates/wayhouse-ui/web/dist
+wayhouse-controller-data
 .env

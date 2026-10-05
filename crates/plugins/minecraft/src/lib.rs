@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: the "virtual host" a Minecraft client dials.
+//! `wayhouse` sniffer plugin: the "virtual host" a Minecraft client dials.
 //!
 //! Since protocol 1.7, a Minecraft client's very first packet is a
 //! Handshake: `[VarInt length][VarInt packet id = 0x00][VarInt protocol
@@ -29,7 +29,7 @@ fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
 /// Parse the handshake and pull out the server-address string. Pure and
 /// host-independent so it's unit tested directly; `sniff` below is the thin
 /// ABI wrapper the host actually calls.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     let mut pos = 0usize;
 
     let (_packet_len, n) = read_varint(&first[pos..])?;
@@ -74,7 +74,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     // its whole linear memory) is torn down by the host right after `sniff`
     // returns.
     let host: &'static str = Box::leak(host.to_ascii_lowercase().into_boxed_str());
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         host: Some(host),
         ..Default::default()
     })
@@ -83,14 +83,14 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// Virtual-host extraction needs no config — the `cfg_*` params are ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note — the pointer/length pairs must be
+/// See `wayhouse_sniffer_abi::input`'s safety note — the pointer/length pairs must be
 /// exactly what the host passed to this export.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

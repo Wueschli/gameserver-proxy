@@ -162,7 +162,7 @@ the hot path**. In brief:
   operator intent (the phase-5 overlay, admin state, route hints). Instances
   **pull** revisions and feed them through the same `validate() → Snapshot::build
   → ArcSwap::store` path a file reload uses. Written by a new optional
-  `gsp-controller`, which also aggregates fleet reads and hosts the GUI + auth.
+  `wayhouse-controller`, which also aggregates fleet reads and hosts the GUI + auth.
 - **Tier 2** — a per-failure-domain gossip fabric for observed backend
   reachability. Advisory and rebuildable: each instance's own checks still
   decide, with the domain quorum as weighted input.

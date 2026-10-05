@@ -1,0 +1,23 @@
+[package]
+name = "wayhouse-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "wayhouse-bench"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+wayhouse-config = { path = "../wayhouse-config" }
+wayhouse-core = { path = "../wayhouse-core" }
+
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+socket2.workspace = true

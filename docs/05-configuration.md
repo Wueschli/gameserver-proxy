@@ -17,7 +17,7 @@
 ## Schema (reference)
 
 > **Implemented subset (roadmap phase 2 + phase 3 routing, partial).**
-> `gsp-config` currently accepts a reduced, flatter schema: `pools[].targets`
+> `wayhouse-config` currently accepts a reduced, flatter schema: `pools[].targets`
 > or a `pools[].source` naming a `backend_sources[]` entry
 > (`static` / `dns_srv` / `consul` / `kubernetes` / `tunnel`, flat fields,
 > `refresh_interval_sec`); `balancer: round_robin | least_conn | consistent_hash
@@ -76,7 +76,7 @@
 > response `ttl_sec` overrides `positive_ttl_sec`; a request missing a key part
 > bypasses the cache. For `type: grpc` the `endpoint` is an `http://host:port`
 > URI and the contract is `proto/resolver.proto`
-> (`gsp.resolver.v1.Resolver/Resolve`).
+> (`wayhouse.resolver.v1.Resolver/Resolve`).
 >
 > **Push resolver:** `POST /route-hint` (admin API) with
 > `{ "src_ip": "...", "pool": "...", "ttl_sec": 30 }` records a short-lived
@@ -96,7 +96,7 @@
 > `deny` is checked first and wins; a non-empty `allow` makes the listener
 > default-deny for any source it does not cover. A blocked connection / new UDP
 > session is dropped silently (no error reply — no reflection) and counted by
-> `gsp_filter_blocked_total{listener,filter="acl"}`. Established UDP sessions are
+> `wayhouse_filter_blocked_total{listener,filter="acl"}`. Established UDP sessions are
 > not re-checked per datagram. `allow` / `deny` are compiled to a radix trie, so
 > large block lists (bogons + a threat feed) match in bounded time.
 >
@@ -106,14 +106,14 @@
 > `burst` the bucket capacity (defaults to `rate`). `per_net` aggregates by the
 > client's /24 (IPv4) or /64 (IPv6). A permit is taken only when every configured
 > bucket can afford it; excess is dropped silently and counted by
-> `gsp_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
+> `wayhouse_filter_blocked_total{listener,filter="rate_ip"|"rate_net"}`. Bucket state
 > is per proxy instance (size it per node behind anycast HA).
 >
 > **Per-source concurrent cap:** `per_source: { max_per_ip, max_per_net }` (at
 > least one) bounds how many connections / UDP sessions are *live at once* from
 > one client IP / one /24 (v4) / /64 (v6) — where `rate_limit` bounds the *rate*
 > of new ones. Checked after `rate_limit`, before allocation; over the cap ⇒
-> silent drop + `gsp_filter_blocked_total{listener,filter="src_conn_ip"|"src_conn_net"}`.
+> silent drop + `wayhouse_filter_blocked_total{listener,filter="src_conn_ip"|"src_conn_net"}`.
 > The slot is released when the connection closes / the UDP session idles out.
 >
 > **GeoIP filter:** `geo: { allow: [CC], deny: [CC] }` on a listener (ISO 3166-1
@@ -124,7 +124,7 @@
 > path to a MaxMind Country `.mmdb` (e.g. MaxMind's free GeoLite2-Country);
 > `--check` and startup fail if it can't be opened, and a listener whose DB
 > somehow isn't loaded fails closed. Blocked ⇒
-> `gsp_filter_blocked_total{listener,filter="geo"}`. Startup-only, like
+> `wayhouse_filter_blocked_total{listener,filter="geo"}`. Startup-only, like
 > `settings.workers`.
 >
 > **Sniffer plugin loader** (phase 9; config schema slice 2, the `wasmtime`
@@ -150,7 +150,7 @@
 > `settings.workers`). Modules within an already-configured `dir` can also be
 > managed over HTTP: `GET/POST /admin/sniffers` + `DELETE
 > /admin/sniffers/{name}` on the instance's own admin API (`409` if
-> `settings.sniffers` is absent), fanned out fleet-wide via `gsp-aggregator`'s
+> `settings.sniffers` is absent), fanned out fleet-wide via `wayhouse-aggregator`'s
 > `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
 > see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
 >
@@ -175,7 +175,7 @@
 >
 > **Fleet grouping:** `settings.group` (optional string) is this instance's
 > self-reported organization path — e.g. `"eu/frankfurt/cluster-a"` — pushed
-> to gsp-aggregator alongside its `IngestPayload` so the admin GUI can render
+> to wayhouse-aggregator alongside its `IngestPayload` so the admin GUI can render
 > a grouped/tree fleet view. `/`-separated, non-empty segments, no
 > leading/trailing `/`; `validate()` rejects anything else. Purely a display
 > label — never consulted by routing/forwarding, and independent of
@@ -189,7 +189,7 @@
 > new connections **and** new UDP sessions combined. A new connection / session
 > that would breach a cap is dropped before it is allocated (existing ones keep
 > running) and counted by
-> `gsp_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
+> `wayhouse_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
 > Startup-only, like `settings.workers`.
 >
 > **UDP first-packet gate:** `first_packet_gate: true` on a UDP listener makes it
@@ -198,7 +198,7 @@
 > that matches the datagram. Applied before the `route_hint` lookup (a spoofable
 > `src_ip` hint must not bypass it). Unrecognised datagrams are dropped with no
 > session and no reply, counted by
-> `gsp_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
+> `wayhouse_datagrams_dropped_total{reason="first_packet_gate"}`. Requires at least
 > one `first_bytes` route or a `sniffer` (else it would drop everything).
 >
 > A UDP session reads the routed pool's `idle_timeout_sec` once when it is
@@ -216,13 +216,13 @@
 > auth, same as always. A single shared secret, not RBAC/mTLS — appropriate
 > for gating a control-plane API that's meant to stay behind its own network
 > boundary regardless; needed once something calls in from outside that
-> boundary, which today means `gsp-aggregator`'s intent-verb fan-out
+> boundary, which today means `wayhouse-aggregator`'s intent-verb fan-out
 > (`docs/10` "The aggregator"), given the same token to present.
 >
 > **Admin API TLS** (2026-10-02): `settings.admin.tls: { cert, key }` (PEM chain,
 > leaf first; PEM private key — both required) serves the admin API over HTTPS.
 > Startup-only like `listen`; the files are re-read every 30 s, so a renewed
-> certificate needs no restart. `gsp --check` loads the pair; errors name
+> certificate needs no restart. `wayhouse --check` loads the pair; errors name
 > `settings.admin.tls.cert`/`.key`.
 > Optional keys under `tls` bound the TLS handshakes: `max_pending` (512),
 > `max_pending_per_source` (16), `new_per_source_per_sec` (20; `0` = no rate limit),
@@ -293,7 +293,7 @@ backend_sources:
     refresh_interval_sec: 10
   - name: home-origin
     type: tunnel               # phase 14 (built) — the `tunnel` BackendSource.
-                                # Resolves backend addresses a `gsp-agent`-managed
+                                # Resolves backend addresses a `wayhouse-agent`-managed
                                 # origin behind a WireGuard tunnel has registered
                                 # with the controller's backend-peers registry.
     pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # origin's WG pubkey
@@ -426,7 +426,7 @@ selected by the `kubernetes.io/service-name` label) and merges them: ready
 endpoints only (an unset `ready` counts as ready), duplicates across slices
 collapsed, `FQDN` slices skipped, and a slice without the wanted port ignored.
 Its service account needs `list` and `watch` on `endpointslices` in the
-namespace; [`deploy/k8s/45-gsp-rbac.yaml`](../deploy/k8s/45-gsp-rbac.yaml) is a
+namespace; [`deploy/k8s/45-wayhouse-rbac.yaml`](../deploy/k8s/45-wayhouse-rbac.yaml) is a
 ready-made Role. Without `watch` the source logs one warning per outage and keeps
 converging on the poll interval, so a missing grant slows updates but never breaks
 discovery. The watch resumes from the version of the last list and reopens itself

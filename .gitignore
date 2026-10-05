@@ -3,23 +3,23 @@
 *.pdb
 .env
 
-# gsp-controller's default --data-dir when run from the repo root during
+# wayhouse-controller's default --data-dir when run from the repo root during
 # manual/local smoke testing.
-/gsp-controller-data
+/wayhouse-controller-data
 
-# gsp-ui's frontend build artifacts (`make ui`) — never checked in, just
-# built locally / in CI before running gsp-ui with --static-dir.
-crates/gsp-ui/web/node_modules
-crates/gsp-ui/web/dist
-crates/gsp-ui/web/*.tsbuildinfo
-crates/gsp-ui/web/test-results
-crates/gsp-ui/web/playwright-report
+# wayhouse-ui's frontend build artifacts (`make ui`) — never checked in, just
+# built locally / in CI before running wayhouse-ui with --static-dir.
+crates/wayhouse-ui/web/node_modules
+crates/wayhouse-ui/web/dist
+crates/wayhouse-ui/web/*.tsbuildinfo
+crates/wayhouse-ui/web/test-results
+crates/wayhouse-ui/web/playwright-report
 
 # binaries staged for `BIN_SOURCE=prebuilt` image builds (CI)
 deploy/prebuilt/
 
 # test reports (vitest --reporter=junit; CI renders them on the run page)
-crates/gsp-ui/web/junit.xml
+crates/wayhouse-ui/web/junit.xml
 
 # superpowers skills' scratch (ledgers, briefs, review packages)
 .superpowers/

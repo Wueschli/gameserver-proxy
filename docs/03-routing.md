@@ -33,13 +33,13 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > `IP_PKTINFO` / `IPV6_RECVPKTINFO` serves the whole routed prefix (scheme A
 > below): the real per-datagram destination feeds `dst`, replies go out from
 > that address, and datagrams outside the prefix are dropped
-> (`gsp_datagrams_dropped_total{reason="outside_prefix"}`). The sniffer **seam**
-> is `gsp_core::sniff::Sniffer` → `RouteHint { host, key, reject }`, fed into
+> (`wayhouse_datagrams_dropped_total{reason="outside_prefix"}`). The sniffer **seam**
+> is `wayhouse_core::sniff::Sniffer` → `RouteHint { host, key, reject }`, fed into
 > routing before matchers run — a `reject` hint drops the connection / datagram
 > outright (`result="sniffer_reject"` / `reason="sniffer_reject"`); loading real
 > sniffers (sandboxed, from a separate repo) is Phase 9. The **push resolver** (`POST /route-hint`) is implemented:
 > a listener with `route_hint: true` checks a short-lived `src_ip → pool` table
-> before its route list (`gsp_route_hints_applied_total{listener}` counts hits).
+> before its route list (`wayhouse_route_hints_applied_total{listener}` counts hits).
 > The **external resolver** (`action: { resolver: <name> }`, `resolvers:`
 > section) is implemented — **phase 4 slices 1–4**: HTTP **and gRPC** transports
 > (`type: http | grpc`), `pool` **and `target`** results (`target` = connect
@@ -70,8 +70,8 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
    match (routing then falls through to non-sniffer routes such as `always`) —
    and a `sniffer` route only matches the sniffer it names. A `RouteHint { reject: true }` **drops the connection / datagram
    immediately** (before the push-resolver hint, so a spoofable `src_ip` hint
-   cannot override it); TCP `gsp_listener_connections_total{result="sniffer_reject"}`,
-   UDP `gsp_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A
+   cannot override it); TCP `wayhouse_listener_connections_total{result="sniffer_reject"}`,
+   UDP `wayhouse_datagrams_dropped_total{reason="sniffer_reject"}` and no reply. A
    non-`reject` hint is carried into route matching.
 4. **Push-resolver hint** – if the listener has `route_hint: true` and a live
    `src_ip → pool` entry exists (from `POST /route-hint`) whose pool still

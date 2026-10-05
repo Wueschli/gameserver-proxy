@@ -4,7 +4,7 @@
 github/codeql-action/upload-sarif takes the whole target/trivy directory, but
 GitHub rejects an upload whose runs share one tool + category, and every Trivy
 report is a "Trivy" run. This stamps `automationDetails.id` with the report's
-name (image-gsp, lock-cargo, ...), so each report is its own category and a
+name (image-wayhouse, lock-cargo, ...), so each report is its own category and a
 later upload replaces only that report's alerts.
 
 Usage: sarif_categories.py <report-dir>   (rewrites *.sarif in place)

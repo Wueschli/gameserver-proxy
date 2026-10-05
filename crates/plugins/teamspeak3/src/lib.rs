@@ -1,4 +1,4 @@
-//! `gsp` sniffer plugin: the TeamSpeak 3 voice server's init packet.
+//! `wayhouse` sniffer plugin: the TeamSpeak 3 voice server's init packet.
 //!
 //! A TeamSpeak 3 client opens its UDP handshake with an *init* packet whose
 //! 8-byte MAC field is the literal `TS3INIT1`:
@@ -27,7 +27,7 @@ const STEP_AT: usize = 17;
 const MIN_LEN: usize = STEP_AT + 1;
 
 /// Recognise a TeamSpeak 3 init step 0 packet in `first`.
-pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
+pub fn recognise(first: &[u8]) -> Option<wayhouse_sniffer_abi::Hint<'static>> {
     if first.len() < MIN_LEN
         || first[..MAGIC.len()] != *MAGIC
         || first[FLAGS_AT] != FLAGS_INIT
@@ -35,7 +35,7 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     {
         return None;
     }
-    Some(gsp_sniffer_abi::Hint {
+    Some(wayhouse_sniffer_abi::Hint {
         key: Some("teamspeak3"),
         ..Default::default()
     })
@@ -44,13 +44,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
 /// A fixed structural check: no config, `cfg_*` ignored.
 ///
 /// # Safety
-/// See `gsp_sniffer_abi::input`'s safety note.
+/// See `wayhouse_sniffer_abi::input`'s safety note.
 #[no_mangle]
 pub unsafe extern "C" fn sniff(in_ptr: u32, in_len: u32, _cfg_ptr: u32, _cfg_len: u32) -> i64 {
-    let first = gsp_sniffer_abi::input(in_ptr, in_len);
+    let first = wayhouse_sniffer_abi::input(in_ptr, in_len);
     match recognise(first) {
-        Some(hint) => gsp_sniffer_abi::emit_hint(&hint),
-        None => gsp_sniffer_abi::NOT_RECOGNISED,
+        Some(hint) => wayhouse_sniffer_abi::emit_hint(&hint),
+        None => wayhouse_sniffer_abi::NOT_RECOGNISED,
     }
 }
 

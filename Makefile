@@ -21,12 +21,12 @@ lint:
 test:
 	cargo test --all
 
-## test-minimal: the minimal edge build of gsp (all optional cargo features off, issue #62)
+## test-minimal: the minimal edge build of wayhouse (all optional cargo features off, issue #62)
 test-minimal:
-	cargo clippy -p gsp --no-default-features --all-targets -- -D warnings
-	cargo test -p gsp --no-default-features
-	cargo clippy -p gsp-core --no-default-features --all-targets -- -D warnings
-	cargo test -p gsp-core --no-default-features
+	cargo clippy -p wayhouse --no-default-features --all-targets -- -D warnings
+	cargo test -p wayhouse --no-default-features
+	cargo clippy -p wayhouse-core --no-default-features --all-targets -- -D warnings
+	cargo test -p wayhouse-core --no-default-features
 
 ## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
 audit:
@@ -38,17 +38,17 @@ build:
 
 ## run: run the proxy against the example config
 run:
-	cargo run -p gsp -- --config config.example.yaml
+	cargo run -p wayhouse -- --config config.example.yaml
 
-## bench: latency / load harness vs. the NFR N1/N2 targets (see crates/gsp-bench)
+## bench: latency / load harness vs. the NFR N1/N2 targets (see crates/wayhouse-bench)
 BENCH_ARGS ?=
 bench:
-	cargo run --release -p gsp-bench -- $(BENCH_ARGS)
+	cargo run --release -p wayhouse-bench -- $(BENCH_ARGS)
 
-## fuzz: short pass of each gsp-config fuzz target (needs nightly + cargo-fuzz)
+## fuzz: short pass of each wayhouse-config fuzz target (needs nightly + cargo-fuzz)
 FUZZ_TIME ?= 60
 fuzz:
-	cd crates/gsp-config && for t in extract_sni route_match parse_config; do \
+	cd crates/wayhouse-config && for t in extract_sni route_match parse_config; do \
 		echo "--- fuzz $$t ($(FUZZ_TIME)s) ---"; \
 		mkdir -p fuzz/corpus/$$t; \
 		cargo +nightly fuzz run $$t fuzz/corpus/$$t fuzz/seeds/$$t -- -max_total_time=$(FUZZ_TIME) || exit 1; \
@@ -61,17 +61,17 @@ plugins:
 	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
 	@echo "built:" crates/plugins/target/wasm32-unknown-unknown/release/*.wasm
 
-## ui: build the gsp-ui frontend (needs Node/npm) — output gsp-ui serves via --static-dir
+## ui: build the wayhouse-ui frontend (needs Node/npm) — output wayhouse-ui serves via --static-dir
 ui:
-	cd crates/gsp-ui/web && npm install && npm run build
+	cd crates/wayhouse-ui/web && npm install && npm run build
 
-## ui-test: run the gsp-ui frontend tests (vitest + Testing Library; needs Node/npm)
+## ui-test: run the wayhouse-ui frontend tests (vitest + Testing Library; needs Node/npm)
 ui-test:
-	cd crates/gsp-ui/web && npm install && npm test
+	cd crates/wayhouse-ui/web && npm install && npm test
 
-## ui-e2e: run the gsp-ui Playwright browser tests against the built UI (backend stubbed; first run: npx playwright install chromium)
+## ui-e2e: run the wayhouse-ui Playwright browser tests against the built UI (backend stubbed; first run: npx playwright install chromium)
 ui-e2e:
-	cd crates/gsp-ui/web && npm install && npm run test:e2e
+	cd crates/wayhouse-ui/web && npm install && npm run test:e2e
 
 # Rootless when not already root: a user+net+mount namespace gives us
 # CAP_NET_ADMIN inside it. `--kill-child` reaps everything if we die.
@@ -96,16 +96,16 @@ tunnel-ns-check:
 ## namespaces (TUNNEL_BACKEND=kernel|userspace, default kernel); see
 ## docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md
 tunnel-e2e: tunnel-ns-check
-	cargo build -p gsp -p gsp-agent -p gsp-controller
-	cargo test -p gsp-fleet-tests --test tunnel --no-run
-	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
+	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller
+	cargo test -p wayhouse-fleet-tests --test tunnel --no-run
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p wayhouse-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## tunnel-e2e-ci: tunnel-e2e under cargo-nextest, writing a JUnit report for the CI run
 ## summary (needs cargo-nextest; `make tunnel-e2e` stays on plain cargo test)
 tunnel-e2e-ci: tunnel-ns-check
-	cargo build -p gsp -p gsp-agent -p gsp-controller
-	cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
-	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
+	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller
+	cargo nextest run -p wayhouse-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
+	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p wayhouse-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
 
 ## deploy-images: build the five deploy/ images and run --version on each (needs Docker)
 deploy-images:
@@ -119,14 +119,14 @@ deploy-scan:
 deploy-lint:
 	sh deploy/lint.sh
 
-# Own project name so `down -v` can never touch a hand-run demo (gsp-demo).
-DEPLOY_COMPOSE := docker compose -p gsp-smoke --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml
+# Own project name so `down -v` can never touch a hand-run demo (wayhouse-demo).
+DEPLOY_COMPOSE := docker compose -p wayhouse-smoke --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml
 
 ## deploy-smoke: build + start deploy/compose, run deploy/smoke.sh, tear down (needs Docker)
 deploy-smoke:
 	test -f deploy/compose/.env || cp deploy/compose/.env.example deploy/compose/.env
 	rc=0; \
-	sha="$${GSP_GIT_SHA:-$$(git rev-parse HEAD 2>/dev/null)}"; export GSP_GIT_SHA=$$(printf %.12s "$$sha"); \
+	sha="$${WAYHOUSE_GIT_SHA:-$$(git rev-parse HEAD 2>/dev/null)}"; export WAYHOUSE_GIT_SHA=$$(printf %.12s "$$sha"); \
 	$(DEPLOY_COMPOSE) up -d --build && sh deploy/smoke.sh || rc=$$?; \
 	[ $$rc -eq 0 ] || $(DEPLOY_COMPOSE) logs; \
 	$(DEPLOY_COMPOSE) down -v; \
