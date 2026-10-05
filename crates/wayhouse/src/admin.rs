@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
@@ -35,7 +35,17 @@ struct AdminState {
     /// still startup-only; see `sniffers_disabled`).
     sniffers_dir: Option<PathBuf>,
     sniffers: std::sync::Arc<Sniffers>,
+    /// The live `settings.sniffers.modules` pins (follows reloads), so an
+    /// upload the next rescan would reject never reaches the disk.
+    sniffer_pins: SnifferPins,
+    /// Vets an uploaded module before it is written. `None` when this build or
+    /// instance cannot load sniffers at all.
+    sniffer_validator: Option<SnifferValidator>,
 }
+
+pub type SnifferPins =
+    std::sync::Arc<dyn Fn() -> Vec<wayhouse_config::SnifferModulePin> + Send + Sync>;
+pub type SnifferValidator = std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 
 /// The admin API route table. Split out from [`serve`] so integration tests can
 /// mount it on their own ephemeral listener. `/healthz` alone stays outside
@@ -56,7 +66,14 @@ fn router(state: AdminState) -> Router {
         .route("/admin/drain", post(drain))
         .route("/admin/undrain", post(undrain))
         .route("/route-hint", post(route_hint))
-        .route("/admin/sniffers", get(list_sniffers).post(upload_sniffer))
+        .route(
+            "/admin/sniffers",
+            get(list_sniffers)
+                .post(upload_sniffer)
+                .layer(DefaultBodyLimit::max(
+                    crate::sniffer_loader::MAX_MODULE_BYTES,
+                )),
+        )
         .route("/admin/sniffers/{name}", delete(delete_sniffer))
         .route_layer(middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref())
@@ -86,6 +103,7 @@ pub fn handshake_limits(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // flat wiring of independent `main.rs` inputs
 pub async fn serve(
     addr: SocketAddr,
     tls: Option<(
@@ -97,6 +115,8 @@ pub async fn serve(
     auth_token: Option<String>,
     sniffers_dir: Option<PathBuf>,
     sniffers: std::sync::Arc<Sniffers>,
+    sniffer_pins: SnifferPins,
+    sniffer_validator: Option<SnifferValidator>,
 ) {
     let app = router(AdminState {
         runtime,
@@ -104,6 +124,8 @@ pub async fn serve(
         auth_token,
         sniffers_dir,
         sniffers,
+        sniffer_pins,
+        sniffer_validator,
     });
 
     // HTTPS with `settings.admin.tls`, plain HTTP otherwise. A bind failure
@@ -521,20 +543,23 @@ async fn list_sniffers(State(s): State<AdminState>) -> Response {
     Json(out).into_response()
 }
 
-/// `POST /admin/sniffers?name=<module>` — uploads a `.wasm` module's raw
-/// bytes into `settings.sniffers.dir/<name>.wasm`, then requests a reload so
-/// `SnifferLoader::scan` (already rescanned live on every reload, phase 9
-/// slice 4) picks it up — the same hot mechanism `POST /pools/{pool}/backends`
-/// uses for the runtime overlay, not a second one. If `settings.sniffers.
-/// modules` pins hashes on this instance, an upload under an unpinned name
-/// loads the file but the *next* scan then rejects the whole registry
-/// update per the existing pin-enforcement rule in `sniffer_loader.rs` —
-/// updating the pin list itself is a config change, out of scope for this
-/// endpoint.
+/// `POST /admin/sniffers?name=<module>` — validates a `.wasm` module's raw
+/// bytes (a loadable sniffer module within `MAX_MODULE_BYTES`; else `400`, or
+/// `413` past the body limit), checks them against `settings.sniffers.modules`
+/// pins when the instance has any (else `409`, because the next rescan would
+/// reject the file and a stray unpinned file makes the next startup fatal),
+/// then writes `settings.sniffers.dir/<name>.wasm` atomically (temp file +
+/// rename) and requests a reload so `SnifferLoader::scan` picks it up — the
+/// same hot mechanism `POST /pools/{pool}/backends` uses for the runtime
+/// overlay. Nothing is written when any check fails. Updating the pin list
+/// itself is a config change, out of scope for this endpoint.
 #[derive(Deserialize)]
 struct SnifferUploadQuery {
     name: String,
 }
+
+/// Uniquifies upload temp files so concurrent uploads never share one.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 async fn upload_sniffer(
     State(s): State<AdminState>,
@@ -551,8 +576,56 @@ async fn upload_sniffer(
         )
             .into_response();
     }
+    let Some(validator) = s.sniffer_validator.clone() else {
+        return sniffers_disabled();
+    };
+    let bytes = body.clone();
+    // Compiling a module is CPU work; keep it off the async workers.
+    let verdict = tokio::task::spawn_blocking(move || validator(&bytes)).await;
+    match verdict {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid sniffer module: {e}\n"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("validating the module: {e}\n"),
+            )
+                .into_response()
+        }
+    }
+    let pins = (s.sniffer_pins)();
+    if !pins.is_empty() {
+        let digest = format!("{:x}", Sha256::digest(&body));
+        let refusal = match pins.iter().find(|p| p.name == q.name) {
+            Some(p) if p.sha256 == digest => None,
+            Some(p) => Some(format!(
+                "pinned: {} must have sha256 {}, the upload has {digest}\n",
+                q.name, p.sha256
+            )),
+            None => Some(format!(
+                "pinned: {} is not listed in settings.sniffers.modules (upload sha256 {digest})\n",
+                q.name
+            )),
+        };
+        if let Some(msg) = refusal {
+            return (StatusCode::CONFLICT, msg).into_response();
+        }
+    }
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        q.name,
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let path = dir.join(format!("{}.wasm", q.name));
-    if let Err(e) = std::fs::write(&path, &body) {
+    let written = std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("writing {}: {e}\n", path.display()),
@@ -639,6 +712,8 @@ mod tests {
             auth_token: auth_token.map(str::to_string),
             sniffers_dir,
             sniffers: std::sync::Arc::new(wayhouse_core::sniff::Sniffers::default()),
+            sniffer_pins: std::sync::Arc::new(Vec::new),
+            sniffer_validator: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -863,82 +938,272 @@ mod tests {
         assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
     }
 
-    #[tokio::test]
-    async fn upload_list_and_delete_a_sniffer_module_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "wayhouse-admin-sniffer-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
-                    listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
-        let (base, _runtime) = spawn_admin_full(yaml, None, Some(dir.clone())).await;
-        let http = reqwest::Client::new();
+    #[cfg(feature = "wasm-sniffers")]
+    mod sniffer_upload {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use wayhouse_config::SnifferModulePin;
 
-        // Nothing uploaded yet.
-        let list: Vec<SnifferInfo> = http
-            .get(format!("{base}/admin/sniffers"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert!(list.is_empty());
+        const YAML: &str = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+                            listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
 
-        // Reject a path-traversal-shaped name before touching the filesystem.
-        let r = http
-            .post(format!("{base}/admin/sniffers?name=../evil"))
-            .body(vec![1u8, 2, 3])
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+        const MODULE_WAT: &str = r#"(module
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
 
-        // A real upload lands on disk and shows up in the listing.
-        let bytes = vec![0u8, 1, 2, 3, 4];
-        let r = http
-            .post(format!("{base}/admin/sniffers?name=demo"))
-            .body(bytes.clone())
-            .send()
-            .await
-            .unwrap();
-        assert!(r.status().is_success());
-        assert!(dir.join("demo.wasm").is_file());
+        fn module() -> Vec<u8> {
+            wat::parse_str(MODULE_WAT).unwrap()
+        }
 
-        let list: Vec<SnifferInfo> = http
-            .get(format!("{base}/admin/sniffers"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "demo");
-        assert_eq!(list[0].size_bytes, bytes.len() as u64);
-        // Not a real wasm module, so the registry never actually loaded it —
-        // `loaded` reports the live registry's state, not just file presence.
-        assert!(!list[0].loaded);
+        /// A valid module padded with a custom section to `total` bytes.
+        fn module_padded_to(total: usize) -> Vec<u8> {
+            let mut m = module();
+            let name = b"pad";
+            let payload = total - m.len() - 1 - 5 - 1 - name.len();
+            // section id 0, LEB128 size (5 bytes), name len, name, payload
+            let size = 1 + name.len() + payload;
+            m.push(0);
+            let mut n = size as u32;
+            for k in 0..5 {
+                let mut b = (n & 0x7f) as u8;
+                n >>= 7;
+                if k < 4 {
+                    b |= 0x80;
+                }
+                m.push(b);
+            }
+            m.push(name.len() as u8);
+            m.extend_from_slice(name);
+            m.extend(std::iter::repeat_n(0u8, payload));
+            assert_eq!(m.len(), total);
+            m
+        }
 
-        // Delete removes the file.
-        let r = http
-            .delete(format!("{base}/admin/sniffers/demo"))
-            .send()
-            .await
-            .unwrap();
-        assert!(r.status().is_success());
-        assert!(!dir.join("demo.wasm").exists());
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "wayhouse-admin-sniffer-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
 
-        // Deleting again is a clean 404, not a panic.
-        let r = http
-            .delete(format!("{base}/admin/sniffers/demo"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+        async fn spawn(
+            dir: &std::path::Path,
+            pins: Arc<Mutex<Vec<SnifferModulePin>>>,
+        ) -> (String, Runtime) {
+            let cfg = wayhouse_config::parse_str(YAML).unwrap();
+            let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+            let loader = Arc::new(
+                crate::sniffer_loader::SnifferLoader::new(Duration::from_millis(50)).unwrap(),
+            );
+            let app = router(AdminState {
+                runtime: runtime.handle(),
+                prometheus: PrometheusBuilder::new().build_recorder().handle(),
+                auth_token: None,
+                sniffers_dir: Some(dir.to_path_buf()),
+                sniffers: Arc::new(wayhouse_core::sniff::Sniffers::default()),
+                sniffer_pins: Arc::new(move || pins.lock().unwrap().clone()),
+                sniffer_validator: Some(Arc::new(move |b: &[u8]| {
+                    loader.validate(b, 1 << 20).map_err(|e| e.to_string())
+                })),
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            (format!("http://{addr}"), runtime)
+        }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        async fn post(base: &str, name: &str, body: Vec<u8>) -> reqwest::Response {
+            reqwest::Client::new()
+                .post(format!("{base}/admin/sniffers?name={name}"))
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+
+        fn no_pins() -> Arc<Mutex<Vec<SnifferModulePin>>> {
+            Arc::default()
+        }
+
+        fn pin(name: &str, bytes: &[u8]) -> SnifferModulePin {
+            SnifferModulePin {
+                name: name.into(),
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                config: None,
+            }
+        }
+
+        fn dir_is_empty(dir: &std::path::Path) -> bool {
+            std::fs::read_dir(dir).unwrap().next().is_none()
+        }
+
+        #[tokio::test]
+        async fn upload_list_and_delete_a_sniffer_module_round_trips() {
+            let dir = scratch("roundtrip");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let http = reqwest::Client::new();
+            let list = |base: String| async move {
+                reqwest::get(format!("{base}/admin/sniffers"))
+                    .await
+                    .unwrap()
+                    .json::<Vec<SnifferInfo>>()
+                    .await
+                    .unwrap()
+            };
+            assert!(list(base.clone()).await.is_empty());
+
+            // Reject a path-traversal-shaped name before touching the filesystem.
+            let r = post(&base, "..%2Fevil", module()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+
+            let bytes = module();
+            let r = post(&base, "demo", bytes.clone()).await;
+            assert!(r.status().is_success());
+            assert!(dir.join("demo.wasm").is_file());
+            let l = list(base.clone()).await;
+            assert_eq!(l.len(), 1);
+            assert_eq!(l[0].name, "demo");
+            assert_eq!(l[0].size_bytes, bytes.len() as u64);
+
+            let r = http
+                .delete(format!("{base}/admin/sniffers/demo"))
+                .send()
+                .await
+                .unwrap();
+            assert!(r.status().is_success());
+            assert!(!dir.join("demo.wasm").exists());
+            let r = http
+                .delete(format!("{base}/admin/sniffers/demo"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn upload_rejects_garbage_with_400_and_writes_nothing() {
+            let dir = scratch("garbage");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = post(&base, "junk", b"not wasm".to_vec()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(r.text().await.unwrap().contains("invalid sniffer module"));
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_rejects_truncated_module_with_400() {
+            let dir = scratch("truncated");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let mut m = module();
+            m.truncate(m.len() - 3);
+            let r = post(&base, "cut", m).await;
+            assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_rejects_empty_body() {
+            let dir = scratch("empty");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = post(&base, "nothing", Vec::new()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_rejects_oversize_with_413() {
+            let dir = scratch("oversize");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = post(
+                &base,
+                "big",
+                vec![0u8; crate::sniffer_loader::MAX_MODULE_BYTES + 1],
+            )
+            .await;
+            assert_eq!(r.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_accepts_valid_module_larger_than_2mib() {
+            let dir = scratch("big-ok");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = post(&base, "big", module_padded_to(3 << 20)).await;
+            assert!(r.status().is_success(), "{}", r.status());
+            assert_eq!(
+                std::fs::metadata(dir.join("big.wasm")).unwrap().len(),
+                3 << 20
+            );
+        }
+
+        #[tokio::test]
+        async fn upload_writes_via_rename_and_leaves_no_tmp_file() {
+            let dir = scratch("atomic");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let (a, b) = tokio::join!(
+                post(&base, "same", module_padded_to(1 << 20)),
+                post(&base, "same", module_padded_to(2 << 20)),
+            );
+            assert!(a.status().is_success() && b.status().is_success());
+            let names: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["same.wasm"], "no tmp file may remain");
+            let len = std::fs::metadata(dir.join("same.wasm")).unwrap().len();
+            assert!(len == 1 << 20 || len == 2 << 20, "whole file, got {len}");
+        }
+
+        #[tokio::test]
+        async fn upload_to_pinned_instance_with_other_hash_is_409_and_writes_nothing() {
+            let dir = scratch("pin-mismatch");
+            let pins = Arc::new(Mutex::new(vec![pin("demo", b"something else")]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            let r = post(&base, "demo", module()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+            assert!(r.text().await.unwrap().contains("pinned"));
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_unpinned_name_on_pinned_instance_is_409_and_writes_nothing() {
+            let dir = scratch("pin-unlisted");
+            let pins = Arc::new(Mutex::new(vec![pin("other", &module())]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            let r = post(&base, "demo", module()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn upload_matching_pin_is_accepted() {
+            let dir = scratch("pin-ok");
+            let pins = Arc::new(Mutex::new(vec![pin("demo", &module())]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            let r = post(&base, "demo", module()).await;
+            assert!(r.status().is_success());
+            assert!(dir.join("demo.wasm").is_file());
+        }
+
+        #[tokio::test]
+        async fn pin_check_uses_live_pins_after_reload() {
+            let dir = scratch("pin-live");
+            let pins = no_pins();
+            let (base, _rt) = spawn(&dir, pins.clone()).await;
+            assert!(post(&base, "a", module()).await.status().is_success());
+            pins.lock().unwrap().push(pin("zzz", b"x"));
+            let r = post(&base, "b", module()).await;
+            assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+            assert!(!dir.join("b.wasm").exists());
+        }
     }
 }

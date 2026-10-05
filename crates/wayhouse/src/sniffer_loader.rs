@@ -299,7 +299,10 @@ impl SnifferLoader {
 
     /// The module pins of the latest scan (empty: no pinning).
     pub fn pins(&self) -> Vec<SnifferModulePin> {
-        self.pins.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Check that `bytes` is a module this loader would accept: within
@@ -379,7 +382,10 @@ impl SnifferLoader {
     /// string, if any, is baked onto its `WasmSniffer` here and handed to the
     /// guest on every `sniff` call.
     pub fn scan(&self, cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
-        *self.pins.lock().unwrap_or_else(|e| e.into_inner()) = cfg.modules.clone();
+        *self
+            .pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg.modules.clone();
         let mut modules = HashMap::new();
         let entries = fs::read_dir(&cfg.dir)
             .with_context(|| format!("settings.sniffers.dir {:?}", cfg.dir))?;
