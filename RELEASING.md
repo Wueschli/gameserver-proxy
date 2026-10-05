@@ -63,15 +63,16 @@ Nothing changes until a trigger fires. Then:
 - **`release.yml`**: the "Tagged commit is on main" step accepts a commit on the matching
   release branch. Derive the branch from the tag and replace the single ancestor check:
 
-  ```sh
-  MAJOR_MINOR=$(echo "${TAG#v}" | cut -d. -f1,2)   # v0.3.2 -> 0.3
-  git merge-base --is-ancestor "$SHA" origin/main ||
-    git merge-base --is-ancestor "$SHA" "origin/release/${MAJOR_MINOR}" ||
-    { echo "::error::$SHA is on neither main nor release/${MAJOR_MINOR}"; exit 1; }
-  ```
+    ```sh
+    MAJOR_MINOR=$(echo "${TAG#v}" | cut -d. -f1,2)   # v0.3.2 -> 0.3
+    git merge-base --is-ancestor "$SHA" origin/main ||
+      git merge-base --is-ancestor "$SHA" "origin/release/${MAJOR_MINOR}" ||
+      { echo "::error::$SHA is on neither main nor release/${MAJOR_MINOR}"; exit 1; }
+    ```
 
-  The job already checks out with `fetch-depth: 0`; make sure the release branches are
-  fetched too.
+    The job already checks out with `fetch-depth: 0`; make sure the release branches are
+    fetched too.
+
 - **Branch protection**: `ruleset-main.json` is duplicated for `release/*`, with the same
   single `ci-ok` requirement, no force push and no deletion.
 - **`ci.yml`**: the `push` branch filter becomes `[main, "release/**"]`. The `pull_request`

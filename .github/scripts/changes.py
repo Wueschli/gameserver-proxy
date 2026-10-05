@@ -180,6 +180,8 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
     files = [f for f in files if f]
     if any(f.startswith(".github/") for f in files):
         return {a: True for a in AREAS}
+    # Documentation builds and scans nothing, even under a scoped dir (deploy/README.md).
+    files = [f for f in files if not DOCS_ONLY.search(f)]
     out = {a: any(rx.search(f) for f in files) for a, rx in EXTRA.items()}
     rustwide = any(RUSTWIDE.search(f) for f in files)
     changed: Set[str] = set()
@@ -201,6 +203,17 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
     return {a: out.get(a, False) for a in AREAS}
 
 
+# What the `docs` CI job (Prettier and the link check) depends on. The Makefile holds the
+# Prettier pin. `.prettierrc.json` and `.prettierignore` are not in DOCS_ONLY on purpose:
+# they are config, so a PR touching only them also runs the code jobs.
+DOCS_JOB = re.compile(r"\.md$|^\.prettier(rc\.json|ignore)$|^Makefile$|^\.github/")
+
+
+def is_docs(files: List[str]) -> bool:
+    """True when a changed file is Markdown or the tooling that checks it."""
+    return any(f and DOCS_JOB.search(f) for f in files)
+
+
 def is_code(files: List[str]) -> bool:
     """False when every changed file is documentation (or the list is empty)."""
     return any(f and not DOCS_ONLY.search(f) for f in files)
@@ -209,20 +222,22 @@ def is_code(files: List[str]) -> bool:
 def main(argv, stdin, stdout, stderr, loader=load_graph) -> None:
     if "--all" in argv:
         result = {a: True for a in AREAS}
-        code = True
+        code = docs = True
     else:
         files = stdin.read().splitlines()
         code = is_code(files)
+        docs = is_docs(files)
         try:
             result = areas(files, loader(os.getcwd()))
         except MetadataError as e:
             # A GitHub annotation, so a broken detector isn't just a silently full run.
             print(f"::warning title=change detection::{e}; running every job", file=stderr)
             result = {a: True for a in AREAS}
-            code = True
+            code = docs = True
     for a in AREAS:
         print(f"{a}={'true' if result[a] else 'false'}", file=stdout)
     print(f"code={'true' if code else 'false'}", file=stdout)
+    print(f"docs={'true' if docs else 'false'}", file=stdout)
 
 
 if __name__ == "__main__":

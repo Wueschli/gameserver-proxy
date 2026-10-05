@@ -1,4 +1,5 @@
 > [!CAUTION]
+>
 > ## 🚧 Work in progress: not finished, not production-ready 🚧
 >
 > This project is under active development and is **definitely not finished yet**.
@@ -36,13 +37,29 @@ examples) or from an external routing service you control.
 
 ## Contents
 
+- [How it fits together](#how-it-fits-together)
 - [Features](#features)
 - [Quick start](#quick-start)
-- [Workspace layout](#workspace-layout)
 - [Documentation](#documentation)
 - [Project status](#project-status)
 - [Contributing](#contributing)
 - [License](#license)
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    P[Players] -->|TCP / UDP| W["wayhouse<br/>(proxy)"]
+    W --> B1[Game server A]
+    W --> B2[Game server B]
+    C["wayhouse-controller<br/>(optional)"] -. config .-> W
+    W -. state .-> A["wayhouse-aggregator<br/>(optional)"]
+    U["wayhouse-ui<br/>(admin GUI)"] --> C
+    U --> A
+```
+
+One `wayhouse` binary is all you need. The controller, aggregator and GUI add central
+configuration and fleet-wide operation once you run more than one proxy.
 
 ## Features
 
@@ -151,64 +168,40 @@ examples) or from an external routing service you control.
 
 ## Quick start
 
-You need a stable Rust toolchain (the repo pins `stable` in `rust-toolchain.toml`)
-and `protoc`, because the gRPC resolver client is generated at build time
-(`apt install protobuf-compiler` or `brew install protobuf`).
+Until the first release you build from source. You need a Rust toolchain (the repo pins
+`stable` in `rust-toolchain.toml`) and `protoc`, because the gRPC resolver client is
+generated at build time (`apt install protobuf-compiler` or `brew install protobuf`).
+
+<!-- install: filled by the rc.1 plan -->
 
 ```sh
 git clone https://github.com/wayhouse-proxy/wayhouse.git
 cd wayhouse
 
-make check                                                 # fmt check + clippy (-D warnings) + tests
-cargo run -p wayhouse -- --config config.example.yaml --check   # validate a config only
-make run                                                   # run the proxy against config.example.yaml
+# validate the example config, then run the proxy with it
+cargo run --release -p wayhouse -- --config config.example.yaml --check
+cargo run --release -p wayhouse -- --config config.example.yaml
 ```
 
-[`config.example.yaml`](config.example.yaml) is the annotated reference config; the
-full schema is in [docs/05-configuration.md](docs/05-configuration.md).
+[`config.example.yaml`](config.example.yaml) is the annotated reference config. Copy it
+and point the listeners at your own backends; the full schema is in
+[docs/05-configuration.md](docs/05-configuration.md). Edit the file or send `SIGHUP`
+(`kill -HUP <pid>`) to reload it without dropping connections.
 
 The admin API listens on `127.0.0.1:9900` by default:
 
-| Method | Endpoints |
-|--------|-----------|
-| `GET` | `/healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions` |
-| `POST` | `/route-hint` `/admin/drain` `/admin/undrain` `/pools/{pool}/backends` |
-| `PATCH` | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`) |
-| `DELETE` | `/pools/{pool}/backends/{addr}` |
+| Method   | Endpoints                                                                 |
+| -------- | ------------------------------------------------------------------------- |
+| `GET`    | `/healthz` `/readyz` `/metrics` `/pools` `/config` `/sessions`            |
+| `POST`   | `/route-hint` `/admin/drain` `/admin/undrain` `/pools/{pool}/backends`    |
+| `PATCH`  | `/pools/{pool}/backends/{addr}` (set `enabled` / `draining` / `disabled`) |
+| `DELETE` | `/pools/{pool}/backends/{addr}`                                           |
 
 Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
-Other useful targets:
-
-```sh
-make bench     # latency / load harness against the NFR N1/N2 budgets
-make fuzz      # parser fuzz targets (needs nightly + cargo-fuzz)
-make plugins   # build the WASM sniffer plugins (needs the wasm32-unknown-unknown target)
-make ui        # build the admin GUI frontend (needs Node/npm)
-make help      # list every target
-```
-
-Container images (six targets in one `Dockerfile`), a Docker Compose demo
-and plain Kubernetes manifests live in [`deploy/`](deploy/). Pushing a `vX.Y.Z` tag
-publishes multi-arch (linux/amd64 + linux/arm64) images to `ghcr.io/wayhouse-proxy/<name>` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
-`wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`) via the `Release` workflow. The compose
-demo and the manifests are reference material only.
-
-## Workspace layout
-
-| Crate | Responsibility |
-|-------|----------------|
-| [`crates/wayhouse-config`](crates/wayhouse-config) | YAML config types, parsing and validation |
-| [`crates/wayhouse-core`](crates/wayhouse-core) | Data plane: config snapshot, backend pools, TCP and UDP listeners, byte pump, UDP session tables |
-| [`crates/wayhouse`](crates/wayhouse) | The proxy binary: CLI, logging, admin API, controller/aggregator/tunnel clients, process lifecycle |
-| [`crates/wayhouse-controller`](crates/wayhouse-controller) | Config and operator-intent distribution (revision store, SSE, Raft HA, canary rollout, peer registries) |
-| [`crates/wayhouse-aggregator`](crates/wayhouse-aggregator) | Fleet-state fan-in (`POST /ingest`, `GET /fleet/*`) and intent fan-out |
-| [`crates/wayhouse-ui`](crates/wayhouse-ui) | Admin GUI backend-for-frontend plus the React/Vite/TS frontend in `web/` |
-| [`crates/wayhouse-agent`](crates/wayhouse-agent) | Origin-side WireGuard agent |
-| [`crates/wayhouse-http`](crates/wayhouse-http) | Shared HTTP client and TLS server helpers |
-| [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries |
-| [`crates/wayhouse-bench`](crates/wayhouse-bench) | Latency / load harness |
-| [`crates/plugins`](crates/plugins) | First-party WASM sniffer plugins (standalone workspace) |
+Container images (six targets in one `Dockerfile`), a Docker Compose demo and plain
+Kubernetes manifests live in [`deploy/`](deploy/); they are reference material, not a
+supported deployment. Sniffer plugins are described in [`crates/plugins`](crates/plugins).
 
 ## Documentation
 
@@ -216,21 +209,21 @@ The design documents in [`docs/`](docs/) are the source of truth for how the pro
 meant to work. Start with the overview and the architecture chapter; the rest can be
 read as needed. See [docs/README.md](docs/README.md) for a guided index.
 
-| Document | Contents |
-|----------|----------|
-| [00 Overview](docs/00-overview.md) | Goals, non-goals, use cases, glossary |
-| [01 Requirements](docs/01-requirements.md) | Functional and non-functional requirements |
-| [02 Architecture](docs/02-architecture.md) | Components, data plane / control plane, data flows |
-| [03 Routing](docs/03-routing.md) | Routing strategies in detail |
-| [04 Transport and client IP](docs/04-transport-and-client-ip.md) | TCP/UDP handling, client-IP preservation, PROXY protocol |
-| [05 Configuration](docs/05-configuration.md) | Configuration schema and examples |
-| [06 Operations and observability](docs/06-operations-observability.md) | Metrics, logging, health checks, draining, fleet endpoints |
-| [07 Security and DDoS](docs/07-security-ddos.md) | Rate limiting, ACLs, DDoS mitigation |
-| [08 Roadmap](docs/08-roadmap.md) | Phased implementation and milestones |
-| [09 Technology choices](docs/09-technology-choices.md) | Language, libraries, alternatives, decision records |
-| [10 Distributed control plane](docs/10-distributed-control-plane.md) | Controller, aggregator, admin GUI, regional health |
-| [11 Backend transport](docs/11-backend-transport.md) | WireGuard transport for origins on other networks |
-| [12 Deployment](docs/12-deployment.md) | Container images and many-port proxies under Docker/Kubernetes |
+| Document                                                               | Contents                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------- |
+| [00 Overview](docs/00-overview.md)                                     | Goals, non-goals, use cases, glossary                          |
+| [01 Requirements](docs/01-requirements.md)                             | Functional and non-functional requirements                     |
+| [02 Architecture](docs/02-architecture.md)                             | Components, data plane / control plane, data flows             |
+| [03 Routing](docs/03-routing.md)                                       | Routing strategies in detail                                   |
+| [04 Transport and client IP](docs/04-transport-and-client-ip.md)       | TCP/UDP handling, client-IP preservation, PROXY protocol       |
+| [05 Configuration](docs/05-configuration.md)                           | Configuration schema and examples                              |
+| [06 Operations and observability](docs/06-operations-observability.md) | Metrics, logging, health checks, draining, fleet endpoints     |
+| [07 Security and DDoS](docs/07-security-ddos.md)                       | Rate limiting, ACLs, DDoS mitigation                           |
+| [08 Roadmap](docs/08-roadmap.md)                                       | Phased implementation and milestones                           |
+| [09 Technology choices](docs/09-technology-choices.md)                 | Language, libraries, alternatives, decision records            |
+| [10 Distributed control plane](docs/10-distributed-control-plane.md)   | Controller, aggregator, admin GUI, regional health             |
+| [11 Backend transport](docs/11-backend-transport.md)                   | WireGuard transport for origins on other networks              |
+| [12 Deployment](docs/12-deployment.md)                                 | Container images and many-port proxies under Docker/Kubernetes |
 
 ## Project status
 
@@ -244,19 +237,9 @@ Open follow-ups, known limitations and decisions still pending live in
 
 ## Contributing
 
-This is a personal project in an early state, so there is no formal contribution
-process yet. Issues and ideas are welcome.
-
-The repository keeps its working notes in the open:
-
-- [`AGENTS.md`](AGENTS.md) is the working agreement (layout, commands, guardrails,
-  "when you touch X, also touch Y"). It doubles as the contributor reference.
-- [`HANDOVER.md`](HANDOVER.md) is the current state, locked decisions and what is
-  deferred or next.
-- [`docs/superpowers/`](docs/superpowers/) holds the per-feature design specs and
-  implementation plans written before each larger change.
-
-Run `make check` before sending changes.
+Issues and ideas are welcome. To build, test and open a pull request, read
+[`CONTRIBUTING.md`](CONTRIBUTING.md). How releases are cut is in
+[`RELEASING.md`](RELEASING.md).
 
 ## License
 

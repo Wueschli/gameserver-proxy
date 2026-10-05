@@ -2,7 +2,8 @@
 
 Guidance for any AI coding agent working in this repository, following the
 [agents.md](https://agents.md) convention.
-Humans: this doubles as the contributor quick-reference.
+Humans: start with [`CONTRIBUTING.md`](CONTRIBUTING.md); this file is the agent working agreement
+and the full command table.
 
 Tool-specific entry points (e.g. `CLAUDE.md`) are thin pointers to this file — keep
 the guidance here, not in them.
@@ -170,6 +171,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
 | wayhouse-ui frontend | `make ui` (needs Node/npm; builds `crates/wayhouse-ui/web/` to `dist/`, served by `wayhouse-ui --static-dir`; see `crates/wayhouse-ui/web/README.md`) |
 | wayhouse-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
+| Markdown | `make docs-fmt` (Prettier, writes) / `make docs-fmt-check` and `make docs-links` (relative links and anchors); both checks are the `docs` CI job. AGENTS.md, HANDOVER.md and `docs/NN-*.md` are in `.prettierignore` for now |
 | Run | `cargo run -p wayhouse -- --config config.example.yaml` |
 | Validate a config | `cargo run -p wayhouse -- --config <file> --check` |
 | Reload a running proxy | edit the config file, or `kill -HUP <pid>` |
@@ -270,6 +272,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
+| Release or version change | `RELEASING.md`, `CONTRIBUTING.md` (conventions), `deploy/README.md` |
 
 ---
 

@@ -298,15 +298,9 @@ than here. Where the items that used to live here went:
 
 ## Workflow gotcha: run `cargo fmt --all` as its own step before `make check`
 
-CI once failed a `cargo fmt --all --check` even though `make check` had reportedly
-passed locally, because `cargo fmt --all` was run early in the session and more
-code was `Edit`ed in afterwards. `--check` (which `make check` runs) only
-*reports* diffs and exits non-zero — it never rewrites the file. So:
-
-**Immediately before every `make check` / commit, run `cargo fmt --all` (the
-writing form, no `--check`) as its own step** — never assume an earlier fmt pass
-covers later edits. Piping `make check` through `tail` also hides an early
-`fmt-check` failure message; check the exit code or read from the top.
+`make check` only reports formatting diffs, so an earlier fmt pass does not cover later edits.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md#build-and-test). Piping `make check` through `tail` hides
+an early `fmt-check` failure; read from the top or check the exit code.
 
 ---
 

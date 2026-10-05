@@ -36,6 +36,12 @@ class RealRepo(unittest.TestCase):
     def test_docs_only_changes_nothing(self):
         self.assertEqual(self.areas("README.md", "docs/12-deployment.md"), set())
 
+    def test_markdown_under_a_scoped_dir_changes_nothing(self):
+        # deploy/README.md matches the `^deploy/` rule but builds and scans nothing.
+        self.assertEqual(self.areas("deploy/README.md"), set())
+        self.assertEqual(self.areas("crates/wayhouse-ui/web/README.md"), set())
+        self.assertEqual(self.areas("deploy/README.md", "deploy/Dockerfile"), {"deploy", "release"})
+
     def test_empty_list_is_nothing_not_all(self):
         self.assertEqual(self.areas(), set())
 
@@ -211,24 +217,24 @@ class Main(unittest.TestCase):
             raise AssertionError("no metadata needed for --all")
 
         got = self.run_main(["--all"], "", boom)
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code", "docs"})
 
     def test_a_metadata_failure_runs_everything(self):
         def broken(_):
             raise changes.MetadataError("cargo metadata failed")
 
         got = self.run_main([], "crates/wayhouse-agent/src/main.rs\n", broken)
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code", "docs"})
 
     def test_a_roots_entry_matching_no_package_runs_everything(self):
         # e.g. wayhouse-agent renamed: a silently empty root would skip tunnel.
         got = self.run_main([], "README.md\n", lambda _: changes.Graph({}, {}))
-        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code"})
+        self.assertEqual({a for a, v in got.items() if v == "true"}, ALL | {"code", "docs"})
 
     def test_output_lists_every_area_once(self):
         got = self.run_main([], "README.md\n", lambda _: changes.load_graph(REPO))
-        self.assertEqual(set(got), ALL | {"code"})
-        self.assertEqual(set(got.values()), {"false"})
+        self.assertEqual(set(got), ALL | {"code", "docs"})
+        self.assertEqual({a for a, v in got.items() if v == "true"}, {"docs"})
 
     def test_code_is_false_for_docs_only_and_true_otherwise(self):
         self.assertFalse(changes.is_code([]))
@@ -236,6 +242,20 @@ class Main(unittest.TestCase):
         self.assertTrue(changes.is_code(["README.md", "crates/wayhouse/src/main.rs"]))
         self.assertTrue(changes.is_code([".github/workflows/ci.yml"]))
         self.assertTrue(changes.is_code(["Cargo.lock"]))
+
+    def test_docs_is_true_for_markdown_and_its_tooling(self):
+        for f in ["README.md", "deploy/README.md", ".prettierrc.json", ".prettierignore", "Makefile",
+                  ".github/scripts/check_md_links.py", ".github/workflows/ci.yml"]:
+            self.assertTrue(changes.is_docs([f]), f)
+        self.assertFalse(changes.is_docs(["crates/wayhouse/src/main.rs", "Cargo.lock"]))
+        self.assertFalse(changes.is_docs([]))
+
+    def test_docs_follows_the_all_flag_and_the_output(self):
+        self.assertEqual(self.run_main(["--all"], "", None)["docs"], "true")
+        got = self.run_main([], "README.md\n", lambda _: changes.load_graph(REPO))
+        self.assertEqual(got["docs"], "true")
+        got = self.run_main([], "crates/wayhouse/src/main.rs\n", lambda _: changes.load_graph(REPO))
+        self.assertEqual(got["docs"], "false")
 
     def test_code_is_true_with_all_flag_and_on_metadata_failure(self):
         self.assertEqual(self.run_main(["--all"], "", None)["code"], "true")
