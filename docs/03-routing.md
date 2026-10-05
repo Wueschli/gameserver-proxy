@@ -47,8 +47,8 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > reject | fallback_route | stale_ok`, and a TTL'd LRU result cache (`cache: {
 > key, positive_ttl_sec, negative_ttl_sec, max_entries }`; key parts `src_ip` /
 > `src_ip_port` / `sni` / `routing_key` / `first_bytes:a:b`). Only
-> `Resolution.sticky_key` is unused (deferred — it overlaps the request-keyed
-> cache and the existing affinity mechanisms).
+> The resolver has no affinity key (`sticky_key` was removed, #54): affinity
+> comes from `consistent_hash` pools and the request-keyed cache.
 > Still pending elsewhere: the TCP side of prefix binding beyond `freebind` and
 > the `first_available` balancer. The `weighted` balancer is implemented
 > (`balancer: weighted` + a `weights:` map of `"ip:port"` → share, default 1) —
@@ -147,7 +147,7 @@ short-lived `src_ip → pool` mapping.
   ```
 - Response:
   ```json
-  { "pool": "match-eu-1", "target": null, "sticky_key": "player:42", "ttl_sec": 30 }
+  { "pool": "match-eu-1", "target": null, "ttl_sec": 30 }
   ```
   either `pool` (then normal LB) **or** `target` (a fixed instance, e.g. assigned by
   the matchmaker).
@@ -174,7 +174,7 @@ short-lived `src_ip → pool` mapping.
   eviction; an unhealthy or draining backend is skipped and its clients move to
   the next-highest score. Adding a backend remaps about 1/N of the clients.
 - **Not implemented**: a `key → backend_id (+ TTL)` sticky table keyed by the
-  resolver's `sticky_key` or a sniffer `key`. The UDP table that existed was
+  sniffer `key`. The UDP table that existed was
   removed in #56: it was per worker, so with `SO_REUSEPORT` (clients spread by
   source port) it kept only ~34% of clients on 4 workers.
 - For UDP, affinity is effectively mandatory (otherwise the gameplay stream

@@ -57,14 +57,14 @@ struct, the rest is shared).
 - **First-packet peek** (TCP): `MSG_PEEK` up to `peek_max_bytes` or `peek_timeout`.
   If that is not enough (the client sends nothing first), the default route applies.
 - **External resolver**: calls gRPC/HTTP with `{listener, src_ip, sni, first_bytes(b64),
-  routing_key}`, expects `{pool | target, sticky_key?, ttl}`. The result is cached
+  routing_key}`, expects `{pool | target, ttl}`. The result is cached
   (key configurable). Timeout → fallback route.
-- Result: target pool + optional affinity key.
+- Result: a target pool or a fixed target.
 
 ### 3. Upstream / pool
 - Holds the backend list + states from the snapshot.
-- The LB strategy picks a healthy backend; the affinity key is consulted first
-  (consistent hashing / sticky table with TTL).
+- The LB strategy picks a healthy backend; a `consistent_hash` pool picks by
+  client IP (or IP and port), stateless.
 - Checks per-backend caps (max sessions, new-session rate). No candidate → defined
   error handling (TCP: RST/close; UDP: drop datagram + metric).
 

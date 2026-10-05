@@ -234,8 +234,7 @@ read as needed. See [docs/README.md](docs/README.md) for a guided index.
 
 ## Project status
 
-All roadmap phases 0 to 14 are implemented and covered by `make check` (the resolver
-`sticky_key` is deferred): the data plane (phases 0 to 9), the distributed control
+All roadmap phases 0 to 14 are implemented and covered by `make check`: the data plane (phases 0 to 9), the distributed control
 plane (10 to 13) and the WireGuard backend transport (14). "Implemented" means built
 and tested, not battle-tested; see the notice at the top.
 

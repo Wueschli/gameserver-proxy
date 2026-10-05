@@ -17,7 +17,8 @@ message ResolveRequest {
 message Resolution {
   string pool = 1;         // route to this pool (normal load balancing)
   string target = 2;       // OR route straight to this "ip:port"
-  string sticky_key = 3;   // remember the decision by this key
+  reserved 3;              // was sticky_key (#54: never used, removed)
+  reserved "sticky_key";
   uint32 ttl_sec = 4;      // positive cache TTL hint
 }
 

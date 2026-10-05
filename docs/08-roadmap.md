@@ -78,7 +78,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
   range within one listener's routes) is what actually splits pools by port
   within the range — the bind range just makes the sockets exist.
 
-## Phase 4 – External routing logic ✅ (sticky_key deferred)
+## Phase 4 – External routing logic ✅
 - ✅ **Slice 1**: `resolvers:` config + `action: { resolver: <name> }`; the
   `Resolver` trait + async routing loop in `wayhouse-core`; `HttpResolver` (reqwest)
   in `wayhouse`; `pool` results; `on_error: reject | fallback_route`.
@@ -88,9 +88,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Slice 3**: gRPC transport (`tonic` + `prost`, `proto/resolver.proto` +
   `build.rs`; CI installs `protoc`).
 - ✅ **Slice 4**: `Resolution.target` (fixed instance, pool-less connect path in
-  `proxy.rs` / `listener_udp.rs` — no health / cap / guard). ⬜ `sticky_key`
-  deferred (overlaps the request-keyed cache + `route_hint` + UDP affinity;
-  needs its own design).
+  `proxy.rs` / `listener_udp.rs` — no health / cap / guard). `sticky_key` was dropped from the
+  protocol (#54): nothing could recover the key on a later request, and
+  `consistent_hash` plus the result cache cover affinity.
 - ✅ **Post-phase (data-plane completion)**: `resolvers:` reloads live —
   `wayhouse_core::Resolvers` gained `ArcSwap` interior mutability (like `Sniffers`),
   and the reload task rebuilds + swaps the clients when (only when)
