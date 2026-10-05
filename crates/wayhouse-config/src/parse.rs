@@ -299,6 +299,9 @@ pub(crate) fn parse_port_range(
 /// Parse a hex string (optional ASCII whitespace between bytes) into bytes.
 pub(crate) fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     let compact: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if !compact.is_ascii() {
+        return Err(format!("non-ASCII character in hex string {s:?}"));
+    }
     if !compact.len().is_multiple_of(2) {
         return Err(format!("odd number of hex digits in {s:?}"));
     }
@@ -309,4 +312,24 @@ pub(crate) fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
                 .map_err(|_| format!("invalid hex byte {:?}", &compact[i..i + 2]))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex;
+
+    #[test]
+    fn parse_hex_rejects_non_ascii_without_panicking() {
+        // Two chars, four bytes: even length, but byte pairs split a char.
+        assert!(parse_hex("\u{37f}\u{37f}").is_err());
+        assert!(parse_hex("a\u{37f}b").is_err());
+    }
+
+    #[test]
+    fn parse_hex_accepts_spaced_bytes() {
+        assert_eq!(
+            parse_hex("de ad BE ef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+    }
 }
