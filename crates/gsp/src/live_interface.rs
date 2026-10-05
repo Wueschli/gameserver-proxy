@@ -25,6 +25,9 @@ pub type Wg = dyn WireguardInterfaceApi + Send + Sync;
 /// Removes an address from the interface.
 pub type DeleteAddress = Box<dyn Fn(&IpAddrMask) -> io::Result<()> + Send + Sync>;
 
+/// Deletes the interface's link, address and all.
+pub type DeleteLink = Box<dyn Fn() -> io::Result<()> + Send + Sync>;
+
 struct State {
     address: IpAddrMask,
     /// Both the new address and the restore of the old one failed in a
@@ -37,10 +40,16 @@ pub struct LiveInterface {
     wg: Arc<Wg>,
     state: Mutex<State>,
     delete: DeleteAddress,
+    delete_link: DeleteLink,
 }
 
 impl LiveInterface {
-    pub fn new(wg: Arc<Wg>, address: IpAddrMask, delete: DeleteAddress) -> Self {
+    pub fn new(
+        wg: Arc<Wg>,
+        address: IpAddrMask,
+        delete: DeleteAddress,
+        delete_link: DeleteLink,
+    ) -> Self {
         Self {
             wg,
             state: Mutex::new(State {
@@ -48,6 +57,7 @@ impl LiveInterface {
                 dirty: false,
             }),
             delete,
+            delete_link,
         }
     }
 
@@ -73,9 +83,18 @@ impl LiveInterface {
         st.address != *new || st.dirty
     }
 
-    /// Removes the interface (shutdown).
+    /// Removes the interface (shutdown). When the library cannot (on the
+    /// kernel backend it fails in `clear_dns` before it deletes the link), the
+    /// link is deleted over netlink instead, so neither it nor its address
+    /// outlives the process.
     pub fn remove(&self) -> anyhow::Result<()> {
-        Ok(self.wg.remove_interface()?)
+        match self.wg.remove_interface() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "removing the interface failed; deleting the link instead");
+                (self.delete_link)().context("deleting the interface's link")
+            }
+        }
     }
 
     /// Moves the interface to `new`, keeping its peers. When the old address
@@ -124,6 +143,8 @@ pub(crate) mod testing {
     pub struct Fake {
         pub log: Log,
         pub fail_assign: Vec<String>,
+        /// Whether `remove_interface` fails (as it does without a resolver tool).
+        pub fail_remove: bool,
     }
 
     impl WireguardInterfaceApi for Fake {
@@ -149,6 +170,11 @@ pub(crate) mod testing {
             Ok(())
         }
         fn remove_interface(&self) -> Result<(), WireguardInterfaceError> {
+            if self.fail_remove {
+                return Err(WireguardInterfaceError::PeerConfigurationError(
+                    "Command returned error status".into(),
+                ));
+            }
             self.log.lock().unwrap().push("remove".into());
             Ok(())
         }
@@ -174,12 +200,29 @@ pub(crate) mod testing {
     /// `fail_assign` fails, deleting one in `fail_delete` fails; both are
     /// logged otherwise.
     pub fn live(fail_assign: &[&str], fail_delete: &[&str], log: &Log) -> LiveInterface {
+        build(fail_assign, fail_delete, false, log)
+    }
+
+    /// A [`live`] whose `remove_interface` fails; deleting the link is logged
+    /// as `delete link`.
+    pub fn live_failing_remove(log: &Log) -> LiveInterface {
+        build(&[], &[], true, log)
+    }
+
+    fn build(
+        fail_assign: &[&str],
+        fail_delete: &[&str],
+        fail_remove: bool,
+        log: &Log,
+    ) -> LiveInterface {
         let fail_delete: Vec<String> = fail_delete.iter().map(ToString::to_string).collect();
         let log2 = log.clone();
+        let log3 = log.clone();
         LiveInterface::new(
             Arc::new(Fake {
                 log: log.clone(),
                 fail_assign: fail_assign.iter().map(ToString::to_string).collect(),
+                fail_remove,
             }),
             mask("10.60.0.2/24"),
             Box::new(move |a| {
@@ -187,6 +230,10 @@ pub(crate) mod testing {
                     return Err(io::Error::other("refused"));
                 }
                 log2.lock().unwrap().push(format!("delete {a}"));
+                Ok(())
+            }),
+            Box::new(move || {
+                log3.lock().unwrap().push("delete link".into());
                 Ok(())
             }),
         )
@@ -257,5 +304,19 @@ mod tests {
             before + 1,
             "the recorded address is deleted and assigned again, not skipped"
         );
+    }
+
+    #[test]
+    fn remove_uses_the_library_when_it_works() {
+        let log = Log::default();
+        live(&[], &[], &log).remove().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["remove"]);
+    }
+
+    #[test]
+    fn remove_deletes_the_link_itself_when_the_library_fails() {
+        let log = Log::default();
+        live_failing_remove(&log).remove().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["delete link"]);
     }
 }
