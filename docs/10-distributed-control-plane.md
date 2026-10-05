@@ -606,6 +606,12 @@ what order," which a stateless replica set cannot give.
   transparent forward means literally nothing downstream of this ADR needs
   to know HA exists. The one-hop latency cost only applies to writes (rare,
   human-paced), never to reads or to the data plane.
+  The forward re-sends the caller's own `Authorization`, `Content-Type` and
+  `X-Actor`; the leader re-checks the token (the `--ha-token` is never
+  substituted). So every replica must run the same `--auth-token`, and with
+  plain-`http` `--ha-peers` entries the caller's bearer token crosses the
+  network between nodes in cleartext — use `https` peers (`--ca-file`) when
+  that network is not trusted.
 - **Raft RPCs travel over the same `axum` server, a separate route prefix**
   (`/raft/*`), gated by a **separate peer-only shared secret** (`--ha-token`,
   distinct from `--auth-token`) rather than mTLS or a new transport — mirrors

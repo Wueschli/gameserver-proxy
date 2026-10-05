@@ -417,6 +417,7 @@ async fn submit_config(
     body: String,
 ) -> Response {
     let actor = actor_header(&headers);
+    let forward = crate::ha::client::ForwardHeaders::from_headers(&headers);
     let stage = match params.stage.as_deref() {
         None => Stage::promoted(),
         Some("canary") => match params.group {
@@ -448,6 +449,7 @@ async fn submit_config(
         stage,
         &format!("/config{query_suffix}"),
         actor,
+        &forward,
     )
     .await
 }
@@ -472,7 +474,7 @@ fn actor_header(headers: &axum::http::HeaderMap) -> Option<String> {
 /// parsing — a slave's only source of new revisions is
 /// [`crate::parent_client`], which never calls this function.
 /// `forward_path` is this write's own route + query string, forwarded
-/// byte-for-byte (`actor` along with it, as `X-Actor` again) to the raft
+/// byte-for-byte (`forward`'s headers along with it) to the raft
 /// leader if this replica isn't it (`crate::ha::client::propose_write`) —
 /// irrelevant when HA is off.
 async fn submit(
@@ -481,6 +483,7 @@ async fn submit(
     stage: Stage,
     forward_path: &str,
     actor: Option<String>,
+    forward: &crate::ha::client::ForwardHeaders,
 ) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
@@ -507,7 +510,7 @@ async fn submit(
             },
             forward_path,
             text,
-            actor.as_deref(),
+            forward,
             crate::ha::client::revision_response,
         )
         .await;
@@ -536,13 +539,12 @@ async fn promote(
     }
 
     if let Some(ha) = &state.ha {
-        let actor = actor_header(&headers);
         return crate::ha::client::propose_write(
             ha,
             crate::ha::WriteRequest::Promote(revision),
             &format!("/config/promote/{revision}"),
             String::new(),
-            actor.as_deref(),
+            &crate::ha::client::ForwardHeaders::from_headers(&headers),
             crate::ha::client::revision_response,
         )
         .await;
@@ -743,6 +745,7 @@ async fn rollback(
                 Stage::promoted(),
                 "/config",
                 actor_header(&headers),
+                &crate::ha::client::ForwardHeaders::from_headers(&headers),
             )
             .await;
             tracing::info!(from_revision = revision, "rolled back");

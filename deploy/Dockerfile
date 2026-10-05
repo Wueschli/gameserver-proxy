@@ -62,8 +62,8 @@ ENTRYPOINT ["/usr/local/bin/gsp"]
 CMD ["--config", "/etc/gsp/gsp.yaml"]
 
 # The minimal edge build of gsp (`--no-default-features`: no WASM sniffers, gRPC
-# resolver, dns_srv source or gossip fabric; a config that needs one is refused
-# at startup). Installed as `gsp`, so it takes the same arguments as the `gsp` target.
+# resolver, dns_srv source, gossip fabric or tunnel client; a config that needs
+# one is refused at startup). Installed as `gsp`, so it takes the same arguments as the `gsp` target.
 FROM gcr.io/distroless/cc-debian13:nonroot AS gsp-minimal
 COPY --from=bins /out/gsp-minimal /usr/local/bin/gsp
 COPY --from=bins --chown=65532:65532 /out/data /data
