@@ -19,7 +19,7 @@ struct Cluster {
     /// Each replica's base URL as a client reaches it (`client` below).
     bases: Vec<String>,
     client: reqwest::Client,
-    /// TLS connections each replica's terminator has accepted so far.
+    /// TLS handshakes each replica's terminator has completed so far.
     accepted: Vec<Arc<AtomicUsize>>,
     procs: Vec<Proc>,
     _fronts: Vec<JoinHandle<()>>,
@@ -256,7 +256,7 @@ async fn replicas_without_the_ca_never_elect_a_leader() -> Result<()> {
         .collect::<String>()
         .to_lowercase();
     ensure!(
-        logs.contains("unknownissuer") || logs.contains("certificate"),
+        logs.contains("unknownissuer"),
         "no replica logged a certificate failure:\n{logs}"
     );
     Ok(())

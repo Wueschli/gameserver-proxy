@@ -68,15 +68,39 @@ pub fn build_tunnel_bins() -> Result<()> {
     build_bins(&["wayhouse", "wayhouse-controller", "wayhouse-agent"])
 }
 
+/// The `cargo build` that [`build_tunnel_bins`] runs, for a test that inspects it.
+pub fn tunnel_bins_build_command() -> std::process::Command {
+    build_command(&["wayhouse", "wayhouse-controller", "wayhouse-agent"])
+}
+
 fn build_bins(packages: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("cargo")
-        .arg("build")
-        .args(packages.iter().flat_map(|p| ["-p", p]))
-        .current_dir(workspace_root())
+    let status = build_command(packages)
         .status()
         .with_context(|| format!("running `cargo build` for {packages:?}"))?;
     ensure!(status.success(), "building the fleet binaries failed");
     Ok(())
+}
+
+/// A `cargo build` that is a no-op on a tree already built from a shell.
+/// `cargo test` sets `CARGO_PKG_*`, `CARGO_MANIFEST_*` and `CARGO_CRATE_NAME`
+/// for the test binary; inherited by this nested cargo they differ from the
+/// outer build's, so `ring`'s build script (it tracks them with
+/// `rerun-if-env-changed`) reruns and `ring` recompiles on every call.
+fn build_command(packages: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build")
+        .args(packages.iter().flat_map(|p| ["-p", p]))
+        .current_dir(workspace_root());
+    for (key, _) in std::env::vars_os() {
+        let Some(key) = key.to_str() else { continue };
+        if key.starts_with("CARGO_PKG_")
+            || key.starts_with("CARGO_MANIFEST_")
+            || key == "CARGO_CRATE_NAME"
+        {
+            cmd.env_remove(key);
+        }
+    }
+    cmd
 }
 
 pub fn bin_path(name: &str) -> PathBuf {
