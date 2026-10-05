@@ -1,0 +1,57 @@
+name: Release
+
+# Publishes the six reference images (deploy/Dockerfile) to GHCR, amd64 only,
+# when a version tag is pushed. Nothing else triggers it, so it costs one build
+# per release. Multi-arch and Kubernetes packaging: issue #88.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04   # pinned like ci.yml
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io/<owner>/<image>
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
+      - name: Build, smoke-test and push the images
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          owner=$(echo "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
+          version="${TAG#v}"
+          # Pre-releases (v1.2.3-rc.1) get their own tag but never move `latest`.
+          tags="$version"
+          case "$version" in *-*) ;; *) tags="$tags latest" ;; esac
+          for t in gsp gsp-minimal gsp-controller gsp-aggregator gsp-ui gsp-agent; do
+            image="$REGISTRY/$owner/$t"
+            docker build -f deploy/Dockerfile --target "$t" \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --label "org.opencontainers.image.version=$version" \
+              --label "org.opencontainers.image.revision=$SHA" \
+              --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
+              -t "$image:$version" .
+            # Prove the binary starts on the runtime base before publishing it.
+            docker run --rm "$image:$version" --version
+            for tag in $tags; do
+              [ "$tag" = "$version" ] || docker tag "$image:$version" "$image:$tag"
+              docker push "$image:$tag"
+            done
+          done

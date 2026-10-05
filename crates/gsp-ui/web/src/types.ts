@@ -53,3 +53,24 @@ export interface SnifferInfo {
   size_bytes: number;
   loaded: boolean;
 }
+
+/** One row of gsp-controller's `GET /tunnel/addresses` (`docs/11` "Address authority"). */
+export interface TunnelAddressEntry {
+  role: "origin" | "proxy";
+  name: string;
+  address: string;
+  /** Unix seconds. */
+  first_seen: number;
+  /** Unix seconds of the last registration. */
+  last_seen: number;
+  /** Not re-registered for longer than the controller's `--tunnel-stale-after`. */
+  stale: boolean;
+}
+
+export interface TunnelAddresses {
+  /** `null` when the controller runs without `--tunnel-network` (pinned addresses only). */
+  network: string | null;
+  allocated: number;
+  capacity: number | null;
+  entries: TunnelAddressEntry[];
+}

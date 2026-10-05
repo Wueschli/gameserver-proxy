@@ -40,7 +40,8 @@ make ui-test     # from the repo root
 CI runs them in the `ui` job, alongside `npm run build` (which type-checks).
 They mock `src/api.ts` / `useFleetSocket` at the module boundary, so they need no
 running `gsp-ui`. What they pin: every destructive action (drain, remove
-backend, set a backend `draining`/`disabled`, config rollback, plugin remove)
+backend, set a backend `draining`/`disabled`, config rollback, plugin remove,
+applying Settings)
 asks for confirmation first and never calls the API on cancel; restorative
 actions (undrain, re-enable) don't ask; action buttons disable while a request
 is in flight; `api.ts` error/response handling (plain-text `ok` login body, JSON
@@ -78,6 +79,14 @@ runs Vite's dev server with hot reload, proxying `/ui`, `/api`, `/ws`, and
 - `src/components/ConfigView.tsx` — the config editor + revision
   history/diff/rollback — phase 10's "full management" GUI level.
 
-No client-side routing: the whole app is one page, view state (which tab,
-which dialog) lives in React state, not the URL. There's nothing here that
-needs a deep link or a browser-back button yet.
+Client-side routing uses `react-router` (`/fleet`, `/settings`, `/plugins`,
+`/config-history`, `/tunnel`), so each page has its own URL and works with the
+browser back button.
+
+## Browser e2e (Playwright)
+
+`make ui-e2e` (`npm run test:e2e`) builds the UI, serves it with `vite preview`
+and drives it in Chromium. The gsp-ui backend is stubbed per test with
+`page.route()` (`e2e/`), so no Rust process is needed. First run:
+`npx playwright install chromium`, or set `PW_CHROMIUM` to an existing
+Chromium binary.

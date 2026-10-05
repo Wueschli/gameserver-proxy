@@ -1,10 +1,10 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test audit build run fuzz bench plugins ui ui-test tunnel-e2e tunnel-e2e-ci deploy-images deploy-lint deploy-smoke help
+.PHONY: check fmt lint test test-minimal audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
-check: fmt-check lint test
+check: fmt-check lint test test-minimal
 
 ## fmt: apply rustfmt
 fmt:
@@ -21,9 +21,16 @@ lint:
 test:
 	cargo test --all
 
+## test-minimal: the minimal edge build of gsp (all optional cargo features off, issue #62)
+test-minimal:
+	cargo clippy -p gsp --no-default-features --all-targets -- -D warnings
+	cargo test -p gsp --no-default-features
+	cargo clippy -p gsp-core --no-default-features --all-targets -- -D warnings
+	cargo test -p gsp-core --no-default-features
+
 ## audit: scan dependencies for known vulnerabilities (cargo install cargo-audit --locked)
 audit:
-	cargo audit
+	sh .github/scripts/cargo_audit.sh
 
 ## build: debug build of the workspace
 build:
@@ -51,7 +58,7 @@ fuzz:
 ## (needs `rustup target add wasm32-unknown-unknown`); see crates/plugins/README.md
 plugins:
 	cd crates/plugins && cargo test --workspace
-	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p regex-firstbytes
+	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
 	@echo "built:" crates/plugins/target/wasm32-unknown-unknown/release/*.wasm
 
 ## ui: build the gsp-ui frontend (needs Node/npm) — output gsp-ui serves via --static-dir
@@ -62,6 +69,10 @@ ui:
 ui-test:
 	cd crates/gsp-ui/web && npm install && npm test
 
+## ui-e2e: run the gsp-ui Playwright browser tests against the built UI (backend stubbed; first run: npx playwright install chromium)
+ui-e2e:
+	cd crates/gsp-ui/web && npm install && npm run test:e2e
+
 # Rootless when not already root: a user+net+mount namespace gives us
 # CAP_NET_ADMIN inside it. `--kill-child` reaps everything if we die.
 ifeq ($(shell id -u),0)
@@ -70,24 +81,39 @@ else
 TUNNEL_NS := unshare -Urnm --kill-child
 endif
 
+# Fails early with the fix when unprivileged user namespaces are blocked (Ubuntu's
+# AppArmor), before the build and the in-test hint that only appears once the
+# test binary runs inside the namespace.
+tunnel-ns-check:
+	@$(TUNNEL_NS) true 2>/dev/null || { \
+	  echo "cannot create a user+net namespace with: $(TUNNEL_NS) true" >&2; \
+	  echo "on Ubuntu 24.04+, AppArmor blocks unprivileged user namespaces; allow them with" >&2; \
+	  echo "  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" >&2; \
+	  echo "or run this target under sudo (the CI job does the former)" >&2; \
+	  exit 1; }
+
 ## tunnel-e2e: phase-14 WireGuard tunnel end-to-end test in rootless network
 ## namespaces (TUNNEL_BACKEND=kernel|userspace, default kernel); see
 ## docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md
-tunnel-e2e:
-	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+tunnel-e2e: tunnel-ns-check
+	cargo build -p gsp -p gsp-agent -p gsp-controller
 	cargo test -p gsp-fleet-tests --test tunnel --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p gsp-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## tunnel-e2e-ci: tunnel-e2e under cargo-nextest, writing a JUnit report for the CI run
 ## summary (needs cargo-nextest; `make tunnel-e2e` stays on plain cargo test)
-tunnel-e2e-ci:
-	cargo build -p gsp -p gsp-agent -p gsp-controller -p gsp-aggregator -p gsp-ui
+tunnel-e2e-ci: tunnel-ns-check
+	cargo build -p gsp -p gsp-agent -p gsp-controller
 	cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p gsp-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
 
 ## deploy-images: build the five deploy/ images and run --version on each (needs Docker)
 deploy-images:
 	sh deploy/build-images.sh
+
+## deploy-scan: Trivy over the deploy/ images and the lockfiles they're built from (after deploy-images; needs Docker + trivy)
+deploy-scan:
+	sh deploy/scan-images.sh
 
 ## deploy-lint: static checks on deploy/ (needs the docker CLI + ruby, no daemon)
 deploy-lint:

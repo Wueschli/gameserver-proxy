@@ -17,7 +17,7 @@
 //! an `.await` (stopped groups are moved out first, then awaited).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use tokio::sync::watch;
@@ -178,7 +178,7 @@ impl ListenerManager {
     /// Spawn groups for every listener in `snap`. Startup only — assumes no
     /// groups are running yet.
     pub fn start_all(&self, snap: &Snapshot) {
-        let mut groups = self.groups.lock().unwrap();
+        let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
         for lc in &snap.listeners {
             groups.insert(lc.name.clone(), self.spawn_group(lc));
         }
@@ -189,7 +189,7 @@ impl ListenerManager {
     pub async fn reconcile(&self, snap: &Snapshot) -> (usize, usize) {
         // Phase 1 (lock held, no await): remove stale groups, spawn new ones.
         let stopped: Vec<Group> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             let wanted: HashMap<&str, &ListenerConfig> = snap
                 .listeners
                 .iter()
@@ -224,14 +224,18 @@ impl ListenerManager {
             tracing::info!(listener = %g.cfg.name, bind = %g.cfg.bind, "stopping listener");
             g.stop().await;
         }
-        let n_running = self.groups.lock().unwrap().len();
+        let n_running = self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
         (n_running, n_stopped)
     }
 
     /// Stop every listener group and wait for the accept tasks to finish.
     pub async fn stop_all(&self) {
         let drained: Vec<Group> = {
-            let mut groups = self.groups.lock().unwrap();
+            let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             groups.drain().map(|(_, g)| g).collect()
         };
         for g in drained {
@@ -242,7 +246,12 @@ impl ListenerManager {
     /// Best-effort abort of any still-running accept task (after a grace
     /// deadline expired).
     pub fn abort_all(&self) {
-        for g in self.groups.lock().unwrap().values() {
+        for g in self
+            .groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
             g.abort();
         }
     }

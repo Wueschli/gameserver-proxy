@@ -35,6 +35,7 @@
 //! Amplification guard: the proxy only ever sends toward a client that has an
 //! established session, i.e. that sent us a datagram first.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -50,9 +51,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use gsp_config::{HashOn, ListenerConfig};
+use gsp_config::ListenerConfig;
 
 use crate::drain::{ConnGuard, ConnTracker};
+use crate::error::ListenerError;
 use crate::geo::GeoDb;
 use crate::limits::{GlobalLimits, LimitGuard};
 use crate::metrics_defs as m;
@@ -64,14 +66,12 @@ use crate::route_hint::RouteHints;
 use crate::snapshot::Snapshot;
 use crate::sniff::Sniffers;
 use crate::src_conns::{SourceGuard, SourceLimiter};
-use crate::util::now_ms;
+use crate::util::mono_ms;
 
 /// Max datagram we will relay in either direction.
 const MAX_DATAGRAM: usize = 64 * 1024;
 /// Idle-eviction timing-wheel tick cadence (also the eviction granularity).
 const WHEEL_TICK: Duration = Duration::from_secs(1);
-/// Hard cap on the per-worker stickiness table; cleared wholesale when hit.
-const STICKY_MAX: usize = 65_536;
 
 /// Session table key: the client address, plus (in prefix / transparent mode)
 /// the destination address the datagram was sent to.
@@ -108,30 +108,6 @@ impl Drop for Session {
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
-enum Who {
-    Ip(IpAddr),
-    IpPort(SocketAddr),
-}
-
-#[derive(PartialEq, Eq, Hash)]
-struct StickyKey {
-    dst: Option<SocketAddr>,
-    who: Who,
-}
-
-fn sticky_key(
-    affinity: Option<HashOn>,
-    client: SocketAddr,
-    dst: Option<SocketAddr>,
-) -> Option<StickyKey> {
-    let who = match affinity? {
-        HashOn::SrcIp => Who::Ip(client.ip()),
-        HashOn::SrcIpPort => Who::IpPort(client),
-    };
-    Some(StickyKey { dst, who })
-}
-
 // Plumbing entry point: each argument is a distinct shared handle wired in by
 // `ListenerManager::spawn_group` (its only caller).
 #[allow(clippy::too_many_arguments)]
@@ -148,7 +124,7 @@ pub async fn run_udp_listener(
     sniffers: Arc<Sniffers>,
     worker_id: usize,
     shutdown: &mut watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> Result<(), ListenerError> {
     let mode = if cfg.transparent {
         UdpMode::Transparent
     } else if cfg.prefix.is_some() {
@@ -157,7 +133,7 @@ pub async fn run_udp_listener(
         UdpMode::Plain
     };
     let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, mode)?)?);
-    crate::sniff::warn_if_missing(&cfg.name, cfg.sniffer.as_deref(), &sniffers);
+    crate::sniff::warn_if_missing(&cfg.name, &cfg.sniffers, &sniffers);
     tracing::info!(
         listener = %cfg.name,
         worker = worker_id,
@@ -168,11 +144,13 @@ pub async fn run_udp_listener(
     );
 
     let mut sessions: HashMap<SessionKey, Session> = HashMap::new();
-    let mut sticky: HashMap<StickyKey, SocketAddr> = HashMap::new();
     let mut rbatch = RecvBatch::new();
     let mut wheel = IdleWheel::new();
     let mut wheel_tick = interval(WHEEL_TICK);
     wheel_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Resolve the per-batch counter once: a registry lookup plus a `String`
+    // clone per received batch is pure overhead on the hot path.
+    let packets_c2s = metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s");
 
     // Once set (by the shutdown signal), no new sessions are opened; the task
     // keeps pumping existing sessions until they idle out, then returns. The
@@ -195,7 +173,7 @@ pub async fn run_udp_listener(
                 }
             }
             _ = wheel_tick.tick() => {
-                let evicted = wheel.tick(&cfg.name, now_ms(), &mut sessions);
+                let evicted = wheel.tick(&cfg.name, mono_ms(), &mut sessions);
                 if evicted > 0 {
                     metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
                         .decrement(evicted as f64);
@@ -210,8 +188,7 @@ pub async fn run_udp_listener(
                     }
                 };
                 if count > 0 {
-                    metrics::counter!(m::PACKETS, "listener" => cfg.name.clone(), "dir" => "c2s")
-                        .increment(count as u64);
+                    packets_c2s.increment(count as u64);
                 }
                 // One `recvmmsg` (Linux) pulled up to `RECV_BATCH` datagrams;
                 // route / forward each. `continue` skips to the next datagram.
@@ -237,7 +214,7 @@ pub async fn run_udp_listener(
 
                     // Existing session: forward and refresh liveness.
                     if let Some(s) = sessions.get(&key) {
-                        s.last_ms.store(now_ms(), Ordering::Relaxed);
+                        s.last_ms.store(mono_ms(), Ordering::Relaxed);
                         let up = s.upstream.clone();
                         if let Err(e) = up.send(data).await {
                             note_port_unreachable(&cfg.name, &s.health, &e);
@@ -314,9 +291,9 @@ pub async fn run_udp_listener(
                             continue;
                         }
                     };
-                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, &mut sticky, src_guard, limit_guard, client, dst, data).await {
+                    match open_session(&cfg, &snapshot, &hints, &conns, &resolvers, &sniffers, &sock, src_guard, limit_guard, client, dst, data).await {
                         Ok(session) => {
-                            let now = now_ms();
+                            let now = mono_ms();
                             wheel.schedule(key, now + session.idle_ms, now);
                             sessions.insert(key, session);
                             metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
@@ -506,9 +483,9 @@ impl RecvBatch {
         .map_err(io::Error::from)?;
 
         for msg in results {
-            let client = match msg.address.and_then(sockaddr_to_std) {
-                Some(a) => a,
-                None => continue, // no source address: drop this slot
+            // No source address: drop this slot.
+            let Some(client) = msg.address.and_then(sockaddr_to_std) else {
+                continue;
             };
             let mut dst = None;
             if want_cmsg {
@@ -531,6 +508,7 @@ impl RecvBatch {
 /// Turn a pktinfo / origdst control message into the destination `SocketAddr`.
 /// `listen_port` fills the port for `IP_PKTINFO` (which carries only the IP).
 #[cfg(target_os = "linux")]
+#[allow(clippy::needless_pass_by_value)] // `ControlMessageOwned` is consumed by value everywhere else it is matched
 fn dst_from_cmsg(
     cm: nix::sys::socket::ControlMessageOwned,
     listen_port: u16,
@@ -624,7 +602,7 @@ impl IdleWheel {
     }
 }
 
-/// Pick a backend (honouring stickiness), bind the upstream socket, send the
+/// Pick a backend (affinity comes from the pool's balancer), bind the upstream socket, send the
 /// first datagram, and spawn the reply pump. On failure returns the
 /// `gsp_datagrams_dropped_total` `reason` label to record.
 #[allow(clippy::too_many_arguments)]
@@ -636,7 +614,6 @@ async fn open_session(
     resolvers: &Arc<Resolvers>,
     sniffers: &Arc<Sniffers>,
     down: &Arc<UdpSocket>,
-    sticky: &mut HashMap<StickyKey, SocketAddr>,
     src_guard: SourceGuard,
     limit_guard: LimitGuard,
     client: SocketAddr,
@@ -645,22 +622,18 @@ async fn open_session(
 ) -> Result<Session, &'static str> {
     let snap = snapshot.load_full();
     let local = dst.unwrap_or_else(|| down.local_addr().unwrap_or(cfg.bind));
-    let hint = cfg
-        .sniffer
-        .as_deref()
-        .and_then(|n| sniffers.get(n))
-        .and_then(|s| s.sniff(first));
+    let hit = crate::sniff::sniff_first(&cfg.sniffers, sniffers, first);
     let mctx = gsp_config::MatchContext {
         src: client,
         local,
         first_bytes: first,
-        sniff: hint.as_ref(),
+        sniff: hit.as_ref().map(|(n, h)| (*n, h)),
     };
 
     // A sniffer that positively rejects drops the datagram outright — no
     // session, no reply (amplifier-safe). Before the gate / push-resolver hint:
     // a content-based reject outranks a spoofable src_ip hint.
-    if hint.as_ref().is_some_and(|h| h.reject) {
+    if hit.as_ref().is_some_and(|(_, h)| h.reject) {
         return Err("sniffer_reject");
     }
 
@@ -689,7 +662,6 @@ async fn open_session(
     // Resolve the route to a concrete backend address, plus (for a pool) a
     // `BackendGuard` holding the session slot. A `target` has neither pool nor
     // guard: no health check, no cap.
-    let skey = sticky_key(cfg.affinity, client, dst);
     let (backend, guard, idle_ms, proxy_protocol, pool_label) = match routed {
         Routed::Target {
             addr,
@@ -706,17 +678,10 @@ async fn open_session(
         ),
         Routed::Pool(name) => {
             let pool = snap.pool(&name).ok_or("no_route")?;
-            let g = match skey
-                .as_ref()
-                .and_then(|k| sticky.get(k))
-                .and_then(|&addr| pool.acquire_addr(addr))
-            {
-                Some(g) => g,
-                None => pool.acquire_for(Some(client)).map_err(|e| {
-                    tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
-                    "no_backend"
-                })?,
-            };
+            let g = pool.acquire_for(Some(client)).map_err(|e| {
+                tracing::warn!(listener = %cfg.name, %client, error = %e, "no backend for udp session");
+                "no_backend"
+            })?;
             let addr = g.addr();
             (
                 addr,
@@ -790,17 +755,8 @@ async fn open_session(
         g.observe(true);
     }
 
-    if guard.is_some() {
-        if let Some(k) = skey {
-            if sticky.len() >= STICKY_MAX {
-                sticky.clear();
-            }
-            sticky.insert(k, backend);
-        }
-    }
-
-    let health = guard.as_ref().map(|g| g.backend());
-    let last_ms = Arc::new(AtomicU64::new(now_ms()));
+    let health = guard.as_ref().map(super::pool::BackendGuard::backend);
+    let last_ms = Arc::new(AtomicU64::new(mono_ms()));
     let reply_task = spawn_reply(
         cfg.name.clone(),
         down.clone(),
@@ -904,31 +860,88 @@ fn spawn_reply(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let out = reply_sock.as_deref().unwrap_or(down.as_ref());
-        let mut buf = vec![0u8; MAX_DATAGRAM];
+        // Once per session, not per reply packet.
+        let packets_s2c =
+            metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c");
         loop {
-            match up.recv(&mut buf).await {
-                Ok(n) => {
-                    last_ms.store(now_ms(), Ordering::Relaxed);
-                    let sent = if reply_sock.is_some() {
-                        out.send_to(&buf[..n], client).await
-                    } else {
-                        send_reply(out, &buf[..n], client, reply_src).await
-                    };
-                    if let Err(e) = sent {
-                        tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
-                        return;
-                    }
-                    metrics::counter!(m::PACKETS, "listener" => listener.clone(), "dir" => "s2c")
-                        .increment(1);
+            // Receive and forward inside one synchronous section so a single
+            // per-thread buffer serves every session (#122): a buffer per
+            // session cost 64 KiB each and stayed resident after a burst. The
+            // closure goes through `async_io` with `ERROR` interest, as
+            // tokio's own `recv` does: an ICMP port-unreachable is a socket error
+            // with no data and must wake the pump.
+            let relayed = up
+                .async_io(Interest::READABLE | Interest::ERROR, || {
+                    REPLY_BUF.with_borrow_mut(|buf| {
+                        // Raw recv, not `try_recv`: that re-checks readiness and
+                        // would skip the syscall for an error-only wakeup.
+                        let n = nix::sys::socket::recv(
+                            up.as_raw_fd(),
+                            buf,
+                            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+                        )
+                        .map_err(io::Error::from)?;
+                        Ok(match try_send_reply(out, &buf[..n], client, reply_src) {
+                            Ok(_) => Relay::Sent,
+                            // Client socket full: park a right-sized copy and
+                            // await writability outside the borrow.
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                Relay::Blocked(buf[..n].to_vec())
+                            }
+                            Err(e) => Relay::Failed(e),
+                        })
+                    })
+                })
+                .await;
+            let sent = match relayed {
+                Ok(Relay::Sent) => Ok(()),
+                Ok(Relay::Blocked(data)) => {
+                    send_reply(out, &data, client, reply_src).await.map(drop)
                 }
+                Ok(Relay::Failed(e)) => Err(e),
                 Err(e) => {
                     note_port_unreachable(&listener, &health, &e);
                     tracing::debug!(%listener, %client, error = %e, "udp upstream recv ended");
                     return;
                 }
+            };
+            last_ms.store(mono_ms(), Ordering::Relaxed);
+            if let Err(e) = sent {
+                tracing::warn!(%listener, %client, error = %e, "udp reply to client failed");
+                return;
             }
+            packets_s2c.increment(1);
         }
     })
+}
+
+thread_local! {
+    /// Scratch buffer for the reply pumps of every session on this thread; only
+    /// ever borrowed inside a synchronous section, never across an `.await`.
+    static REPLY_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; MAX_DATAGRAM]);
+}
+
+enum Relay {
+    Sent,
+    /// The datagram, to send once the client socket is writable.
+    Blocked(Vec<u8>),
+    /// Sending to the client failed.
+    Failed(io::Error),
+}
+
+/// Non-blocking [`send_reply`]: `WouldBlock` if the socket's send buffer is full.
+fn try_send_reply(
+    sock: &UdpSocket,
+    data: &[u8],
+    client: SocketAddr,
+    src: Option<IpAddr>,
+) -> io::Result<usize> {
+    match src {
+        None => sock.try_send_to(data, client),
+        Some(src) => sock.try_io(Interest::WRITABLE, || {
+            sendmsg_pktinfo(sock, data, client, src)
+        }),
+    }
 }
 
 async fn send_reply(
@@ -998,4 +1011,179 @@ fn sendmsg_pktinfo(
     }
     .map_err(io::Error::from)?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drain::{Proto, SessionMeta};
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// A minimal live session for wheel tests: no pool slot, no limits.
+    async fn session(client: SocketAddr, last_ms: u64, idle_ms: u64) -> Session {
+        session_tracked(&ConnTracker::new(), client, last_ms, idle_ms).await
+    }
+
+    async fn session_tracked(
+        tracker: &Arc<ConnTracker>,
+        client: SocketAddr,
+        last_ms: u64,
+        idle_ms: u64,
+    ) -> Session {
+        let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let limits = GlobalLimits::new(&gsp_config::GlobalLimits::default());
+        let src = SourceLimiter::new(None);
+        Session {
+            upstream,
+            last_ms: Arc::new(AtomicU64::new(last_ms)),
+            backend: addr("127.0.0.1:9"),
+            idle_ms,
+            _guard: None,
+            health: None,
+            _conn_guard: tracker.track(SessionMeta {
+                proto: Proto::Udp,
+                listener: "t".into(),
+                peer: client,
+                local: addr("127.0.0.1:1"),
+            }),
+            _limit_guard: limits.acquire_udp().unwrap(),
+            _src_guard: src.acquire(client.ip()).unwrap(),
+            _reply_sock: None,
+            reply_task: tokio::spawn(async {}),
+        }
+    }
+
+    fn slot_of(w: &IdleWheel, key: &SessionKey) -> Option<usize> {
+        w.slots.iter().position(|s| s.contains(key))
+    }
+
+    #[test]
+    fn sockaddr_to_std_round_trips_v4_and_v6() {
+        use nix::sys::socket::SockaddrStorage;
+        for a in [addr("192.0.2.7:4242"), addr("[2001:db8::7]:4242")] {
+            assert_eq!(sockaddr_to_std(SockaddrStorage::from(a)), Some(a));
+        }
+    }
+
+    #[test]
+    fn schedule_files_at_least_one_slot_ahead() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        // Deadline already passed: must still not land on the current hand.
+        w.schedule(k, 1_000, 5_000);
+        assert_eq!(slot_of(&w, &k), Some(1));
+    }
+
+    #[test]
+    fn schedule_rounds_down_to_whole_seconds() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        w.schedule(k, 10_000 + 3_999, 10_000);
+        assert_eq!(slot_of(&w, &k), Some(3));
+    }
+
+    #[test]
+    fn schedule_clamps_long_deadlines_inside_the_wheel() {
+        let mut w = IdleWheel::new();
+        w.hand = WHEEL_SLOTS - 2;
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        // Far beyond the wheel span: clamped to WHEEL_SLOTS - 1, wrapping round.
+        w.schedule(k, 10_000_000, 0);
+        let expect = (WHEEL_SLOTS - 2 + WHEEL_SLOTS - 1) % WHEEL_SLOTS;
+        assert_eq!(slot_of(&w, &k), Some(expect));
+        assert_ne!(expect, w.hand, "clamped entry must not alias the hand");
+    }
+
+    #[test]
+    fn tick_skips_sessions_already_gone() {
+        let mut w = IdleWheel::new();
+        let k: SessionKey = (addr("10.0.0.1:1"), None);
+        w.schedule(k, 1_000, 0);
+        let mut sessions = HashMap::new();
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 0);
+        assert!(
+            w.slots.iter().all(std::vec::Vec::is_empty),
+            "stale key dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_evicts_idle_session_and_releases_its_guards() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let tracker = ConnTracker::new();
+        let s = session_tracked(&tracker, client, 0, 1_000).await;
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, 1_000, 0);
+        assert_eq!(tracker.active(), 1);
+        assert_eq!(w.tick("t", 999, &mut sessions), 0, "not idle yet: re-filed");
+        assert_eq!(tracker.active(), 1);
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 1);
+        assert!(sessions.is_empty());
+        assert_eq!(tracker.active(), 0, "drain guard released on eviction");
+        assert!(w.slots.iter().all(std::vec::Vec::is_empty));
+    }
+
+    #[tokio::test]
+    async fn tick_refiles_a_refreshed_session_instead_of_evicting() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let s = session(client, 0, 2_000).await;
+        let last = s.last_ms.clone();
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, 2_000, 0);
+
+        // A datagram at t=1.5s pushes the deadline to 3.5s.
+        last.store(1_500, Ordering::Relaxed);
+        assert_eq!(w.tick("t", 1_000, &mut sessions), 0); // hand -> 1
+        assert_eq!(w.tick("t", 2_000, &mut sessions), 0); // hand -> 2: due, refiled
+        assert!(sessions.contains_key(&k));
+        assert_eq!(slot_of(&w, &k), Some(3), "re-filed at its new deadline");
+
+        assert_eq!(w.tick("t", 3_500, &mut sessions), 1); // hand -> 3: evicted
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_rechecks_sessions_whose_idle_outruns_the_wheel() {
+        let mut w = IdleWheel::new();
+        let client = addr("10.0.0.1:1");
+        let k: SessionKey = (client, None);
+        let span_ms = WHEEL_SLOTS as u64 * 1_000;
+        let s = session(client, 0, span_ms * 2).await;
+        let mut sessions = HashMap::new();
+        sessions.insert(k, s);
+        w.schedule(k, span_ms * 2, 0);
+
+        let mut now = 0;
+        let mut evicted = 0;
+        // One full revolution: the entry comes due early and must be re-filed.
+        for _ in 0..WHEEL_SLOTS {
+            now += 1_000;
+            evicted += w.tick("t", now, &mut sessions);
+        }
+        assert_eq!(evicted, 0);
+        assert!(sessions.contains_key(&k));
+        assert_eq!(
+            w.slots.iter().map(Vec::len).sum::<usize>(),
+            1,
+            "exactly one entry"
+        );
+
+        // Keep ticking until the real deadline: evicted exactly then.
+        while sessions.contains_key(&k) {
+            now += 1_000;
+            evicted += w.tick("t", now, &mut sessions);
+            assert!(now <= span_ms * 2 + 1_000, "evicted late at {now}");
+        }
+        assert_eq!(evicted, 1);
+        assert!(now >= span_ms * 2, "evicted early at {now}");
+    }
 }

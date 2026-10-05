@@ -1,4 +1,4 @@
-# gsp — reduced v0 schema (roadmap phase 2).
+# gsp — annotated example config (`make run` starts the proxy with it).
 # The full target schema is documented in docs/05-configuration.md.
 
 settings:
@@ -15,6 +15,18 @@ settings:
     # e.g. gsp-aggregator's intent-verb fan-out (phase 10+11, docs/10 "The
     # aggregator"), which is given the same token to present.
     # auth_token: "change-me"
+    # Serve the admin API over HTTPS (both required; startup-only like
+    # `listen`; the files are re-read every 30 s). The admin URL reported to
+    # --aggregator becomes https://<listen>, so the certificate must cover the
+    # listen address. See docs/12 "TLS for the fleet services".
+    # tls:
+    #   cert: /etc/gsp/tls/fullchain.pem
+    #   key: /etc/gsp/tls/privkey.pem
+    #   # Optional TLS handshake limits (defaults shown; rate 0 = off):
+    #   max_pending: 512
+    #   max_pending_per_source: 16
+    #   new_per_source_per_sec: 20
+    #   new_per_source_burst: 64
   # Process-wide caps (phase 7). Omit a key for "no cap". Startup-only — a
   # reload does not change these. Hitting a cap drops the new connection /
   # session silently + gsp_filter_blocked_total{filter="max_conn"|"max_udp"|
@@ -70,8 +82,9 @@ settings:
 # source gets one control-plane refresh task (never on the data path).
 #   type: static      — a fixed reusable list (folded into the pool at load time)
 #   type: dns_srv      — resolve an SRV record; port comes from the record
-#   type: consul       — passing instances of a Consul service (HTTP API)
-#   type: kubernetes   — Endpoints of a Service (polled; SA token + CA in-pod)
+#   type: consul       — passing instances of a Consul service (HTTP API; blocking-query
+#                         push + resync; optional consul_token_file for ACLs)
+#   type: kubernetes   — EndpointSlices of a Service (watched + resynced; SA token + CA in-pod)
 #   type: tunnel        — backend addresses a `gsp-agent`-managed origin behind
 #                         a WireGuard tunnel has registered with the controller
 #                         (phase 14; requires `gsp --tunnel-*` on this proxy —
@@ -182,8 +195,6 @@ listeners:
     bind: "0.0.0.0:27015"
     protocol: udp
     pool: realtime
-    affinity:
-      hash_on: src_ip             # src_ip (default for udp) | src_ip_port
     route_hint: true               # a launcher may POST /route-hint {src_ip,pool,ttl_sec}
                                     # before the player connects; that hint then wins
 
@@ -334,7 +345,7 @@ listeners:
 #   same snapshot rebuild (discovery set ∪ overlay-added − overlay-removed, then
 #   health / admin state). `backend_sources` themselves are startup-only.
 # Reconciled by name on reload (stop + respawn if changed): listener bind /
-#   protocol / routes / affinity / prefix / freebind / transparent / route_hint
+#   protocol / routes / prefix / freebind / transparent / route_hint
 #   / allow / deny / rate_limit / per_source / first_packet_gate / geo.
 #   (Route-hint *entries* are runtime state via POST /route-hint, not config, and
 #   survive reloads.)

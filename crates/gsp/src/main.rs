@@ -8,11 +8,27 @@ mod admin;
 mod aggregator_client;
 mod controller_client;
 mod discovery;
+#[cfg(feature = "dns-srv")]
+mod dns_srv;
+#[cfg(not(feature = "dns-srv"))]
+#[path = "dns_srv_disabled.rs"]
+mod dns_srv;
+#[cfg(feature = "grpc-resolver")]
+mod grpc_resolver;
+#[cfg(not(feature = "grpc-resolver"))]
+#[path = "grpc_resolver_disabled.rs"]
+mod grpc_resolver;
 mod intent_client;
+mod live_interface;
+mod netlink_addr;
 mod procinfo;
 mod proxy_register;
 mod reload;
 mod resolver;
+#[cfg(feature = "wasm-sniffers")]
+mod sniffer_loader;
+#[cfg(not(feature = "wasm-sniffers"))]
+#[path = "sniffer_loader_disabled.rs"]
 mod sniffer_loader;
 mod tunnel_address;
 mod tunnel_client;
@@ -60,6 +76,12 @@ struct Args {
     #[arg(long)]
     check: bool,
 
+    /// Allow a non-loopback `settings.admin.listen` with no
+    /// `settings.admin.auth_token`. Without it startup is refused. Only for
+    /// deployments where the network boundary is the sole access control.
+    #[arg(long)]
+    insecure_no_auth: bool,
+
     /// Fleet aggregator base URL (e.g. "http://127.0.0.1:9902") to push
     /// periodic fleet-state summaries to (docs/10 "The aggregator").
     /// Optional and independent of `--controller` — pushing state and
@@ -81,6 +103,15 @@ struct Args {
     /// requires one (its own `--auth-token`).
     #[arg(long)]
     aggregator_token: Option<String>,
+
+    /// Base URL the aggregator should use to reach this instance's admin API
+    /// for intent fan-out (drain, backend edits, route hints), e.g.
+    /// `http://10.1.2.3:9900` or `https://gsp-1.example`. Defaults to
+    /// `http(s)://<settings.admin.listen>`, which is unreachable from another
+    /// host or container when the admin API binds `0.0.0.0` or loopback, or
+    /// sits behind a NAT, port mapping or TLS terminator.
+    #[arg(long, requires = "aggregator")]
+    aggregator_admin_url: Option<String>,
 
     /// Enables phase 14's WireGuard backend transport (`docs/11`):
     /// brings up a local interface with this name and reconciles its peer
@@ -249,6 +280,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         "configuration loaded"
     );
 
+    check_admin_auth(&cfg, args.insecure_no_auth)?;
+    check_gossip_feature(&cfg)?;
+
     // A configured GeoIP DB must load, both for `--check` and at startup.
     let geo_db = match &cfg.geo_db {
         Some(path) => Some(
@@ -271,11 +305,31 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         None => (None, Arc::new(gsp_core::sniff::Sniffers::default())),
     };
 
+    // A configured admin certificate must load too, for `--check` and at startup.
+    let admin_tls = match &cfg.admin_tls {
+        Some(t) => Some(gsp_http::tls::ReloadingCert::new(
+            gsp_http::tls::TlsFiles::new(t.cert.clone().into(), t.key.clone().into())
+                .named("settings.admin.tls.cert", "settings.admin.tls.key"),
+        )?),
+        None => None,
+    };
+
+    let admin_url = aggregator_admin_url(
+        args.aggregator_admin_url.as_deref(),
+        admin_tls.is_some(),
+        cfg.admin_listen,
+    )?;
+
     if args.check {
         println!(
-            "config OK: {} listener(s), {} pool(s){}{}",
+            "config OK: {} listener(s), {} pool(s){}{}{}",
             cfg.listeners.len(),
             cfg.pools.len(),
+            if admin_tls.is_some() {
+                ", admin TLS loaded"
+            } else {
+                ""
+            },
             if geo_db.is_some() {
                 ", geo_db loaded"
             } else {
@@ -296,7 +350,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             instance: args
                 .aggregator_instance
                 .unwrap_or_else(|| cfg.admin_listen.to_string()),
-            admin_url: format!("http://{}", cfg.admin_listen),
+            admin_url,
             interval: Duration::from_secs(args.aggregator_interval_sec),
             token: args.aggregator_token,
         });
@@ -310,6 +364,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         sniffers,
         aggregator_push,
         tunnel_config,
+        admin_tls,
     )
     .await
 }
@@ -324,6 +379,7 @@ async fn run(
     sniffers: Arc<gsp_core::sniff::Sniffers>,
     aggregator_push: Option<aggregator_client::PushConfig>,
     tunnel_config: Option<TunnelConfig>,
+    admin_tls: Option<Arc<gsp_http::tls::ReloadingCert>>,
 ) -> anyhow::Result<()> {
     let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
@@ -402,9 +458,9 @@ async fn run(
             // listener binds — a failure here is a failing `--tunnel-*`.
             let pinned_cidr = tc.address.clone();
             if let Some(c) = pinned_cidr.as_deref() {
-                tunnel_address::ip_of(c)
-                    .parse::<std::net::Ipv4Addr>()
-                    .with_context(|| format!("--tunnel-address {c:?} must be an IPv4 ip/prefix"))?;
+                tunnel_address::tunnel_ip(tunnel_address::ip_of(c)).map_err(|e| {
+                    anyhow::anyhow!("--tunnel-address {c:?} must be an ip/prefix: {e}")
+                })?;
             }
             let reg = proxy_register::Registration {
                 name: tc.name.clone(),
@@ -413,6 +469,7 @@ async fn run(
                 address: pinned_cidr
                     .as_deref()
                     .map(|c| tunnel_address::ip_of(c).to_string()),
+                boot_id: proxy_register::new_boot_id(),
             };
             let client = proxy_register::http_client();
             let addr_path = {
@@ -437,10 +494,19 @@ async fn run(
                 tunnel_address::Source::Controller => {
                     tunnel_address::save(&addr_path, &start.cidr)?
                 }
-                tunnel_address::Source::Saved => tracing::warn!(
-                    address = %start.cidr,
-                    "controller unreachable; starting with the last saved tunnel address"
-                ),
+                tunnel_address::Source::Saved {
+                    ref cause,
+                    ref pin_ignored,
+                } => {
+                    tracing::warn!(
+                        address = %start.cidr,
+                        error = %cause,
+                        "controller unreachable; starting with the last saved tunnel address"
+                    );
+                    if let Some(msg) = pin_ignored {
+                        tracing::warn!("{msg}");
+                    }
+                }
             }
             let address: defguard_wireguard_rs::net::IpAddrMask = start
                 .cidr
@@ -451,9 +517,15 @@ async fn run(
                     &tc.iface,
                     &private_key,
                     tc.listen_port,
-                    address,
+                    address.clone(),
                     tc.userspace,
                 )?);
+            let live = Arc::new(live_interface::LiveInterface::new(
+                wg,
+                address,
+                netlink_addr::deleter(tc.iface.clone()),
+                netlink_addr::link_deleter(tc.iface.clone()),
+            ));
             tracing::info!(
                 iface = %tc.iface,
                 port = tc.listen_port,
@@ -465,7 +537,7 @@ async fn run(
             let task = tokio::spawn(tunnel_client::run(
                 tc.controller_url.clone(),
                 tc.controller_token.clone(),
-                wg.clone(),
+                live.api(),
             ));
             // Register ourselves (periodically) so every origin's `gsp-agent`
             // can peer with us — the mirror image of `task` above.
@@ -475,9 +547,13 @@ async fn run(
                 tc.controller_token,
                 reg,
                 tc.register_interval,
-                tunnel_address::ip_of(&start.cidr).to_string(),
+                proxy_register::AddressSync {
+                    live: live.clone(),
+                    pinned_cidr,
+                    path: addr_path,
+                },
             ));
-            Some((task, register_task, wg))
+            Some((task, register_task, live))
         }
         None => None,
     };
@@ -500,12 +576,7 @@ async fn run(
     // built): version/commit are fixed for the process lifetime, so
     // `gsp_build_info` and `gsp_fd_limit` are set once; `gsp_fd_open` needs a
     // live sample, hence the periodic task.
-    metrics::gauge!(
-        gsp_core::metrics_defs::BUILD_INFO,
-        "version" => env!("CARGO_PKG_VERSION"),
-        "commit" => env!("GSP_GIT_SHA"),
-    )
-    .set(1.0);
+    gsp_http::metrics::set_build_info("gsp", env!("CARGO_PKG_VERSION"));
     if let Some(limit) = procinfo::fd_limit() {
         metrics::gauge!(gsp_core::metrics_defs::FD_LIMIT).set(limit as f64);
     }
@@ -513,6 +584,7 @@ async fn run(
 
     let admin = tokio::spawn(admin::serve(
         cfg.admin_listen,
+        admin_tls.map(|cert| (cert, admin::handshake_limits(cfg.admin_tls.as_ref()))),
         handle.clone(),
         prometheus,
         cfg.admin_auth_token.clone(),
@@ -599,15 +671,78 @@ async fn run(
         aggregator.abort();
     }
     fd_gauge.abort();
-    if let Some((task, register_task, wg)) = tunnel {
+    if let Some((task, register_task, live)) = tunnel {
         task.abort();
         register_task.abort();
-        if let Err(e) = wg.remove_interface() {
+        if let Err(e) = live.remove() {
             tracing::warn!(error = %e, "failed to remove the wireguard tunnel interface cleanly");
         }
     }
     tracing::info!("stopped");
     Ok(())
+}
+
+/// The admin URL to report in aggregator pushes: `--aggregator-admin-url` if
+/// given (an `http`/`https` base URL, optionally with a path prefix; trailing
+/// slashes are trimmed because the fan-out appends absolute paths), else this
+/// instance's own admin listener.
+/// Refuse an open admin API on a routable address and weak admin/gossip
+/// secrets (docs/security-review-2026-10.md O1, O7).
+fn check_admin_auth(cfg: &gsp_config::Config, insecure_no_auth: bool) -> anyhow::Result<()> {
+    let token = cfg.admin_auth_token.as_deref();
+    gsp_http::policy::check_optional_secret("settings.admin.auth_token", token)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(g) = &cfg.gossip {
+        gsp_http::policy::check_secret("settings.gossip.psk", &g.psk)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    gsp_http::policy::check_exposure(
+        "gsp admin API",
+        cfg.admin_listen,
+        token.is_some(),
+        insecure_no_auth,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `settings.gossip` needs the `gossip` cargo feature; a build without it must
+/// refuse the config, not silently run without the regional health fabric.
+#[cfg_attr(feature = "gossip", allow(clippy::unnecessary_wraps))] // the refusal only exists without the feature
+fn check_gossip_feature(cfg: &gsp_config::Config) -> anyhow::Result<()> {
+    #[cfg(not(feature = "gossip"))]
+    if cfg.gossip.is_some() {
+        anyhow::bail!(
+            "settings.gossip: this build of gsp was compiled without the `gossip` cargo \
+             feature, so it cannot join the regional health fabric; remove \
+             `settings.gossip` or use a full build"
+        );
+    }
+    #[cfg(feature = "gossip")]
+    let _ = cfg;
+    Ok(())
+}
+
+fn aggregator_admin_url(
+    override_url: Option<&str>,
+    admin_tls: bool,
+    admin_listen: impl std::fmt::Display,
+) -> anyhow::Result<String> {
+    let Some(raw) = override_url else {
+        let scheme = if admin_tls { "https" } else { "http" };
+        return Ok(format!("{scheme}://{admin_listen}"));
+    };
+    let bad = |why: &str| anyhow::anyhow!("--aggregator-admin-url {raw:?}: {why}");
+    let url = reqwest::Url::parse(raw).map_err(|e| bad(&e.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(bad("the scheme must be http or https"));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(bad("missing host"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(bad("must not have a query or fragment"));
+    }
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
 #[cfg(unix)]
@@ -624,4 +759,123 @@ async fn wait_for_shutdown() {
 #[cfg(not(unix))]
 async fn wait_for_shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{aggregator_admin_url, check_admin_auth, check_gossip_feature};
+
+    fn cfg(settings: &str) -> gsp_config::Config {
+        gsp_config::parse_str(&format!(
+            "settings:\n{settings}pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
+             listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_admin_on_loopback_is_fine_elsewhere_refused() {
+        assert!(check_admin_auth(&cfg(""), false).is_ok());
+        let public = cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n");
+        let e = check_admin_auth(&public, false).unwrap_err().to_string();
+        assert!(e.contains("--insecure-no-auth"), "{e}");
+        assert!(check_admin_auth(&public, true).is_ok());
+    }
+
+    #[test]
+    fn admin_token_makes_a_public_bind_ok_unless_short() {
+        let ok =
+            cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n    auth_token: \"0123456789abcdef\"\n");
+        assert!(check_admin_auth(&ok, false).is_ok());
+        let short = cfg("  admin:\n    listen: \"0.0.0.0:9900\"\n    auth_token: \"short\"\n");
+        let e = check_admin_auth(&short, true).unwrap_err().to_string();
+        assert!(e.contains("settings.admin.auth_token"), "{e}");
+    }
+
+    #[test]
+    fn short_gossip_psk_is_refused() {
+        let gossip = |psk: &str| {
+            cfg(&format!(
+                "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"{psk}\"\n"
+            ))
+        };
+        let e = check_admin_auth(&gossip("short"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("settings.gossip.psk"), "{e}");
+        assert!(check_admin_auth(&gossip("0123456789abcdef"), false).is_ok());
+    }
+
+    #[cfg(not(feature = "gossip"))]
+    #[test]
+    fn a_gossip_section_is_refused_with_a_message_naming_the_feature() {
+        let with = cfg(
+            "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"0123456789abcdef\"\n",
+        );
+        let e = check_gossip_feature(&with).unwrap_err().to_string();
+        assert!(e.contains("`gossip` cargo feature"), "{e}");
+        assert!(check_gossip_feature(&cfg("")).is_ok());
+    }
+
+    #[cfg(feature = "gossip")]
+    #[test]
+    fn a_gossip_section_is_accepted_in_a_full_build() {
+        let with = cfg(
+            "  failure_domain: \"r1\"\n  gossip:\n    bind: \"127.0.0.1:7946\"\n    psk: \"0123456789abcdef\"\n",
+        );
+        assert!(check_gossip_feature(&with).is_ok());
+    }
+
+    #[test]
+    fn defaults_to_the_admin_listen_address() {
+        let listen = "127.0.0.1:9900";
+        assert_eq!(
+            aggregator_admin_url(None, false, listen).unwrap(),
+            "http://127.0.0.1:9900"
+        );
+        assert_eq!(
+            aggregator_admin_url(None, true, listen).unwrap(),
+            "https://127.0.0.1:9900"
+        );
+    }
+
+    #[test]
+    fn an_override_replaces_it_whatever_the_admin_tls() {
+        for tls in [false, true] {
+            assert_eq!(
+                aggregator_admin_url(Some("http://10.1.2.3:9900"), tls, "0.0.0.0:9900").unwrap(),
+                "http://10.1.2.3:9900"
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_keeps_a_path_prefix_and_loses_trailing_slashes() {
+        assert_eq!(
+            aggregator_admin_url(Some("https://edge.example/gsp-1//"), false, "0.0.0.0:9900")
+                .unwrap(),
+            "https://edge.example/gsp-1"
+        );
+        assert_eq!(
+            aggregator_admin_url(Some("https://edge.example/"), false, "0.0.0.0:9900").unwrap(),
+            "https://edge.example"
+        );
+    }
+
+    #[test]
+    fn a_bad_override_is_an_error_naming_the_flag() {
+        for bad in [
+            "10.1.2.3:9900",
+            "ftp://10.1.2.3",
+            "http://",
+            "http://host/?x=1",
+            "http://host/#frag",
+            "not a url",
+        ] {
+            let err = aggregator_admin_url(Some(bad), false, "0.0.0.0:9900")
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("--aggregator-admin-url"), "{bad}: {err}");
+        }
+    }
 }

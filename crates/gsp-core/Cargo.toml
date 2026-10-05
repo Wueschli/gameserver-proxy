@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# On by default. `gsp` forwards its own `gossip` feature here so a minimal edge
+# build (`gsp --no-default-features`, issue #62) drops the Tier-2 health fabric
+# and its dependencies; `settings.gossip` is then refused at startup.
+default = ["gossip"]
+# `gossip.rs`, the SWIM mesh behind `settings.gossip` (phase 13).
+gossip = ["dep:foca", "dep:rand10", "dep:bytes", "dep:hmac", "dep:serde", "dep:postcard", "dep:sha2"]
+
+[lints]
+workspace = true
+
 [dependencies]
 gsp-config = { path = "../gsp-config" }
 
@@ -17,19 +28,18 @@ nix.workspace = true
 async-trait.workspace = true
 lru.workspace = true
 maxminddb.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, optional = true }
 # Phase 13 (Tier-2 regional health fabric, docs/10). `foca` needs its own
 # `rand` major version (0.10) for its `RngExt` trait bound — aliased to avoid
 # colliding with the workspace's `rand = "0.8"` (used by gsp-ui), which is an
 # unrelated, semver-incompatible major version living happily alongside it.
-foca = { version = "2.0", default-features = false, features = ["std", "postcard-codec"] }
-rand10 = { package = "rand", version = "0.10", default-features = false, features = ["std_rng", "sys_rng"] }
-bytes = "1"
-hmac = "0.12"
-serde.workspace = true
-postcard = { version = "1", features = ["use-std"] }
+foca = { version = "2.0", default-features = false, features = ["std", "postcard-codec"], optional = true }
+rand10 = { package = "rand", version = "0.10", default-features = false, features = ["std_rng", "sys_rng"], optional = true }
+bytes = { version = "1", optional = true }
+hmac = { version = "0.12", optional = true }
+serde = { workspace = true, optional = true }
+postcard = { version = "1", features = ["use-std"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "test-util"] }

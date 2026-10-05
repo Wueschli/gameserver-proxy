@@ -1,0 +1,54 @@
+name: Load test
+
+# Manual only: a load test on shared runners is noisy and slow (about a minute
+# per scenario), so it never runs on a push, a PR or a schedule. Start it from
+# the Actions tab to compare UDP affinity strategies (issue #56); the runner is
+# a small 4-core VM, read the numbers as relative, not absolute.
+on:
+  workflow_dispatch:
+    inputs:
+      keys:
+        description: "Distinct UDP clients"
+        default: "100000"
+      rate:
+        description: "UDP session opens per second (at most ~5000 on a 20000-fd runner)"
+        default: "4000"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  udp-affinity:
+    runs-on: ubuntu-24.04   # pinned like ci.yml
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: ./.github/actions/cargo-cache
+        with: { name: load-test }
+      - name: Build
+        run: cargo build --release -p gsp -p gsp-bench
+      - name: Sticky table (balancer round_robin) vs consistent_hash
+        env:
+          KEYS: ${{ inputs.keys }}
+          RATE: ${{ inputs.rate }}
+        shell: bash   # -eo pipefail: a crashing gsp-bench must fail the step, not hide behind tee
+        run: |
+          # The runner's default fd limit is far below the proxy's session
+          # count at this rate; a hard limit may cap the raise.
+          ulimit -n "$(ulimit -Hn)"
+          for balancer in round-robin consistent-hash; do
+            echo "::group::udp-affinity $balancer"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            ./target/release/gsp-bench --mode udp-affinity \
+              --gsp-bin target/release/gsp --balancer "$balancer" \
+              --keys "$KEYS" --rate "$RATE" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "::endgroup::"
+          done

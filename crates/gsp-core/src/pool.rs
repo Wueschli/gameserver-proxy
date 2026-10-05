@@ -9,7 +9,7 @@
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use gsp_config::{Balancer, HashOn, HealthCheck, HealthCheckKind, PoolConfig, ProxyProtocol};
@@ -230,7 +230,11 @@ impl Backend {
     /// Feed a health observation (active check result or passive connect
     /// result). Returns `Some(new_state)` when the healthy flag flips.
     pub fn observe(&self, ok: bool) -> Option<bool> {
-        let mut s = self.state.streaks.lock().unwrap();
+        let mut s = self
+            .state
+            .streaks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if ok {
             s.fail = 0;
             s.ok = s.ok.saturating_add(1);
