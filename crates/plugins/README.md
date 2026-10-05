@@ -40,7 +40,9 @@ installed.
 - `wireguard` — recognises a WireGuard handshake initiation (exactly 148 bytes,
   message type 1, three zero reserved bytes) and tags it `key: "wireguard"`.
   Later packets of the flow are not recognised; they ride the session the
-  initiation opened.
+  initiation opened, and if that session is evicted the flow is not routed again
+  until the next handshake (about two minutes). See the configuration guide's
+  "Handshake-only sniffers" note: keep `idle_timeout_sec` above the keepalive.
 - `openvpn` — recognises an OpenVPN client hard reset (opcode 1, 7 or 10 with
   key id 0, 14 to 2047 bytes), over UDP or with the TCP `u16` length prefix, and
   tags it `key: "openvpn"`. A weak single-byte signal, so list it after the
@@ -59,6 +61,14 @@ installed.
   with `key` (default `firstbytes`). Examples: `ascii:GET `,
   `key:a2s|@0 hex:ffffffff`. With no `config` it matches nothing. `a2s` and
   `minecraft` take no config and ignore the `cfg_*` region.
+
+**Handshake-only plugins:** `quic`, `wireguard`, `openvpn`, `raknet` and
+`teamspeak3` recognise only a flow's first datagram. A session evicted by
+`idle_timeout_sec` (or a changed NAT mapping, a proxy restart, an ECMP move)
+cannot be routed again by them, so on a listener that uses one the proxy rejects
+an `always` route to another pool unless `first_packet_gate: true` is set, and
+warns when the sniffed pool's `idle_timeout_sec` is under 60 s. Details in
+`docs/05-configuration.md`.
 
 Every plugin crate is `crate-type = ["cdylib", "lib"]`: `cargo test` runs its
 unit tests as a normal native `rlib` (the `recognise()` function is pure Rust,

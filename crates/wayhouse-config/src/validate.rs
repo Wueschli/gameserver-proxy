@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::cidr::{Acl, Cidr, GeoAcl};
 use crate::keys::base64_decode_32;
-use crate::matcher::Matcher;
+use crate::matcher::{is_handshake_only_sniffer, Matcher};
 use crate::parse::*;
 use crate::resolved::*;
 use crate::schema::*;
@@ -632,6 +632,33 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                      or a `sniffer` (otherwise it drops every datagram)",
                     l.name
                 )));
+            }
+        }
+
+        if l.protocol == Protocol::Udp && !l.first_packet_gate {
+            // Issue #131: these sniffers recognise only a flow's handshake, but the
+            // route is decided whenever a session opens, so a mid-flow packet whose
+            // session was evicted reaches a later `always` route.
+            if let Some(first) = routes.iter().position(|r| {
+                matches!(&r.matcher, Matcher::Sniffer { name, .. } if is_handshake_only_sniffer(name))
+            }) {
+                let sniffed = &routes[first];
+                let misrouting = routes[first + 1..].iter().find(|r| {
+                    matches!(r.matcher, Matcher::Always) && r.action != sniffed.action
+                });
+                if misrouting.is_some() {
+                    let Matcher::Sniffer { name, .. } = &sniffed.matcher else {
+                        unreachable!("position() matched a sniffer route")
+                    };
+                    return Err(Invalid(format!(
+                        "listener {}: an `always` route after the handshake-only `{name}` \
+                         sniffer sends a flow whose session was evicted (or whose source \
+                         port changed) to the wrong pool, because only the first datagram \
+                         is recognised; set `first_packet_gate: true` to drop those \
+                         datagrams instead, or drop the `always` route",
+                        l.name
+                    )));
+                }
             }
         }
 
