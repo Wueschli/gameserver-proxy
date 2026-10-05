@@ -30,8 +30,13 @@ installed.
   `host:` patterns.
 - `quic` — recognises a QUIC Initial packet (long header, version 1, version 2
   or an IETF draft, with the packet type that version uses for Initial and
-  a destination connection ID of 8 to 20 bytes). The payload is encrypted, so there
-  is no hostname; the hint carries `key: "quic"`.
+  a destination connection ID of 8 to 20 bytes) and tags it `key: "quic"`. It then
+  decrypts the Initial (keys derive from the packet's own destination connection
+  ID and a public per-version salt, RFC 9001 §5.2; AES-128-GCM and HKDF-SHA256,
+  RustCrypto, pure Rust) and returns the TLS SNI, lower-cased, as the hint's
+  `host`, so a `sniffer` route with `host:` patterns can steer QUIC by server
+  name. Readable for v1, v2 and drafts 29 to 34, when the SNI sits in the part of
+  the ClientHello the first Initial carries; otherwise only the key is set.
 - `wireguard` — recognises a WireGuard handshake initiation (exactly 148 bytes,
   message type 1, three zero reserved bytes) and tags it `key: "wireguard"`.
   Later packets of the flow are not recognised; they ride the session the
@@ -148,7 +153,7 @@ this endpoint.
 Release profile (workspace-wide, `[profile.release]` in this workspace's
 `Cargo.toml`) uses `opt-level = "z"`, `lto = true`, `panic = "abort"`,
 `strip = true` — these are short-lived, instantiate-per-call modules, so
-binary size (currently ~17–21 KiB each) matters more than raw codegen speed.
+binary size (currently ~17–21 KiB each, `quic` ~55 KiB with its crypto) matters more than raw codegen speed.
 No plugin here does any I/O, spawns no threads, and imports nothing from the
 host beyond the two ABI functions it exports — consistent with the "no WASI,
 no host imports" sandbox guarantee in `docs/08` / `docs/07`.

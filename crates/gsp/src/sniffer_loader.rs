@@ -669,6 +669,17 @@ mod tests {
         initial.extend_from_slice(&[0; 32]);
         assert_eq!(quic.sniff(&initial).unwrap().key.as_deref(), Some("quic"));
         assert!(quic.sniff(b"not quic at all").is_none());
+        // A real client Initial (aioquic, v1): the plugin decrypts it and
+        // reports the SNI as the host.
+        let real: Vec<u8> = include_str!("../../plugins/quic/testdata/v1_mixed_case.hex")
+            .trim()
+            .as_bytes()
+            .chunks(2)
+            .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect();
+        let hint = quic.sniff(&real).unwrap();
+        assert_eq!(hint.key.as_deref(), Some("quic"));
+        assert_eq!(hint.host.as_deref(), Some("play.example.net"));
 
         let wireguard = registry.get("wireguard").expect("wireguard.wasm not built");
         let mut initiation = vec![0u8; 148];

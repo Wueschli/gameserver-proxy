@@ -11,3 +11,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 gsp-sniffer-abi = { path = "../gsp-sniffer-abi" }
+aes = { version = "0.8", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+hkdf = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }

@@ -16,6 +16,8 @@
 //! `0b01`). Retry, 0-RTT, Handshake and short-header packets are not first
 //! packets from a client, so they are not recognised.
 
+mod initial;
+
 const V1: u32 = 0x0000_0001;
 const V2: u32 = 0x6b33_43cf;
 const DRAFT_FIRST: u32 = 0xff00_0000;
@@ -51,7 +53,13 @@ pub fn recognise(first: &[u8]) -> Option<gsp_sniffer_abi::Hint<'static>> {
     if scid_len > MAX_CID_LEN || rest.len() < after_dcid + 1 + usize::from(scid_len) {
         return None;
     }
+    // The Initial's keys derive from public inputs, so try to read the SNI.
+    // Failure (an older draft, a ClientHello split across packets with the
+    // SNI in the later one, a forged packet) is not a reason to drop the
+    // recognition: the key-only hint stands.
+    let host = initial::extract_sni(first).map(|h| &*Box::leak(h.into_boxed_str()));
     Some(gsp_sniffer_abi::Hint {
+        host,
         key: Some("quic"),
         ..Default::default()
     })
@@ -92,6 +100,18 @@ mod tests {
         assert_eq!(hint.key, Some("quic"));
         assert!(hint.host.is_none());
         assert!(!hint.reject);
+    }
+
+    #[test]
+    fn a_real_initial_carries_the_sni_as_host() {
+        let p: String = include_str!("../testdata/v1_mixed_case.hex").trim().into();
+        let bytes: Vec<u8> = (0..p.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&p[i..i + 2], 16).unwrap())
+            .collect();
+        let hint = recognise(&bytes).unwrap();
+        assert_eq!(hint.key, Some("quic"));
+        assert_eq!(hint.host, Some("play.example.net"));
     }
 
     #[test]
