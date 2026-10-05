@@ -149,7 +149,13 @@
 > `settings.workers`). Modules within an already-configured `dir` can also be
 > managed over HTTP: `GET/POST /admin/sniffers` + `DELETE
 > /admin/sniffers/{name}` on the instance's own admin API (`409` if
-> `settings.sniffers` is absent), fanned out fleet-wide via `wayhouse-aggregator`'s
+> `settings.sniffers` is absent). An upload is checked before it is written
+> and written atomically: anything that is not a loadable module (not wasm, has
+> imports, lacks the `memory` / `alloc` / `sniff` exports, fails to
+> instantiate, empty) is `400`, a body over 8 MiB is `413`, and on an instance
+> with `settings.sniffers.modules` pins an unlisted name or a different sha256
+> is `409`. A bad `.wasm` file already in `dir` is logged and skipped by every
+> rescan; only a pin violation fails the whole scan. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
 > `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
 > see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
 >

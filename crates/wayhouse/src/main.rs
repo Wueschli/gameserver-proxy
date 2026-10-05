@@ -466,6 +466,22 @@ async fn run(
     }
     let fd_gauge = procinfo::spawn_fd_gauge(Duration::from_secs(5));
 
+    let (sniffer_pins, sniffer_validator): (admin::SnifferPins, Option<admin::SnifferValidator>) =
+        match (&sniffer_loader, &cfg.sniffers) {
+            (Some(loader), Some(sc)) => {
+                let (pins_loader, check_loader) = (loader.clone(), loader.clone());
+                let max_memory = sc.max_memory_bytes;
+                (
+                    Arc::new(move || pins_loader.pins()),
+                    Some(Arc::new(move |bytes: &[u8]| {
+                        check_loader
+                            .validate(bytes, max_memory)
+                            .map_err(|e| e.to_string())
+                    })),
+                )
+            }
+            _ => (Arc::new(Vec::new), None),
+        };
     let admin = tokio::spawn(admin::serve(
         cfg.admin_listen,
         admin_tls.map(|cert| (cert, admin::handshake_limits(cfg.admin_tls.as_ref()))),
@@ -474,6 +490,8 @@ async fn run(
         cfg.admin_auth_token.clone(),
         cfg.sniffers.as_ref().map(|sc| PathBuf::from(&sc.dir)),
         sniffers.clone(),
+        sniffer_pins,
+        sniffer_validator,
     ));
     let aggregator = aggregator_push.map(|push_cfg| {
         tracing::info!(
