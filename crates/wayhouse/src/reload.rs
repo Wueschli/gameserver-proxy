@@ -153,12 +153,17 @@ pub(crate) async fn apply_config(
     metrics::counter!(m::CONFIG_RELOAD, "result" => "ok").increment(1);
     metrics::gauge!(m::CONFIG_VERSION).set(unix_now());
     if listeners_changed {
-        let (running, stopped) = handle.reconcile_listeners().await;
+        let out = handle.reconcile_listeners().await;
         tracing::info!(
-            running,
-            stopped,
+            running = out.running,
+            stopped = out.stopped,
+            failed = out.failed.len(),
             "listener definitions changed; listeners reconciled (added / removed / rebound)"
         );
+        for e in &out.failed {
+            metrics::counter!(m::LISTENER_BIND_FAILURES, "listener" => e.listener.clone())
+                .increment(1);
+        }
     }
     if sources_changed {
         let (running, stopped) = handle.reconcile_sources().await;

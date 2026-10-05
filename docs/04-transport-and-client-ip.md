@@ -160,6 +160,12 @@ needed to override a kernel default.
 | `sendmmsg` egress batch | – | not implemented yet — still one `send` per datagram (see `docs/08`/`HANDOVER.md` follow-ups) |
 | pipe size for `splice` | kernel default | – |
 
+`SO_REUSEPORT` lets any same-user socket join a port, so before binding a
+listener's worker sockets the proxy probes each bind address with a socket that
+does not set it. A port some other process already holds is refused: startup
+fails, and a reload keeps the previous listener running and reports the failure
+(`wayhouse_listener_bind_failures_total`).
+
 ## OS limits
 
 - Raise the FD limit (`RLIMIT_NOFILE`) (≥ 2 × expected connections).

@@ -962,3 +962,33 @@ listeners:
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;
 }
+
+/// #150: a second instance with the same UDP bind must fail to start rather
+/// than share the port through `SO_REUSEPORT`.
+#[tokio::test]
+async fn a_second_udp_instance_with_the_same_bind_fails_to_start() {
+    let b1 = echo_backend(1).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{b1}\"]\n    health_check:\n      type: none\n\
+         listeners:\n  - name: l\n    bind: \"{proxy_addr}\"\n    protocol: udp\n    pool: p\n"
+    );
+    let snap = || Snapshot::from_config(&parse_str(&yaml).unwrap());
+    let first = Runtime::start(snap(), std::sync::Arc::default(), 2);
+
+    let second = Runtime::start_with_discovery(
+        snap(),
+        std::sync::Arc::default(),
+        None,
+        std::sync::Arc::default(),
+        std::sync::Arc::new(wayhouse_core::Discovery::new()),
+        None,
+        None,
+        2,
+    );
+    let err = second.err().expect("a duplicate bind must fail startup");
+    assert_eq!(err.bind, proxy_addr);
+    assert_eq!(err.source.kind(), std::io::ErrorKind::AddrInUse);
+
+    first.shutdown_with_grace(Duration::from_millis(100)).await;
+}

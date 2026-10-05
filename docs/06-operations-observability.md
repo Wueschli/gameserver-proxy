@@ -81,6 +81,10 @@
 
 ### Proxy internals
 - `wayhouse_config_reload_total{result}` / `wayhouse_config_version` (gauge, timestamp)
+- `wayhouse_listener_bind_failures_total{listener}` – a reload could not (re)bind the
+  listener (port taken by another process, no permission, bad address). The previous
+  listener, if any, keeps running; the next reload retries. Startup refuses to run
+  instead.
 - `wayhouse_build_info{component,version,commit}` (gauge, always `1`) — set once at
   startup; the same label set on `wayhouse` (`component="wayhouse"`) and every fleet
   binary. `commit` is a 12-char git SHA baked in at build time

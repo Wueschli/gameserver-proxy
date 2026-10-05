@@ -215,44 +215,42 @@ async fn marker_backend(mark: u8) -> std::net::SocketAddr {
     addr
 }
 
-/// Sockets backing every port `free_port` handed out, kept for the life of the
-/// test process. Dropping them straight away would let the kernel give the same
-/// port to a later call or to a test running in parallel, and since the proxy
-/// binds with `SO_REUSEPORT` two listeners would then share the port silently.
-static RESERVED_PORTS: std::sync::Mutex<Vec<socket2::Socket>> = std::sync::Mutex::new(Vec::new());
+/// Ports `free_port` already handed out in this process. Two parallel tests
+/// must never get the same one; the proxy refuses a port anything else holds,
+/// so a clash would fail loudly rather than share silently.
+static HANDED_OUT: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Bind (but do not listen on) `127.0.0.1:port`, `0` meaning "any free port",
-/// and hold it. The reservation sets `SO_REUSEPORT` like the proxy does, so the
-/// proxy can bind the same port later, while any other bind is refused.
+/// Pick `127.0.0.1:port` (`0` = any free port) that this process has not handed
+/// out yet. The socket is released again, so the proxy can bind it.
 fn reserve_port(port: u16) -> std::io::Result<std::net::SocketAddr> {
-    let sock = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    // No `SO_REUSEADDR`: with it, a plain `TcpListener::bind` could still take
-    // the port next to this idle socket.
-    sock.set_reuse_port(true)?;
-    sock.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], port)).into())?;
-    let addr = sock.local_addr()?.as_socket().expect("an IPv4 address");
-    RESERVED_PORTS
+    let probe = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    let addr = probe.local_addr()?;
+    let fresh = HANDED_OUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(sock);
-    Ok(addr)
+        .insert(addr.port());
+    if fresh {
+        Ok(addr)
+    } else {
+        Err(std::io::ErrorKind::AddrInUse.into())
+    }
 }
 
-/// A port on 127.0.0.1 that nothing listens on yet and nobody else can take.
+/// A port on 127.0.0.1 that nothing listens on and no other test was given.
 async fn free_port() -> std::net::SocketAddr {
-    reserve_port(0).unwrap()
+    loop {
+        if let Ok(addr) = reserve_port(0) {
+            return addr;
+        }
+    }
 }
 
 /// Two adjacent free ports on 127.0.0.1, for the bind-range test — retries a
 /// few times since "port N+1 is also free right now" isn't guaranteed by a
 /// single ephemeral-port grab (the kernel hands out even ports to `bind(0)` and
 /// favours odd ones for outgoing connections, so the neighbour is often busy). A
-/// `lo` whose neighbour is taken stays reserved (a few idle sockets for the rest
-/// of the process), which is harmless.
+/// `lo` whose neighbour is taken stays handed out, which is harmless.
 async fn free_port_pair() -> (u16, u16) {
     for _ in 0..200 {
         let lo = free_port().await.port();
@@ -267,7 +265,7 @@ async fn free_port_pair() -> (u16, u16) {
 }
 
 #[tokio::test]
-async fn free_port_hands_out_each_port_once_and_keeps_it_reserved() {
+async fn free_port_hands_out_each_port_once() {
     let mut seen = std::collections::HashSet::new();
     for _ in 0..200 {
         let addr = free_port().await;
@@ -276,25 +274,7 @@ async fn free_port_hands_out_each_port_once_and_keeps_it_reserved() {
             "port {} handed out twice",
             addr.port()
         );
-        // Nobody else can take the port while the test is still preparing to bind it.
-        assert!(
-            std::net::TcpListener::bind(addr).is_err(),
-            "port {} was free to take after free_port returned it",
-            addr.port()
-        );
     }
-}
-
-#[tokio::test]
-async fn a_port_from_free_port_can_still_be_bound_by_the_proxy_and_refuses_until_then() {
-    let addr = free_port().await;
-    assert!(
-        TcpStream::connect(addr).await.is_err(),
-        "nothing listens on a reserved port yet"
-    );
-    let listener = wayhouse_core::net::bind_reuseport_tcp(addr, 16, false, false)
-        .expect("the proxy's SO_REUSEPORT bind must coexist with the reservation");
-    assert_eq!(listener.local_addr().unwrap(), addr);
 }
 
 #[tokio::test]
@@ -889,6 +869,159 @@ async fn reload_adds_removes_and_rebinds_listeners_at_runtime() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(hit(p2b).await.is_none(), "l2 removed");
     assert_eq!(hit(p1).await, Some(b'A'), "l1 still serving");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+const ONE_LISTENER: &str = "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+     listeners:\n  - name: l1\n    bind: \"{bind}\"\n    pool: p\n";
+
+fn one_listener(backend: std::net::SocketAddr, bind: std::net::SocketAddr) -> Arc<Snapshot> {
+    let yaml = ONE_LISTENER
+        .replace("{a}", &backend.to_string())
+        .replace("{bind}", &bind.to_string());
+    Snapshot::from_config(&parse_str(&yaml).unwrap())
+}
+
+async fn marker_hit(addr: std::net::SocketAddr) -> Option<u8> {
+    let mut c = TcpStream::connect(addr).await.ok()?;
+    let mut m = [0u8; 1];
+    c.read_exact(&mut m).await.ok()?;
+    Some(m[0])
+}
+
+/// #149: a reload that moves a listener to a port that cannot be bound used to
+/// stop the old listener and leave the new one silently dead.
+#[tokio::test]
+async fn reload_to_an_unbindable_port_keeps_the_old_listener_and_reports_it() {
+    let a = marker_backend(b'A').await;
+    let p1 = free_port().await;
+    let p2 = free_port().await;
+
+    let runtime = Runtime::start(one_listener(a, p1), Arc::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(marker_hit(p1).await, Some(b'A'));
+
+    // Something else holds p2 exclusively.
+    let blocker = std::net::TcpListener::bind(p2).unwrap();
+
+    handle.store(one_listener(a, p2));
+    let out = handle.reconcile_listeners().await;
+    assert_eq!(out.failed.len(), 1, "the failed rebind is reported");
+    assert_eq!(out.failed[0].listener, "l1");
+    assert_eq!(out.failed[0].bind, p2);
+    assert_eq!(out.stopped, 0, "the old listener must not be stopped");
+    assert_eq!(out.running, 1);
+    assert_eq!(
+        marker_hit(p1).await,
+        Some(b'A'),
+        "old listener still serves"
+    );
+
+    // The next reconcile retries, because the group still carries the old config.
+    drop(blocker);
+    let out = handle.reconcile_listeners().await;
+    assert!(out.failed.is_empty(), "retry succeeds: {:?}", out.failed);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(marker_hit(p2).await, Some(b'A'), "listener moved to p2");
+    assert!(marker_hit(p1).await.is_none(), "old bind released");
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// #149: a brand-new listener that cannot bind is reported and retried, not
+/// recorded as running.
+#[tokio::test]
+async fn a_new_listener_that_cannot_bind_is_reported_and_retried() {
+    let a = marker_backend(b'A').await;
+    let p1 = free_port().await;
+    let p2 = free_port().await;
+    let runtime = Runtime::start(one_listener(a, p1), Arc::default(), 1);
+    let handle = runtime.handle();
+
+    let blocker = std::net::TcpListener::bind(p2).unwrap();
+    let both = parse_str(&format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l1\n    bind: \"{p1}\"\n    pool: p\n\
+         \x20 - name: l2\n    bind: \"{p2}\"\n    pool: p\n"
+    ))
+    .unwrap();
+    handle.store(Snapshot::from_config(&both));
+    let out = handle.reconcile_listeners().await;
+    assert_eq!(out.failed.len(), 1);
+    assert_eq!(
+        out.running, 1,
+        "only l1 runs; l2 is not recorded as running"
+    );
+
+    drop(blocker);
+    let out = handle.reconcile_listeners().await;
+    assert!(out.failed.is_empty());
+    assert_eq!(out.running, 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(marker_hit(p2).await, Some(b'A'));
+
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// #150: `SO_REUSEPORT` let a second instance with the same bind start and
+/// split the traffic. Startup must refuse instead.
+#[tokio::test]
+async fn a_second_instance_with_the_same_bind_fails_to_start() {
+    let a = marker_backend(b'A').await;
+    let p1 = free_port().await;
+
+    let first = Runtime::start(one_listener(a, p1), Arc::default(), 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let second = Runtime::start_with_discovery(
+        one_listener(a, p1),
+        Arc::default(),
+        None,
+        Arc::default(),
+        Arc::new(wayhouse_core::Discovery::new()),
+        None,
+        None,
+        2,
+    );
+    let err = second.err().expect("a duplicate bind must fail startup");
+    assert_eq!(err.listener, "l1");
+    assert_eq!(err.bind, p1);
+    assert_eq!(err.source.kind(), std::io::ErrorKind::AddrInUse);
+
+    // The first instance is untouched.
+    assert_eq!(marker_hit(p1).await, Some(b'A'));
+    first
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// The same-process rebind of an unchanged address (a listener whose config
+/// changed but not its bind) must still work: the old group holds the port.
+#[tokio::test]
+async fn reload_that_keeps_the_bind_but_changes_the_listener_rebinds() {
+    let a = marker_backend(b'A').await;
+    let p1 = free_port().await;
+    let runtime = Runtime::start(one_listener(a, p1), Arc::default(), 1);
+    let handle = runtime.handle();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let yaml = format!(
+        "pools:\n  - name: p\n    targets: [\"{a}\"]\n\
+         listeners:\n  - name: l1\n    bind: \"{p1}\"\n    pool: p\n    route_hint: true\n"
+    );
+    handle.store(Snapshot::from_config(&parse_str(&yaml).unwrap()));
+    let out = handle.reconcile_listeners().await;
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(marker_hit(p1).await, Some(b'A'));
 
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))

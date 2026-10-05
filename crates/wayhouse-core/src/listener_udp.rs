@@ -58,7 +58,7 @@ use crate::error::ListenerError;
 use crate::geo::GeoDb;
 use crate::limits::{GlobalLimits, LimitGuard};
 use crate::metrics_defs as m;
-use crate::net::{bind_reuseport_udp, bind_transparent_udp, UdpMode};
+use crate::net::{bind_transparent_udp, UdpMode};
 use crate::pool::{Backend, BackendGuard};
 use crate::ratelimit::RateLimiter;
 use crate::resolver::{resolve_route, Resolvers, Routed};
@@ -129,8 +129,21 @@ struct Pending {
     limit_guard: LimitGuard,
 }
 
+/// The per-datagram destination mechanism a listener's socket needs; the
+/// socket itself is bound by `ListenerManager` with this mode.
+pub(crate) fn udp_mode(cfg: &ListenerConfig) -> UdpMode {
+    if cfg.transparent {
+        UdpMode::Transparent
+    } else if cfg.prefix.is_some() {
+        UdpMode::Prefix
+    } else {
+        UdpMode::Plain
+    }
+}
+
 // Plumbing entry point: each argument is a distinct shared handle wired in by
-// `ListenerManager::spawn_group` (its only caller).
+// `ListenerManager::spawn_group` (its only caller), which also binds `socket`
+// (see `net::bind_reuseport_udp`) so a bind failure surfaces before any task runs.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_udp_listener(
     cfg: ListenerConfig,
@@ -144,16 +157,11 @@ pub async fn run_udp_listener(
     geo: Option<Arc<GeoDb>>,
     sniffers: Arc<Sniffers>,
     worker_id: usize,
+    socket: std::net::UdpSocket,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), ListenerError> {
-    let mode = if cfg.transparent {
-        UdpMode::Transparent
-    } else if cfg.prefix.is_some() {
-        UdpMode::Prefix
-    } else {
-        UdpMode::Plain
-    };
-    let sock = Arc::new(UdpSocket::from_std(bind_reuseport_udp(cfg.bind, mode)?)?);
+    let mode = udp_mode(&cfg);
+    let sock = Arc::new(UdpSocket::from_std(socket)?);
     crate::sniff::warn_if_missing(&cfg.name, &cfg.sniffers, &sniffers);
     tracing::info!(
         listener = %cfg.name,
