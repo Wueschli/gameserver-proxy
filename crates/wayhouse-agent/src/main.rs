@@ -270,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
     let subscribe_task = tokio::spawn(proxy_subscribe::run(
         args.controller_url.clone(),
         args.controller_token.clone(),
-        live.api(),
+        live.clone(),
     ));
 
     tokio::signal::ctrl_c()
