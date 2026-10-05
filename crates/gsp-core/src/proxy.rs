@@ -7,6 +7,8 @@
 //! pair lives in the kernel; other platforms (or a pipe-setup failure) fall back
 //! to a buffered `try_read` / `try_write` loop. The idle timer is shared: a
 //! connection is idle only when *neither* direction has moved bytes for `idle`.
+//! A direction stuck on a write (peer not reading) is therefore no longer bounded
+//! by its own timer while the other direction keeps moving bytes.
 
 use std::io;
 use std::net::SocketAddr;
