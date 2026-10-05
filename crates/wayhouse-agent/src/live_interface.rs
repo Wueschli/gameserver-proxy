@@ -143,6 +143,13 @@ impl LiveInterface {
         Ok(targets)
     }
 
+    /// Drops `key` from the peers awaiting repair: the registration it came
+    /// from was removed or replaced, so re-adding it would resurrect a proxy
+    /// that no longer exists.
+    pub fn forget_peer(&self, key: &defguard_wireguard_rs::key::Key) {
+        self.lost().retain(|p| &p.public_key != key);
+    }
+
     /// Adds back the peers [`LiveInterface::renew_peers`] lost and returns
     /// their tunnel addresses, to be kicked. A peer that has reappeared on the
     /// device since (the subscription re-added it from a newer registration)
@@ -529,6 +536,22 @@ mod tests {
             .peers
             .contains_key(&a.public_key));
         assert!(live.repair_peers().is_empty(), "nothing is left to repair");
+    }
+
+    #[test]
+    fn a_forgotten_peer_is_not_repaired() {
+        let a = peer(1, "fd00::1/128");
+        let log = Log::default();
+        let live = live_with_flaky_peers(std::slice::from_ref(&a), &[(&a.public_key, 2)], &log);
+        live.renew_peers().unwrap();
+        live.forget_peer(&a.public_key);
+        assert!(live.repair_peers().is_empty());
+        assert!(!live
+            .api()
+            .read_interface_data()
+            .unwrap()
+            .peers
+            .contains_key(&a.public_key));
     }
 
     #[test]
