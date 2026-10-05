@@ -43,6 +43,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           python3 .github/scripts/check_release_test.py
+          python3 .github/scripts/check_version_policy_test.py
+          python3 .github/scripts/check_version_policy.py >/dev/null
           echo "version=$(python3 .github/scripts/check_release.py "$TAG")" >> "$GITHUB_OUTPUT"
       - name: Tagged commit is on main and CI passed on it
         env:
