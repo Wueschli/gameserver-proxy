@@ -1,0 +1,64 @@
+name: Release PR
+
+# Keeps one release PR open on main (release-please, manifest mode): it bumps
+# [workspace.package] version, refreshes Cargo.lock and writes CHANGELOG.md from the
+# conventional-commit titles. It never tags or publishes (skip-github-release): the
+# maintainer tags by hand, see RELEASING.md. Versions stay 0.x; the `release-policy`
+# CI job fails a release PR that would reach 1.0.
+#
+# PRs created with GITHUB_TOKEN do not start workflows, and `ci-ok` is required, so
+# after every run this dispatches ci.yml on the release branch. If a dispatched run
+# does not satisfy the ruleset, fall back to a fine-grained PAT secret
+# RELEASE_PLEASE_TOKEN (contents + pull requests write) in place of GITHUB_TOKEN.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04   # pinned like ci.yml
+    timeout-minutes: 15
+    permissions:
+      contents: write        # push the release branch and Cargo.lock
+      pull-requests: write   # open and update the release PR
+      actions: write         # dispatch ci.yml
+    env:
+      BRANCH: release-please--branches--main
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.rp.outputs.prs_created == 'true'
+        with:
+          ref: ${{ env.BRANCH }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      # release-please edits Cargo.toml only; its TOML updater cannot address the
+      # ten Cargo.lock entries reliably, so the lockfile is refreshed here. The
+      # `release-policy` job then proves Cargo.toml and Cargo.lock agree.
+      - name: Refresh Cargo.lock
+        if: steps.rp.outputs.prs_created == 'true'
+        run: |
+          cargo update --workspace
+          if ! git diff --quiet Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: update Cargo.lock for the release"
+            git push origin "HEAD:$BRANCH"
+          fi
+      - name: Run CI on the release branch
+        if: steps.rp.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run ci.yml --ref "$BRANCH"
