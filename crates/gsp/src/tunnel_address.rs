@@ -64,9 +64,30 @@ pub fn load(path: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Saves `cidr` by writing a temporary file beside `path`, syncing it and
+/// renaming it over `path`, so a crash or a full disk leaves the previous
+/// address, never an empty or partial one.
 pub fn save(path: &Path, cidr: &str) -> anyhow::Result<()> {
-    std::fs::write(path, format!("{cidr}\n"))
+    write_atomically(path, format!("{cidr}\n").as_bytes())
         .with_context(|| format!("saving the tunnel address to {}", path.display()))
+}
+
+fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(contents)?;
+        f.sync_all()
+    });
+    match written.and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -296,5 +317,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("already held"), "{err:#}");
+    }
+
+    #[test]
+    fn save_replaces_the_file_atomically_and_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        save(&path, "10.60.0.5/16").unwrap();
+        save(&path, "10.60.0.6/16").unwrap();
+        assert_eq!(load(&path).as_deref(), Some("10.60.0.6/16"));
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("tunnel-address")]);
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_previous_file_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tunnel-address");
+        save(&path, "10.60.0.5/16").unwrap();
+        // A directory squatting on the temporary's name makes the write fail
+        // before the rename.
+        std::fs::create_dir(dir.path().join("tunnel-address.tmp")).unwrap();
+        assert!(save(&path, "10.60.0.6/16").is_err());
+        assert_eq!(load(&path).as_deref(), Some("10.60.0.5/16"));
     }
 }

@@ -54,7 +54,7 @@ examples) or from an external routing service you control.
 - Active `tcp_connect` / `udp_probe` health checks (`rise`/`fall` thresholds) plus
   passive connect-failure feedback; unhealthy backends are skipped.
 - UDP: worker-local (lock-free) session tables, one `connect(2)` upstream socket per
-  session, `src_ip` / `src_ip_port` backend affinity, idle-timeout eviction and a
+  session, idle-timeout eviction (affinity: a `consistent_hash` pool) and a
   no-unsolicited-reply amplification guard.
 - Linux fast paths: `splice(2)` zero-copy for TCP, `recvmmsg(2)` batching for UDP.
 - Optional per-backend session caps (shared by TCP connections and UDP sessions).

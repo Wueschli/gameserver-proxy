@@ -517,18 +517,6 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
                 l.name
             )));
         }
-        let affinity = match (l.protocol, l.affinity) {
-            (Protocol::Tcp, Some(_)) => {
-                return Err(Invalid(format!(
-                    "listener {}: affinity applies only to udp listeners",
-                    l.name
-                )))
-            }
-            (Protocol::Tcp, None) => None,
-            (Protocol::Udp, None) => Some(HashOn::default()),
-            (Protocol::Udp, Some(a)) => Some(a.hash_on),
-        };
-
         let prefix = match &l.prefix {
             Some(p) => {
                 if l.protocol != Protocol::Udp {
@@ -750,7 +738,6 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
             extra_binds,
             protocol: l.protocol,
             routes,
-            affinity,
             prefix,
             freebind: l.freebind,
             transparent: l.transparent,

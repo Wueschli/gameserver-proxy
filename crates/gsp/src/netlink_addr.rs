@@ -18,15 +18,67 @@ use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::constants::NETLINK_ROUTE;
 use netlink_sys::{Socket, SocketAddr};
 
-use crate::live_interface::DeleteAddress;
+use crate::live_interface::{DeleteAddress, DeleteLink};
 
 /// `EADDRNOTAVAIL`: the kernel's answer to deleting an address that is not
 /// there.
 const EADDRNOTAVAIL: i32 = 99;
 
+/// `ENODEV`: the kernel's answer to deleting a link that is not there.
+const ENODEV: i32 = 19;
+
 /// A [`DeleteAddress`] for the interface `ifname`.
 pub fn deleter(ifname: String) -> DeleteAddress {
     Box::new(move |address| delete_address(&ifname, address))
+}
+
+/// A [`DeleteLink`] for the interface `ifname`.
+pub fn link_deleter(ifname: String) -> DeleteLink {
+    Box::new(move || delete_link(&ifname))
+}
+
+/// Deletes the link `ifname`, which takes its addresses with it. A link that
+/// is already gone is not an error.
+pub fn delete_link(ifname: &str) -> io::Result<()> {
+    let mut message = LinkMessage::default();
+    message
+        .attributes
+        .push(LinkAttribute::IfName(ifname.to_string()));
+    match request_ack(RouteNetlinkMessage::DelLink(message)) {
+        Err(e) if e.raw_os_error() == Some(ENODEV) => Ok(()),
+        other => other,
+    }
+}
+
+/// Sends `message` and waits for the kernel's acknowledgement; its error
+/// code, if any, is the returned error.
+fn request_ack(message: RouteNetlinkMessage) -> io::Result<()> {
+    let mut request = NetlinkMessage::from(message);
+    request.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+    request.finalize();
+    let mut buf = vec![0u8; request.buffer_len()];
+    request.serialize(&mut buf);
+
+    let socket = Socket::new(NETLINK_ROUTE)?;
+    socket.connect(&SocketAddr::new(0, 0))?;
+    if socket.send(&buf, 0)? != buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short netlink write",
+        ));
+    }
+    let mut reply = [0u8; 4096];
+    let n = socket.recv(&mut &mut reply[..], 0)?;
+    let response = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&reply[..n])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    match response.payload {
+        NetlinkPayload::Error(e) if e.code.is_none() => Ok(()),
+        NetlinkPayload::Error(e) => Err(e.to_io()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected netlink reply",
+        )),
+    }
 }
 
 /// Deletes `address` from the interface `ifname`. An address that is already
@@ -50,38 +102,13 @@ pub fn delete_address(ifname: &str, address: &IpAddrMask) -> io::Result<()> {
             .push(AddressAttribute::Local(address.address));
     }
 
-    let mut request = NetlinkMessage::from(RouteNetlinkMessage::DelAddress(message));
-    request.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-    request.finalize();
-    let mut buf = vec![0u8; request.buffer_len()];
-    request.serialize(&mut buf);
-
-    let socket = Socket::new(NETLINK_ROUTE)?;
-    socket.connect(&SocketAddr::new(0, 0))?;
-    if socket.send(&buf, 0)? != buf.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "short netlink write",
-        ));
-    }
-    let mut reply = [0u8; 4096];
-    let n = socket.recv(&mut &mut reply[..], 0)?;
-    let response = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&reply[..n])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    match response.payload {
-        NetlinkPayload::Error(e) if e.code.is_none() => Ok(()),
-        NetlinkPayload::Error(e) => {
-            let err = e.to_io();
-            if err.raw_os_error() == Some(EADDRNOTAVAIL) || err.kind() == io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(err)
-            }
+    match request_ack(RouteNetlinkMessage::DelAddress(message)) {
+        Err(e)
+            if e.raw_os_error() == Some(EADDRNOTAVAIL) || e.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(())
         }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unexpected netlink reply",
-        )),
+        other => other,
     }
 }
 
@@ -155,5 +182,24 @@ mod tests {
         delete_address("lo", &address).unwrap();
         assert!(!ip(&["addr", "show", "dev", "lo"]).contains("10.99.77.1/24"));
         delete_address("lo", &address).unwrap();
+    }
+
+    /// Same privilege rule as above.
+    #[test]
+    fn deletes_a_link_and_tolerates_one_that_is_gone() {
+        let ip = |args: &[&str]| {
+            std::process::Command::new("ip")
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !ip(&["link", "add", "gspdel0", "type", "dummy"]) {
+            eprintln!("skipped: needs CAP_NET_ADMIN and ip");
+            return;
+        }
+        assert!(ip(&["link", "show", "gspdel0"]));
+        delete_link("gspdel0").unwrap();
+        assert!(!ip(&["link", "show", "gspdel0"]));
+        delete_link("gspdel0").unwrap();
     }
 }

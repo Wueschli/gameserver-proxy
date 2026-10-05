@@ -169,12 +169,17 @@ short-lived `src_ip → pool` mapping.
 
 ## Session affinity
 
-- **Sticky table**: `key → backend_id (+ TTL)`. The key comes from the resolver
-  (`sticky_key`), a sniffer (`key`), or config (`hash_on: src_ip`).
-- A new request with a known key and a **healthy** backend → goes there.
-- Backend `unhealthy`/`draining` → re-resolve the key, replace the table entry.
-- For UDP, affinity is effectively mandatory (otherwise the gameplay stream fragments
-  across multiple instances). Default: `hash_on: src_ip` + sticky table.
+- **Implemented**: a `consistent_hash` pool (rendezvous hash of `src_ip` or
+  `src_ip_port`). Stateless, so it holds at any worker count and after any idle
+  eviction; an unhealthy or draining backend is skipped and its clients move to
+  the next-highest score. Adding a backend remaps about 1/N of the clients.
+- **Not implemented**: a `key → backend_id (+ TTL)` sticky table keyed by the
+  resolver's `sticky_key` or a sniffer `key`. The UDP table that existed was
+  removed in #56: it was per worker, so with `SO_REUSEPORT` (clients spread by
+  source port) it kept only ~34% of clients on 4 workers.
+- For UDP, affinity is effectively mandatory (otherwise the gameplay stream
+  fragments across multiple instances): point UDP listeners at a
+  `consistent_hash` pool.
 
 ## Routing without a protocol hint (raw data to an IP:port)
 
@@ -229,7 +234,7 @@ schemes, used alone or combined:
   plane API before connecting:
   `POST /route-hint { src_ip: "203.0.113.7", pool: "survival", ttl_sec: 30 }`.
 - The proxy keeps a short-lived `src_ip → pool` table. The first packet/SYN from that
-  IP with no other hint is resolved via it, then the normal sticky table takes over.
+  IP with no other hint is resolved via it, then the pool's balancer takes over.
 - Weakness: several players behind **one** NAT IP wanting different subdomains at the
   same time cannot be told apart — unless the launcher can additionally set a short
   token that does end up in the first packet (then `first-bytes`). Otherwise fall back
@@ -296,7 +301,6 @@ listener raw-udp
     route 2: dst 2001:db8:ace:1::2/128 → pool creative
     route 3: dst 2001:db8:ace:1::3/128 → pool arena
     route 4: always                     → reject   # unknown destination IP
-  affinity: hash_on = src_ip            # keep the UDP session on one backend
 ```
 The client connects to `survival.example.net:7777`, immediately sends raw packets; the
 proxy reads the destination address from the datagram `cmsg` and picks the pool.

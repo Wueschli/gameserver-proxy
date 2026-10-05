@@ -1,5 +1,5 @@
 //! End-to-end UDP: datagrams flow client -> proxy -> backend -> client, with
-//! per-client sessions, `src_ip` backend affinity, and idle-timeout eviction
+//! per-client sessions, `consistent_hash` backend affinity, and idle-timeout eviction
 //! that releases the backend slot.
 
 use std::time::Duration;
@@ -724,6 +724,114 @@ listeners:
         "port-unreachable should mark the backend unhealthy"
     );
 
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+/// An echo backend with a full-size receive buffer, so large datagrams make
+/// the round trip.
+async fn big_echo_backend() -> std::net::SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_536];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            let _ = sock.send_to(&buf[..n], peer).await;
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn replies_of_every_size_reach_their_own_client_intact() {
+    let backend = big_echo_backend().await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Concurrent sessions, each with its own fill byte and datagram size, from
+    // a tiny one up to near the UDP maximum. The reply pumps interleave on the
+    // runtime, so any shared reply buffer must not mix their payloads up.
+    let sizes = [1usize, 64, 1_200, 9_000, 30_000, 60_000, 65_000, 100];
+    let mut tasks = Vec::new();
+    for (i, size) in sizes.into_iter().enumerate() {
+        tasks.push(tokio::spawn(async move {
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.connect(proxy_addr).await.unwrap();
+            let payload = vec![i as u8 + 1; size];
+            let mut buf = vec![0u8; 65_536];
+            let n = first_reply(&client, &payload, &mut buf).await;
+            assert_eq!(&buf[..n], &payload[..], "session {i} got a corrupted reply");
+            for round in 0..20 {
+                client.send(&payload).await.unwrap();
+                let n = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+                    .await
+                    .expect("reply timed out")
+                    .unwrap();
+                assert_eq!(&buf[..n], &payload[..], "session {i} round {round}");
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    runtime
+        .shutdown_with_grace(std::time::Duration::from_millis(100))
+        .await;
+}
+
+#[tokio::test]
+async fn consistent_hash_keeps_a_client_ip_on_one_backend_across_ports() {
+    let b1 = echo_backend(1).await;
+    let b2 = echo_backend(2).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = format!(
+        r#"
+pools:
+  - name: p
+    targets: ["{b1}", "{b2}"]
+    balancer: consistent_hash
+    hash_on: src_ip
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+"#
+    );
+    let cfg = parse_str(&yaml).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg), std::sync::Arc::default(), 2);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Each socket is a new source port (a new session, possibly on another
+    // worker); `src_ip` hashing must still send them all to the same backend.
+    let mut tags = Vec::new();
+    for _ in 0..12 {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(proxy_addr).await.unwrap();
+        let mut buf = [0u8; 32];
+        let n = first_reply(&client, b"hi", &mut buf).await;
+        assert_eq!(&buf[1..n], b"hi");
+        tags.push(buf[0]);
+    }
+    assert!(
+        tags.windows(2).all(|w| w[0] == w[1]),
+        "one client IP must hash to one backend, got {tags:?}"
+    );
     runtime
         .shutdown_with_grace(std::time::Duration::from_millis(100))
         .await;

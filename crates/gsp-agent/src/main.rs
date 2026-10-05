@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         wg,
         address,
         netlink_addr::deleter(args.iface.clone()),
+        netlink_addr::link_deleter(args.iface.clone()),
     ));
     tracing::info!(iface = %args.iface, port = args.listen_port, "wireguard interface up");
     if let Some(ip) = args.peer_address.as_deref().and_then(|a| a.parse().ok()) {

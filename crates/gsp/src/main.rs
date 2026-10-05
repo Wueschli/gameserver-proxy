@@ -524,6 +524,7 @@ async fn run(
                 wg,
                 address,
                 netlink_addr::deleter(tc.iface.clone()),
+                netlink_addr::link_deleter(tc.iface.clone()),
             ));
             tracing::info!(
                 iface = %tc.iface,

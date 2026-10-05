@@ -18,12 +18,16 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use defguard_wireguard_rs::net::IpAddrMask;
+use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::WireguardInterfaceApi;
 
 pub type Wg = dyn WireguardInterfaceApi + Send + Sync;
 
 /// Removes an address from the interface.
 pub type DeleteAddress = Box<dyn Fn(&IpAddrMask) -> io::Result<()> + Send + Sync>;
+
+/// Deletes the interface's link, address and all.
+pub type DeleteLink = Box<dyn Fn() -> io::Result<()> + Send + Sync>;
 
 struct State {
     address: IpAddrMask,
@@ -37,10 +41,19 @@ pub struct LiveInterface {
     wg: Arc<Wg>,
     state: Mutex<State>,
     delete: DeleteAddress,
+    delete_link: DeleteLink,
+    /// Peers [`LiveInterface::renew_peers`] removed and could not add back,
+    /// for [`LiveInterface::repair_peers`].
+    lost: Mutex<Vec<Peer>>,
 }
 
 impl LiveInterface {
-    pub fn new(wg: Arc<Wg>, address: IpAddrMask, delete: DeleteAddress) -> Self {
+    pub fn new(
+        wg: Arc<Wg>,
+        address: IpAddrMask,
+        delete: DeleteAddress,
+        delete_link: DeleteLink,
+    ) -> Self {
         Self {
             wg,
             state: Mutex::new(State {
@@ -48,6 +61,8 @@ impl LiveInterface {
                 dirty: false,
             }),
             delete,
+            delete_link,
+            lost: Mutex::new(Vec::new()),
         }
     }
 
@@ -73,17 +88,37 @@ impl LiveInterface {
         st.address != *new || st.dirty
     }
 
-    /// Removes the interface (shutdown).
+    /// Removes the interface (shutdown). When the library cannot (on the
+    /// kernel backend it fails in `clear_dns` before it deletes the link), the
+    /// link is deleted over netlink instead, so neither it nor its address
+    /// outlives the process.
     pub fn remove(&self) -> anyhow::Result<()> {
-        Ok(self.wg.remove_interface()?)
+        match self.wg.remove_interface() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "removing the interface failed; deleting the link instead");
+                (self.delete_link)().context("deleting the interface's link")
+            }
+        }
     }
 
-    /// Re-creates every peer exactly as configured and returns their tunnel
-    /// addresses, to be kicked. The other side drops and re-adds its peer for
-    /// us when our address changes, which discards the session this side
-    /// still believes in; its packets are then ignored until a keepalive
-    /// times out (longer than a proxy waits for a backend). Re-creating the
-    /// peer resets the session, so a new handshake starts at once.
+    fn lost(&self) -> std::sync::MutexGuard<'_, Vec<Peer>> {
+        self.lost
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Re-creates every peer as the device reports it and returns the tunnel
+    /// addresses of those that came back, to be kicked. The other side drops
+    /// and re-adds its peer for us when our address changes, which discards
+    /// the session this side still believes in; its packets are then ignored
+    /// until a keepalive times out (longer than a proxy waits for a backend).
+    /// Re-creating the peer resets the session, so a new handshake starts at
+    /// once.
+    ///
+    /// Best effort per peer: one that cannot be added back (retried once) is
+    /// remembered for [`LiveInterface::repair_peers`] and does not stop the
+    /// others.
     pub fn renew_peers(&self) -> anyhow::Result<Vec<std::net::IpAddr>> {
         let host = self.wg.read_interface_data()?;
         let mut targets = Vec::new();
@@ -91,10 +126,56 @@ impl LiveInterface {
             if let Err(e) = self.wg.remove_peer(&peer.public_key) {
                 tracing::debug!(error = %e, "removing a peer to renew its session");
             }
-            self.wg.configure_peer(peer)?;
-            targets.extend(peer.allowed_ips.iter().map(|a| a.address));
+            let added = self.wg.configure_peer(peer).or_else(|first| {
+                tracing::debug!(error = %first, "re-adding a peer failed; retrying once");
+                self.wg.configure_peer(peer)
+            });
+            match added {
+                Ok(()) => targets.extend(peer.allowed_ips.iter().map(|a| a.address)),
+                Err(e) => {
+                    tracing::warn!(error = %e, peer = %peer.public_key, "could not re-add a peer after the address change; will retry");
+                    let mut lost = self.lost();
+                    lost.retain(|p| p.public_key != peer.public_key);
+                    lost.push(peer.clone());
+                }
+            }
         }
         Ok(targets)
+    }
+
+    /// Adds back the peers [`LiveInterface::renew_peers`] lost and returns
+    /// their tunnel addresses, to be kicked. A peer that has reappeared on the
+    /// device since (the subscription re-added it from a newer registration)
+    /// is left as it is.
+    pub fn repair_peers(&self) -> Vec<std::net::IpAddr> {
+        let mut lost = self.lost();
+        if lost.is_empty() {
+            return Vec::new();
+        }
+        let present = match self.wg.read_interface_data() {
+            Ok(host) => host.peers,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the interface to repair lost peers");
+                return Vec::new();
+            }
+        };
+        let mut targets = Vec::new();
+        lost.retain(|peer| {
+            if present.contains_key(&peer.public_key) {
+                return false;
+            }
+            match self.wg.configure_peer(peer) {
+                Ok(()) => {
+                    targets.extend(peer.allowed_ips.iter().map(|a| a.address));
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, peer = %peer.public_key, "could not re-add a lost peer; will retry");
+                    true
+                }
+            }
+        });
+        targets
     }
 
     /// Moves the interface to `new`, keeping its peers. When the old address
@@ -143,7 +224,12 @@ pub(crate) mod testing {
     pub struct Fake {
         pub log: Log,
         pub fail_assign: Vec<String>,
-        pub peers: Vec<Peer>,
+        /// Whether `remove_interface` fails (as it does without a resolver tool).
+        pub fail_remove: bool,
+        /// The peers the device holds; `remove_peer` and `configure_peer` edit it.
+        pub peers: Mutex<Vec<Peer>>,
+        /// Remaining failures of `configure_peer` per peer key.
+        pub fail_configure: Mutex<std::collections::HashMap<String, usize>>,
     }
 
     impl WireguardInterfaceApi for Fake {
@@ -169,23 +255,44 @@ pub(crate) mod testing {
             Ok(())
         }
         fn remove_interface(&self) -> Result<(), WireguardInterfaceError> {
+            if self.fail_remove {
+                return Err(WireguardInterfaceError::PeerConfigurationError(
+                    "Command returned error status".into(),
+                ));
+            }
             self.log.lock().unwrap().push("remove".into());
             Ok(())
         }
         fn configure_peer(&self, peer: &Peer) -> Result<(), WireguardInterfaceError> {
+            if let Some(n) = self
+                .fail_configure
+                .lock()
+                .unwrap()
+                .get_mut(&peer.public_key.to_string())
+                .filter(|n| **n > 0)
+            {
+                *n -= 1;
+                return Err(WireguardInterfaceError::PeerConfigurationError(
+                    "refused".into(),
+                ));
+            }
             self.log
                 .lock()
                 .unwrap()
                 .push(format!("configure peer {}", peer.public_key));
+            let mut peers = self.peers.lock().unwrap();
+            peers.retain(|p| p.public_key != peer.public_key);
+            peers.push(peer.clone());
             Ok(())
         }
         fn remove_peer(&self, key: &Key) -> Result<(), WireguardInterfaceError> {
             self.log.lock().unwrap().push(format!("remove peer {key}"));
+            self.peers.lock().unwrap().retain(|p| &p.public_key != key);
             Ok(())
         }
         fn read_interface_data(&self) -> Result<Host, WireguardInterfaceError> {
             let mut host = Host::default();
-            for p in &self.peers {
+            for p in self.peers.lock().unwrap().iter() {
                 host.peers.insert(p.public_key.clone(), p.clone());
             }
             Ok(host)
@@ -213,13 +320,45 @@ pub(crate) mod testing {
         peers: &[Peer],
         log: &Log,
     ) -> LiveInterface {
+        build(fail_assign, fail_delete, peers, &[], false, log)
+    }
+
+    /// [`live_with_peers`] where `configure_peer` fails the given number of
+    /// times for each listed key before it succeeds.
+    pub fn live_with_flaky_peers(
+        peers: &[Peer],
+        failures: &[(&Key, usize)],
+        log: &Log,
+    ) -> LiveInterface {
+        build(&[], &[], peers, failures, false, log)
+    }
+
+    /// A [`live`] whose `remove_interface` fails; deleting the link is logged
+    /// as `delete link`.
+    pub fn live_failing_remove(log: &Log) -> LiveInterface {
+        build(&[], &[], &[], &[], true, log)
+    }
+
+    fn build(
+        fail_assign: &[&str],
+        fail_delete: &[&str],
+        peers: &[Peer],
+        failures: &[(&Key, usize)],
+        fail_remove: bool,
+        log: &Log,
+    ) -> LiveInterface {
         let fail_delete: Vec<String> = fail_delete.iter().map(ToString::to_string).collect();
         let log2 = log.clone();
+        let log3 = log.clone();
         LiveInterface::new(
             Arc::new(Fake {
                 log: log.clone(),
                 fail_assign: fail_assign.iter().map(ToString::to_string).collect(),
-                peers: peers.to_vec(),
+                fail_remove,
+                peers: Mutex::new(peers.to_vec()),
+                fail_configure: Mutex::new(
+                    failures.iter().map(|(k, n)| (k.to_string(), *n)).collect(),
+                ),
             }),
             mask("10.60.0.2/24"),
             Box::new(move |a| {
@@ -227,6 +366,10 @@ pub(crate) mod testing {
                     return Err(io::Error::other("refused"));
                 }
                 log2.lock().unwrap().push(format!("delete {a}"));
+                Ok(())
+            }),
+            Box::new(move || {
+                log3.lock().unwrap().push("delete link".into());
                 Ok(())
             }),
         )
@@ -319,6 +462,88 @@ mod tests {
                 format!("remove peer {key}"),
                 format!("configure peer {key}")
             ]
+        );
+    }
+
+    fn peer(n: u8, ip: &str) -> defguard_wireguard_rs::peer::Peer {
+        let mut p =
+            defguard_wireguard_rs::peer::Peer::new(defguard_wireguard_rs::key::Key::new([n; 32]));
+        p.allowed_ips.push(mask(ip));
+        p
+    }
+
+    #[test]
+    fn remove_uses_the_library_when_it_works() {
+        let log = Log::default();
+        live(&[], &[], &log).remove().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["remove"]);
+    }
+
+    #[test]
+    fn remove_deletes_the_link_itself_when_the_library_fails() {
+        let log = Log::default();
+        live_failing_remove(&log).remove().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["delete link"]);
+    }
+
+    #[test]
+    fn a_failed_readd_is_retried_once_and_the_other_peers_are_still_renewed() {
+        let (a, b) = (peer(1, "fd00::1/128"), peer(2, "fd00::2/128"));
+        let log = Log::default();
+        let live = live_with_flaky_peers(&[a.clone(), b.clone()], &[(&a.public_key, 1)], &log);
+        let mut targets = live.renew_peers().unwrap();
+        targets.sort();
+        assert_eq!(targets.len(), 2, "both peers renewed: {targets:?}");
+        let log = log.lock().unwrap();
+        assert!(log.contains(&format!("configure peer {}", a.public_key)));
+        assert!(log.contains(&format!("configure peer {}", b.public_key)));
+    }
+
+    #[test]
+    fn a_peer_that_cannot_be_re_added_is_repaired_on_a_later_pass() {
+        let (a, b) = (peer(1, "fd00::1/128"), peer(2, "fd00::2/128"));
+        let log = Log::default();
+        let live = live_with_flaky_peers(&[a.clone(), b.clone()], &[(&a.public_key, 2)], &log);
+        let targets = live.renew_peers().unwrap();
+        assert_eq!(
+            targets,
+            vec!["fd00::2".parse::<std::net::IpAddr>().unwrap()],
+            "only the peer that came back is kicked"
+        );
+        let device = live.api().read_interface_data().unwrap();
+        assert!(!device.peers.contains_key(&a.public_key), "a is lost");
+        assert!(
+            device.peers.contains_key(&b.public_key),
+            "b was not skipped"
+        );
+
+        let repaired = live.repair_peers();
+        assert_eq!(
+            repaired,
+            vec!["fd00::1".parse::<std::net::IpAddr>().unwrap()]
+        );
+        assert!(live
+            .api()
+            .read_interface_data()
+            .unwrap()
+            .peers
+            .contains_key(&a.public_key));
+        assert!(live.repair_peers().is_empty(), "nothing is left to repair");
+    }
+
+    #[test]
+    fn repair_does_not_overwrite_a_peer_that_was_re_added_meanwhile() {
+        let a = peer(1, "fd00::1/128");
+        let log = Log::default();
+        let live = live_with_flaky_peers(std::slice::from_ref(&a), &[(&a.public_key, 2)], &log);
+        live.renew_peers().unwrap();
+        let newer = peer(1, "fd00::99/128");
+        live.api().configure_peer(&newer).unwrap();
+        assert!(live.repair_peers().is_empty());
+        let device = live.api().read_interface_data().unwrap();
+        assert_eq!(
+            device.peers[&a.public_key].allowed_ips, newer.allowed_ips,
+            "the newer configuration stays"
         );
     }
 }

@@ -383,9 +383,6 @@ pub(crate) struct RawListener {
     /// Priority-ordered route rules; the first matching rule wins.
     #[serde(default)]
     pub(crate) routes: Vec<RawRoute>,
-    /// UDP only: per-client → backend stickiness across session re-creation.
-    #[serde(default)]
-    pub(crate) affinity: Option<RawAffinity>,
     /// UDP only: serve a whole routed prefix on one wildcard socket, reading the
     /// real destination address per datagram (`IP_PKTINFO` / `IPV6_RECVPKTINFO`)
     /// and replying from it. `bind` must be a wildcard address. Datagrams whose
@@ -555,13 +552,6 @@ pub(crate) fn default_target_connect_timeout_ms() -> u64 {
 }
 pub(crate) fn default_target_idle_timeout_sec() -> u64 {
     90
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawAffinity {
-    #[serde(default)]
-    pub(crate) hash_on: HashOn,
 }
 
 #[derive(Debug, Deserialize)]

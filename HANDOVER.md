@@ -327,7 +327,7 @@ ones with a subtlety.)
 - **Listeners are reconciled by name** (`ListenerManager::reconcile`), not
   rebuilt with the snapshot. An unchanged listener keeps running with its route
   rules captured at spawn; only the *pool contents* they resolve to are read
-  live. A `ListenerConfig` change (bind, protocol, routes, affinity, `prefix`,
+  live. A `ListenerConfig` change (bind, protocol, routes, `prefix`,
   `freebind`, `route_hint`, ACL, `rate_limit`, `geo`, `transparent`) stops and
   re-spawns it — a same-bind rebind is gapless via `SO_REUSEPORT`.
 - **Startup-only config** (reload does *not* re-read): `workers`,
@@ -367,7 +367,7 @@ per-connection or per-datagram task, hop, or allocation, add it here.**
 
 - **Base**: 1 `Pool::acquire[_for]` (lock-free reads + one atomic add), 1
   upstream `connect`, 1 spawned pump/reply task, (UDP) 1 socket `bind`+`connect`
-  + sticky-table + session-table insert.
+  + session-table insert.
 - **Routing**: 1 `local_addr()` syscall + a linear scan of the small route list
   (bit-compare per `client_cidr`/`dst`, `u16` range per `port`, `starts_with` +
   len check per `first_bytes`, one `extract_sni` pass per `sni`).
@@ -429,7 +429,7 @@ rebuild reads `Discovery::get`).
 | `crates/gsp-core/src/snapshot.rs` | `Snapshot { listeners, pools, sources, resolvers, limits, geo_db }`; `build` → `build_with_overlay` → `build_with_sources` carry health/admin-state over by address and apply overlay + discovered backends. |
 | `crates/gsp-core/src/pool.rs` | `Pool` (balancer, `rr` index, `hash_on`, `weights`; `acquire` / `acquire_for` / `acquire_addr` / `backend`, `hrw_score`), `Backend` (health / active / streaks / `check_kind` + `AdminState`), `BackendGuard` (RAII slot + passive health), `PickError`. |
 | `crates/gsp-core/src/listener.rs` | `run_tcp_listener`: accept loop; per-conn task does ACL/geo/rate/`per_source`/global-cap checks, first-bytes peek, route match, pool lookup. |
-| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, sticky affinity, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
+| `crates/gsp-core/src/listener_udp.rs` | `run_udp_listener`: per-worker `recvmmsg` batch loop, `(client, Option<SocketAddr> dst)` session table, `IdleWheel` idle expiry, per-session upstream socket + reply pump. `UdpMode` Plain / Prefix (`IP_PKTINFO` + `sendmsg` reply) / Transparent (`IP_ORIGDSTADDR`, client-bound upstream, per-session `IP_TRANSPARENT` reply socket). |
 | `crates/gsp-core/src/{ratelimit,src_conns,limits,geo}.rs` | Per-listener token bucket / per-source concurrent cap / process-wide caps / MaxMind country lookup. |
 | `crates/gsp-core/src/sniff.rs` | `Sniffer` trait + `Sniffers` `ArcSwap`-backed registry (`register` / `get` / `replace`) + `warn_if_missing`. **No built-in sniffers** — the seam the phase-9 loader fills. |
 | `crates/gsp-core/src/route_hint.rs` | `RouteHints` — `ArcSwap<HashMap>` `src_ip → pool` push-resolver table (`POST /route-hint`), lock-free read. |
