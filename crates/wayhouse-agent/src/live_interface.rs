@@ -45,6 +45,10 @@ pub struct LiveInterface {
     /// Peers [`LiveInterface::renew_peers`] removed and could not add back,
     /// for [`LiveInterface::repair_peers`].
     lost: Mutex<Vec<Peer>>,
+    /// Held across every edit of the device's peer set: a renewal or repair
+    /// works from a snapshot, so a subscription event must not land in the
+    /// middle of one and then be overtaken by it.
+    peer_edit: Mutex<()>,
 }
 
 impl LiveInterface {
@@ -63,7 +67,19 @@ impl LiveInterface {
             delete,
             delete_link,
             lost: Mutex::new(Vec::new()),
+            peer_edit: Mutex::new(()),
         }
+    }
+
+    /// Runs `f`, an edit of the device's peers, so that it never interleaves
+    /// with [`LiveInterface::renew_peers`] or [`LiveInterface::repair_peers`].
+    /// Not reentrant: `f` must not call either of them.
+    pub fn edit_peers<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = self
+            .peer_edit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f()
     }
 
     /// The interface itself, for the peer subscriptions.
@@ -120,6 +136,10 @@ impl LiveInterface {
     /// remembered for [`LiveInterface::repair_peers`] and does not stop the
     /// others.
     pub fn renew_peers(&self) -> anyhow::Result<Vec<std::net::IpAddr>> {
+        self.edit_peers(|| self.renew_peers_locked())
+    }
+
+    fn renew_peers_locked(&self) -> anyhow::Result<Vec<std::net::IpAddr>> {
         let host = self.wg.read_interface_data()?;
         let mut targets = Vec::new();
         for peer in host.peers.values() {
@@ -155,6 +175,10 @@ impl LiveInterface {
     /// device since (the subscription re-added it from a newer registration)
     /// is left as it is.
     pub fn repair_peers(&self) -> Vec<std::net::IpAddr> {
+        self.edit_peers(|| self.repair_peers_locked())
+    }
+
+    fn repair_peers_locked(&self) -> Vec<std::net::IpAddr> {
         let mut lost = self.lost();
         if lost.is_empty() {
             return Vec::new();
@@ -237,7 +261,12 @@ pub(crate) mod testing {
         pub peers: Mutex<Vec<Peer>>,
         /// Remaining failures of `configure_peer` per peer key.
         pub fail_configure: Mutex<std::collections::HashMap<String, usize>>,
+        /// Run once, right after the next `read_interface_data` took its
+        /// snapshot: lets a test deliver an event while a renewal is in flight.
+        pub after_read: Hook,
     }
+
+    pub type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
     impl WireguardInterfaceApi for Fake {
         fn create_interface(&mut self) -> Result<(), WireguardInterfaceError> {
@@ -302,6 +331,10 @@ pub(crate) mod testing {
             for p in self.peers.lock().unwrap().iter() {
                 host.peers.insert(p.public_key.clone(), p.clone());
             }
+            let hook = self.after_read.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
             Ok(host)
         }
         fn set_dns(&self, _: &DnsConfig<'_>) -> Result<(), WireguardInterfaceError> {
@@ -327,7 +360,15 @@ pub(crate) mod testing {
         peers: &[Peer],
         log: &Log,
     ) -> LiveInterface {
-        build(fail_assign, fail_delete, peers, &[], false, log)
+        build(
+            fail_assign,
+            fail_delete,
+            peers,
+            &[],
+            false,
+            log,
+            Hook::default(),
+        )
     }
 
     /// [`live_with_peers`] where `configure_peer` fails the given number of
@@ -337,13 +378,18 @@ pub(crate) mod testing {
         failures: &[(&Key, usize)],
         log: &Log,
     ) -> LiveInterface {
-        build(&[], &[], peers, failures, false, log)
+        build(&[], &[], peers, failures, false, log, Hook::default())
+    }
+
+    /// [`live_with_peers`] with `hook` run after the first read of the device.
+    pub fn live_with_read_hook(peers: &[Peer], hook: &Hook, log: &Log) -> LiveInterface {
+        build(&[], &[], peers, &[], false, log, hook.clone())
     }
 
     /// A [`live`] whose `remove_interface` fails; deleting the link is logged
     /// as `delete link`.
     pub fn live_failing_remove(log: &Log) -> LiveInterface {
-        build(&[], &[], &[], &[], true, log)
+        build(&[], &[], &[], &[], true, log, Hook::default())
     }
 
     fn build(
@@ -353,6 +399,7 @@ pub(crate) mod testing {
         failures: &[(&Key, usize)],
         fail_remove: bool,
         log: &Log,
+        after_read: Hook,
     ) -> LiveInterface {
         let fail_delete: Vec<String> = fail_delete.iter().map(ToString::to_string).collect();
         let log2 = log.clone();
@@ -366,6 +413,7 @@ pub(crate) mod testing {
                 fail_configure: Mutex::new(
                     failures.iter().map(|(k, n)| (k.to_string(), *n)).collect(),
                 ),
+                after_read,
             }),
             mask("10.60.0.2/24"),
             Box::new(move |a| {

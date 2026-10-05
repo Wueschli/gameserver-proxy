@@ -248,8 +248,19 @@ async fn subscribe_once(
 
 /// Applies one event to the device and records it in `applied`. A peer the
 /// event removes or supersedes is also dropped from `live`'s lost peers, so a
-/// later repair cannot bring back a proxy that is gone.
+/// later repair cannot bring back a proxy that is gone. The whole edit holds
+/// `live`'s peer lock, so a renewal in flight finishes before it and never
+/// re-adds a peer from older state.
 fn apply(
+    wg: &(dyn WireguardInterfaceApi + Send + Sync),
+    live: &LiveInterface,
+    applied: &mut HashMap<String, ProxyRegistration>,
+    ev: &Event,
+) {
+    live.edit_peers(|| apply_locked(wg, live, applied, ev));
+}
+
+fn apply_locked(
     wg: &(dyn WireguardInterfaceApi + Send + Sync),
     live: &LiveInterface,
     applied: &mut HashMap<String, ProxyRegistration>,
@@ -544,5 +555,52 @@ mod tests {
             .unwrap()
             .peers
             .contains_key(&old_key));
+    }
+
+    #[test]
+    fn a_removal_arriving_mid_renewal_is_not_undone_by_it() {
+        use crate::live_interface::testing::*;
+        let key = Key::new([1; 32]);
+        let mut proxy = reg(Some("fd00::1"));
+        proxy.pubkey = key.to_string();
+        let log = Log::default();
+        let hook = Hook::default();
+        let live = Arc::new(live_with_read_hook(
+            &[to_wg_peer(&proxy).unwrap()],
+            &hook,
+            &log,
+        ));
+        let removal = Arc::new(std::sync::Mutex::new(None));
+        {
+            let (live, removal, name) = (live.clone(), removal.clone(), proxy.name.clone());
+            let applied = HashMap::from([(proxy.name.clone(), proxy.clone())]);
+            *hook.lock().unwrap() = Some(Box::new(move || {
+                // The removal event lands right after the renewal read the
+                // peers; give it time to finish if nothing holds it back.
+                let handle = std::thread::spawn({
+                    let live = live.clone();
+                    move || {
+                        let mut applied = applied;
+                        apply(
+                            live.api().as_ref(),
+                            &live,
+                            &mut applied,
+                            &Event::Removed(name),
+                        );
+                    }
+                });
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                *removal.lock().unwrap() = Some(handle);
+            }));
+        }
+        live.renew_peers().unwrap();
+        removal.lock().unwrap().take().unwrap().join().unwrap();
+        live.repair_peers();
+        assert!(!live
+            .api()
+            .read_interface_data()
+            .unwrap()
+            .peers
+            .contains_key(&key));
     }
 }
