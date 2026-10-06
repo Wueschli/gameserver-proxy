@@ -323,7 +323,11 @@ async fn main() -> anyhow::Result<()> {
     // `role::RoleHandle`'s doc for why a plain `Role` field per state
     // wouldn't work once adoption exists).
     let role_handle = RoleHandle::new(args.role);
-    let mut config_state = AppState::try_new(store, args.auth_token.clone(), role_handle.clone())?;
+    // POST /config refuses a document newer than the oldest live proxy
+    // understands; the clone reads the same trees `with_ha` below keeps using.
+    let schema_source = proxy_peers_state.clone();
+    let mut config_state = AppState::try_new(store, args.auth_token.clone(), role_handle.clone())?
+        .with_schema_floor(Arc::new(move || schema_source.min_live_config_schema()));
     let mut intent_state_val =
         IntentState::try_new(intent_store, role_handle.clone(), args.auth_token.clone())?;
 

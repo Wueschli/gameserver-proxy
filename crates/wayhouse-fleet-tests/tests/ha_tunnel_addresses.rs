@@ -49,7 +49,7 @@ impl Cluster {
         let mut c = Cluster {
             bases,
             procs: vec![None, None, None],
-            http: reqwest::Client::new(),
+            http: wayhouse_http::client(),
             _dirs: Vec::new(),
         };
         let spawn = |i: usize, dir: &std::path::Path| -> Result<Proc> {
@@ -283,7 +283,7 @@ async fn pre_ha_controller() -> Result<(tempfile::TempDir, Vec<(String, Value)>)
         &["--tunnel-network".to_string(), "10.60.0.0/24".to_string()],
     )?;
     wait_http_up(&format!("{base}/healthz"), Duration::from_secs(10)).await?;
-    let http = reqwest::Client::new();
+    let http = wayhouse_http::client();
     let mut given = Vec::new();
     for name in ["o1", "o2", "o3"] {
         let r: Value = http

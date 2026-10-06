@@ -31,8 +31,19 @@ fn reject_duplicate_targets(what: &str, addrs: &[SocketAddr]) -> Result<(), Conf
     }
 }
 
-pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
+/// `doc` is the document as a YAML value, needed only to check
+/// [`crate::version::FIELD_SINCE`] (`None` while that table is empty).
+pub(crate) fn validate(
+    raw: RawConfig,
+    doc: Option<&serde_norway::Value>,
+) -> Result<Config, ConfigError> {
     use ConfigError::Invalid;
+
+    let schema_declared = raw.schema_version.is_some();
+    let schema_version = crate::version::check_schema_version(raw.schema_version.as_ref())?;
+    if let Some(doc) = doc {
+        crate::version::check_fields_since(doc, schema_version, crate::version::FIELD_SINCE)?;
+    }
 
     if raw.listeners.is_empty() {
         return Err(Invalid("at least one listener is required".into()));
@@ -958,6 +969,8 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
     };
 
     Ok(Config {
+        schema_version,
+        schema_declared,
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,

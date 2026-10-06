@@ -25,7 +25,7 @@ const MAX_SNAPSHOT_BODY: usize = 4 * 1024 * 1024;
 const MAX_APPEND_BODY: usize = 32 * 1024 * 1024;
 
 pub fn router(ha: Arc<HaHandle>) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route(
             "/raft/append",
             post(append).layer(DefaultBodyLimit::max(MAX_APPEND_BODY)),
@@ -43,8 +43,10 @@ pub fn router(ha: Arc<HaHandle>) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(ha.ha_token.as_deref()),
             wayhouse_http::server::require_bearer,
-        ))
-        .with_state(ha)
+        ));
+    // Raft shares the protocol-header gate: changing an RPC payload type is a
+    // breaking wire change (protocol major bump).
+    wayhouse_http::protocol::gate(routes, "raft").with_state(ha)
 }
 
 /// Who this node is and what it holds: the leader of a fresh cluster asks every
@@ -116,6 +118,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post(path)
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -146,5 +149,20 @@ mod tests {
             post_bytes(&app, "/raft/vote", 1024).await,
             StatusCode::UNPROCESSABLE_ENTITY
         );
+    }
+
+    #[tokio::test]
+    async fn raft_route_rejects_other_major() {
+        let (ha, _cluster, _dir) = single_node(1, "127.0.0.1:1").await;
+        let resp = router(ha)
+            .oneshot(
+                Request::get("/raft/whoami")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }

@@ -152,7 +152,15 @@ pub struct AppState {
     /// (`slave` role only; stays `0` otherwise). Lands in the same
     /// transaction as the revision it covers.
     pub relay: RelayCursor,
+    /// The lowest config schema any live proxy supports (`Ok(None)`: no live
+    /// proxy, no limit; `Err`: the registry cannot be read, writes are refused):
+    /// `POST /config` refuses a document above it, so a mixed fleet never
+    /// receives one it must reject.
+    schema_floor: Option<SchemaFloor>,
 }
+
+/// See [`AppState::with_schema_floor`].
+pub type SchemaFloor = Arc<dyn Fn() -> Result<Option<u32>, String> + Send + Sync>;
 
 impl AppState {
     pub fn try_new(
@@ -175,6 +183,7 @@ impl AppState {
             actors,
             ha: None,
             relay: RelayCursor::open(&store_db)?,
+            schema_floor: None,
         })
     }
 
@@ -182,6 +191,13 @@ impl AppState {
     #[cfg(test)]
     pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
         Self::try_new(store, auth_token, role).expect("opening the sibling trees")
+    }
+
+    /// Gate submissions on the lowest config schema the live proxies support
+    /// (`RegistryState::min_live_config_schema`).
+    pub fn with_schema_floor(mut self, floor: SchemaFloor) -> Self {
+        self.schema_floor = Some(floor);
+        self
     }
 
     pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
@@ -466,9 +482,15 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    // Only the proxies' subscribe stream is component-facing; the rest is for
+    // operators and tools and is never gated on the protocol header.
+    let component = wayhouse_http::protocol::gate(
+        Router::new().route("/config/subscribe", get(subscribe)),
+        "controller",
+    );
     Router::new()
+        .merge(component)
         .route("/config", post(submit_config).get(get_current_config))
-        .route("/config/subscribe", get(subscribe))
         .route("/config/revisions", get(list_revisions))
         .route("/config/revisions/{revision}", get(get_revision))
         .route("/config/revisions/{revision}/diff", get(diff_revision))
@@ -585,15 +607,21 @@ async fn submit(
         return slave_rejects_write();
     }
 
-    if let Err(e) = wayhouse_config::parse_str(&text) {
-        tracing::warn!(error = %e, "rejected an invalid config submission");
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response();
+    let parsed = match wayhouse_config::parse_str(&text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(error = %e, "rejected an invalid config submission");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if let Some(rejection) = schema_floor_rejection(state, &parsed) {
+        return rejection;
     }
 
     if let Some(ha) = &state.ha {
@@ -621,6 +649,47 @@ async fn submit(
     }
 }
 
+/// `422` when `cfg` needs a newer config schema than the oldest live proxy
+/// understands (`schema_floor`). A document that declares no `schema_version`
+/// needs nothing and always passes: a proxy that predates the field parses it.
+fn schema_floor_rejection(state: &AppState, cfg: &wayhouse_config::Config) -> Option<Response> {
+    let floor = match state.schema_floor.as_ref().map(|f| f()) {
+        None | Some(Ok(None)) => return None,
+        Some(Ok(Some(floor))) => floor,
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "cannot read the proxy registry for the config schema gate");
+            return Some(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "cannot check the config schema against the live proxies: the registry is unreadable".into(),
+                    }),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let needed = if cfg.schema_declared {
+        cfg.schema_version
+    } else {
+        0
+    };
+    if needed <= floor {
+        return None;
+    }
+    let error = format!(
+        "config schema_version {needed} is newer than the oldest live proxy supports (max {floor}): upgrade the proxies first"
+    );
+    tracing::warn!(%error, "rejected a config submission");
+    Some(
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse { error }),
+        )
+            .into_response(),
+    )
+}
+
 /// `POST /config/promote/{revision}` — flips a previously-staged revision's
 /// `Stage::promoted` to `true` (see the module doc). `404` if the revision
 /// never existed; promoting an already-promoted revision is a harmless
@@ -632,6 +701,16 @@ async fn promote(
 ) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
+    }
+
+    // A proxy that predates the revision's schema may have registered since it
+    // was staged: promoting it would hand that proxy a document it rejects.
+    if let Ok(Some(bytes)) = state.store.get(revision) {
+        if let Ok(cfg) = wayhouse_config::parse_str(&String::from_utf8_lossy(&bytes)) {
+            if let Some(rejection) = schema_floor_rejection(&state, &cfg) {
+                return rejection;
+            }
+        }
     }
 
     if let Some(ha) = &state.ha {
@@ -1779,5 +1858,186 @@ listeners:
             .insert(encode_rev(rev), b"not json".to_vec())
             .unwrap();
         assert!(!is_visible(&stage_tree, rev, None));
+    }
+
+    #[tokio::test]
+    async fn config_subscribe_rejects_other_major() {
+        let (state, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::get("/config/subscribe")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Refused before the SSE stream starts, not mid-stream.
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_ne!(
+            resp.headers()
+                .get("content-type")
+                .map(axum::http::HeaderValue::as_bytes),
+            Some(&b"text/event-stream"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_routes_ignore_the_header() {
+        let (state, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::get("/config/revisions")
+                    .header(wayhouse_http::protocol::HEADER, "banana")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn status_and_error(resp: Response) -> (StatusCode, String) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn submit_text(app: &Router, body: String) -> Response {
+        app.clone()
+            .oneshot(Request::post("/config").body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn submit_config_with_newer_schema_is_422_and_keeps_current_revision() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
+        let (status, body) =
+            status_and_error(submit_text(&app, format!("schema_version: 2\n{VALID_CONFIG}")).await)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("config schema_version 2 is newer than this build supports (max 1)"),
+            "{body}"
+        );
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn controller_rejects_schema_above_lowest_registered_proxy_max() {
+        let (state, _dir) = test_state();
+        // A live proxy that understands no schema at all (older than any this
+        // build can write): everything above it is refused.
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(0)))));
+        let (status, body) =
+            status_and_error(submit_text(&app, format!("schema_version: 1\n{VALID_CONFIG}")).await)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("oldest live proxy supports (max 0)"),
+            "{body}"
+        );
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_proxy_registry_fails_the_schema_gate_closed() {
+        let (state, _dir) = test_state();
+        let app =
+            router(state.with_schema_floor(Arc::new(|| Err("registry unreadable".to_string()))));
+        let (status, body) = status_and_error(submit_text(&app, VALID_CONFIG.into()).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("registry is unreadable"), "{body}");
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn schema_at_or_below_the_floor_is_accepted() {
+        let (state, _dir) = test_state();
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(1)))));
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_that_declares_no_schema_still_reaches_pre_versioning_proxies() {
+        let (state, _dir) = test_state();
+        // Floor 0: a live proxy that predates `schema_version`. It parses a document
+        // without the key, and rejects one with it.
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(0)))));
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_checks_the_floor_a_late_registering_proxy_may_have_lowered() {
+        let (state, _dir) = test_state();
+        let floor = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let f = floor.clone();
+        let app = router(state.with_schema_floor(Arc::new(move || {
+            Ok(Some(f.load(std::sync::atomic::Ordering::SeqCst)))
+        })));
+        let staged = app
+            .clone()
+            .oneshot(
+                Request::post("/config?stage=canary&group=eu")
+                    .body(Body::from(format!("schema_version: 1\n{VALID_CONFIG}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.status(), StatusCode::OK);
+        // A proxy that predates the field registers after the staging.
+        floor.store(0, std::sync::atomic::Ordering::SeqCst);
+        let promote = app
+            .clone()
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = status_and_error(promote).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.contains("oldest live proxy supports (max 0)"),
+            "{body}"
+        );
+        // Back at the document's own level it promotes.
+        floor.store(1, std::sync::atomic::Ordering::SeqCst);
+        let promote = app
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(promote.status(), StatusCode::OK);
     }
 }

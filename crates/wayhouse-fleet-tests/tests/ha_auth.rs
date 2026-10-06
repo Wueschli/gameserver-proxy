@@ -17,7 +17,7 @@ const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 #[tokio::test]
 async fn writes_through_a_follower_carry_the_callers_bearer_token() -> Result<()> {
     build_fleet_bins()?;
-    let http = reqwest::Client::new();
+    let http = wayhouse_http::client();
     let ports = (0..3).map(|_| free_port()).collect::<Result<Vec<_>>>()?;
     let peers = ports
         .iter()

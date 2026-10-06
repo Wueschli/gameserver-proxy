@@ -12,7 +12,7 @@ const ADMIN: &str = "admin-token-0123456789";
 const INGEST: &str = "ingest-token-0123456789";
 
 fn push(url: &str, token: &str, admin_url: &str) -> reqwest::RequestBuilder {
-    reqwest::Client::new()
+    wayhouse_http::client()
         .post(format!("{url}/ingest"))
         .bearer_auth(token)
         .json(&json!({ "instance": "edge-1", "admin_url": admin_url, "pools": [] }))
@@ -42,7 +42,7 @@ async fn the_ingest_token_only_pushes_and_admin_urls_must_be_the_pushers_own() -
     ensure!(resp.status() == 200, "own admin_url: {}", resp.status());
 
     // The ingest token cannot read or drive the fleet.
-    let client = reqwest::Client::new();
+    let client = wayhouse_http::client();
     let get = |token: &str| client.get(format!("{url}/fleet/pools")).bearer_auth(token);
     ensure!(get(INGEST).send().await?.status() == 401);
     let body: Value = get(ADMIN).send().await?.error_for_status()?.json().await?;

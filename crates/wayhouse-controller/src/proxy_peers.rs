@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use wayhouse_config::base64_decode_32;
 
 use crate::addresses::Role;
-use crate::registry::Registration;
+use crate::registry::{ConfigSchemaReport, Registration};
 
 /// One proxy instance's current registration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -59,7 +59,22 @@ pub struct ProxyRegistration {
     /// proxies and log entries from before it existed still work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_id: Option<String>,
+    /// The newest config `schema_version` this proxy's build understands
+    /// (`wayhouse_config::version::CONFIG_SCHEMA_VERSION`). The controller refuses
+    /// a config whose schema is above the lowest value any live proxy reports
+    /// (`RegistryState::min_live_config_schema`). `None` from a proxy that
+    /// predates it, which then constrains nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_config_schema: Option<u32>,
+    /// How often this proxy re-registers, in seconds: a registration is *live*
+    /// until three of these pass without one. `None` means the 30 s default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_sec: Option<u64>,
 }
+
+/// `wayhouse --tunnel-register-interval-sec`'s default, assumed for a proxy that
+/// does not say how often it re-registers.
+const DEFAULT_REFRESH_SEC: u64 = 30;
 
 /// Upper bound on a `boot_id`'s length — an opaque token, never a payload.
 const BOOT_ID_MAX: usize = 64;
@@ -100,6 +115,12 @@ impl ProxyRegistration {
                 ));
             }
         }
+        if self.max_config_schema == Some(0) {
+            return Err("max_config_schema must be at least 1".into());
+        }
+        if self.refresh_sec.is_some_and(|s| s == 0 || s > u64::MAX / 3) {
+            return Err("refresh_sec must be between 1 and u64::MAX / 3".into());
+        }
         Ok(())
     }
 }
@@ -131,6 +152,19 @@ impl Registration for ProxyRegistration {
         Some(&mut self.endpoint)
     }
 
+    fn config_schema(&self) -> Option<ConfigSchemaReport> {
+        // A proxy that reports no schema predates `schema_version`: it counts as
+        // understanding schema 0, so a document carrying the key is held back
+        // while it is live.
+        Some(ConfigSchemaReport {
+            max: self.max_config_schema.unwrap_or(0),
+            live_for: self
+                .refresh_sec
+                .unwrap_or(DEFAULT_REFRESH_SEC)
+                .saturating_mul(3),
+        })
+    }
+
     fn register_request(self, now: u64) -> crate::ha::WriteRequest {
         crate::ha::WriteRequest::RegisterProxy { reg: self, now }
     }
@@ -147,6 +181,8 @@ mod tests {
             endpoint: "203.0.113.9:51820".into(),
             tunnel_address: None,
             boot_id: None,
+            max_config_schema: None,
+            refresh_sec: None,
         }
     }
 

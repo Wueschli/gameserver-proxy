@@ -59,7 +59,7 @@ fn spawn_node(dir: &tempfile::TempDir, port: u16, extra: &[&str]) -> Result<Proc
 #[tokio::test]
 async fn a_node_that_joins_after_a_purge_catches_up_by_snapshot() -> Result<()> {
     build_fleet_bins()?;
-    let client = reqwest::Client::new();
+    let client = wayhouse_http::client();
     let ports = (0..3).map(|_| free_port()).collect::<Result<Vec<_>>>()?;
     let peers = ports
         .iter()

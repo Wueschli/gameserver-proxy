@@ -4412,6 +4412,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wayhouse-config",
+ "wayhouse-http",
 ]
 
 [[package]]
@@ -4425,6 +4426,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wayhouse-http",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ repository.workspace = true
 # and its dependencies; `settings.gossip` is then refused at startup.
 default = ["gossip"]
 # `gossip.rs`, the SWIM mesh behind `settings.gossip` (phase 13).
-gossip = ["dep:foca", "dep:rand10", "dep:bytes", "dep:hmac", "dep:serde", "dep:postcard", "dep:sha2"]
+gossip = ["dep:foca", "dep:rand10", "dep:bytes", "dep:hmac", "dep:serde", "dep:postcard", "dep:sha2", "dep:wayhouse-http"]
 
 [lints]
 workspace = true
@@ -30,6 +30,8 @@ lru.workspace = true
 maxminddb.workspace = true
 thiserror.workspace = true
 sha2 = { workspace = true, optional = true }
+# The gossip version byte is the protocol major (#185); client-only feature set.
+wayhouse-http = { workspace = true, optional = true }
 # Phase 13 (Tier-2 regional health fabric, docs/10). `foca` needs its own
 # `rand` major version (0.10) for its `RngExt` trait bound — aliased to avoid
 # colliding with the workspace's `rand = "0.8"` (used by wayhouse-ui), which is an

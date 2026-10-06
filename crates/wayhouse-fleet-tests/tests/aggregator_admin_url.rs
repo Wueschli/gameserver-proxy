@@ -75,7 +75,7 @@ async fn the_aggregator_fans_out_through_the_overridden_admin_url() -> Result<()
         accepted.load(Ordering::Relaxed) == 0,
         "nothing dialled the front yet"
     );
-    let body: Value = reqwest::Client::new()
+    let body: Value = wayhouse_http::client()
         .post(format!("{agg_url}/fleet/pools/local/backends"))
         .json(&serde_json::json!({ "addr": "127.0.0.1:1" }))
         .send()

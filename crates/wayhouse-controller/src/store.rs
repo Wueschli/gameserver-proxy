@@ -14,7 +14,7 @@
 //! transaction as the revision so a replayed entry can be recognised and
 //! skipped (see [`Store::put_applied`]).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sled::Transactional;
 use thiserror::Error;
@@ -33,7 +33,21 @@ pub enum StoreError {
     ConcurrentWrite,
     #[error("a write without a Raft index was skipped as already applied")]
     UnexpectedSkip,
+    #[error(
+        "store {} has on-disk format {found}, newer than this build supports (max {max}): upgrade this component",
+        path.display()
+    )]
+    FormatTooNew { path: PathBuf, found: u32, max: u32 },
+    #[error("store {} has an unreadable format marker (meta/format)", path.display())]
+    FormatCorrupt { path: PathBuf },
 }
+
+/// The on-disk format this build writes (#185). A store with a higher marker
+/// is refused on open; one with no marker (created before it existed, or
+/// brand new) is adopted as this format. Bump it, and migrate older formats
+/// in `Store::open`, when the layout of any tree changes incompatibly.
+pub const STORE_FORMAT: u32 = 1;
+const FORMAT_KEY: &[u8] = b"format";
 
 const CURRENT_KEY: &[u8] = b"current";
 const APPLIED_INDEX_KEY: &[u8] = b"applied_index";
@@ -78,6 +92,7 @@ impl Store {
         let db = sled::open(path)?;
         let revisions = db.open_tree("revisions")?;
         let meta = db.open_tree("meta")?;
+        check_format(path, &meta)?;
         Ok(Store {
             db,
             revisions,
@@ -466,6 +481,33 @@ impl RelayCursor {
     }
 }
 
+/// Writes the format marker into a store that has none; refuses a higher or
+/// malformed one.
+fn check_format(path: &Path, meta: &sled::Tree) -> Result<(), StoreError> {
+    match meta.get(FORMAT_KEY)? {
+        None => {
+            meta.insert(FORMAT_KEY, &STORE_FORMAT.to_be_bytes())?;
+        }
+        Some(v) => {
+            let bytes: [u8; 4] = v
+                .as_ref()
+                .try_into()
+                .map_err(|_| StoreError::FormatCorrupt {
+                    path: path.to_owned(),
+                })?;
+            let found = u32::from_be_bytes(bytes);
+            if found > STORE_FORMAT {
+                return Err(StoreError::FormatTooNew {
+                    path: path.to_owned(),
+                    found,
+                    max: STORE_FORMAT,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn encode_rev(rev: u64) -> [u8; 8] {
     rev.to_be_bytes()
 }
@@ -523,6 +565,78 @@ pub(crate) fn reopen_when_unlocked<T, E: std::fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn marker(store: &Store) -> Option<Vec<u8>> {
+        store.meta.get(FORMAT_KEY).unwrap().map(|v| v.to_vec())
+    }
+
+    fn open_retrying(path: &Path) -> Result<Store, StoreError> {
+        retry_when_unlocked(|| Store::open(path))
+    }
+
+    #[test]
+    fn fresh_store_gets_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(marker(&store), Some(STORE_FORMAT.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn reopen_keeps_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Store::open(dir.path()).unwrap());
+        let store = open_retrying(dir.path()).unwrap();
+        assert_eq!(marker(&store), Some(STORE_FORMAT.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn store_with_higher_format_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .meta
+                .insert(FORMAT_KEY, &(STORE_FORMAT + 1).to_be_bytes())
+                .unwrap();
+            store.db.flush().unwrap();
+        }
+        let err = open_retrying(dir.path()).err().expect("must be refused");
+        assert!(
+            matches!(&err, StoreError::FormatTooNew { found, max, .. } if *found == STORE_FORMAT + 1 && *max == STORE_FORMAT),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+        assert!(text.contains("upgrade"), "{text}");
+    }
+
+    #[test]
+    fn a_malformed_marker_is_refused_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.meta.insert(FORMAT_KEY, &b"xyz"[..]).unwrap();
+            store.db.flush().unwrap();
+        }
+        assert!(matches!(
+            open_retrying(dir.path()).err(),
+            Some(StoreError::FormatCorrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_marker_store_with_revisions_is_adopted_as_format_1() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.put(b"cfg".to_vec()).unwrap();
+            store.meta.remove(FORMAT_KEY).unwrap();
+            store.db.flush().unwrap();
+        }
+        let store = open_retrying(dir.path()).unwrap();
+        assert_eq!(marker(&store), Some(STORE_FORMAT.to_be_bytes().to_vec()));
+        assert_eq!(store.current().unwrap().unwrap().1, b"cfg".to_vec());
+    }
 
     #[test]
     fn reopen_retries_a_lock_error_wrapped_in_context() {

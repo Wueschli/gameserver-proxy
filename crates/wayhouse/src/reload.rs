@@ -347,4 +347,55 @@ mod tests {
             .shutdown_with_grace(Duration::from_millis(100))
             .await;
     }
+
+    /// A document from a newer schema is refused on the reload path too, and
+    /// the running config keeps serving.
+    #[tokio::test]
+    async fn reload_with_newer_schema_keeps_running_config() {
+        let bind = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let yaml = |header: &str| {
+            format!(
+                "{header}pools:\n  - name: p\n    targets: [\"127.0.0.1:9\"]\n    health_check:\n      type: none\n\
+                 listeners:\n  - name: l1\n    bind: \"{bind}\"\n    pool: p\n"
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml("")).unwrap();
+        let cfg = wayhouse_config::load(&path).unwrap();
+        let runtime = wayhouse_core::Runtime::start(Snapshot::from_config(&cfg), Arc::default(), 1);
+        let handle = runtime.handle();
+        // Not applied yet: start only builds the snapshot, so bring the listener up.
+        apply_config(
+            cfg,
+            &handle,
+            &Resolvers::default(),
+            None,
+            &Sniffers::default(),
+            "test",
+        )
+        .await;
+        assert!(tokio::net::TcpStream::connect(bind).await.is_ok());
+
+        std::fs::write(&path, yaml("schema_version: 2\n")).unwrap();
+        apply(
+            &path,
+            &handle,
+            &Resolvers::default(),
+            None,
+            &Sniffers::default(),
+        )
+        .await;
+        assert!(
+            tokio::net::TcpStream::connect(bind).await.is_ok(),
+            "the running config keeps serving after the newer document is refused"
+        );
+        assert_eq!(handle.snapshot().listeners.len(), 1);
+        runtime
+            .shutdown_with_grace(Duration::from_millis(100))
+            .await;
+    }
 }

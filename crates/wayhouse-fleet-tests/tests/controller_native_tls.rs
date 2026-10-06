@@ -28,7 +28,7 @@ async fn tls_controller() -> Result<Tls> {
         &["--tls-cert", TEST_LEAF, "--tls-key", TEST_LEAF_KEY].map(String::from),
     )?;
     let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
-    let client = reqwest::Client::builder()
+    let client = wayhouse_http::builder()
         .add_root_certificate(ca)
         .timeout(Duration::from_secs(10))
         .build()?;

@@ -28,6 +28,7 @@ pub const LONG_VERSION: &str = env!("WAYHOUSE_LONG_VERSION");
 pub mod metrics;
 #[cfg(feature = "server")]
 pub mod policy;
+pub mod protocol;
 pub mod sse;
 #[cfg(feature = "server")]
 pub mod tls;
@@ -83,12 +84,19 @@ pub fn load_ca_file(path: &Path) -> Result<Vec<Certificate>, CaError> {
     Ok(certs)
 }
 
-/// A builder trusting the built-in roots plus `extra`.
+/// A builder trusting the built-in roots plus `extra`, sending the
+/// [`protocol::HEADER`] on every request so a peer can refuse an incompatible major.
 pub fn builder_with(extra: &[Certificate]) -> ClientBuilder {
-    extra
-        .iter()
-        .cloned()
-        .fold(Client::builder(), ClientBuilder::add_root_certificate)
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::HeaderName::from_static(protocol::HEADER),
+        reqwest::header::HeaderValue::from_str(&protocol::ProtocolVersion::CURRENT.to_string())
+            .expect("digits and a dot are a valid header value"),
+    );
+    extra.iter().cloned().fold(
+        Client::builder().default_headers(headers),
+        ClientBuilder::add_root_certificate,
+    )
 }
 
 /// Load `path` (see [`load_ca_file`]) and trust it in every client built

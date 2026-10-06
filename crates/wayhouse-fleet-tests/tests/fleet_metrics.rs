@@ -43,7 +43,9 @@ async fn controller_and_aggregator_serve_metrics_behind_their_auth_token() -> Re
         aport,
         &args(&["--auth-token", TOKEN, "--ingest-token", INGEST_TOKEN]),
     )?;
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = wayhouse_http::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
     for (name, port) in [
         ("wayhouse-controller", cport),
         ("wayhouse-aggregator", aport),
@@ -81,7 +83,9 @@ async fn a_metrics_token_unlocks_only_metrics_on_controller_and_aggregator() -> 
     let mut agg_extra = extra.clone();
     agg_extra.extend(args(&["--ingest-token", INGEST_TOKEN]));
     let _aggregator = spawn_aggregator_with(aport, &agg_extra)?;
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = wayhouse_http::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
     for (name, port, api) in [
         ("wayhouse-controller", cport, "config"),
         ("wayhouse-aggregator", aport, "fleet/pools"),
@@ -115,7 +119,9 @@ async fn a_metrics_token_unlocks_only_metrics_on_controller_and_aggregator() -> 
 #[tokio::test]
 async fn ui_metrics_need_their_own_token_once_a_login_is_configured() -> Result<()> {
     build_fleet_bins()?;
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = wayhouse_http::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
 
     // Open UI (loopback, no login): /metrics is open too.
     let port = free_port()?;
@@ -173,7 +179,7 @@ async fn refused_tls_handshakes_show_up_on_the_aggregators_metrics() -> Result<(
         ]),
     )?;
     let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
-    let client = Client::builder()
+    let client = wayhouse_http::builder()
         .add_root_certificate(ca)
         .timeout(Duration::from_secs(10))
         .build()?;

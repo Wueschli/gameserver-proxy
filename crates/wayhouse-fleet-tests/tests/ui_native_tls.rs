@@ -24,7 +24,7 @@ async fn login_over_native_tls_sets_a_secure_cookie_that_works() -> Result<()> {
         .map(String::from),
     )?;
     let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
-    let client = reqwest::Client::builder()
+    let client = wayhouse_http::builder()
         .add_root_certificate(ca)
         .timeout(Duration::from_secs(10))
         .build()?;

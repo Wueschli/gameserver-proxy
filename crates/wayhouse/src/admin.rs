@@ -81,6 +81,10 @@ fn router(state: AdminState) -> Router {
             wayhouse_http::server::require_bearer,
         ));
 
+    // The aggregator's fan-out (and the controller's tooling) call these with the
+    // protocol header; operators also call them by hand, so a missing header is
+    // fine but another major is refused.
+    let gated = wayhouse_http::protocol::gate_lenient(gated, "proxy");
     Router::new()
         .route("/healthz", get(healthz))
         .merge(gated)
@@ -1206,5 +1210,42 @@ mod tests {
             assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
             assert!(!dir.join("b.wasm").exists());
         }
+    }
+
+    /// The aggregator's fan-out carries the protocol header: an unknown major
+    /// is refused with both versions named, while `curl` (no header) still works.
+    #[tokio::test]
+    async fn admin_routes_refuse_another_protocol_major_but_accept_no_header() {
+        let proxy = free_port();
+        let yaml = format!(
+            "pools:\n  - name: p\n    targets: [\"127.0.0.1:9\"]\n    health_check:\n      type: none\n\
+             listeners:\n  - name: l\n    bind: \"{proxy}\"\n    pool: p\n"
+        );
+        let (base, runtime) = spawn_admin(&yaml).await;
+        let http = reqwest::Client::new();
+        let get = |header: Option<&'static str>| {
+            let mut r = http.get(format!("{base}/pools"));
+            if let Some(h) = header {
+                r = r.header(wayhouse_http::protocol::HEADER, h);
+            }
+            r.send()
+        };
+        assert!(get(None).await.unwrap().status().is_success());
+        assert!(get(Some("1.4")).await.unwrap().status().is_success());
+        let refused = get(Some("2.0")).await.unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
+        let body = refused.text().await.unwrap();
+        assert!(body.contains("2.0") && body.contains("(1.0)"), "{body}");
+        // Liveness is never gated.
+        let health = http
+            .get(format!("{base}/healthz"))
+            .header(wayhouse_http::protocol::HEADER, "2.0")
+            .send()
+            .await
+            .unwrap();
+        assert!(health.status().is_success());
+        runtime
+            .shutdown_with_grace(std::time::Duration::from_millis(100))
+            .await;
     }
 }

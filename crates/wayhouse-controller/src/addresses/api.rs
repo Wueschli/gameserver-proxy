@@ -51,13 +51,13 @@ impl AddressesState {
 }
 
 pub fn router(state: AddressesState) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/tunnel/addresses", get(list))
         .route_layer(axum::middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref()),
             wayhouse_http::server::require_bearer,
-        ))
-        .with_state(state)
+        ));
+    wayhouse_http::protocol::gate(routes, "controller").with_state(state)
 }
 
 #[derive(Serialize)]
@@ -230,7 +230,8 @@ mod tests {
     }
 
     async fn get_json(app: Router, auth: Option<&str>) -> (StatusCode, serde_json::Value) {
-        let mut req = HttpRequest::get("/tunnel/addresses");
+        let mut req =
+            HttpRequest::get("/tunnel/addresses").header(wayhouse_http::protocol::HEADER, "1.0");
         if let Some(a) = auth {
             req = req.header("authorization", a);
         }
@@ -364,5 +365,20 @@ mod tests {
             stale_warning_due(true, &book, Duration::ZERO, 100_000),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn tunnel_addresses_rejects_other_major() {
+        let (s, _book, _d) = state(None);
+        let resp = router(s)
+            .oneshot(
+                HttpRequest::get("/tunnel/addresses")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }

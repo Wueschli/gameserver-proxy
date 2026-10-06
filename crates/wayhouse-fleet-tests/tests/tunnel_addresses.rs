@@ -28,7 +28,7 @@ async fn controller(extra: &[&str]) -> Result<(Proc, tempfile::TempDir, String)>
 #[tokio::test]
 async fn the_controller_allocates_refuses_conflicts_and_lists_the_table() -> Result<()> {
     let (_ctl, _dir, base) = controller(&["--tunnel-network", "10.60.0.0/16"]).await?;
-    let http = reqwest::Client::new();
+    let http = wayhouse_http::client();
 
     let r: Value = http
         .post(format!("{base}/peers"))
@@ -74,7 +74,7 @@ async fn the_controller_allocates_refuses_conflicts_and_lists_the_table() -> Res
 #[tokio::test]
 async fn an_ipv6_tunnel_network_allocates_ipv6_addresses_and_bracketed_backends() -> Result<()> {
     let (_ctl, _dir, base) = controller(&["--tunnel-network", "fd49:89c1:4b5e:60::/64"]).await?;
-    let http = reqwest::Client::new();
+    let http = wayhouse_http::client();
 
     let r: Value = http
         .post(format!("{base}/peers"))
@@ -172,7 +172,7 @@ async fn a_changed_tunnel_network_is_refused_without_touching_the_book() -> Resu
     let dir = tempfile::tempdir()?;
     let port = free_port()?;
     let base = format!("http://127.0.0.1:{port}");
-    let http = reqwest::Client::new();
+    let http = wayhouse_http::client();
 
     let ctl = controller_in(dir.path(), port, &["--tunnel-network", "10.60.0.0/16"]).await?;
     let r: Value = http

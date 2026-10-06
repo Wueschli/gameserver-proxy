@@ -130,6 +130,11 @@ pub const GOSSIP_AUTH_REJECTED_TOTAL: &str = "wayhouse_gossip_auth_rejected_tota
 /// instance with a badly skewed clock.
 pub const GOSSIP_STALE_REJECTED_TOTAL: &str = "wayhouse_gossip_stale_rejected_total";
 
+/// Counter, no labels. Authentic, fresh gossip datagrams dropped because their
+/// version byte is not this build's protocol major (#185): a peer on an
+/// incompatible release. Dropped before decoding.
+pub const GOSSIP_VERSION_REJECTED_TOTAL: &str = "wayhouse_gossip_version_rejected_total";
+
 /// Gauge (0/1). Labels: `pool`, `backend`. Whether the Tier-2 domain quorum
 /// is currently overriding this backend to down (phase 13) — independent of
 /// (and never able to clear) the backend's own local `healthy` flag.

@@ -532,6 +532,7 @@ mod tests {
                 Request::builder()
                     .method(method)
                     .uri(path)
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(body)
                     .unwrap(),
             )

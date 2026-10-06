@@ -42,7 +42,7 @@ async fn controller_reconnect_freezes_then_catches_up() -> Result<()> {
     let wayhouse_admin_port = free_port()?;
     let wayhouse_listen_port_a = free_port()?;
     let target_port = free_port()?;
-    reqwest::Client::new()
+    wayhouse_http::client()
         .post(format!("{controller_url}/config"))
         .body(minimal_wayhouse_config(
             wayhouse_admin_port,
@@ -99,7 +99,7 @@ async fn controller_reconnect_freezes_then_catches_up() -> Result<()> {
     let controller2 = spawn_controller(data_dir.path(), controller_port)?;
     wait_http_up(&format!("{controller_url}/healthz"), UP).await?;
     let wayhouse_listen_port_b = free_port()?;
-    reqwest::Client::new()
+    wayhouse_http::client()
         .post(format!("{controller_url}/config"))
         .body(minimal_wayhouse_config(
             wayhouse_admin_port,
@@ -144,7 +144,7 @@ async fn controller_rejects_bad_config_and_keeps_previous() -> Result<()> {
     let controller = spawn_controller(data_dir.path(), controller_port)?;
     wait_http_up(&format!("{base}/healthz"), UP).await?;
 
-    let client = reqwest::Client::new();
+    let client = wayhouse_http::client();
     let good = minimal_wayhouse_config(free_port()?, free_port()?, free_port()?);
     let resp = client
         .post(format!("{base}/config"))
@@ -307,7 +307,7 @@ async fn fanout_broadcast_partial_failure() -> Result<()> {
         "instance 1's admin port should be gone after kill"
     );
 
-    let resp = reqwest::Client::new()
+    let resp = wayhouse_http::client()
         .post(format!("{agg_url}/fleet/pools/local/backends"))
         .json(&serde_json::json!({ "addr": "127.0.0.1:1" }))
         .send()

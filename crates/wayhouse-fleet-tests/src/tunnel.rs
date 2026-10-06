@@ -280,13 +280,13 @@ impl TunnelLab {
         wait_until(
             || {
                 let url = url.clone();
-                async move { Ok(reqwest::get(&url).await?.status().is_success()) }
+                async move { Ok(crate::http_get(&url).await?.status().is_success()) }
             },
             Duration::from_secs(20),
             "the origin to register with the controller",
         )
         .await?;
-        let body: serde_json::Value = reqwest::get(&url).await?.json().await?;
+        let body: serde_json::Value = crate::http_get(&url).await?.json().await?;
         let pubkey = body["pubkey"]
             .as_str()
             .context("registry entry has no pubkey")?
@@ -320,7 +320,7 @@ impl TunnelLab {
     /// removed first, as in [`TunnelLab::restart_edge`].
     pub async fn restart_origin(&mut self) -> Result<()> {
         let url = self.registry_url(&format!("/peers/{ORIGIN_NAME}"));
-        let before = reqwest::get(&url)
+        let before = crate::http_get(&url)
             .await?
             .json::<serde_json::Value>()
             .await?["tunnel_address"]
@@ -353,7 +353,7 @@ impl TunnelLab {
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        let body: serde_json::Value = reqwest::get(&url).await?.json().await?;
+        let body: serde_json::Value = crate::http_get(&url).await?.json().await?;
         let ip: IpAddr = body["tunnel_address"]
             .as_str()
             .context("registry entry has no tunnel_address")?
@@ -470,7 +470,7 @@ impl TunnelLab {
     }
 
     pub async fn pools(&self, edge: usize) -> Result<String> {
-        Ok(reqwest::get(self.admin_url(edge, "/pools"))
+        Ok(crate::http_get(self.admin_url(edge, "/pools"))
             .await?
             .text()
             .await?)
@@ -527,7 +527,7 @@ impl TunnelLab {
     /// A proxy's stored registration, as `GET /proxy-peers/{name}` returns it.
     pub async fn proxy_registration(&self, name: &str) -> Result<serde_json::Value> {
         Ok(
-            reqwest::get(self.registry_url(&format!("/proxy-peers/{name}")))
+            crate::http_get(self.registry_url(&format!("/proxy-peers/{name}")))
                 .await?
                 .json()
                 .await?,
@@ -537,7 +537,7 @@ impl TunnelLab {
     /// The tunnel address the controller assigned to a registered proxy.
     pub async fn proxy_address(&self, name: &str) -> Result<String> {
         let body: serde_json::Value =
-            reqwest::get(self.registry_url(&format!("/proxy-peers/{name}")))
+            crate::http_get(self.registry_url(&format!("/proxy-peers/{name}")))
                 .await?
                 .json()
                 .await?;
@@ -556,7 +556,7 @@ impl TunnelLab {
     /// re-registers between the two calls the placeholder is refused and the
     /// whole step is repeated.
     pub async fn move_address(&self, kind: &str, name: &str) -> Result<(String, String)> {
-        let client = reqwest::Client::new();
+        let client = wayhouse_http::client();
         let entry = self.registry_url(&format!("/{kind}/{name}"));
         let old = {
             let body: serde_json::Value = client.get(&entry).send().await?.json().await?;
@@ -667,7 +667,7 @@ impl TunnelLab {
     /// When the controller last heard from a proxy (unix seconds), from the
     /// address table.
     pub async fn proxy_last_seen(&self, name: &str) -> Result<u64> {
-        let table: serde_json::Value = reqwest::get(self.registry_url("/tunnel/addresses"))
+        let table: serde_json::Value = crate::http_get(self.registry_url("/tunnel/addresses"))
             .await?
             .json()
             .await?;

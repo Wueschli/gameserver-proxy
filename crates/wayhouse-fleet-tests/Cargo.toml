@@ -20,6 +20,8 @@ workspace = true
 [dependencies]
 tokio = { workspace = true, features = ["process", "io-std"] }
 reqwest = { workspace = true }
+# Component clients send the protocol header (#185); the tests talk to gated routes.
+wayhouse-http = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tempfile = { workspace = true }

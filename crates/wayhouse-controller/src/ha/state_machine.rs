@@ -1378,6 +1378,8 @@ mod tests {
             endpoint: "203.0.113.1:51820".into(),
             tunnel_address: address.map(Into::into),
             boot_id: None,
+            max_config_schema: None,
+            refresh_sec: None,
         }
     }
 

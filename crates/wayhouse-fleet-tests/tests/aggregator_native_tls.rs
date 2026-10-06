@@ -15,7 +15,7 @@ const UP: Duration = Duration::from_secs(30);
 
 fn tls_client() -> Result<reqwest::Client> {
     let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
-    Ok(reqwest::Client::builder()
+    Ok(wayhouse_http::builder()
         .add_root_certificate(ca)
         .timeout(Duration::from_secs(10))
         .build()?)

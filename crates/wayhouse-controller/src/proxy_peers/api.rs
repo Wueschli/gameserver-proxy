@@ -51,6 +51,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -94,6 +95,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
                     .unwrap(),
             )
@@ -109,6 +111,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(
                         r#"{"name":"edge-1","pubkey":"garbage","endpoint":"x"}"#,
                     ))
@@ -126,6 +129,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from("not json"))
                     .unwrap(),
             )
@@ -141,6 +145,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/nope")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -157,6 +162,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
                     .unwrap(),
             )
@@ -165,6 +171,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51821")))
                     .unwrap(),
             )
@@ -174,6 +181,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -194,6 +202,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("a", "203.0.113.1:51820")))
                     .unwrap(),
             )
@@ -202,6 +211,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("b", "203.0.113.2:51820")))
                     .unwrap(),
             )
@@ -209,7 +219,12 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(Request::get("/proxy-peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -236,7 +251,12 @@ mod tests {
         let state = ProxyPeersState::new(store, Some("secret".into()), book);
         let app = router(state);
         let resp = app
-            .oneshot(Request::get("/proxy-peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -254,6 +274,8 @@ mod tests {
                     endpoint: "203.0.113.9:51820".into(),
                     tunnel_address: None,
                     boot_id: None,
+                    max_config_schema: None,
+                    refresh_sec: None,
                 })
                 .unwrap(),
             )
@@ -274,6 +296,8 @@ mod tests {
                     endpoint: "203.0.113.9:51821".into(),
                     tunnel_address: None,
                     boot_id: None,
+                    max_config_schema: None,
+                    refresh_sec: None,
                 })
                 .unwrap(),
             )
@@ -331,6 +355,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -354,6 +379,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -377,6 +403,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!("/proxy-peers/{name}"))
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -405,7 +432,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::get("/proxy-peers/a").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers/a")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -488,6 +520,174 @@ mod tests {
         assert_eq!(
             crate::registry::event_payload(r2, &b2)["removed"]["name"],
             "edge-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_peers_rejects_other_major_with_426() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn proxy_peers_subscribe_is_refused_before_the_stream_starts() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/proxy-peers/subscribe")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    fn schema_body(name: &str, max: Option<u32>, refresh_sec: Option<u64>) -> String {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&reg_body(name, "203.0.113.9:51820")).unwrap();
+        // A distinct key per name; the endpoint stays shared (allowed).
+        if let Some(m) = max {
+            v["max_config_schema"] = serde_json::json!(m);
+        }
+        if let Some(r) = refresh_sec {
+            v["refresh_sec"] = serde_json::json!(r);
+        }
+        v.to_string()
+    }
+
+    fn clocked(state: ProxyPeersState) -> (ProxyPeersState, Arc<std::sync::atomic::AtomicU64>) {
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        let n = now.clone();
+        let state = state.with_now_fn(Arc::new(move || {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        (state, now)
+    }
+
+    #[tokio::test]
+    async fn the_floor_is_the_lowest_max_config_schema_reported() {
+        let (state, _book, _dir) = test_state();
+        let (state, _now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(
+            state.min_live_config_schema().unwrap(),
+            None,
+            "no proxies, no floor"
+        );
+        assert_eq!(
+            post(&app, schema_body("a", Some(3), None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, schema_body("b", Some(2), None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(2));
+        // A live proxy that reports nothing predates `schema_version`: it cannot
+        // parse a document that carries the key, so it pins the floor at 0.
+        assert_eq!(
+            post(&app, schema_body("c", None, None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn stale_registration_does_not_pin_the_minimum() {
+        let (state, _book, _dir) = test_state();
+        let (state, now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(
+            post(&app, schema_body("old", Some(1), Some(30))).await.0,
+            StatusCode::OK
+        );
+        now.store(1_000 + 90, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            post(&app, schema_body("new", Some(5), Some(30))).await.0,
+            StatusCode::OK
+        );
+        // Three intervals since `old` last registered: still live.
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(1));
+        now.store(1_000 + 91, std::sync::atomic::Ordering::SeqCst);
+        // One second more and it is stale; only `new` counts.
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_registration_no_longer_counts() {
+        let (state, _book, _dir) = test_state();
+        let (state, _now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(
+            post(&app, schema_body("gone", Some(1), None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, schema_body("kept", Some(4), None)).await.0,
+            StatusCode::OK
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete("/proxy-peers/gone")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn a_registration_without_the_protocol_header_is_refused() {
+        let (state, _book, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn nonsense_schema_reports_are_refused() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        for (max, refresh) in [
+            (Some(0), None),
+            (None, Some(0)),
+            (None, Some(u64::MAX / 3 + 1)),
+        ] {
+            let (status, _) = post(&app, schema_body("x", max, refresh)).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{max:?} {refresh:?}"
+            );
+        }
+        let (status, _) = post(&app, schema_body("x", Some(1), Some(u64::MAX / 3))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the largest allowed interval is accepted"
         );
     }
 }
