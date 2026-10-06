@@ -71,6 +71,15 @@ const COMPACT_EVERY: u64 = 1024;
 /// been superseded and compacted away.
 const CURRENT_READ_ATTEMPTS: usize = 4;
 
+/// What a registrant says about the config documents it can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigSchemaReport {
+    /// Newest `schema_version` it understands.
+    pub max: u32,
+    /// Seconds a registration counts after its last (re-)registration.
+    pub live_for: u64,
+}
+
 /// One registry's registration type — what `POST` takes, what `current`
 /// points at and what every subscriber event carries.
 pub trait Registration:
@@ -93,6 +102,12 @@ pub trait Registration:
     /// a type (or a registration) without one. The unchanged check compares
     /// it as a parsed address when it parses.
     fn endpoint_mut(&mut self) -> Option<&mut String> {
+        None
+    }
+    /// The config schema this registrant supports and how long (seconds) a
+    /// registration stays live, for the config gate; `None` for a type that
+    /// reports none.
+    fn config_schema(&self) -> Option<ConfigSchemaReport> {
         None
     }
     /// The Raft entry that registers `self`, stamped with the proposing
@@ -338,6 +353,34 @@ impl<R: Registration> RegistryState<R> {
     }
 
     /// Every name's current registration, ordered by name.
+    /// The lowest config `schema_version` any **live** registration supports, or
+    /// `None` when none reports one. Live means re-registered (the address
+    /// book's `last_seen`) within the registrant's own `live_for`; a stale
+    /// entry is ignored and a deleted one is gone, so a decommissioned proxy
+    /// cannot pin the minimum. Store trouble fails open (`None`, logged): the
+    /// proxies still refuse a document they cannot parse, and keep their
+    /// previous config.
+    pub fn min_live_config_schema(&self) -> Option<u32> {
+        let regs = match self.all_current() {
+            Ok(regs) => regs,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read registrations for the config schema gate");
+                return None;
+            }
+        };
+        let now = (self.now_fn)();
+        regs.iter()
+            .filter_map(|reg| {
+                let report = reg.config_schema()?;
+                let seen = match self.book.get(R::ROLE, reg.name()) {
+                    Ok(Some(a)) => a.last_seen,
+                    _ => return None,
+                };
+                (now.saturating_sub(seen) <= report.live_for).then_some(report.max)
+            })
+            .min()
+    }
+
     pub(crate) fn all_current(&self) -> Result<Vec<R>, StoreError> {
         let mut out = Vec::new();
         for key in self.current.iter().keys() {
@@ -496,14 +539,15 @@ async fn register<R: Registration>(
         .write_lock
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let assignment =
-        match state
-            .book
-            .claim(R::ROLE, reg.name(), reg.requested_address(), unix_secs())
-        {
-            Ok(a) => a,
-            Err(e) => return claim_error_response(&e),
-        };
+    let assignment = match state.book.claim(
+        R::ROLE,
+        reg.name(),
+        reg.requested_address(),
+        (state.now_fn)(),
+    ) {
+        Ok(a) => a,
+        Err(e) => return claim_error_response(&e),
+    };
     // Note: the claim above is kept even if the backends below are rejected
     // (the owner's corrected retry gets the same address, Review Focus 1), and
     // also if storing the registration fails afterwards (a `5xx`; the retry

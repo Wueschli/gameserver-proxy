@@ -256,6 +256,10 @@
 > The full schema below is the target.
 
 ```yaml
+# Optional: the minimum config schema this document needs (whole number, 1 or
+# higher; absent = 1). See "Schema version" below.
+schema_version: 1
+
 # global
 settings:
   workers: 0                 # 0 = number of CPU cores
@@ -537,6 +541,32 @@ rolling update of many pods costs one fetch, not one per event.
   bind address of another listener.
 - Numeric ranges: timeouts > 0, `rise`/`fall` ≥ 1, TTLs ≥ 0.
 
+## Schema version
+
+`schema_version` (top level, optional) is the **minimum config schema the document
+needs**; absent means `1`. A build supports up to the schema in
+`wayhouse_config::version::CONFIG_SCHEMA_VERSION` (currently `1`). A document that
+asks for more is refused with `config schema_version N is newer than this build
+supports (max M)`, on startup, on a file reload (the running config stays active)
+and on a controller-delivered revision. A string, `0` or a fractional value is
+an error that says so. `deny_unknown_fields` stays on, so an older node also rejects
+a newer field loudly instead of ignoring it.
+
+**Bump rule for contributors:** a PR that adds a config field, even an optional
+one, raises `CONFIG_SCHEMA_VERSION` and adds the field's dotted path to
+`FIELD_SINCE` (`wayhouse-config/src/version.rs`) with the new number. The parser then
+refuses a document that uses that field without a `schema_version` that covers it,
+so nobody adopts a new field by accident while older proxies still run.
+
+**Mixed fleets.** Proxies that register with the controller (the `tunnel` source)
+report the newest schema they understand (`max_config_schema`) and how often they
+re-register. `POST /config` answers `422` when the document's `schema_version` is
+above the lowest value reported by any *live* proxy (one that re-registered within
+three of its own intervals; a stopped or deleted proxy stops counting). Upgrade every
+proxy before submitting a document that uses a field introduced by the new
+version. Proxies that do not register (no tunnel) are not tracked: they still refuse
+a document they cannot parse and keep their previous config.
+
 ## Reload semantics
 
 | Change | Behavior |
@@ -555,7 +585,7 @@ rolling update of many pods costs one fetch, not one per event.
 | `settings.geo_db` changed | requires a restart — the MaxMind DB is opened once at startup (a listener's `geo` codes are reloadable, the DB path is not) |
 | `settings.sniffers.dir` contents changed (module added / removed / recompiled), or a `modules[].config` string changed | live — rescanned on every reload (phase 9 slice 4) and swapped in like the snapshot |
 | `settings.sniffers` block added / removed, or `call_timeout_ms` / `max_memory_bytes` changed | requires a restart — the `wasmtime::Engine` and its epoch-ticker thread are built once at startup, like `settings.workers` |
-| Invalid file | reload rejected, metric `config_reload_failed_total++`, old config stays active |
+| Invalid file (including a `schema_version` newer than this build supports) | reload rejected, metric `config_reload_failed_total++`, old config stays active |
 
 ## Health checks
 

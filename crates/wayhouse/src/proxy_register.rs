@@ -28,6 +28,12 @@ struct ProxyRegistration<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tunnel_address: Option<&'a str>,
     boot_id: &'a str,
+    /// Newest config `schema_version` this build parses: the controller refuses a
+    /// document above the lowest value any live proxy reports (#185).
+    max_config_schema: u32,
+    /// Seconds between this proxy's registrations: the controller treats it as
+    /// gone after three of them.
+    refresh_sec: u64,
 }
 
 /// What the controller answers to a successful `POST /proxy-peers`.
@@ -51,6 +57,9 @@ pub struct Registration {
     /// [`new_boot_id`], once per process: lets every origin's `wayhouse-agent`
     /// tell a restart from a routine re-registration.
     pub boot_id: String,
+    /// `--tunnel-register-interval-sec`, reported so the controller knows when
+    /// this registration has gone stale.
+    pub refresh_sec: u64,
 }
 
 /// A fresh random id for this process start (128 bits, hex). A restarted
@@ -70,6 +79,8 @@ fn body(reg: &Registration) -> ProxyRegistration<'_> {
         endpoint: &reg.endpoint,
         tunnel_address: reg.address.as_deref(),
         boot_id: &reg.boot_id,
+        max_config_schema: wayhouse_config::version::CONFIG_SCHEMA_VERSION,
+        refresh_sec: reg.refresh_sec,
     }
 }
 
@@ -276,7 +287,18 @@ mod tests {
             endpoint: "203.0.113.9:51820".into(),
             address: None,
             boot_id: "0123456789abcdef0123456789abcdef".into(),
+            refresh_sec: 30,
         }
+    }
+
+    #[test]
+    fn proxy_registration_reports_max_config_schema() {
+        let v = serde_json::to_value(body(&reg())).unwrap();
+        assert_eq!(
+            v["max_config_schema"],
+            wayhouse_config::version::CONFIG_SCHEMA_VERSION
+        );
+        assert_eq!(v["refresh_sec"], 30);
     }
 
     #[test]

@@ -152,7 +152,14 @@ pub struct AppState {
     /// (`slave` role only; stays `0` otherwise). Lands in the same
     /// transaction as the revision it covers.
     pub relay: RelayCursor,
+    /// The lowest config schema any live proxy supports (`None`: unknown, no
+    /// limit): `POST /config` refuses a document above it, so a mixed fleet never
+    /// receives one it must reject.
+    schema_floor: Option<SchemaFloor>,
 }
+
+/// See [`AppState::with_schema_floor`].
+pub type SchemaFloor = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 
 impl AppState {
     pub fn try_new(
@@ -175,6 +182,7 @@ impl AppState {
             actors,
             ha: None,
             relay: RelayCursor::open(&store_db)?,
+            schema_floor: None,
         })
     }
 
@@ -182,6 +190,13 @@ impl AppState {
     #[cfg(test)]
     pub fn new(store: Arc<Store>, auth_token: Option<String>, role: RoleHandle) -> Self {
         Self::try_new(store, auth_token, role).expect("opening the sibling trees")
+    }
+
+    /// Gate submissions on the lowest config schema the live proxies support
+    /// (`RegistryState::min_live_config_schema`).
+    pub fn with_schema_floor(mut self, floor: SchemaFloor) -> Self {
+        self.schema_floor = Some(floor);
+        self
     }
 
     pub fn with_ha(mut self, ha: Option<Arc<crate::ha::HaHandle>>) -> Self {
@@ -591,15 +606,32 @@ async fn submit(
         return slave_rejects_write();
     }
 
-    if let Err(e) = wayhouse_config::parse_str(&text) {
-        tracing::warn!(error = %e, "rejected an invalid config submission");
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response();
+    let parsed = match wayhouse_config::parse_str(&text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(error = %e, "rejected an invalid config submission");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if let Some(floor) = state.schema_floor.as_ref().and_then(|f| f()) {
+        if parsed.schema_version > floor {
+            let error = format!(
+                "config schema_version {} is newer than the oldest live proxy supports (max {floor}): upgrade the proxies first",
+                parsed.schema_version
+            );
+            tracing::warn!(%error, "rejected a config submission");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse { error }),
+            )
+                .into_response();
+        }
     }
 
     if let Some(ha) = &state.ha {
@@ -1820,5 +1852,72 @@ listeners:
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn status_and_error(resp: Response) -> (StatusCode, String) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn submit_text(app: &Router, body: String) -> Response {
+        app.clone()
+            .oneshot(Request::post("/config").body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn submit_config_with_newer_schema_is_422_and_keeps_current_revision() {
+        let (state, _dir) = test_state();
+        let app = router(state);
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
+        let (status, body) =
+            status_and_error(submit_text(&app, format!("schema_version: 2\n{VALID_CONFIG}")).await)
+                .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("config schema_version 2 is newer than this build supports (max 1)"),
+            "{body}"
+        );
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("X-Config-Revision").unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn controller_rejects_schema_above_lowest_registered_proxy_max() {
+        let (state, _dir) = test_state();
+        // A live proxy that understands no schema at all (older than any this
+        // build can write): everything above it is refused.
+        let app = router(state.with_schema_floor(Arc::new(|| Some(0))));
+        let (status, body) = status_and_error(submit_text(&app, VALID_CONFIG.into()).await).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("oldest live proxy supports (max 0)"),
+            "{body}"
+        );
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn schema_at_or_below_the_floor_is_accepted() {
+        let (state, _dir) = test_state();
+        let app = router(state.with_schema_floor(Arc::new(|| Some(1))));
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
     }
 }

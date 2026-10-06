@@ -254,6 +254,8 @@ mod tests {
                     endpoint: "203.0.113.9:51820".into(),
                     tunnel_address: None,
                     boot_id: None,
+                    max_config_schema: None,
+                    refresh_sec: None,
                 })
                 .unwrap(),
             )
@@ -274,6 +276,8 @@ mod tests {
                     endpoint: "203.0.113.9:51821".into(),
                     tunnel_address: None,
                     boot_id: None,
+                    max_config_schema: None,
+                    refresh_sec: None,
                 })
                 .unwrap(),
             )
@@ -521,5 +525,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    fn schema_body(name: &str, max: Option<u32>, refresh_sec: Option<u64>) -> String {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&reg_body(name, "203.0.113.9:51820")).unwrap();
+        // A distinct key per name; the endpoint stays shared (allowed).
+        if let Some(m) = max {
+            v["max_config_schema"] = serde_json::json!(m);
+        }
+        if let Some(r) = refresh_sec {
+            v["refresh_sec"] = serde_json::json!(r);
+        }
+        v.to_string()
+    }
+
+    fn clocked(state: ProxyPeersState) -> (ProxyPeersState, Arc<std::sync::atomic::AtomicU64>) {
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        let n = now.clone();
+        let state = state.with_now_fn(Arc::new(move || {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        (state, now)
+    }
+
+    #[tokio::test]
+    async fn the_floor_is_the_lowest_max_config_schema_reported() {
+        let (state, _book, _dir) = test_state();
+        let (state, _now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(state.min_live_config_schema(), None, "no proxies, no floor");
+        assert_eq!(
+            post(&app, schema_body("a", Some(3), None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, schema_body("b", Some(2), None)).await.0,
+            StatusCode::OK
+        );
+        // An older proxy that reports nothing says nothing.
+        assert_eq!(
+            post(&app, schema_body("c", None, None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(state.min_live_config_schema(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn stale_registration_does_not_pin_the_minimum() {
+        let (state, _book, _dir) = test_state();
+        let (state, now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(
+            post(&app, schema_body("old", Some(1), Some(30))).await.0,
+            StatusCode::OK
+        );
+        now.store(1_000 + 90, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            post(&app, schema_body("new", Some(5), Some(30))).await.0,
+            StatusCode::OK
+        );
+        // Three intervals since `old` last registered: still live.
+        assert_eq!(state.min_live_config_schema(), Some(1));
+        now.store(1_000 + 91, std::sync::atomic::Ordering::SeqCst);
+        // One second more and it is stale; only `new` counts.
+        assert_eq!(state.min_live_config_schema(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_registration_no_longer_counts() {
+        let (state, _book, _dir) = test_state();
+        let (state, _now) = clocked(state);
+        let app = router(state.clone());
+        assert_eq!(
+            post(&app, schema_body("gone", Some(1), None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, schema_body("kept", Some(4), None)).await.0,
+            StatusCode::OK
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete("/proxy-peers/gone")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.min_live_config_schema(), Some(4));
     }
 }

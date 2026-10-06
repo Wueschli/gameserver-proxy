@@ -207,6 +207,8 @@ pub struct ResolverConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The `schema_version` the document declared (`1` when absent).
+    pub schema_version: u32,
     /// `0` means "one worker per CPU core".
     pub workers: usize,
     /// How long `shutdown` waits for in-flight connections to finish.

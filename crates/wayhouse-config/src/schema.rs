@@ -7,6 +7,10 @@ use crate::resolved::{Balancer, HashOn, OnError, Protocol, ProxyProtocol};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
+    /// Minimum config schema the document needs (`version`). Kept as a raw YAML
+    /// value so a string or `0` gets a precise error, not a serde one.
+    #[serde(default)]
+    pub(crate) schema_version: Option<serde_norway::Value>,
     #[serde(default)]
     pub(crate) settings: RawSettings,
     #[serde(default)]

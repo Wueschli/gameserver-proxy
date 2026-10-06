@@ -31,7 +31,7 @@ fn reject_duplicate_targets(what: &str, addrs: &[SocketAddr]) -> Result<(), Conf
     }
 }
 
-pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
+pub(crate) fn validate(raw: RawConfig, schema_version: u32) -> Result<Config, ConfigError> {
     use ConfigError::Invalid;
 
     if raw.listeners.is_empty() {
@@ -958,6 +958,7 @@ pub(crate) fn validate(raw: RawConfig) -> Result<Config, ConfigError> {
     };
 
     Ok(Config {
+        schema_version,
         workers: raw.settings.workers,
         shutdown_grace: Duration::from_secs(raw.settings.shutdown_grace_sec),
         admin_listen,

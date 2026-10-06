@@ -17,6 +17,7 @@ mod parse;
 mod resolved;
 mod schema;
 mod validate;
+pub mod version;
 
 pub use cidr::{Acl, Cidr, CidrSet, GeoAcl};
 pub use keys::base64_decode_32;
@@ -44,6 +45,9 @@ pub enum ConfigError {
     Parse(#[from] serde_norway::Error),
     #[error("invalid configuration: {0}")]
     Invalid(String),
+    /// The document's `schema_version` is above [`version::CONFIG_SCHEMA_VERSION`].
+    #[error("config schema_version {found} is newer than this build supports (max {max})")]
+    SchemaTooNew { found: u32, max: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,25 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
 /// Parse and validate a config from a YAML string.
 pub fn parse_str(text: &str) -> Result<Config, ConfigError> {
-    let raw: RawConfig = serde_norway::from_str(text)?;
-    validate(raw)
+    let raw: RawConfig = match serde_norway::from_str(text) {
+        Ok(raw) => raw,
+        Err(e) => {
+            // A document from a newer schema usually also fails on its new
+            // fields; the version is the useful thing to say, so report it first.
+            if let Ok(doc) = serde_norway::from_str::<serde_norway::Value>(text) {
+                if let Err(too_new @ ConfigError::SchemaTooNew { .. }) =
+                    version::check_schema_version(doc.get("schema_version"))
+                {
+                    return Err(too_new);
+                }
+            }
+            return Err(e.into());
+        }
+    };
+    let declared = version::check_schema_version(raw.schema_version.as_ref())?;
+    if !version::FIELD_SINCE.is_empty() {
+        let doc: serde_norway::Value = serde_norway::from_str(text)?;
+        version::check_fields_since(&doc, declared, version::FIELD_SINCE)?;
+    }
+    validate(raw, declared)
 }

@@ -105,6 +105,7 @@ pub async fn start(tc: TunnelConfig) -> anyhow::Result<Running> {
             .as_deref()
             .map(|c| crate::tunnel_address::ip_of(c).to_string()),
         boot_id: crate::proxy_register::new_boot_id(),
+        refresh_sec: tc.register_interval.as_secs(),
     };
     let client = crate::proxy_register::http_client();
     let addr_path = {

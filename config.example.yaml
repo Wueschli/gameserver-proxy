@@ -1,6 +1,10 @@
 # wayhouse — annotated example config (`make run` starts the proxy with it).
 # The full target schema is documented in docs/05-configuration.md.
 
+# The minimum config schema this document needs (docs/05 "Schema version").
+# Optional; omit it and it means 1. A proxy refuses a number it does not know.
+schema_version: 1
+
 settings:
   # Accept-loop tasks per listener. 0 = one per CPU core.
   workers: 0
