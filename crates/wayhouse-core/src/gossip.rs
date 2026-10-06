@@ -44,6 +44,12 @@ type HmacSha256 = Hmac<Sha256>;
 const HMAC_TAG_LEN: usize = 32;
 /// Bytes of sender timestamp in front of every datagram's payload.
 const TIMESTAMP_LEN: usize = 8;
+/// Bytes `tag` adds around a foca packet: timestamp, version byte, HMAC tag.
+const FRAME_OVERHEAD: usize = TIMESTAMP_LEN + 1 + HMAC_TAG_LEN;
+/// The gossip wire version, the second field of every datagram: the protocol
+/// major (`wayhouse_http::protocol`, #185). A datagram carrying another value is
+/// dropped before its payload is decoded.
+const GOSSIP_VERSION: u8 = wayhouse_http::protocol::PROTOCOL_MAJOR as u8;
 /// How far a datagram's sender timestamp may sit from our clock before it is
 /// dropped as a replay (security review O4). Also the clock skew the mesh
 /// tolerates between instances; a replay inside the window is still possible.
@@ -243,8 +249,9 @@ pub async fn run(
         },
     );
     let mut runtime = AccumulatingRuntime::new();
+    let mut warned_version = false;
     let mut timers: BinaryHeap<Reverse<TimerEntry>> = BinaryHeap::new();
-    let mut recv_buf = vec![0u8; max_packet + TIMESTAMP_LEN + HMAC_TAG_LEN];
+    let mut recv_buf = vec![0u8; max_packet + FRAME_OVERHEAD];
 
     for seed in &cfg.seeds {
         if let Err(error) = foca.announce(*seed, &mut runtime) {
@@ -272,7 +279,7 @@ pub async fn run(
             }
             recv = socket.recv_from(&mut recv_buf) => {
                 match recv {
-                    Ok((len, _from)) => match verify_and_strip(&cfg.psk, &recv_buf[..len], wall_ms()) {
+                    Ok((len, from)) => match verify_and_strip(&cfg.psk, &recv_buf[..len], wall_ms()) {
                         Ok(payload) => {
                             metrics::counter!(m::GOSSIP_MESSAGES_TOTAL, "direction" => "received")
                                 .increment(1);
@@ -285,6 +292,17 @@ pub async fn run(
                         }
                         Err(Reject::Stale) => {
                             metrics::counter!(m::GOSSIP_STALE_REJECTED_TOTAL).increment(1);
+                        }
+                        Err(Reject::Version(theirs)) => {
+                            // One warning, then debug: a peer on another version
+                            // sends every second and the counter carries the rate.
+                            let msg = "gossip: dropping a datagram with another protocol version: upgrade the older side";
+                            if std::mem::replace(&mut warned_version, true) {
+                                tracing::debug!(theirs, ours = GOSSIP_VERSION, %from, "{msg}");
+                            } else {
+                                tracing::warn!(theirs, ours = GOSSIP_VERSION, %from, "{msg}");
+                            }
+                            metrics::counter!(m::GOSSIP_VERSION_REJECTED_TOTAL).increment(1);
                         }
                     },
                     Err(error) => {
@@ -392,12 +410,18 @@ fn wall_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Frames `payload` as `timestamp (u64 BE ms) || payload || HMAC(timestamp ||
-/// payload)`. The timestamp sits inside the MAC so an on-path attacker can
-/// neither replay a captured datagram after [`MAX_DATAGRAM_AGE`] nor refresh it.
+/// Frames `payload` as `timestamp (u64 BE ms) || version (u8) || payload ||
+/// HMAC(timestamp || version || payload)`. The timestamp sits inside the MAC so
+/// an on-path attacker can neither replay a captured datagram after
+/// [`MAX_DATAGRAM_AGE`] nor refresh it; the version byte is inside it too.
 fn tag(psk: &str, payload: &[u8], now_ms: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(TIMESTAMP_LEN + payload.len() + HMAC_TAG_LEN);
+    tag_with_version(psk, GOSSIP_VERSION, payload, now_ms)
+}
+
+fn tag_with_version(psk: &str, version: u8, payload: &[u8], now_ms: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(TIMESTAMP_LEN + 1 + payload.len() + HMAC_TAG_LEN);
     out.extend_from_slice(&now_ms.to_be_bytes());
+    out.push(version);
     out.extend_from_slice(payload);
     let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes())
         .expect("HMAC accepts a key of any length");
@@ -414,20 +438,27 @@ enum Reject {
     /// Authentic, but its timestamp is further than [`MAX_DATAGRAM_AGE`] from
     /// our clock (a replay, or peers with badly skewed clocks).
     Stale,
+    /// Authentic and fresh, but built by a node speaking another gossip
+    /// version (an upgrade in progress): not decoded.
+    Version(u8),
 }
 
 fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8], now_ms: u64) -> Result<&'a [u8], Reject> {
-    if datagram.len() < TIMESTAMP_LEN + HMAC_TAG_LEN {
+    if datagram.len() < FRAME_OVERHEAD {
         return Err(Reject::Auth);
     }
     let (signed, tag) = datagram.split_at(datagram.len() - HMAC_TAG_LEN);
     let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes()).map_err(|_| Reject::Auth)?;
     mac.update(signed);
     mac.verify_slice(tag).map_err(|_| Reject::Auth)?;
-    let (ts, payload) = signed.split_at(TIMESTAMP_LEN);
+    let (ts, rest) = signed.split_at(TIMESTAMP_LEN);
     let sent_ms = u64::from_be_bytes(ts.try_into().expect("split_at(8) yields 8 bytes"));
     if now_ms.abs_diff(sent_ms) > MAX_DATAGRAM_AGE.as_millis() as u64 {
         return Err(Reject::Stale);
+    }
+    let (&version, payload) = rest.split_first().expect("length checked above");
+    if version != GOSSIP_VERSION {
+        return Err(Reject::Version(version));
     }
     Ok(payload)
 }
@@ -445,6 +476,42 @@ mod tests {
     }
 
     #[test]
+    fn frame_round_trips_with_version_byte() {
+        let tagged = tag("secret", b"hello", NOW);
+        assert_eq!(tagged[TIMESTAMP_LEN], GOSSIP_VERSION);
+        assert_eq!(tagged.len(), TIMESTAMP_LEN + 1 + 5 + HMAC_TAG_LEN);
+        assert_eq!(verify_and_strip("secret", &tagged, NOW), Ok(&b"hello"[..]));
+    }
+
+    #[test]
+    fn valid_mac_but_other_version_is_dropped_as_version() {
+        let tagged = tag_with_version("secret", 9, b"hello", NOW);
+        assert_eq!(
+            verify_and_strip("secret", &tagged, NOW),
+            Err(Reject::Version(9))
+        );
+    }
+
+    #[test]
+    fn postcard_is_not_parsed_for_other_version() {
+        // Random bytes under a valid MAC and another version: dropped before
+        // any decoding, so no panic and no `Ok` payload for the codec.
+        let garbage: Vec<u8> = (0..200u32).map(|i| (i * 37 % 251) as u8).collect();
+        let tagged = tag_with_version("secret", 0, &garbage, NOW);
+        assert_eq!(
+            verify_and_strip("secret", &tagged, NOW),
+            Err(Reject::Version(0))
+        );
+    }
+
+    #[test]
+    fn a_forged_version_without_the_key_is_an_auth_failure() {
+        let mut tagged = tag("secret", b"hello", NOW);
+        tagged[TIMESTAMP_LEN] = 9;
+        assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
+    }
+
+    #[test]
     fn wrong_psk_is_rejected() {
         let tagged = tag("secret", b"hello", NOW);
         assert_eq!(verify_and_strip("other", &tagged, NOW), Err(Reject::Auth));
@@ -458,7 +525,7 @@ mod tests {
     #[test]
     fn tampered_payload_is_rejected() {
         let mut tagged = tag("secret", b"hello", NOW);
-        tagged[TIMESTAMP_LEN] ^= 0xff;
+        tagged[TIMESTAMP_LEN + 1] ^= 0xff;
         assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
     }
 
