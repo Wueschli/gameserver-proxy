@@ -1834,7 +1834,9 @@ listeners:
         // Refused before the SSE stream starts, not mid-stream.
         assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
         assert_ne!(
-            resp.headers().get("content-type").map(|v| v.as_bytes()),
+            resp.headers()
+                .get("content-type")
+                .map(axum::http::HeaderValue::as_bytes),
             Some(&b"text/event-stream"[..])
         );
     }

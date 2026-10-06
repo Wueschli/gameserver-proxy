@@ -118,6 +118,15 @@
 - `wayhouse_gossip_stale_rejected_total` (counter, no labels) — authentic gossip
   datagrams dropped because their sender timestamp is more than 30 s from this
   node's clock (a replay, or an instance with a skewed clock; keep NTP running).
+- `wayhouse_gossip_version_rejected_total` (counter, no labels, #185) — authentic,
+  fresh gossip datagrams dropped because their version byte is not this build's
+  protocol major: a peer on an incompatible release. Dropped before decoding; the
+  first one per process is logged as a warning.
+- `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"}`
+  (counter, #185) — component requests refused with `426` because the caller's
+  `X-Wayhouse-Protocol` major differs or is not `<major>.<minor>`. Emitted by
+  `wayhouse-controller` and `wayhouse-aggregator`; see
+  [10](10-distributed-control-plane.md) "Versioning".
 - `wayhouse_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.
   Independent of, and unable to clear, the backend's own local `healthy`

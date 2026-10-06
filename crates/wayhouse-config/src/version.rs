@@ -190,7 +190,11 @@ mod tests {
         // path into a document and require that the schema does not call it
         // unknown. (Empty while the schema is at version 1.)
         for (path, since) in FIELD_SINCE {
-            assert!(*since >= 2 && *since <= CONFIG_SCHEMA_VERSION, "{path}");
+            assert!(*since >= 2, "{path}: version 1 needs no entry");
+            assert!(
+                *since <= CONFIG_SCHEMA_VERSION,
+                "{path}: bump CONFIG_SCHEMA_VERSION"
+            );
             let mut v = Value::Null;
             for seg in path.rsplit('.') {
                 let mut m = serde_norway::Mapping::new();
