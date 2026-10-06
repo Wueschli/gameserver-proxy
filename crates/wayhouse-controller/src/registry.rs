@@ -359,20 +359,24 @@ impl<R: Registration> RegistryState<R> {
     /// entry is ignored and a deleted one is gone, so a decommissioned proxy
     /// cannot pin the minimum. `Ok(None)` is a successful read that found no
     /// live proxy; an unreadable registry is an `Err` (the gate fails closed).
-    pub fn min_live_config_schema(&self) -> Result<Option<u32>, StoreError> {
-        let regs = self.all_current()?;
+    pub fn min_live_config_schema(&self) -> Result<Option<u32>, String> {
+        let regs = self.all_current().map_err(|e| e.to_string())?;
         let now = (self.now_fn)();
-        Ok(regs
-            .iter()
-            .filter_map(|reg| {
-                let report = reg.config_schema()?;
-                let seen = match self.book.get(R::ROLE, reg.name()) {
-                    Ok(Some(a)) => a.last_seen,
-                    _ => return None,
-                };
-                (now.saturating_sub(seen) <= report.live_for).then_some(report.max)
-            })
-            .min())
+        let mut floor: Option<u32> = None;
+        for reg in &regs {
+            let Some(report) = reg.config_schema() else {
+                continue;
+            };
+            let seen = match self.book.get(R::ROLE, reg.name()) {
+                Ok(Some(a)) => a.last_seen,
+                Ok(None) => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+            if now.saturating_sub(seen) <= report.live_for {
+                floor = Some(floor.map_or(report.max, |f| f.min(report.max)));
+            }
+        }
+        Ok(floor)
     }
 
     pub(crate) fn all_current(&self) -> Result<Vec<R>, StoreError> {

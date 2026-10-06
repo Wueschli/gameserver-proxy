@@ -160,7 +160,7 @@ pub struct AppState {
 }
 
 /// See [`AppState::with_schema_floor`].
-pub type SchemaFloor = Arc<dyn Fn() -> Result<Option<u32>, StoreError> + Send + Sync>;
+pub type SchemaFloor = Arc<dyn Fn() -> Result<Option<u32>, String> + Send + Sync>;
 
 impl AppState {
     pub fn try_new(
@@ -1959,7 +1959,8 @@ listeners:
     #[tokio::test]
     async fn an_unreadable_proxy_registry_fails_the_schema_gate_closed() {
         let (state, _dir) = test_state();
-        let app = router(state.with_schema_floor(Arc::new(|| Err(StoreError::CounterOverflow))));
+        let app =
+            router(state.with_schema_floor(Arc::new(|| Err("registry unreadable".to_string()))));
         let (status, body) = status_and_error(submit_text(&app, VALID_CONFIG.into()).await).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(body.contains("registry is unreadable"), "{body}");
