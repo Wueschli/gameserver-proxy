@@ -28,6 +28,17 @@
 //! This encoding is also what the `wayhouse-sniffer-abi` guest helper crate
 //! (`crates/plugins/`) implements on the write side.
 //!
+//! ### Version
+//! A module declares the ABI version it was built for in a custom section named
+//! `wayhouse.abi`: exactly 4 bytes, major then minor, both `u16` LE (now
+//! `0.1`, [`HOST_ABI`]). Depending on `wayhouse-sniffer-abi` adds the section to
+//! a plugin; nothing else to do. The host reads it with [`read_abi_version`]
+//! before compiling, so no guest code runs, and rejects a module without the
+//! section, with a duplicate or wrong-sized one, or with another version. While
+//! the major is 0 the minor must match exactly (a 0.x minor bump may break the
+//! ABI); at 1.0 this relaxes to "same major, plugin minor <= host minor" by a
+//! deliberate decision. Other custom sections are ignored.
+//!
 //! ## Bounds
 //! Two independent bounds keep a plugin from stalling or ballooning the
 //! process: a shared `wasmtime::Engine` with epoch interruption — a ticker
@@ -183,10 +194,75 @@ fn new_store(engine: &Engine, max_memory_bytes: usize) -> Store<StoreState> {
 /// Largest module the loader and the admin upload accept.
 pub const MAX_MODULE_BYTES: usize = 8 * 1024 * 1024;
 
+/// The ABI version a sniffer module declares (or the host speaks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbiVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl std::fmt::Display for AbiVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// The ABI version this host implements.
+pub const HOST_ABI: AbiVersion = AbiVersion { major: 0, minor: 1 };
+
+/// Name of the custom section a module declares its ABI version in.
+const ABI_SECTION: &str = "wayhouse.abi";
+
+impl AbiVersion {
+    /// While the major is 0 a minor bump may break the ABI (SemVer 0.x), so the
+    /// versions must match exactly. At 1.0 this relaxes to "same major, plugin
+    /// minor <= host minor" — a policy decision for then, not now.
+    fn accepted_by(self, host: Self) -> bool {
+        self.major == host.major && self.minor == host.minor
+    }
+}
+
+/// Read the ABI version out of the module's `wayhouse.abi` custom section
+/// (4 bytes: major u16 LE, minor u16 LE). The module is only parsed, never
+/// compiled or instantiated, so no guest code runs. Other custom sections are
+/// ignored; a second `wayhouse.abi` section or a payload of any other length is
+/// rejected.
+pub fn read_abi_version(bytes: &[u8]) -> Result<AbiVersion, ModuleError> {
+    let mut found: Option<&[u8]> = None;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let payload = payload.map_err(|e| ModuleError::Compile(e.to_string()))?;
+        if let wasmparser::Payload::CustomSection(c) = payload {
+            if c.name() == ABI_SECTION {
+                if found.is_some() {
+                    return Err(ModuleError::AbiMalformed(c.data().len()));
+                }
+                found = Some(c.data());
+            }
+        }
+    }
+    match found {
+        None => Err(ModuleError::AbiMissing),
+        Some(&[a, b, c, d]) => Ok(AbiVersion {
+            major: u16::from_le_bytes([a, b]),
+            minor: u16::from_le_bytes([c, d]),
+        }),
+        Some(other) => Err(ModuleError::AbiMalformed(other.len())),
+    }
+}
+
 /// Why a byte string is not a loadable sniffer module.
 #[derive(Debug)]
 pub enum ModuleError {
-    TooLarge { len: usize, max: usize },
+    AbiMissing,
+    AbiMalformed(usize),
+    AbiIncompatible {
+        plugin: AbiVersion,
+        host: AbiVersion,
+    },
+    TooLarge {
+        len: usize,
+        max: usize,
+    },
     Empty,
     Compile(String),
     UnexpectedImport(String),
@@ -200,6 +276,20 @@ impl std::fmt::Display for ModuleError {
         match self {
             Self::TooLarge { len, max } => write!(f, "module is {len} bytes, the limit is {max}"),
             Self::Empty => write!(f, "module is empty"),
+            Self::AbiMissing => write!(
+                f,
+                "module declares no ABI version (custom section `{ABI_SECTION}`); build it \
+                 against `wayhouse-sniffer-abi` {HOST_ABI}, which adds the section"
+            ),
+            Self::AbiMalformed(len) => write!(
+                f,
+                "custom section `{ABI_SECTION}` must be one 4-byte section, found a {len}-byte payload \
+                 or a duplicate"
+            ),
+            Self::AbiIncompatible { plugin, host } => write!(
+                f,
+                "module targets sniffer ABI {plugin}, this host speaks {host}"
+            ),
             Self::Compile(e) => write!(f, "not a valid wasm module: {e}"),
             Self::UnexpectedImport(i) => {
                 write!(f, "module imports {i}, but sniffer modules take no imports")
@@ -306,7 +396,7 @@ impl SnifferLoader {
     }
 
     /// Check that `bytes` is a module this loader would accept: within
-    /// [`MAX_MODULE_BYTES`], no imports, the three ABI exports with the right
+    /// [`MAX_MODULE_BYTES`], a compatible ABI version declaration, no imports, the three ABI exports with the right
     /// types, and it instantiates under `max_memory_bytes`. `sniff` is not called.
     pub fn validate(&self, bytes: &[u8], max_memory_bytes: usize) -> Result<(), ModuleError> {
         self.compile_checked(bytes, max_memory_bytes).map(drop)
@@ -324,6 +414,13 @@ impl SnifferLoader {
             return Err(ModuleError::TooLarge {
                 len: bytes.len(),
                 max: MAX_MODULE_BYTES,
+            });
+        }
+        let plugin = read_abi_version(bytes)?;
+        if !plugin.accepted_by(HOST_ABI) {
+            return Err(ModuleError::AbiIncompatible {
+                plugin,
+                host: HOST_ABI,
             });
         }
         let module =
@@ -476,6 +573,7 @@ mod tests {
     /// fixed output offset.
     const HOST_SNIFFER_WAT: &str = r#"
         (module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 2)
           ;; Bump allocator: next free offset lives at address 0 (reserved).
           (global $next (mut i32) (i32.const 4))
@@ -535,6 +633,7 @@ mod tests {
     /// config is empty (`cfg_len == 0`). Assumes a config shorter than 256 B.
     const CFG_ECHO_WAT: &str = r#"
         (module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 2)
           (global $next (mut i32) (i32.const 4))
           (func $alloc (export "alloc") (param $len i32) (result i32)
@@ -804,6 +903,41 @@ mod tests {
         p.extend_from_slice(&[0, 101, 0, 0, 0x88, 6, 0x3b, 0xec, 0xe9, 0]);
         p.extend_from_slice(&[0; 16]);
         p
+    }
+
+    /// Every real built plugin must carry the host's ABI version in its
+    /// `wayhouse.abi` section — this is what catches the section being dropped by
+    /// `strip`/`lto` in the plugins release profile, and the host and guest
+    /// constants drifting apart. Needs `make plugins`; run with
+    /// `cargo test -p wayhouse built_plugins_declare -- --ignored`.
+    #[test]
+    #[ignore = "needs `make plugins` to have built crates/plugins first"]
+    fn built_plugins_declare_the_host_abi() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/target/wasm32-unknown-unknown/release");
+        assert!(
+            dir.is_dir(),
+            "run `make plugins` first (looked in {})",
+            dir.display()
+        );
+        let mut found = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "wasm") {
+                let bytes = std::fs::read(&path).unwrap();
+                assert_eq!(
+                    read_abi_version(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                    HOST_ABI,
+                    "{}",
+                    path.display()
+                );
+                found += 1;
+            }
+        }
+        assert!(
+            found >= 8,
+            "expected the 8 first-party plugins, found {found}"
+        );
     }
 
     /// Loads the real first-party plugins (`crates/plugins/`) built by
@@ -1251,6 +1385,7 @@ listeners:
     #[test]
     fn validate_rejects_import() {
         let wat = r#"(module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (import "wasi_snapshot_preview1" "fd_write" (func))
           (memory (export "memory") 1)
           (func (export "alloc") (param i32) (result i32) (i32.const 0))
@@ -1263,6 +1398,7 @@ listeners:
     #[test]
     fn validate_rejects_missing_sniff() {
         let wat = r#"(module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 1)
           (func (export "alloc") (param i32) (result i32) (i32.const 0)))"#;
         let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
@@ -1272,6 +1408,7 @@ listeners:
     #[test]
     fn validate_rejects_wrong_sniff_signature() {
         let wat = r#"(module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 1)
           (func (export "alloc") (param i32) (result i32) (i32.const 0))
           (func (export "sniff") (param i32) (result i64) (i64.const 0)))"#;
@@ -1282,6 +1419,7 @@ listeners:
     #[test]
     fn validate_rejects_start_function_that_traps() {
         let wat = r#"(module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 1)
           (func $f unreachable)
           (start $f)
@@ -1289,6 +1427,135 @@ listeners:
           (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
         let e = loader().validate(&wat_bytes(wat), MEM).unwrap_err();
         assert!(matches!(e, ModuleError::Instantiate(_)), "{e}");
+    }
+
+    /// A valid sniffer module with no ABI declaration.
+    const BARE_WAT: &str = r#"(module
+      (memory (export "memory") 1)
+      (func (export "alloc") (param i32) (result i32) (i32.const 0))
+      (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
+
+    fn leb(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    /// `bytes` with one custom section appended.
+    fn with_custom(mut bytes: Vec<u8>, name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = leb(name.len());
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(payload);
+        bytes.push(0);
+        bytes.extend(leb(body.len()));
+        bytes.extend(body);
+        bytes
+    }
+
+    fn with_abi(major: u16, minor: u16) -> Vec<u8> {
+        let mut payload = major.to_le_bytes().to_vec();
+        payload.extend(minor.to_le_bytes());
+        with_custom(wat_bytes(BARE_WAT), "wayhouse.abi", &payload)
+    }
+
+    #[test]
+    fn abi_reads_0_1() {
+        let v = read_abi_version(&with_abi(0, 1)).unwrap();
+        assert_eq!(v, AbiVersion { major: 0, minor: 1 });
+        assert_eq!(v.to_string(), "0.1");
+        assert_eq!(v, HOST_ABI);
+    }
+
+    #[test]
+    fn abi_reads_the_bytes_little_endian() {
+        let v = read_abi_version(&with_abi(0x0102, 0x0304)).unwrap();
+        assert_eq!(
+            v,
+            AbiVersion {
+                major: 0x0102,
+                minor: 0x0304
+            }
+        );
+    }
+
+    #[test]
+    fn abi_missing_is_rejected_with_hint() {
+        let e = loader().validate(&wat_bytes(BARE_WAT), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::AbiMissing), "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains("wayhouse-sniffer-abi"), "{msg}");
+        assert!(msg.contains("0.1"), "{msg}");
+    }
+
+    #[test]
+    fn abi_payload_of_3_and_6_bytes_rejected() {
+        for len in [3usize, 6] {
+            let bytes = with_custom(wat_bytes(BARE_WAT), "wayhouse.abi", &vec![0u8; len]);
+            let e = read_abi_version(&bytes).unwrap_err();
+            assert!(matches!(e, ModuleError::AbiMalformed(n) if n == len), "{e}");
+        }
+    }
+
+    #[test]
+    fn abi_two_sections_rejected() {
+        let bytes = with_custom(with_abi(0, 1), "wayhouse.abi", &[0, 0, 1, 0]);
+        let e = read_abi_version(&bytes).unwrap_err();
+        assert!(matches!(e, ModuleError::AbiMalformed(_)), "{e}");
+    }
+
+    #[test]
+    fn abi_other_minor_rejected_while_major_is_0() {
+        for minor in [0u16, 2] {
+            let e = loader().validate(&with_abi(0, minor), MEM).unwrap_err();
+            assert!(
+                matches!(e, ModuleError::AbiIncompatible { plugin, host }
+                    if plugin == AbiVersion { major: 0, minor } && host == HOST_ABI),
+                "{e}"
+            );
+            let msg = e.to_string();
+            assert!(
+                msg.contains(&format!("0.{minor}")) && msg.contains("0.1"),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn abi_other_major_rejected() {
+        let e = loader().validate(&with_abi(1, 1), MEM).unwrap_err();
+        assert!(matches!(e, ModuleError::AbiIncompatible { .. }), "{e}");
+    }
+
+    #[test]
+    fn abi_extra_custom_sections_ignored() {
+        let bytes = with_custom(with_abi(0, 1), "name", b"\x00");
+        let bytes = with_custom(bytes, "producers", b"rustc");
+        assert_eq!(read_abi_version(&bytes).unwrap(), HOST_ABI);
+        loader().validate(&bytes, MEM).unwrap();
+    }
+
+    #[test]
+    fn abi_read_does_not_need_a_valid_body() {
+        assert!(matches!(
+            read_abi_version(b"not wasm"),
+            Err(ModuleError::Compile(_))
+        ));
+    }
+
+    #[test]
+    fn scan_skips_module_without_abi() {
+        let dir = tempdir();
+        std::fs::write(dir.join("good.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        std::fs::write(dir.join("old.wasm"), wat_bytes(BARE_WAT)).unwrap();
+        let map = loader().scan(&cfg(&dir)).unwrap();
+        assert_eq!(map.keys().cloned().collect::<Vec<_>>(), ["good"]);
     }
 
     #[test]
@@ -1307,6 +1574,7 @@ listeners:
         let dir = tempdir();
         std::fs::write(dir.join("good.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
         let wat = r#"(module (import "env" "x" (func))
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 1)
           (func (export "alloc") (param i32) (result i32) (i32.const 0))
           (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;

@@ -4296,6 +4296,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
+ "wasmparser 0.254.2",
  "wasmtime",
  "wat",
  "wayhouse-config",

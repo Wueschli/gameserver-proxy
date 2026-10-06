@@ -12,6 +12,10 @@
 //! if key present:     u16 LE length, then that many UTF-8 bytes
 //! ```
 //!
+//! Depending on this crate is also what declares the plugin's ABI version: a
+//! `wayhouse.abi` custom section ([`ABI_BYTES`]) is linked into every module
+//! that uses it, and the host refuses a module without it or with another version.
+//!
 //! A plugin crate only needs three things: depend on this crate, implement
 //! `#[no_mangle] pub extern "C" fn sniff(in_ptr: u32, in_len: u32, cfg_ptr: u32,
 //! cfg_len: u32) -> i64` calling [`input`] to borrow the peeked bytes the host
@@ -28,6 +32,29 @@
 //! module's own linear memory, matching the sandbox guarantee that a plugin
 //! cannot reach the filesystem, clock, or network (there's nothing here that
 //! could).
+
+/// ABI version this crate implements: the host accepts a module only when it
+/// declares the same version (while the major is 0 a minor bump may break the
+/// ABI). Keep in step with `HOST_ABI` in `crates/wayhouse/src/sniffer_loader.rs`;
+/// the `built_plugins_declare_the_host_abi` test there fails if they drift.
+pub const ABI_MAJOR: u16 = 0;
+/// See [`ABI_MAJOR`].
+pub const ABI_MINOR: u16 = 1;
+
+/// The payload of the `wayhouse.abi` custom section: major then minor, both u16 LE.
+pub const ABI_BYTES: [u8; 4] = {
+    let major = ABI_MAJOR.to_le_bytes();
+    let minor = ABI_MINOR.to_le_bytes();
+    [major[0], major[1], minor[0], minor[1]]
+};
+
+/// Stamps every module that links this crate with its ABI version, so the host
+/// can read it without instantiating the module. Only on wasm32: on a native
+/// build the attribute would put a section in the host test binary.
+#[cfg(target_arch = "wasm32")]
+#[used]
+#[link_section = "wayhouse.abi"]
+static ABI_VERSION: [u8; 4] = ABI_BYTES;
 
 /// The host calls this once per `sniff()` call to reserve `len` writable
 /// bytes for the input it's about to copy in. Delegates to the module's
@@ -162,6 +189,14 @@ fn pack(ptr: u32, len: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abi_bytes_match_constants() {
+        let b = ABI_BYTES;
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]), ABI_MAJOR);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]), ABI_MINOR);
+        assert_eq!((ABI_MAJOR, ABI_MINOR), (0, 1));
+    }
 
     /// Mirrors the host's `decode_route_hint` in
     /// `crates/wayhouse/src/sniffer_loader.rs` — kept independent (not shared code)

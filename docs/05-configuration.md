@@ -151,8 +151,8 @@
 > /admin/sniffers/{name}` on the instance's own admin API (`409` if
 > `settings.sniffers` is absent). An upload is checked before it is written
 > and written atomically: anything that is not a loadable module (not wasm, has
-> imports, lacks the `memory` / `alloc` / `sniff` exports, fails to
-> instantiate, empty) is `400`, a body over 8 MiB is `413`, and on an instance
+> imports, lacks the `memory` / `alloc` / `sniff` exports, declares no ABI
+> version or another one than the host's, fails to instantiate, empty) is `400`, a body over 8 MiB is `413`, and on an instance
 > with `settings.sniffers.modules` pins an unlisted name or a different sha256
 > is `409`. A bad `.wasm` file already in `dir` is logged and skipped by every
 > rescan; only a pin violation fails the whole scan. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
