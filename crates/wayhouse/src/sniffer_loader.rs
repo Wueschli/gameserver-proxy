@@ -28,6 +28,17 @@
 //! This encoding is also what the `wayhouse-sniffer-abi` guest helper crate
 //! (`crates/plugins/`) implements on the write side.
 //!
+//! ### Version
+//! A module declares the ABI version it was built for in a custom section named
+//! `wayhouse.abi`: exactly 4 bytes, major then minor, both `u16` LE (now
+//! `0.1`, [`HOST_ABI`]). Depending on `wayhouse-sniffer-abi` adds the section to
+//! a plugin; nothing else to do. The host reads it with [`read_abi_version`]
+//! before compiling, so no guest code runs, and rejects a module without the
+//! section, with a duplicate or wrong-sized one, or with another version. While
+//! the major is 0 the minor must match exactly (a 0.x minor bump may break the
+//! ABI); at 1.0 this relaxes to "same major, plugin minor <= host minor" by a
+//! deliberate decision. Other custom sections are ignored.
+//!
 //! ## Bounds
 //! Two independent bounds keep a plugin from stalling or ballooning the
 //! process: a shared `wasmtime::Engine` with epoch interruption — a ticker
@@ -244,8 +255,14 @@ pub fn read_abi_version(bytes: &[u8]) -> Result<AbiVersion, ModuleError> {
 pub enum ModuleError {
     AbiMissing,
     AbiMalformed(usize),
-    AbiIncompatible { plugin: AbiVersion, host: AbiVersion },
-    TooLarge { len: usize, max: usize },
+    AbiIncompatible {
+        plugin: AbiVersion,
+        host: AbiVersion,
+    },
+    TooLarge {
+        len: usize,
+        max: usize,
+    },
     Empty,
     Compile(String),
     UnexpectedImport(String),
@@ -888,6 +905,41 @@ mod tests {
         p
     }
 
+    /// Every real built plugin must carry the host's ABI version in its
+    /// `wayhouse.abi` section — this is what catches the section being dropped by
+    /// `strip`/`lto` in the plugins release profile, and the host and guest
+    /// constants drifting apart. Needs `make plugins`; run with
+    /// `cargo test -p wayhouse built_plugins_declare -- --ignored`.
+    #[test]
+    #[ignore = "needs `make plugins` to have built crates/plugins first"]
+    fn built_plugins_declare_the_host_abi() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/target/wasm32-unknown-unknown/release");
+        assert!(
+            dir.is_dir(),
+            "run `make plugins` first (looked in {})",
+            dir.display()
+        );
+        let mut found = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "wasm") {
+                let bytes = std::fs::read(&path).unwrap();
+                assert_eq!(
+                    read_abi_version(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                    HOST_ABI,
+                    "{}",
+                    path.display()
+                );
+                found += 1;
+            }
+        }
+        assert!(
+            found >= 8,
+            "expected the 8 first-party plugins, found {found}"
+        );
+    }
+
     /// Loads the real first-party plugins (`crates/plugins/`) built by
     /// `make plugins` and drives each one through this crate's own loader —
     /// not just the plugin's own native `recognise()` unit tests, but the
@@ -1468,7 +1520,10 @@ listeners:
                 "{e}"
             );
             let msg = e.to_string();
-            assert!(msg.contains(&format!("0.{minor}")) && msg.contains("0.1"), "{msg}");
+            assert!(
+                msg.contains(&format!("0.{minor}")) && msg.contains("0.1"),
+                "{msg}"
+            );
         }
     }
 

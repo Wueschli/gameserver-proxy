@@ -16,7 +16,7 @@ installed.
   `input`/`config` to borrow the two regions the host writes before each call
   (the peeked bytes and this module's `settings.sniffers.modules[].config`
   string), and an `encode`/`emit_hint` pair that packs a `RouteHint` into the
-  compact wire format the host decodes. Every plugin below depends on it. The
+  compact wire format the host decodes. Every plugin below depends on it, and that dependency is all a plugin needs to declare its ABI version: the crate links a `wayhouse.abi` custom section (currently `0.1`) into the module, which the host checks before loading it and refuses on a mismatch or when it is missing. The
   guest export is
   `sniff(in_ptr, in_len, cfg_ptr, cfg_len) -> i64` (see ADR 16a).
 - `a2s` — recognises Source-engine (CS:GO, TF2, Garry's Mod, Rust, …) A2S
