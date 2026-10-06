@@ -29,6 +29,9 @@ titled `chore(main): release 0.N.P`. It bumps `Cargo.toml`, a follow-up step ref
 `GITHUB_TOKEN` do not start workflows, the workflow dispatches `ci.yml` on the release branch
 so `ci-ok` is reported; if that does not satisfy the ruleset, create a fine-grained token
 secret `RELEASE_PLEASE_TOKEN` (contents and pull requests write).
+The repository setting Settings > Actions > General > "Allow GitHub Actions to create and approve
+pull requests" must be on, otherwise the run fails with "GitHub Actions is not permitted to create
+or approve pull requests"; a `RELEASE_PLEASE_TOKEN` secret works instead of the setting.
 
 1. Merge the release PR (check the proposed version and changelog first).
 2. Wait for CI on the merge commit on `main`.
@@ -51,7 +54,7 @@ and tag `v0.N.P-rc.K`. A pre-release never moves `latest`.
 `CHANGELOG.md` is generated from the conventional-commit titles on `main` (squash-merge title
 = commit), so the PR title is the changelog entry (the repository setting "Default to pull request title" for squash merges makes that reliable): `feat:` and `fix:` appear, `docs:`, `ci:`,
 `test:` and similar are hidden, `!` after the type marks a breaking change (a minor bump under
-0.x). Do not edit released sections by hand. The `PR title` workflow warns about titles that
+0.x). Do not edit released sections by hand. The file was empty before 0.1.0 on purpose: any pre-seeded heading ends up as a stray `## Changelog` at the bottom of the first release. The `PR title` workflow warns about titles that
 are not conventional; it is advisory, not a required check.
 
 ## Branching models
