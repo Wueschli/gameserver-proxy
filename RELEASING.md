@@ -29,6 +29,9 @@ titled `chore(main): release 0.N.P`. It bumps `Cargo.toml`, a follow-up step ref
 `GITHUB_TOKEN` do not start workflows, the workflow dispatches `ci.yml` on the release branch
 so `ci-ok` is reported; if that does not satisfy the ruleset, create a fine-grained token
 secret `RELEASE_PLEASE_TOKEN` (contents and pull requests write).
+The repository setting Settings > Actions > General > "Allow GitHub Actions to create and approve
+pull requests" must be on, otherwise the run fails with "GitHub Actions is not permitted to create
+or approve pull requests"; a `RELEASE_PLEASE_TOKEN` secret works instead of the setting.
 
 1. Merge the release PR (check the proposed version and changelog first).
 2. Wait for CI on the merge commit on `main`.

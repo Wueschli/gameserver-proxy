@@ -29,8 +29,6 @@ jobs:
       contents: write        # push the release branch and Cargo.lock
       pull-requests: write   # open and update the release PR
       actions: write         # dispatch ci.yml
-    env:
-      BRANCH: release-please--branches--main
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: rp
@@ -38,16 +36,26 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      # The branch is release-please--branches--main--components--wayhouse (the
+      # package name is part of it), so take it from the action's output.
+      - name: Release branch name
+        id: branch
+        if: steps.rp.outputs.prs_created == 'true'
+        env:
+          PR: ${{ steps.rp.outputs.pr }}
+        run: echo "name=$(jq -r .headBranchName <<<"$PR")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: steps.rp.outputs.prs_created == 'true'
         with:
-          ref: ${{ env.BRANCH }}
+          ref: ${{ steps.branch.outputs.name }}
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
       # release-please edits Cargo.toml only; its TOML updater cannot address the
       # ten Cargo.lock entries reliably, so the lockfile is refreshed here. The
       # `release-policy` job then proves Cargo.toml and Cargo.lock agree.
       - name: Refresh Cargo.lock
         if: steps.rp.outputs.prs_created == 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
         run: |
           cargo update --workspace
           if ! git diff --quiet Cargo.lock; then
@@ -61,4 +69,5 @@ jobs:
         if: steps.rp.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
         run: gh workflow run ci.yml --ref "$BRANCH"
