@@ -175,14 +175,14 @@ impl IntentState {
 }
 
 pub fn router(state: IntentState) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/intent", axum::routing::post(submit_intent))
         .route("/intent/subscribe", get(subscribe))
         .route_layer(axum::middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref()),
             wayhouse_http::server::require_bearer,
-        ))
-        .with_state(state)
+        ));
+    wayhouse_http::protocol::gate(routes, "controller").with_state(state)
 }
 
 #[derive(Serialize)]
@@ -461,5 +461,22 @@ mod tests {
         updates_tx.send(rev2).unwrap();
         let (got_rev2, _) = rx.recv().await.unwrap();
         assert_eq!(got_rev2, rev2);
+    }
+
+    #[tokio::test]
+    async fn intent_rejects_other_major() {
+        let (state, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::post("/intent")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::from(
+                        r#"{"op":"backend_add","pool":"mc","addr":"127.0.0.1:1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }

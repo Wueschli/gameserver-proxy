@@ -466,9 +466,15 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    // Only the proxies' subscribe stream is component-facing; the rest is for
+    // operators and tools and is never gated on the protocol header.
+    let component = wayhouse_http::protocol::gate(
+        Router::new().route("/config/subscribe", get(subscribe)),
+        "controller",
+    );
     Router::new()
+        .merge(component)
         .route("/config", post(submit_config).get(get_current_config))
-        .route("/config/subscribe", get(subscribe))
         .route("/config/revisions", get(list_revisions))
         .route("/config/revisions/{revision}", get(get_revision))
         .route("/config/revisions/{revision}/diff", get(diff_revision))
@@ -1779,5 +1785,40 @@ listeners:
             .insert(encode_rev(rev), b"not json".to_vec())
             .unwrap();
         assert!(!is_visible(&stage_tree, rev, None));
+    }
+
+    #[tokio::test]
+    async fn config_subscribe_rejects_other_major() {
+        let (state, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::get("/config/subscribe")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Refused before the SSE stream starts, not mid-stream.
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_ne!(
+            resp.headers().get("content-type").map(|v| v.as_bytes()),
+            Some(&b"text/event-stream"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_routes_ignore_the_header() {
+        let (state, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::get("/config/revisions")
+                    .header(wayhouse_http::protocol::HEADER, "banana")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

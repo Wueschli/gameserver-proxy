@@ -419,7 +419,7 @@ fn decode_registration<R: Registration>(bytes: &[u8]) -> R {
 /// The registry's HTTP surface under `base` (`/peers`, `/proxy-peers`):
 /// `POST`/`GET {base}`, `GET {base}/subscribe`, `GET`/`DELETE {base}/{name}`.
 pub fn router<R: Registration>(state: RegistryState<R>, base: &str) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route(base, axum::routing::post(register::<R>).get(list::<R>))
         .route(&format!("{base}/subscribe"), get(subscribe::<R>))
         .route(
@@ -429,8 +429,8 @@ pub fn router<R: Registration>(state: RegistryState<R>, base: &str) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref()),
             wayhouse_http::server::require_bearer,
-        ))
-        .with_state(state)
+        ));
+    wayhouse_http::protocol::gate(routes, "controller").with_state(state)
 }
 
 #[derive(Serialize)]

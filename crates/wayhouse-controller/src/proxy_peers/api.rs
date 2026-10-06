@@ -490,4 +490,36 @@ mod tests {
             "edge-1"
         );
     }
+
+    #[tokio::test]
+    async fn proxy_peers_rejects_other_major_with_426() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn proxy_peers_subscribe_is_refused_before_the_stream_starts() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/proxy-peers/subscribe")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
 }

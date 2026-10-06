@@ -56,3 +56,7 @@ required-features = ["server"]
 [[test]]
 name = "tls_server"
 required-features = ["server"]
+
+[[test]]
+name = "protocol_metrics"
+required-features = ["server"]

@@ -136,11 +136,16 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     // Two bearer layers: `/ingest` accepts only `--ingest-token`, everything
     // under `/fleet` only `--auth-token`.
-    let ingest = Router::new().route("/ingest", post(ingest)).route_layer(
-        axum::middleware::from_fn_with_state(
-            wayhouse_http::server::BearerAuth::new(state.ingest_token.as_deref()),
-            wayhouse_http::server::require_bearer,
+    // Only `/ingest` (a proxy pushing) is component-facing and gated on the
+    // protocol header; `/fleet` serves the UI and operators.
+    let ingest = wayhouse_http::protocol::gate(
+        Router::new().route("/ingest", post(ingest)).route_layer(
+            axum::middleware::from_fn_with_state(
+                wayhouse_http::server::BearerAuth::new(state.ingest_token.as_deref()),
+                wayhouse_http::server::require_bearer,
+            ),
         ),
+        "aggregator",
     );
     let fleet = Router::new()
         .route("/fleet/pools", get(fleet_pools))
@@ -829,5 +834,37 @@ mod tests {
             extra.is_err(),
             "no second resend should follow the debounced one"
         );
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_other_major() {
+        let state = test_state();
+        let store = state.store.clone();
+        let resp = router(state)
+            .oneshot(
+                Request::post("/ingest")
+                    .header("content-type", "application/json")
+                    .header(wayhouse_http::protocol::HEADER, "2.0")
+                    .body(Body::from(payload_json("proxy-1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+        assert!(store.get("proxy-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn fleet_routes_ignore_the_header() {
+        let resp = router(test_state())
+            .oneshot(
+                Request::get("/fleet/healthz")
+                    .header(wayhouse_http::protocol::HEADER, "banana")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }
