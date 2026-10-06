@@ -227,7 +227,7 @@ impl Proc {
 /// serves `GET /healthz` unauthenticated, so this is the uniform "is it up"
 /// check.
 pub async fn wait_http_up(url: &str, timeout: Duration) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = wayhouse_http::client();
     let deadline = Instant::now() + timeout;
     loop {
         match client.get(url).send().await {

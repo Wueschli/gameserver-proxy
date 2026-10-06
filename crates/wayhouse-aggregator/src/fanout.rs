@@ -428,6 +428,15 @@ async fn broadcast_with_content_type(
                 req = req.header("content-type", content_type).body(body);
             }
             match req.send().await {
+                // A proxy on another protocol major answers 426 with both
+                // versions in the body: surface that text, not just the status.
+                Ok(resp) if resp.status() == reqwest::StatusCode::UPGRADE_REQUIRED => {
+                    InstanceResult {
+                        instance,
+                        status: Some(resp.status().as_u16()),
+                        error: Some(resp.text().await.unwrap_or_default()),
+                    }
+                }
                 Ok(resp) => InstanceResult {
                     instance,
                     status: Some(resp.status().as_u16()),
@@ -774,6 +783,49 @@ mod tests {
             .unwrap();
         assert!(bad["status"].is_null());
         assert!(bad["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_proxy_on_another_protocol_major_shows_its_426_text_in_the_results() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = Router::new().route(
+            "/admin/sniffers/demo",
+            axum::routing::delete(|| async {
+                (
+                    StatusCode::UPGRADE_REQUIRED,
+                    "wayhouse protocol 1.0 is not compatible with this node (2.0): upgrade the older side",
+                )
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        let state = test_state();
+        state
+            .store
+            .ingest(ingest_payload("old-proxy", &format!("http://{addr}")));
+        let resp = crate::api::router(state)
+            .oneshot(
+                Request::delete("/fleet/sniffers/demo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let r = &body["results"][0];
+        assert_eq!(r["status"], 426);
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("upgrade the older side"),
+            "{r}"
+        );
     }
 
     type CapturedUpload = Arc<Mutex<Option<(String, Vec<u8>)>>>;

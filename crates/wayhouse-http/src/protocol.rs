@@ -8,8 +8,9 @@
 //! component-facing routers with [`gate`] (the `server` feature), which also
 //! echoes the server's own version on every response.
 //!
-//! A request with no header is accepted: operators call these routes with `curl`
-//! too. A present but unparsable or other-major value is refused with `426`.
+//! A request with no header is refused too (a caller that predates versioning)
+//! except on [`gate_lenient`] routes, which operators also call by hand. An
+//! unparsable or other-major value is always refused with `426`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -83,7 +84,7 @@ impl FromStr for ProtocolVersion {
 pub struct PeerProtocol(pub Option<ProtocolVersion>);
 
 #[cfg(feature = "server")]
-pub use server_side::gate;
+pub use server_side::{gate, gate_lenient};
 
 #[cfg(feature = "server")]
 mod server_side {
@@ -95,28 +96,63 @@ mod server_side {
 
     use super::{PeerProtocol, ProtocolVersion, HEADER, PROTOCOL_MISMATCH_TOTAL};
 
+    #[derive(Clone, Copy)]
+    struct Gate {
+        name: &'static str,
+        /// Refuse a request with no header too (a caller that predates
+        /// versioning). Operator-facing routes stay lenient: `curl` has none.
+        strict: bool,
+    }
+
     /// Gate every route of `router` (a component-facing one: admin, UI,
     /// `/healthz` and `/metrics` stay ungated) on the caller's protocol major.
-    /// `route_group` labels [`PROTOCOL_MISMATCH_TOTAL`].
+    /// A request with no header is refused too: components always send it, and
+    /// a caller without it predates versioning. `route_group` labels
+    /// [`PROTOCOL_MISMATCH_TOTAL`].
     pub fn gate<S: Clone + Send + Sync + 'static>(
         router: Router<S>,
         route_group: &'static str,
     ) -> Router<S> {
-        router.layer(from_fn_with_state(route_group, require_compatible_protocol))
+        with_gate(router, route_group, true)
+    }
+
+    /// [`gate`] for routes that operators also call by hand: a missing header
+    /// is accepted, a present one must still be a compatible major.
+    pub fn gate_lenient<S: Clone + Send + Sync + 'static>(
+        router: Router<S>,
+        route_group: &'static str,
+    ) -> Router<S> {
+        with_gate(router, route_group, false)
+    }
+
+    fn with_gate<S: Clone + Send + Sync + 'static>(
+        router: Router<S>,
+        name: &'static str,
+        strict: bool,
+    ) -> Router<S> {
+        router.layer(from_fn_with_state(
+            Gate { name, strict },
+            require_compatible_protocol,
+        ))
     }
 
     async fn require_compatible_protocol(
-        State(group): State<&'static str>,
+        State(group): State<Gate>,
         mut req: Request,
         next: Next,
     ) -> Response {
         let ours = ProtocolVersion::CURRENT;
         let mut peer = None;
-        if let Some(raw) = req.headers().get(HEADER) {
-            let shown = String::from_utf8_lossy(raw.as_bytes()).into_owned();
+        let raw = req.headers().get(HEADER);
+        if raw.is_some() || group.strict {
+            let shown = raw.map_or_else(
+                || "(none: the caller predates protocol versioning)".to_owned(),
+                |raw| String::from_utf8_lossy(raw.as_bytes()).into_owned(),
+            );
             match shown.parse::<ProtocolVersion>() {
                 Ok(v) if ours.compatible(&v) => peer = Some(v),
                 bad => {
+                    let group = group.name;
                     let peer_txt = bad.map_or(shown, |v| v.to_string());
                     tracing::warn!(
                         route_group = group, peer = %peer_txt, ours = %ours, path = %req.uri().path(),
@@ -185,27 +221,25 @@ mod gate_tests {
     use axum::Router;
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        gate(
-            Router::new().route(
-                "/x",
-                get(|Extension(p): Extension<PeerProtocol>| async move {
-                    p.0.map_or("none".to_owned(), |v| v.to_string())
-                }),
-            ),
-            "test",
+    fn routes() -> Router {
+        Router::new().route(
+            "/x",
+            get(|Extension(p): Extension<PeerProtocol>| async move {
+                p.0.map_or("none".to_owned(), |v| v.to_string())
+            }),
         )
     }
 
     async fn call(header: Option<&str>) -> (StatusCode, Option<String>, String) {
+        call_on(gate(routes(), "test"), header).await
+    }
+
+    async fn call_on(app: Router, header: Option<&str>) -> (StatusCode, Option<String>, String) {
         let mut req = Request::builder().uri("/x");
         if let Some(h) = header {
             req = req.header(HEADER, h);
         }
-        let resp = app()
-            .oneshot(req.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
         let status = resp.status();
         let ours = resp
             .headers()
@@ -216,10 +250,25 @@ mod gate_tests {
     }
 
     #[tokio::test]
-    async fn layer_accepts_missing_header() {
-        let (s, _, body) = call(None).await;
-        assert_eq!(s, StatusCode::OK);
-        assert_eq!(body, "none");
+    async fn layer_rejects_missing_header_with_426() {
+        let (s, ours, body) = call(None).await;
+        assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(ours.as_deref(), Some("1.0"));
+        assert!(
+            body.contains("predates protocol versioning") && body.contains("(1.0)"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lenient_layer_accepts_missing_header_but_not_a_bad_one() {
+        let app = || gate_lenient(routes(), "test");
+        let (s, _, body) = call_on(app(), None).await;
+        assert_eq!((s, body.as_str()), (StatusCode::OK, "none"));
+        let (s, _, _) = call_on(app(), Some("2.0")).await;
+        assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
+        let (s, _, _) = call_on(app(), Some("banana")).await;
+        assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
     }
 
     #[tokio::test]

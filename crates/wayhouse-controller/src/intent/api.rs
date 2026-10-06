@@ -378,6 +378,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/intent")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(
                         r#"{"op":"backend_add","pool":"mc","addr":"127.0.0.1:1"}"#,
                     ))
@@ -396,6 +397,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/intent")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(
                         r#"{"op":"backend_add","pool":"mc","addr":"garbage"}"#,
                     ))
@@ -413,6 +415,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/intent")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from("not json"))
                     .unwrap(),
             )
@@ -430,6 +433,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/intent")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(
                         r#"{"op":"backend_add","pool":"mc","addr":"127.0.0.1:1"}"#,
                     ))

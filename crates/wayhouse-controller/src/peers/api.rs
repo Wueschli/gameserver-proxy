@@ -50,7 +50,12 @@ mod tests {
     async fn post(app: &Router, body: String) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
-            .oneshot(Request::post("/peers").body(Body::from(body)).unwrap())
+            .oneshot(
+                Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
@@ -93,6 +98,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("home", &[":25565"])))
                     .unwrap(),
             )
@@ -108,6 +114,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(r#"{"name":"home","pubkey":"garbage"}"#))
                     .unwrap(),
             )
@@ -123,6 +130,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from("not json"))
                     .unwrap(),
             )
@@ -136,7 +144,12 @@ mod tests {
         let (state, _book, _dir) = test_state();
         let app = router(state);
         let resp = app
-            .oneshot(Request::get("/peers/nope").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers/nope")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -150,6 +163,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("home", &[":1"])))
                     .unwrap(),
             )
@@ -158,6 +172,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("home", &[":2"])))
                     .unwrap(),
             )
@@ -165,7 +180,12 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(Request::get("/peers/home").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers/home")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -183,6 +203,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("a", &[])))
                     .unwrap(),
             )
@@ -191,6 +212,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("b", &[])))
                     .unwrap(),
             )
@@ -198,7 +220,12 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(Request::get("/peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -225,7 +252,12 @@ mod tests {
         let state = PeersState::new(store, Some("secret".into()), book);
         let app = router(state);
         let resp = app
-            .oneshot(Request::get("/peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -319,7 +351,12 @@ mod tests {
         let app = router(state);
         post(&app, body_with("home", &[":25565"], None)).await;
         let resp = app
-            .oneshot(Request::get("/peers/home").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers/home")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -358,6 +395,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!("/peers/{name}"))
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -386,7 +424,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::get("/peers/a").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/peers/a")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -515,7 +558,12 @@ mod tests {
         );
         let app = router(PeersState::new(store, Some("secret".into()), book));
         let resp = app
-            .oneshot(Request::delete("/peers/x").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::delete("/peers/x")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

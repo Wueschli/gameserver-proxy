@@ -118,6 +118,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post(path)
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),

@@ -122,10 +122,10 @@
   fresh gossip datagrams dropped because their version byte is not this build's
   protocol major: a peer on an incompatible release. Dropped before decoding; the
   first one per process is logged as a warning.
-- `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"}`
+- `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"|"proxy"}`
   (counter, #185) — component requests refused with `426` because the caller's
-  `X-Wayhouse-Protocol` major differs or is not `<major>.<minor>`. Emitted by
-  `wayhouse-controller` and `wayhouse-aggregator`; see
+  `X-Wayhouse-Protocol` major differs, is not `<major>.<minor>`, or (on component
+  routes) is missing. Emitted by the controller, aggregator and proxy; see
   [10](10-distributed-control-plane.md) "Versioning".
 - `wayhouse_backend_domain_down{pool,backend}` (gauge, 0/1, phase 13) — whether
   the Tier-2 domain quorum is currently overriding this backend to down.

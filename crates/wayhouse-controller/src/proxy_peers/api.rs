@@ -51,6 +51,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -94,6 +95,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
                     .unwrap(),
             )
@@ -109,6 +111,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(
                         r#"{"name":"edge-1","pubkey":"garbage","endpoint":"x"}"#,
                     ))
@@ -126,6 +129,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from("not json"))
                     .unwrap(),
             )
@@ -141,6 +145,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/nope")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -157,6 +162,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
                     .unwrap(),
             )
@@ -165,6 +171,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("edge-1", "203.0.113.9:51821")))
                     .unwrap(),
             )
@@ -174,6 +181,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -194,6 +202,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("a", "203.0.113.1:51820")))
                     .unwrap(),
             )
@@ -202,6 +211,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::from(reg_body("b", "203.0.113.2:51820")))
                     .unwrap(),
             )
@@ -209,7 +219,12 @@ mod tests {
             .unwrap();
 
         let resp = app
-            .oneshot(Request::get("/proxy-peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -236,7 +251,12 @@ mod tests {
         let state = ProxyPeersState::new(store, Some("secret".into()), book);
         let app = router(state);
         let resp = app
-            .oneshot(Request::get("/proxy-peers").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -335,6 +355,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -358,6 +379,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/proxy-peers/edge-1")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -381,6 +403,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete(format!("/proxy-peers/{name}"))
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -409,7 +432,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::get("/proxy-peers/a").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/proxy-peers/a")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -609,6 +637,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::delete("/proxy-peers/gone")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -616,5 +645,19 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(state.min_live_config_schema(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn a_registration_without_the_protocol_header_is_refused() {
+        let (state, _book, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }

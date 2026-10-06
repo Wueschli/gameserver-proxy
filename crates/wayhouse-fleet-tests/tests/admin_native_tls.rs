@@ -30,7 +30,7 @@ fn tls_admin_config(admin_port: u16, cert: &str, key: &str) -> Result<String> {
 
 fn tls_client() -> Result<reqwest::Client> {
     let ca = reqwest::Certificate::from_pem(&std::fs::read(TEST_CA)?)?;
-    Ok(reqwest::Client::builder()
+    Ok(wayhouse_http::builder()
         .add_root_certificate(ca)
         .timeout(Duration::from_secs(10))
         .build()?)
@@ -97,7 +97,7 @@ async fn the_aggregator_fans_out_to_an_https_admin_api() -> Result<()> {
     )
     .await?;
 
-    let body: Value = reqwest::Client::new()
+    let body: Value = wayhouse_http::client()
         .post(format!("{agg_url}/fleet/pools/local/backends"))
         .json(&serde_json::json!({ "addr": "127.0.0.1:1" }))
         .send()

@@ -413,6 +413,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/ingest")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from(payload_json("proxy-1")))
                     .unwrap(),
@@ -432,6 +433,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/ingest")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from(payload_json("  ")))
                     .unwrap(),
@@ -447,6 +449,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::post("/ingest")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from("not json"))
                     .unwrap(),
@@ -468,6 +471,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::post("/ingest")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("content-type", "application/json")
                     .body(Body::from(payload_json("proxy-1")))
                     .unwrap(),
@@ -479,6 +483,7 @@ mod tests {
         second.sessions = SessionCounts { tcp: 99, udp: 0 };
         app.oneshot(
             Request::post("/ingest")
+                .header(wayhouse_http::protocol::HEADER, "1.0")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&second).unwrap()))
                 .unwrap(),
@@ -516,7 +521,12 @@ mod tests {
         let app = router(state);
 
         let resp = app
-            .oneshot(Request::get("/fleet/pools").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/fleet/pools")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -534,7 +544,12 @@ mod tests {
         let app = router(state);
 
         let resp = app
-            .oneshot(Request::get("/fleet/sessions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/fleet/sessions")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let list = body_json(resp).await;
@@ -549,7 +564,12 @@ mod tests {
         for path in ["/fleet/pools", "/fleet/sessions", "/fleet/healthz"] {
             let resp = app
                 .clone()
-                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::get(path)
+                        .header(wayhouse_http::protocol::HEADER, "1.0")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -571,7 +591,12 @@ mod tests {
         let app = router(state);
 
         let resp = app
-            .oneshot(Request::get("/fleet/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/fleet/healthz")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let list = body_json(resp).await;
@@ -599,7 +624,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::get("/fleet/pools").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/fleet/pools")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -608,6 +638,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/fleet/pools")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("Authorization", "Bearer wrong")
                     .body(Body::empty())
                     .unwrap(),
@@ -619,6 +650,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/fleet/pools")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
                     .header("Authorization", "Bearer secret")
                     .body(Body::empty())
                     .unwrap(),
@@ -633,7 +665,9 @@ mod tests {
     }
 
     fn push(token: Option<&str>, instance: &str) -> Request<Body> {
-        let mut req = Request::post("/ingest").header("content-type", "application/json");
+        let mut req = Request::post("/ingest")
+            .header(wayhouse_http::protocol::HEADER, "1.0")
+            .header("content-type", "application/json");
         if let Some(t) = token {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
@@ -642,6 +676,7 @@ mod tests {
 
     fn get(path: &str, token: &str) -> Request<Body> {
         Request::get(path)
+            .header(wayhouse_http::protocol::HEADER, "1.0")
             .header("Authorization", format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap()
@@ -683,6 +718,7 @@ mod tests {
         // A write verb is a /fleet route too: the ingest token cannot drain.
         let drain = |t: &str| {
             Request::post("/fleet/instances/a/drain")
+                .header(wayhouse_http::protocol::HEADER, "1.0")
                 .header("Authorization", format!("Bearer {t}"))
                 .body(Body::empty())
                 .unwrap()
@@ -699,6 +735,7 @@ mod tests {
 
     fn push_from(peer: &str, admin_url: &str) -> Request<Body> {
         let mut req = Request::post("/ingest")
+            .header(wayhouse_http::protocol::HEADER, "1.0")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_string(&IngestPayload {

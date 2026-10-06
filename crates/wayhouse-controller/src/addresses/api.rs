@@ -230,7 +230,8 @@ mod tests {
     }
 
     async fn get_json(app: Router, auth: Option<&str>) -> (StatusCode, serde_json::Value) {
-        let mut req = HttpRequest::get("/tunnel/addresses");
+        let mut req =
+            HttpRequest::get("/tunnel/addresses").header(wayhouse_http::protocol::HEADER, "1.0");
         if let Some(a) = auth {
             req = req.header("authorization", a);
         }

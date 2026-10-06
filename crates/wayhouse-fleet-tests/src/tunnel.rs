@@ -556,7 +556,7 @@ impl TunnelLab {
     /// re-registers between the two calls the placeholder is refused and the
     /// whole step is repeated.
     pub async fn move_address(&self, kind: &str, name: &str) -> Result<(String, String)> {
-        let client = reqwest::Client::new();
+        let client = wayhouse_http::client();
         let entry = self.registry_url(&format!("/{kind}/{name}"));
         let old = {
             let body: serde_json::Value = client.get(&entry).send().await?.json().await?;

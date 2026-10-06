@@ -73,7 +73,7 @@ async fn cluster(with_ca: bool) -> Result<Cluster> {
             .iter()
             .map(|p| format!("http://127.0.0.1:{p}"))
             .collect(),
-        client: reqwest::Client::new(),
+        client: wayhouse_http::client(),
         accepted,
         procs,
         _fronts: fronts,
@@ -122,9 +122,7 @@ async fn native_cluster() -> Result<Cluster> {
             .iter()
             .map(|p| format!("https://localhost:{p}"))
             .collect(),
-        client: reqwest::Client::builder()
-            .add_root_certificate(ca)
-            .build()?,
+        client: wayhouse_http::builder().add_root_certificate(ca).build()?,
         accepted: Vec::new(),
         procs,
         _fronts: Vec::new(),

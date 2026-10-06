@@ -70,7 +70,7 @@ async fn wayhouse_check_reaches_a_private_ca_controller() -> Result<()> {
     let _controller = spawn_controller(data.path(), port)?;
     let plain = format!("http://127.0.0.1:{port}");
     wait_http_up(&format!("{plain}/healthz"), Duration::from_secs(30)).await?;
-    reqwest::Client::new()
+    wayhouse_http::client()
         .post(format!("{plain}/config"))
         .body(minimal_wayhouse_config(
             free_port()?,
