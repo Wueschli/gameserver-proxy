@@ -800,12 +800,24 @@ jobs:
       - name: Relative links and anchors resolve
         run: make docs-links
 
+  # The version policy (RELEASING.md): 0.x only, and Cargo.lock agrees with
+  # Cargo.toml. Milliseconds, so no `changes` filter; it also guards release PRs.
+  release-policy:
+    runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Version policy script and its tests
+        run: |
+          python3 .github/scripts/check_version_policy_test.py
+          python3 .github/scripts/check_version_policy.py
+
   # The one check the `protect-main` ruleset requires. Always runs (also on
   # docs-only PRs, where every other job is skipped); skipped jobs count as
   # passed, a failed or cancelled one fails the gate.
   ci-ok:
     if: always()
-    needs: [changes, test, musl, build-release, build-release-arm64, plugins, plugins-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs]
+    needs: [changes, test, musl, build-release, build-release-arm64, plugins, plugins-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs, release-policy]
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - name: Fail if any job failed or was cancelled

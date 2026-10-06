@@ -37,7 +37,7 @@
 - Modify: `.github/workflows/ci.yml` (job `release-policy`, add to `ci-ok.needs`), `.github/workflows/release.yml` (run the script in `verify`)
 
 **Interfaces:**
-- Produces: `check_version_policy.py [Cargo.toml] [Cargo.lock]`; library function `check(cargo_toml_text: str, cargo_lock_text: str, allow_major: bool = False) -> str` returning the version, raising `ValueError` with the message. Env `WAYHOUSE_ALLOW_MAJOR=1` sets `allow_major` (documented as maintainer-only).
+- Produces: `check_version_policy.py [Cargo.toml] [Cargo.lock]`; library function `check(cargo_toml_text: str, cargo_lock_text: str, allow_major: bool = False) -> str` returning the version, raising `ValueError` with the message. `allow_major` is only for tests; no env switch (a reviewed script edit is the way to 1.0).
 
 - [ ] **Step 1: Write failing tests** (`unittest`, same style as `check_release_test.py`): `test_plain_0x_version_passes`, `test_prerelease_passes` (`0.1.0-rc.1`), `test_major_1_fails_with_policy_message`, `test_major_1_passes_with_allow_major`, `test_lock_mismatch_fails_and_names_cargo_update`, `test_lock_entries_for_non_workspace_crates_ignored` (a registry crate with another version must not matter: only lock packages with no `source` and a name in `[workspace] members` count; derive member names from the member paths' basenames, they equal crate names in this repo).
 - [ ] **Step 2: Run** `python3 .github/scripts/check_version_policy_test.py`. Expected: FAIL (no module).

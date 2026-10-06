@@ -272,7 +272,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
 | Architectural decision | ADR table in `docs/09-technology-choices.md` |
-| Release or version change | `RELEASING.md`, `CONTRIBUTING.md` (conventions), `deploy/README.md` |
+| Release or version change | `RELEASING.md`, `CONTRIBUTING.md` (conventions), `deploy/README.md`, `.github/scripts/check_version_policy.py` (never reach 1.0 by tooling) |
 
 ---
 

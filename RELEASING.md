@@ -4,15 +4,55 @@ How a release is cut today, and how it would be cut from a release branch later.
 
 ## Versioning
 
-(Filled in by the versioning and changelog work, #188.)
+The workspace version in the root `Cargo.toml` (`[workspace.package] version`) is the single
+source of truth. Every binary reports it (`--version`, the `wayhouse_build_info` metric), and
+`release.yml` refuses a tag that is not `v` + that version. `crates/plugins/` has its own
+workspace and keeps its own `0.0.1` until it leaves this repo.
+
+Versions stay `0.x`. Under 0.x:
+
+- **minor bump** (`0.N.0`): anything breaking: the config schema, CLI flags, the admin and
+  fleet HTTP APIs, wire protocols, the plugin ABI, metric names, on-disk formats;
+- **patch bump** (`0.N.P`): fixes and compatible additions.
+
+Moving to 1.0 is the maintainer's explicit call, never something tooling does.
+`.github/scripts/check_version_policy.py` (CI job `release-policy`, and `release.yml`)
+fails any `Cargo.toml` that says `1.x` or more, and any `Cargo.lock` that disagrees with
+`Cargo.toml`. Going to 1.0 means a deliberate, reviewed edit of that script (there is no environment switch).
+What changes at 1.0 (the stability promise) is not decided here.
 
 ## Cutting a release
 
-(Filled in by #188.)
+release-please (`.github/workflows/release-please.yml`) keeps one release PR open on `main`,
+titled `chore(main): release 0.N.P`. It bumps `Cargo.toml`, a follow-up step refreshes
+`Cargo.lock`, and the PR adds the section to `CHANGELOG.md`. Because PRs made with
+`GITHUB_TOKEN` do not start workflows, the workflow dispatches `ci.yml` on the release branch
+so `ci-ok` is reported; if that does not satisfy the ruleset, create a fine-grained token
+secret `RELEASE_PLEASE_TOKEN` (contents and pull requests write).
+
+1. Merge the release PR (check the proposed version and changelog first).
+2. Wait for CI on the merge commit on `main`.
+3. Tag that commit `v0.N.P` and push the tag. The tag stays manual (release-please runs with
+   `skip-github-release`) so `release.yml` triggers and its `verify` job runs in order.
+4. Watch `release.yml`. If `publish` fails half-way, re-run it; the pushes are idempotent.
+5. **Do not forget:** on the merged release PR, change the label `autorelease: pending` to
+   `autorelease: tagged`. Without it release-please silently stops opening release PRs (the
+   job stays green).
+
+The first release PR carries `"release-as": "0.1.0"` in `release-please-config.json`; remove
+that line once `0.1.0` is out.
+
+**Pre-release** (`0.N.P-rc.K`): release-please does not make these. Set the version in
+`Cargo.toml` and `Cargo.lock` by hand in a normal PR (`cargo update --workspace`), merge it,
+and tag `v0.N.P-rc.K`. A pre-release never moves `latest`.
 
 ## Changelog
 
-(Filled in by #188.)
+`CHANGELOG.md` is generated from the conventional-commit titles on `main` (squash-merge title
+= commit), so the PR title is the changelog entry (the repository setting "Default to pull request title" for squash merges makes that reliable): `feat:` and `fix:` appear, `docs:`, `ci:`,
+`test:` and similar are hidden, `!` after the type marks a breaking change (a minor bump under
+0.x). Do not edit released sections by hand. The `PR title` workflow warns about titles that
+are not conventional; it is advisory, not a required check.
 
 ## Branching models
 
