@@ -35,8 +35,9 @@ secret `RELEASE_PLEASE_TOKEN` (contents and pull requests write).
 3. Tag that commit `v0.N.P` and push the tag. The tag stays manual (release-please runs with
    `skip-github-release`) so `release.yml` triggers and its `verify` job runs in order.
 4. Watch `release.yml`. If `publish` fails half-way, re-run it; the pushes are idempotent.
-5. On the merged release PR, change the label `autorelease: pending` to `autorelease: tagged`,
-   or release-please will not open the next release PR.
+5. **Do not forget:** on the merged release PR, change the label `autorelease: pending` to
+   `autorelease: tagged`. Without it release-please silently stops opening release PRs (the
+   job stays green).
 
 The first release PR carries `"release-as": "0.1.0"` in `release-please-config.json`; remove
 that line once `0.1.0` is out.
@@ -48,7 +49,7 @@ and tag `v0.N.P-rc.K`. A pre-release never moves `latest`.
 ## Changelog
 
 `CHANGELOG.md` is generated from the conventional-commit titles on `main` (squash-merge title
-= commit), so the PR title is the changelog entry: `feat:` and `fix:` appear, `docs:`, `ci:`,
+= commit), so the PR title is the changelog entry (the repository setting "Default to pull request title" for squash merges makes that reliable): `feat:` and `fix:` appear, `docs:`, `ci:`,
 `test:` and similar are hidden, `!` after the type marks a breaking change (a minor bump under
 0.x). Do not edit released sections by hand. The `PR title` workflow warns about titles that
 are not conventional; it is advisory, not a required check.
