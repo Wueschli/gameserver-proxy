@@ -948,6 +948,7 @@ mod tests {
                             listeners:\n  - name: l\n    bind: \"127.0.0.1:0\"\n    pool: p\n";
 
         const MODULE_WAT: &str = r#"(module
+          (@custom "wayhouse.abi" "\00\00\01\00")
           (memory (export "memory") 1)
           (func (export "alloc") (param i32) (result i32) (i32.const 0))
           (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;

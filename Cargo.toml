@@ -63,6 +63,9 @@ wasmtime = { version = "48", default-features = false, features = [
     "std",
 ] }
 wat = "1"
+# Reads a sniffer module's `wayhouse.abi` custom section without compiling it; same
+# version wasmtime already pulls in.
+wasmparser = { version = "0.254", default-features = false, features = ["std"] }
 sha2 = "0.10"
 sled = "0.34"
 tempfile = "3"
