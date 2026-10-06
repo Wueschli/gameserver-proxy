@@ -619,19 +619,8 @@ async fn submit(
                 .into_response();
         }
     };
-    if let Some(floor) = state.schema_floor.as_ref().and_then(|f| f()) {
-        if parsed.schema_version > floor {
-            let error = format!(
-                "config schema_version {} is newer than the oldest live proxy supports (max {floor}): upgrade the proxies first",
-                parsed.schema_version
-            );
-            tracing::warn!(%error, "rejected a config submission");
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse { error }),
-            )
-                .into_response();
-        }
+    if let Some(rejection) = schema_floor_rejection(state, &parsed) {
+        return rejection;
     }
 
     if let Some(ha) = &state.ha {
@@ -659,6 +648,32 @@ async fn submit(
     }
 }
 
+/// `422` when `cfg` needs a newer config schema than the oldest live proxy
+/// understands (`schema_floor`). A document that declares no `schema_version`
+/// needs nothing and always passes: a proxy that predates the field parses it.
+fn schema_floor_rejection(state: &AppState, cfg: &wayhouse_config::Config) -> Option<Response> {
+    let floor = state.schema_floor.as_ref().and_then(|f| f())?;
+    let needed = if cfg.schema_declared {
+        cfg.schema_version
+    } else {
+        0
+    };
+    if needed <= floor {
+        return None;
+    }
+    let error = format!(
+        "config schema_version {needed} is newer than the oldest live proxy supports (max {floor}): upgrade the proxies first"
+    );
+    tracing::warn!(%error, "rejected a config submission");
+    Some(
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse { error }),
+        )
+            .into_response(),
+    )
+}
+
 /// `POST /config/promote/{revision}` — flips a previously-staged revision's
 /// `Stage::promoted` to `true` (see the module doc). `404` if the revision
 /// never existed; promoting an already-promoted revision is a harmless
@@ -670,6 +685,16 @@ async fn promote(
 ) -> Response {
     if state.role.get() == Role::Slave {
         return slave_rejects_write();
+    }
+
+    // A proxy that predates the revision's schema may have registered since it
+    // was staged: promoting it would hand that proxy a document it rejects.
+    if let Ok(Some(bytes)) = state.store.get(revision) {
+        if let Ok(cfg) = wayhouse_config::parse_str(&String::from_utf8_lossy(&bytes)) {
+            if let Some(rejection) = schema_floor_rejection(&state, &cfg) {
+                return rejection;
+            }
+        }
     }
 
     if let Some(ha) = &state.ha {
@@ -1900,7 +1925,9 @@ listeners:
         // A live proxy that understands no schema at all (older than any this
         // build can write): everything above it is refused.
         let app = router(state.with_schema_floor(Arc::new(|| Some(0))));
-        let (status, body) = status_and_error(submit_text(&app, VALID_CONFIG.into()).await).await;
+        let (status, body) =
+            status_and_error(submit_text(&app, format!("schema_version: 1\n{VALID_CONFIG}")).await)
+                .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             body.contains("oldest live proxy supports (max 0)"),
@@ -1921,5 +1948,65 @@ listeners:
             submit_text(&app, VALID_CONFIG.into()).await.status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn a_document_that_declares_no_schema_still_reaches_pre_versioning_proxies() {
+        let (state, _dir) = test_state();
+        // Floor 0: a live proxy that predates `schema_version`. It parses a document
+        // without the key, and rejects one with it.
+        let app = router(state.with_schema_floor(Arc::new(|| Some(0))));
+        assert_eq!(
+            submit_text(&app, VALID_CONFIG.into()).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_checks_the_floor_a_late_registering_proxy_may_have_lowered() {
+        let (state, _dir) = test_state();
+        let floor = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let f = floor.clone();
+        let app = router(state.with_schema_floor(Arc::new(move || {
+            Some(f.load(std::sync::atomic::Ordering::SeqCst))
+        })));
+        let staged = app
+            .clone()
+            .oneshot(
+                Request::post("/config?stage=canary&group=eu")
+                    .body(Body::from(format!("schema_version: 1\n{VALID_CONFIG}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.status(), StatusCode::OK);
+        // A proxy that predates the field registers after the staging.
+        floor.store(0, std::sync::atomic::Ordering::SeqCst);
+        let promote = app
+            .clone()
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = status_and_error(promote).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.contains("oldest live proxy supports (max 0)"),
+            "{body}"
+        );
+        // Back at the document's own level it promotes.
+        floor.store(1, std::sync::atomic::Ordering::SeqCst);
+        let promote = app
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(promote.status(), StatusCode::OK);
     }
 }

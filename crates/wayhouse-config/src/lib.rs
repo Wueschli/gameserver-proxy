@@ -80,10 +80,10 @@ pub fn parse_str(text: &str) -> Result<Config, ConfigError> {
             return Err(e.into());
         }
     };
-    let declared = version::check_schema_version(raw.schema_version.as_ref())?;
-    if !version::FIELD_SINCE.is_empty() {
-        let doc: serde_norway::Value = serde_norway::from_str(text)?;
-        version::check_fields_since(&doc, declared, version::FIELD_SINCE)?;
-    }
-    validate(raw, declared)
+    let doc: Option<serde_norway::Value> = if version::FIELD_SINCE.is_empty() {
+        None
+    } else {
+        Some(serde_norway::from_str(text)?)
+    };
+    validate(raw, doc.as_ref())
 }

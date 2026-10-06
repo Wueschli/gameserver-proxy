@@ -591,12 +591,14 @@ mod tests {
             post(&app, schema_body("b", Some(2), None)).await.0,
             StatusCode::OK
         );
-        // An older proxy that reports nothing says nothing.
+        assert_eq!(state.min_live_config_schema(), Some(2));
+        // A live proxy that reports nothing predates `schema_version`: it cannot
+        // parse a document that carries the key, so it pins the floor at 0.
         assert_eq!(
             post(&app, schema_body("c", None, None)).await.0,
             StatusCode::OK
         );
-        assert_eq!(state.min_live_config_schema(), Some(2));
+        assert_eq!(state.min_live_config_schema(), Some(0));
     }
 
     #[tokio::test]
@@ -659,5 +661,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn nonsense_schema_reports_are_refused() {
+        let (state, _book, _dir) = test_state();
+        let app = router(state);
+        for (max, refresh) in [
+            (Some(0), None),
+            (None, Some(0)),
+            (None, Some(u64::MAX / 3 + 1)),
+        ] {
+            let (status, _) = post(&app, schema_body("x", max, refresh)).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{max:?} {refresh:?}"
+            );
+        }
+        let (status, _) = post(&app, schema_body("x", Some(1), Some(u64::MAX / 3))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the largest allowed interval is accepted"
+        );
     }
 }

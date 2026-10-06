@@ -560,12 +560,16 @@ so nobody adopts a new field by accident while older proxies still run.
 
 **Mixed fleets.** Proxies that register with the controller (the `tunnel` source)
 report the newest schema they understand (`max_config_schema`) and how often they
-re-register. `POST /config` answers `422` when the document's `schema_version` is
-above the lowest value reported by any *live* proxy (one that re-registered within
-three of its own intervals; a stopped or deleted proxy stops counting). Upgrade every
-proxy before submitting a document that uses a field introduced by the new
-version. Proxies that do not register (no tunnel) are not tracked: they still refuse
-a document they cannot parse and keep their previous config.
+re-register. `POST /config` (and `POST /config/promote/{revision}`, for a staged
+revision) answers `422` when the document's `schema_version` is above the lowest value
+reported by any *live* proxy: one that re-registered within three of its own
+intervals, so a stopped or deleted proxy stops counting. A live proxy that reports
+nothing predates the field and cannot parse a document that carries the
+`schema_version` key, so it holds such documents back until it upgrades or expires;
+a document without the key still goes through. Upgrade every proxy before submitting
+a document that declares `schema_version` or uses a field introduced by the new
+version. Proxies that do not register (no tunnel) are not tracked: they still refuse a
+document they cannot parse and keep their previous config.
 
 ## Reload semantics
 

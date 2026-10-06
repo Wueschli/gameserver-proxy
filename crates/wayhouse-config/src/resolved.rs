@@ -209,6 +209,10 @@ pub struct ResolverConfig {
 pub struct Config {
     /// The `schema_version` the document declared (`1` when absent).
     pub schema_version: u32,
+    /// Whether the document carried a `schema_version` key at all. One that does
+    /// not is parseable by a proxy that predates the field; the controller uses
+    /// this to gate submissions on such proxies.
+    pub schema_declared: bool,
     /// `0` means "one worker per CPU core".
     pub workers: usize,
     /// How long `shutdown` waits for in-flight connections to finish.

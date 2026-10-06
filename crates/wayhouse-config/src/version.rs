@@ -133,6 +133,31 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_null_schema_version_is_rejected_not_read_as_absent() {
+        for header in [
+            "schema_version: null\n",
+            "schema_version: ~\n",
+            "schema_version:\n",
+        ] {
+            let e = parse_str(&doc(header)).unwrap_err().to_string();
+            assert!(
+                e.contains("schema_version must be a whole number"),
+                "{header:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_config_records_whether_the_document_declared_a_schema() {
+        assert!(!parse_str(BODY).unwrap().schema_declared);
+        assert!(
+            parse_str(&doc("schema_version: 1\n"))
+                .unwrap()
+                .schema_declared
+        );
+    }
+
+    #[test]
     fn schema_version_zero_rejected() {
         let e = parse_str(&doc("schema_version: 0\n"))
             .unwrap_err()

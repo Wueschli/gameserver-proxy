@@ -4,12 +4,20 @@ use serde::Deserialize;
 
 use crate::resolved::{Balancer, HashOn, OnError, Protocol, ProxyProtocol};
 
+/// Keeps `key: null` apart from an absent key: `Option<Value>` alone reads both
+/// as `None`.
+fn present<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_norway::Value>, D::Error> {
+    serde_norway::Value::deserialize(d).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
     /// Minimum config schema the document needs (`version`). Kept as a raw YAML
     /// value so a string or `0` gets a precise error, not a serde one.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     pub(crate) schema_version: Option<serde_norway::Value>,
     #[serde(default)]
     pub(crate) settings: RawSettings,

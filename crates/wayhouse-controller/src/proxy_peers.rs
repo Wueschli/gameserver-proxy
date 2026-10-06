@@ -115,6 +115,12 @@ impl ProxyRegistration {
                 ));
             }
         }
+        if self.max_config_schema == Some(0) {
+            return Err("max_config_schema must be at least 1".into());
+        }
+        if self.refresh_sec.is_some_and(|s| s == 0 || s > u64::MAX / 3) {
+            return Err("refresh_sec must be between 1 and u64::MAX / 3".into());
+        }
         Ok(())
     }
 }
@@ -147,9 +153,15 @@ impl Registration for ProxyRegistration {
     }
 
     fn config_schema(&self) -> Option<ConfigSchemaReport> {
-        self.max_config_schema.map(|max| ConfigSchemaReport {
-            max,
-            live_for: 3 * self.refresh_sec.unwrap_or(DEFAULT_REFRESH_SEC),
+        // A proxy that reports no schema predates `schema_version`: it counts as
+        // understanding schema 0, so a document carrying the key is held back
+        // while it is live.
+        Some(ConfigSchemaReport {
+            max: self.max_config_schema.unwrap_or(0),
+            live_for: self
+                .refresh_sec
+                .unwrap_or(DEFAULT_REFRESH_SEC)
+                .saturating_mul(3),
         })
     }
 
