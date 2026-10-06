@@ -357,19 +357,13 @@ impl<R: Registration> RegistryState<R> {
     /// `None` when none reports one. Live means re-registered (the address
     /// book's `last_seen`) within the registrant's own `live_for`; a stale
     /// entry is ignored and a deleted one is gone, so a decommissioned proxy
-    /// cannot pin the minimum. Store trouble fails open (`None`, logged): the
-    /// proxies still refuse a document they cannot parse, and keep their
-    /// previous config.
-    pub fn min_live_config_schema(&self) -> Option<u32> {
-        let regs = match self.all_current() {
-            Ok(regs) => regs,
-            Err(e) => {
-                tracing::warn!(error = %e, "cannot read registrations for the config schema gate");
-                return None;
-            }
-        };
+    /// cannot pin the minimum. `Ok(None)` is a successful read that found no
+    /// live proxy; an unreadable registry is an `Err` (the gate fails closed).
+    pub fn min_live_config_schema(&self) -> Result<Option<u32>, StoreError> {
+        let regs = self.all_current()?;
         let now = (self.now_fn)();
-        regs.iter()
+        Ok(regs
+            .iter()
             .filter_map(|reg| {
                 let report = reg.config_schema()?;
                 let seen = match self.book.get(R::ROLE, reg.name()) {
@@ -378,7 +372,7 @@ impl<R: Registration> RegistryState<R> {
                 };
                 (now.saturating_sub(seen) <= report.live_for).then_some(report.max)
             })
-            .min()
+            .min())
     }
 
     pub(crate) fn all_current(&self) -> Result<Vec<R>, StoreError> {

@@ -582,7 +582,11 @@ mod tests {
         let (state, _book, _dir) = test_state();
         let (state, _now) = clocked(state);
         let app = router(state.clone());
-        assert_eq!(state.min_live_config_schema(), None, "no proxies, no floor");
+        assert_eq!(
+            state.min_live_config_schema().unwrap(),
+            None,
+            "no proxies, no floor"
+        );
         assert_eq!(
             post(&app, schema_body("a", Some(3), None)).await.0,
             StatusCode::OK
@@ -591,14 +595,14 @@ mod tests {
             post(&app, schema_body("b", Some(2), None)).await.0,
             StatusCode::OK
         );
-        assert_eq!(state.min_live_config_schema(), Some(2));
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(2));
         // A live proxy that reports nothing predates `schema_version`: it cannot
         // parse a document that carries the key, so it pins the floor at 0.
         assert_eq!(
             post(&app, schema_body("c", None, None)).await.0,
             StatusCode::OK
         );
-        assert_eq!(state.min_live_config_schema(), Some(0));
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(0));
     }
 
     #[tokio::test]
@@ -616,10 +620,10 @@ mod tests {
             StatusCode::OK
         );
         // Three intervals since `old` last registered: still live.
-        assert_eq!(state.min_live_config_schema(), Some(1));
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(1));
         now.store(1_000 + 91, std::sync::atomic::Ordering::SeqCst);
         // One second more and it is stale; only `new` counts.
-        assert_eq!(state.min_live_config_schema(), Some(5));
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(5));
     }
 
     #[tokio::test]
@@ -646,7 +650,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(state.min_live_config_schema(), Some(4));
+        assert_eq!(state.min_live_config_schema().unwrap(), Some(4));
     }
 
     #[tokio::test]

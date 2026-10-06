@@ -152,14 +152,15 @@ pub struct AppState {
     /// (`slave` role only; stays `0` otherwise). Lands in the same
     /// transaction as the revision it covers.
     pub relay: RelayCursor,
-    /// The lowest config schema any live proxy supports (`None`: unknown, no
-    /// limit): `POST /config` refuses a document above it, so a mixed fleet never
+    /// The lowest config schema any live proxy supports (`Ok(None)`: no live
+    /// proxy, no limit; `Err`: the registry cannot be read, writes are refused):
+    /// `POST /config` refuses a document above it, so a mixed fleet never
     /// receives one it must reject.
     schema_floor: Option<SchemaFloor>,
 }
 
 /// See [`AppState::with_schema_floor`].
-pub type SchemaFloor = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
+pub type SchemaFloor = Arc<dyn Fn() -> Result<Option<u32>, StoreError> + Send + Sync>;
 
 impl AppState {
     pub fn try_new(
@@ -652,7 +653,22 @@ async fn submit(
 /// understands (`schema_floor`). A document that declares no `schema_version`
 /// needs nothing and always passes: a proxy that predates the field parses it.
 fn schema_floor_rejection(state: &AppState, cfg: &wayhouse_config::Config) -> Option<Response> {
-    let floor = state.schema_floor.as_ref().and_then(|f| f())?;
+    let floor = match state.schema_floor.as_ref().map(|f| f()) {
+        None | Some(Ok(None)) => return None,
+        Some(Ok(Some(floor))) => floor,
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "cannot read the proxy registry for the config schema gate");
+            return Some(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "cannot check the config schema against the live proxies: the registry is unreadable".into(),
+                    }),
+                )
+                    .into_response(),
+            );
+        }
+    };
     let needed = if cfg.schema_declared {
         cfg.schema_version
     } else {
@@ -1924,7 +1940,7 @@ listeners:
         let (state, _dir) = test_state();
         // A live proxy that understands no schema at all (older than any this
         // build can write): everything above it is refused.
-        let app = router(state.with_schema_floor(Arc::new(|| Some(0))));
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(0)))));
         let (status, body) =
             status_and_error(submit_text(&app, format!("schema_version: 1\n{VALID_CONFIG}")).await)
                 .await;
@@ -1941,9 +1957,23 @@ listeners:
     }
 
     #[tokio::test]
+    async fn an_unreadable_proxy_registry_fails_the_schema_gate_closed() {
+        let (state, _dir) = test_state();
+        let app = router(state.with_schema_floor(Arc::new(|| Err(StoreError::CounterOverflow))));
+        let (status, body) = status_and_error(submit_text(&app, VALID_CONFIG.into()).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("registry is unreadable"), "{body}");
+        let resp = app
+            .oneshot(Request::get("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing was stored");
+    }
+
+    #[tokio::test]
     async fn schema_at_or_below_the_floor_is_accepted() {
         let (state, _dir) = test_state();
-        let app = router(state.with_schema_floor(Arc::new(|| Some(1))));
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(1)))));
         assert_eq!(
             submit_text(&app, VALID_CONFIG.into()).await.status(),
             StatusCode::OK
@@ -1955,7 +1985,7 @@ listeners:
         let (state, _dir) = test_state();
         // Floor 0: a live proxy that predates `schema_version`. It parses a document
         // without the key, and rejects one with it.
-        let app = router(state.with_schema_floor(Arc::new(|| Some(0))));
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(0)))));
         assert_eq!(
             submit_text(&app, VALID_CONFIG.into()).await.status(),
             StatusCode::OK
@@ -1968,7 +1998,7 @@ listeners:
         let floor = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let f = floor.clone();
         let app = router(state.with_schema_floor(Arc::new(move || {
-            Some(f.load(std::sync::atomic::Ordering::SeqCst))
+            Ok(Some(f.load(std::sync::atomic::Ordering::SeqCst)))
         })));
         let staged = app
             .clone()

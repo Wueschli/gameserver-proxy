@@ -566,7 +566,8 @@ reported by any *live* proxy: one that re-registered within three of its own
 intervals, so a stopped or deleted proxy stops counting. A live proxy that reports
 nothing predates the field and cannot parse a document that carries the
 `schema_version` key, so it holds such documents back until it upgrades or expires;
-a document without the key still goes through. Upgrade every proxy before submitting
+a document without the key still goes through. If the controller cannot read its
+proxy registry the check fails closed (`503`). Upgrade every proxy before submitting
 a document that declares `schema_version` or uses a field introduced by the new
 version. Proxies that do not register (no tunnel) are not tracked: they still refuse a
 document they cannot parse and keep their previous config.
