@@ -54,7 +54,7 @@ and tag `v0.N.P-rc.K`. A pre-release never moves `latest`.
 `CHANGELOG.md` is generated from the conventional-commit titles on `main` (squash-merge title
 = commit), so the PR title is the changelog entry (the repository setting "Default to pull request title" for squash merges makes that reliable): `feat:` and `fix:` appear, `docs:`, `ci:`,
 `test:` and similar are hidden, `!` after the type marks a breaking change (a minor bump under
-0.x). Do not edit released sections by hand. The `PR title` workflow warns about titles that
+0.x). Do not edit released sections by hand. The file was empty before 0.1.0 on purpose: any pre-seeded heading ends up as a stray `## Changelog` at the bottom of the first release. The `PR title` workflow warns about titles that
 are not conventional; it is advisory, not a required check.
 
 ## Branching models
