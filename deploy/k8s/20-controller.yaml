@@ -9,6 +9,8 @@ spec:
     metadata: { labels: { app: wayhouse-controller } }
     spec:
       securityContext: { fsGroup: 65532, runAsNonRoot: true }
+      # Private GHCR images: uncomment (see deploy/README.md "Pulling private images").
+      # imagePullSecrets: [{ name: ghcr }]
       containers:
         - name: controller
           image: wayhouse-deploy/wayhouse-controller:local

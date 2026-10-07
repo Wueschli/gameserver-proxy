@@ -8,6 +8,8 @@ spec:
     metadata: { labels: { app: wayhouse-aggregator } }
     spec:
       securityContext: { runAsNonRoot: true }
+      # Private GHCR images: uncomment (see deploy/README.md "Pulling private images").
+      # imagePullSecrets: [{ name: ghcr }]
       containers:
         - name: aggregator
           image: wayhouse-deploy/wayhouse-aggregator:local
