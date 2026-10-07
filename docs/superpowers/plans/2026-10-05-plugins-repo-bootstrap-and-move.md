@@ -27,7 +27,7 @@
 
 - `sniffers.lock` hash mismatch must fail the e2e job loudly, and the fetch script must refuse non-`https` and redirects to other schemes.
 - An outage of the sniffers repo must not block ordinary PRs in main (the e2e job is not in `ci-ok.needs`; it runs on `sniffers.lock` changes, pushes to main and a nightly schedule).
-- After the move, no file in main still says `make plugins` or `crates/sniffers/` (grep gate in the plan's last task).
+- After the move, no tracked file in main still says `make sniffers` or `crates/sniffers/`, except under `docs/superpowers/` and in `CHANGELOG.md` (grep gate in the plan's last task).
 - History: `git log --follow` on one sniffer's `src/lib.rs` in the new repo reaches the original commits.
 - The `index.json` the sniffers repo publishes must parse with `wayhouse_registry::parse_index` (CI runs the real parser).
 
