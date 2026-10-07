@@ -11,6 +11,7 @@ import type {
   RegistrySniffers,
   RevisionSummary,
   SnifferInfo,
+  UpdateCheck,
   TunnelAddresses,
 } from "./types";
 
@@ -194,6 +195,18 @@ export function deleteSniffer(name: string): Promise<FanoutResponse> {
   return requestJson(`/api/fleet/sniffers/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
+}
+
+/** Swaps every instance's `<name>` with its kept previous version. */
+export function rollbackSniffer(name: string): Promise<FanoutResponse> {
+  return requestJson(`/api/fleet/sniffers/${encodeURIComponent(name)}/rollback`, {
+    method: "POST",
+  });
+}
+
+/** On demand only: refetches every registry and asks each proxy what it runs. */
+export function checkUpdates(): Promise<UpdateCheck> {
+  return requestJson("/api/registries/updates/check", { method: "POST" });
 }
 
 // --- config (proxied to wayhouse-controller) ---

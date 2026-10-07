@@ -148,7 +148,9 @@
 > `wasmtime::Engine` and its epoch-ticker thread are built once (like
 > `settings.workers`). Modules within an already-configured `dir` can also be
 > managed over HTTP: `GET/POST /admin/sniffers` + `DELETE
-> /admin/sniffers/{name}` on the instance's own admin API (`409` if
+> /admin/sniffers/{name}` + `POST /admin/sniffers/{name}/rollback` (swaps in the
+> kept previous version, [`docs/sniffers.md`](sniffers.md) "Updates and rollback")
+> on the instance's own admin API (`409` if
 > `settings.sniffers` is absent). An upload is checked before it is written
 > and written atomically: anything that is not a loadable module (not wasm, has
 > imports, lacks the `memory` / `alloc` / `sniff` exports, declares no ABI

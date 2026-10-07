@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useFleetSocket } from "../useFleetSocket";
-import { ApiError, deleteSniffer, listInstanceSniffers, uploadSniffer } from "../api";
+import { ApiError, deleteSniffer, listInstanceSniffers, rollbackSniffer, uploadSniffer } from "../api";
 import type { SnifferInfo } from "../types";
 import { Badge } from "../components/ui/Badge";
 import { Button, Input } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import { RegistrySection } from "./RegistrySection";
+import { UpdatesSection } from "./UpdatesSection";
 
 export function SniffersPage() {
   const { instances } = useFleetSocket();
@@ -51,6 +52,30 @@ export function SniffersPage() {
       setNotice(`removed ${name}`);
     } catch (err) {
       setNotice(`remove ${name} failed: ${err instanceof ApiError ? err.message : err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRollback(name: string) {
+    const ok = await confirm({
+      title: `Roll back ${name}?`,
+      description:
+        "Every instance swaps this module with the version it kept before the last upload. Instances without a kept version are skipped. Pinned instances only roll back to a version their pin allows.",
+      confirmLabel: "Roll back",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await rollbackSniffer(name);
+      const done = res.results.filter((r) => r.status !== null && r.status >= 200 && r.status < 300).length;
+      setNotice(
+        done === 0
+          ? `roll back ${name} failed on all ${res.results.length} instances`
+          : `rolled back ${name} on ${done} of ${res.results.length} instances`,
+      );
+    } catch (err) {
+      setNotice(`roll back ${name} failed: ${err instanceof ApiError ? err.message : err}`);
     } finally {
       setBusy(false);
     }
@@ -109,8 +134,25 @@ export function SniffersPage() {
                   <td className="px-4 py-2 text-ink-muted">{m.size_bytes} B</td>
                   <td className="px-4 py-2">
                     {m.loaded ? <Badge tone="good">loaded</Badge> : <Badge tone="warn">not loaded</Badge>}
+                    {m.fallback && (
+                      <span
+                        className="ml-2"
+                        title="The current file failed validation, so the previous version is running"
+                      >
+                        <Badge tone="warn">fallback active</Badge>
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2 text-right">
+                    {m.has_previous && (
+                      <button
+                        onClick={() => handleRollback(m.name)}
+                        disabled={busy}
+                        className="mr-3 text-ink-muted hover:underline disabled:opacity-50"
+                      >
+                        roll back
+                      </button>
+                    )}
                     <button
                       onClick={() => handleDelete(m.name)}
                       disabled={busy}
@@ -125,6 +167,8 @@ export function SniffersPage() {
           </table>
         )}
       </div>
+
+      <UpdatesSection onChanged={setNotice} />
 
       <RegistrySection onInstalled={(name) => setNotice(`installed ${name} from a registry`)} />
 

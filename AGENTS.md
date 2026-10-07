@@ -84,7 +84,7 @@ crates/
     util.rs                 tiny helpers (monotonic now_ms)
   wayhouse/                       binary
     main.rs                 CLI, tracing, runtime bring-up, shutdown
-    admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes
+    admin.rs                axum admin API: GET /healthz /readyz /metrics /pools /config /sessions, POST /route-hint /admin/drain /admin/undrain, PATCH+POST+DELETE backend routes, GET/POST/DELETE /admin/sniffers and POST /admin/sniffers/{name}/rollback (listing reports `has_previous`, `fallback`)
     resolver.rs             HttpResolver (reqwest) + GrpcResolver (tonic) + build_resolvers(&Config)
     discovery.rs            ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from wayhouse-controller's backend-peers registry, pinned to a configured pubkey
     dns_srv.rs              DnsSrvSource (Phase 8) — behind the `dns-srv` feature (`hickory-resolver`), `dns_srv_disabled.rs` stands in without it

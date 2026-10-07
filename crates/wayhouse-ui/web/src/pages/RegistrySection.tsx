@@ -313,14 +313,19 @@ function VersionDetails({ version }: { version: RegistryVersion }) {
   );
 }
 
-function InstallDialog({
+export function InstallDialog({
   registry,
   sniffer,
+  version: wantedVersion,
+  verb = "Install",
   onClose,
   onInstalled,
 }: {
   registry: RegistryRef;
   sniffer: RegistrySniffer;
+  /** Install exactly this version (an update) instead of the newest compatible one. */
+  version?: string;
+  verb?: "Install" | "Update";
   onClose: () => void;
   onInstalled?: (name: string) => void;
 }) {
@@ -328,7 +333,7 @@ function InstallDialog({
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<InstallResponse | null>(null);
 
-  const wanted = "version" in sniffer.compatible ? sniffer.compatible.version : null;
+  const wanted = wantedVersion ?? ("version" in sniffer.compatible ? sniffer.compatible.version : null);
   const version = sniffer.versions.find((v) => v.version === wanted);
 
   async function run() {
@@ -345,7 +350,7 @@ function InstallDialog({
     }
   }
 
-  const title = `Install ${sniffer.name}`;
+  const title = `${verb} ${sniffer.name}`;
   if (outcome) {
     return (
       <Dialog open onOpenChange={(o) => !o && onClose()} title={title}>
@@ -371,7 +376,7 @@ function InstallDialog({
         open
         onOpenChange={(o) => !o && onClose()}
         title={title}
-        confirmLabel="Install on every instance"
+        confirmLabel={`${verb} on every instance`}
         onConfirm={run}
         busy={busy}
       >
@@ -388,7 +393,7 @@ function InstallDialog({
             Cancel
           </Button>
           <Button variant="primary" disabled={busy} onClick={run}>
-            Install on every instance
+            {verb} on every instance
           </Button>
         </div>
       </div>

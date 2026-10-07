@@ -55,6 +55,7 @@ mod header_contract {
         ("POST", "/api/fleet/route-hint"),
         ("POST", "/api/fleet/sniffers?name=a2s.wasm"),
         ("DELETE", "/api/fleet/sniffers/a2s.wasm"),
+        ("POST", "/api/fleet/sniffers/a2s.wasm/rollback"),
         // controller_proxy: viewer reads
         ("GET", "/api/config"),
         ("GET", "/api/config/revisions"),
