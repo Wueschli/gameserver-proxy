@@ -42,8 +42,9 @@ or approve pull requests"; a `RELEASE_PLEASE_TOKEN` secret works instead of the 
    `autorelease: tagged`. Without it release-please silently stops opening release PRs (the
    job stays green).
 
-The first release PR carries `"release-as": "0.1.0"` in `release-please-config.json`; remove
-that line once `0.1.0` is out.
+The first release PR carried `"release-as": "0.1.0"` in `release-please-config.json`; it was
+removed once `0.1.0` was out, so later versions follow the commit types (`feat` bumps the
+minor, `fix` the patch while the major is 0).
 
 **Pre-release** (`0.N.P-rc.K`): release-please does not make these. Set the version in
 `Cargo.toml` and `Cargo.lock` by hand in a normal PR (`cargo update --workspace`), merge it,
