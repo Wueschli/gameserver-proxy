@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button, Input } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
 import { useConfirm } from "../components/ui/ConfirmDialog";
+import { RegistrySection } from "./RegistrySection";
 
 export function SniffersPage() {
   const { instances } = useFleetSocket();
@@ -124,6 +125,8 @@ export function SniffersPage() {
           </table>
         )}
       </div>
+
+      <RegistrySection onInstalled={(name) => setNotice(`installed ${name} from a registry`)} />
 
       {dialog}
       <UploadDialog

@@ -6,6 +6,8 @@ const api = vi.hoisted(() => ({
   deleteSniffer: vi.fn(),
   listInstanceSniffers: vi.fn(),
   uploadSniffer: vi.fn(),
+  listRegistries: vi.fn(),
+  listRegistrySniffers: vi.fn(),
 }));
 vi.mock("../api", async (orig) => ({ ...(await orig<typeof import("../api")>()), ...api }));
 vi.mock("../useFleetSocket", () => ({
@@ -21,6 +23,7 @@ beforeEach(() => {
   api.listInstanceSniffers
     .mockReset()
     .mockResolvedValue([{ name: "a2s.wasm", sha256: "ab".repeat(32), size_bytes: 100, loaded: true }]);
+  api.listRegistries.mockReset().mockResolvedValue({ registries: [], persistent: true });
   api.deleteSniffer.mockReset().mockResolvedValue({ results: [] });
 });
 

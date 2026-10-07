@@ -2,6 +2,8 @@
 
 Status: design for review (brainstormed 2026-10-07 with Leandro). Decisions are marked **[decided]**; the rest is a recommendation the future implementation plan follows unless the maintainer changes it. No code in this wave.
 
+**Partly superseded** by the [automation hooks addendum](2026-10-07-plugin-automation-hooks-design.md) for: guest exports, `routes_replace`, module-byte replication and secrets storage. Implement from the addendum where the two differ.
+
 ## Vocabulary
 
 - **Sniffer**: WASM protocol/hostname module on the proxy data path. Spec: [sniffer registry](2026-10-05-plugin-registry-design.md). Repo: `wayhouse-proxy/sniffers`.

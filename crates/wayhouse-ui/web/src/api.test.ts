@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, checkSession, getCurrentConfig, login, releaseTunnelAddress, rollbackTo } from "./api";
+import {
+  ApiError,
+  checkSession,
+  getCurrentConfig,
+  installFromRegistry,
+  login,
+  releaseTunnelAddress,
+  rollbackTo,
+} from "./api";
 
 function mockFetch(resp: Response) {
   const fn = vi.fn().mockResolvedValue(resp);
@@ -53,5 +61,20 @@ describe("api", () => {
     const fn = mockFetch(new Response("", { status: 200 }));
     await checkSession();
     expect(fn).toHaveBeenCalledWith("/ui/session", { credentials: "same-origin" });
+  });
+
+  it("installFromRegistry returns the per-instance body of a 502 (nothing accepted) instead of throwing", async () => {
+    const body = { sniffer: "demo", results: [{ instance: "a", ok: false, pinned: false, error: "refused", status: null }], pinned_instances: [] };
+    const fn = mockFetch(new Response(JSON.stringify(body), { status: 502 }));
+    await expect(installFromRegistry("abc", "demo", "1.2.0")).resolves.toMatchObject({ results: [{ instance: "a" }] });
+    expect(fn.mock.calls[0][0]).toBe("/api/registries/abc/install");
+    expect(JSON.parse(fn.mock.calls[0][1].body)).toEqual({ name: "demo", version: "1.2.0" });
+  });
+
+  it("installFromRegistry still throws a plain error body (registry unreachable)", async () => {
+    mockFetch(new Response(JSON.stringify({ error: "registry: timed out" }), { status: 502 }));
+    const err = await installFromRegistry("abc", "demo").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.message).toBe("registry: timed out");
   });
 });
