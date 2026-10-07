@@ -158,9 +158,9 @@
 > rescan when `modules` is not set. When `modules` pins are set, a pin
 > violation or a pinned module that fails validation fails the whole scan:
 > the process refuses to start (naming the module), and a reload keeps the
-> previous plugin set. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
-> `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
-> see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
+> previous sniffer set. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
+> `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Sniffers page —
+> see `crates/sniffers/README.md` "Installing over HTTP instead of `cp`".
 >
 > **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — built):
 > `settings.failure_domain` (a string identity — this instance's

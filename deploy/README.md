@@ -43,12 +43,12 @@ a manifest list for `linux/amd64` and `linux/arm64`; `docker pull` picks the hos
 per-architecture images stay available as `:<version>-amd64` and `:<version>-arm64`. There
 is no emulation and no cross-compiling: each architecture builds natively, so the Dockerfile
 is architecture-neutral (the base images are pinned by index digest, which covers both).
-CI has an arm64 leg of each of `build-release`, `plugins`, `deploy` and `trivy` (jobs `*-arm64`).
+CI has an arm64 leg of each of `build-release`, `sniffers`, `deploy` and `trivy` (jobs `*-arm64`).
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
 binaries you built yourself from `deploy/prebuilt/` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
 `wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`). CI uses it to share one release build
-with the plugins tests; they must be built against a glibc no newer than the
+with the sniffers tests; they must be built against a glibc no newer than the
 runtime's (2.41). The nightly CI run uses the default, self-contained path.
 
 ## Pulling private images

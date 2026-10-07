@@ -1,0 +1,10 @@
+[package]
+name = "wayhouse-sniffer-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Guest-side ABI helper for wayhouse sniffers (phase 9)."
+
+[lib]
+crate-type = ["lib"]

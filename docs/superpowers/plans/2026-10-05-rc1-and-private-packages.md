@@ -1,6 +1,6 @@
 # v0.1.0-rc.1, Private Packages and v0.1.0 Implementation Plan (#189, #177)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax. Tasks 1 and 4 and part of Task 3 are maintainer-assisted: the thread prepares, the maintainer does the GitHub UI parts.
@@ -15,7 +15,7 @@
 
 ## Global Constraints
 
-- **Preconditions (all must hold, check them in Task 1 step 1):** Phases 0 and 1 merged (#187, #190, #171, #188, ABI version, protocol and config versions), the GitHub Actions outage over, `make check` green and `ci.yml` green **on the exact commit** to be tagged, `crates/plugins` still bundled (the images may use them).
+- **Preconditions (all must hold, check them in Task 1 step 1):** Phases 0 and 1 merged (#187, #190, #171, #188, ABI version, protocol and config versions), the GitHub Actions outage over, `make check` green and `ci.yml` green **on the exact commit** to be tagged, `crates/sniffers` still bundled (the images may use them).
 - Tag only from `main`. Versions never reach 1.0.0.
 - Packages stay private for now (maintainer decision); no musl release assets (decision 3).
 - The pre-release must not move `latest` (existing `case "$VERSION" in *-*)` in `release.yml`); verify after the run.

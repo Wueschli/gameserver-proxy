@@ -2,7 +2,7 @@
 //!
 //! This is the reduced **v0 schema**: TCP/UDP listeners with a priority-ordered
 //! route rule list (`always` / `client_cidr` / `dst` / `port` / `first_bytes` /
-//! `sni` matchers; `sniffer` for future plugins) onto static pools, with active
+//! `sni` matchers; `sniffer` for future sniffers) onto static pools, with active
 //! health checks, round-robin /
 //! least-connections / consistent-hash balancing (UDP session affinity), and per-backend
 //! session caps. The full target schema lives in

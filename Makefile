@@ -1,7 +1,7 @@
 # Convenience wrapper around the cargo commands CI runs.
 # Requires `cargo` on PATH (rustup: `source "$HOME/.cargo/env"`).
 
-.PHONY: check fmt lint test test-minimal audit build run fuzz bench plugins ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke docs-fmt docs-fmt-check docs-links help
+.PHONY: check fmt lint test test-minimal audit build run fuzz bench sniffers ui ui-test ui-e2e tunnel-ns-check tunnel-e2e tunnel-e2e-ci deploy-images deploy-scan deploy-lint deploy-smoke docs-fmt docs-fmt-check docs-links help
 
 ## check: everything CI runs — format check, clippy (deny warnings), tests
 check: fmt-check lint test test-minimal
@@ -54,12 +54,12 @@ fuzz:
 		cargo +nightly fuzz run $$t fuzz/corpus/$$t fuzz/seeds/$$t -- -max_total_time=$(FUZZ_TIME) || exit 1; \
 	done
 
-## plugins: build the first-party sniffer plugins to wasm32-unknown-unknown
-## (needs `rustup target add wasm32-unknown-unknown`); see crates/plugins/README.md
-plugins:
-	cd crates/plugins && cargo test --workspace
-	cd crates/plugins && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
-	@echo "built:" crates/plugins/target/wasm32-unknown-unknown/release/*.wasm
+## sniffers: build the first-party sniffers to wasm32-unknown-unknown
+## (needs `rustup target add wasm32-unknown-unknown`); see crates/sniffers/README.md
+sniffers:
+	cd crates/sniffers && cargo test --workspace
+	cd crates/sniffers && cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
+	@echo "built:" crates/sniffers/target/wasm32-unknown-unknown/release/*.wasm
 
 ## ui: build the wayhouse-ui frontend (needs Node/npm) — output wayhouse-ui serves via --static-dir
 ui:

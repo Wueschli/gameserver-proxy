@@ -18,7 +18,7 @@ sys.path.insert(0, HERE)
 
 import changes  # noqa: E402
 
-ALL = {"ui", "plugins", "tunnel", "deploy", "fuzz", "release"}
+ALL = {"ui", "sniffers", "tunnel", "deploy", "fuzz", "release"}
 
 
 def flags(out):
@@ -54,22 +54,22 @@ class RealRepo(unittest.TestCase):
             {"ui", "deploy", "release"},
         )
 
-    def test_wayhouse_core_reaches_plugins_and_tunnel(self):
+    def test_wayhouse_core_reaches_sniffers_and_tunnel(self):
         self.assertEqual(
             self.areas("crates/wayhouse-core/src/pool.rs"),
-            {"plugins", "tunnel", "release"},
+            {"sniffers", "tunnel", "release"},
         )
 
     def test_wayhouse_config_also_runs_fuzz(self):
         self.assertEqual(
             self.areas("crates/wayhouse-config/src/lib.rs"),
-            {"plugins", "tunnel", "fuzz", "release"},
+            {"sniffers", "tunnel", "fuzz", "release"},
         )
 
-    def test_wayhouse_http_reaches_plugins_and_tunnel(self):
+    def test_wayhouse_http_reaches_sniffers_and_tunnel(self):
         self.assertEqual(
             self.areas("crates/wayhouse-http/tests/fixtures/leaf.pem"),
-            {"plugins", "tunnel", "release"},
+            {"sniffers", "tunnel", "release"},
         )
 
     def test_fuzz_workspace_only_runs_fuzz(self):
@@ -78,11 +78,11 @@ class RealRepo(unittest.TestCase):
             {"fuzz"},
         )
 
-    def test_a_plugin_crate_only_runs_plugins(self):
-        self.assertEqual(self.areas("crates/plugins/a2s/src/lib.rs"), {"plugins", "release"})
+    def test_a_sniffer_crate_only_runs_sniffers(self):
+        self.assertEqual(self.areas("crates/sniffers/a2s/src/lib.rs"), {"sniffers", "release"})
 
-    def test_plugins_workspace_root_files_run_plugins(self):
-        self.assertEqual(self.areas("crates/plugins/Cargo.lock"), {"plugins", "release"})
+    def test_sniffers_workspace_root_files_run_sniffers(self):
+        self.assertEqual(self.areas("crates/sniffers/Cargo.lock"), {"sniffers", "release"})
 
     def test_wayhouse_agent_is_tunnel_only(self):
         self.assertEqual(self.areas("crates/wayhouse-agent/src/main.rs"), {"tunnel"})
@@ -96,24 +96,24 @@ class RealRepo(unittest.TestCase):
     def test_wayhouse_bench_runs_no_scoped_job(self):
         self.assertEqual(self.areas("crates/wayhouse-bench/src/main.rs"), set())
 
-    def test_wayhouse_proto_runs_plugins_and_tunnel(self):
+    def test_wayhouse_proto_runs_sniffers_and_tunnel(self):
         self.assertEqual(
             self.areas("crates/wayhouse/proto/resolver.proto"),
-            {"plugins", "tunnel", "release"},
+            {"sniffers", "tunnel", "release"},
         )
 
     def test_an_unknown_path_under_crates_runs_every_rust_job(self):
         self.assertEqual(
             self.areas("crates/wayhouse-new/src/lib.rs"),
-            {"plugins", "tunnel", "fuzz", "release"},
+            {"sniffers", "tunnel", "fuzz", "release"},
         )
 
     def test_nextest_config_runs_the_nextest_jobs(self):
-        self.assertEqual(self.areas(".config/nextest.toml"), {"plugins", "tunnel", "release"})
+        self.assertEqual(self.areas(".config/nextest.toml"), {"sniffers", "tunnel", "release"})
 
     def test_root_cargo_lock_runs_its_workspace_and_deploy_not_fuzz(self):
         # crates/wayhouse-config/fuzz has its own workspace and lockfile.
-        self.assertEqual(self.areas("Cargo.lock"), {"plugins", "tunnel", "deploy", "release"})
+        self.assertEqual(self.areas("Cargo.lock"), {"sniffers", "tunnel", "deploy", "release"})
 
     def test_fuzz_lockfile_runs_fuzz_only(self):
         self.assertEqual(self.areas("crates/wayhouse-config/fuzz/Cargo.lock"), {"fuzz"})
@@ -121,12 +121,12 @@ class RealRepo(unittest.TestCase):
     def test_root_manifest_runs_all_rust_and_deploy(self):
         # Inherited by every workspace's members (wayhouse-config uses workspace = true).
         self.assertEqual(
-            self.areas("Cargo.toml"), {"plugins", "tunnel", "deploy", "fuzz", "release"}
+            self.areas("Cargo.toml"), {"sniffers", "tunnel", "deploy", "fuzz", "release"}
         )
 
     def test_toolchain_runs_all_rust(self):
         self.assertEqual(
-            self.areas("rust-toolchain.toml"), {"plugins", "tunnel", "fuzz", "release"}
+            self.areas("rust-toolchain.toml"), {"sniffers", "tunnel", "fuzz", "release"}
         )
 
     def test_makefile_runs_tunnel_and_deploy(self):
@@ -170,12 +170,12 @@ class SyntheticGraph(unittest.TestCase):
             "crates/wayhouse-ui": pkg("wayhouse-ui"),
             "crates/wayhouse-fleet-tests": pkg("wayhouse-fleet-tests"),
             "crates/wayhouse-config/fuzz": pkg("wayhouse-config-fuzz", "crates/wayhouse-config"),
-            "crates/plugins/a2s": pkg("a2s"),
+            "crates/sniffers/a2s": pkg("a2s"),
         }
         packages.update(extra)
         return changes.Graph(packages, {
-            "": [d for d in packages if not d.startswith(("crates/plugins/", "crates/wayhouse-config/fuzz"))],
-            "crates/plugins": ["crates/plugins/a2s"],
+            "": [d for d in packages if not d.startswith(("crates/sniffers/", "crates/wayhouse-config/fuzz"))],
+            "crates/sniffers": ["crates/sniffers/a2s"],
             "crates/wayhouse-config/fuzz": ["crates/wayhouse-config/fuzz"],
         })
 

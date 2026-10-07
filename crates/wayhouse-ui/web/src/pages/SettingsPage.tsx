@@ -342,7 +342,7 @@ function StructuredForm({
       </section>
 
       <section className="rounded border border-line bg-surface p-4">
-        <h3 className="mb-3 text-sm font-medium text-ink">Sniffer plugins</h3>
+        <h3 className="mb-3 text-sm font-medium text-ink">Sniffers</h3>
         <Field label="sniffers.dir">
           <Input
             value={s.sniffers?.dir ?? ""}
@@ -356,7 +356,7 @@ function StructuredForm({
           />
         </Field>
         <p className="mt-2 text-xs text-ink-faint">
-          Manage which modules live in this directory from the Plugins page.
+          Manage which modules live in this directory from the Sniffers page.
         </p>
       </section>
 

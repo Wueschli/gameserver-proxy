@@ -3,7 +3,7 @@
 //! path that would use one is statically unreachable: the only way to get a
 //! loader is [`build_sniffers`], and that always refuses. A config that sets
 //! `settings.sniffers` therefore fails loudly at startup (and under
-//! `--check`) instead of silently running without its plugins.
+//! `--check`) instead of silently running without its sniffers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ impl SnifferLoader {
 pub fn build_sniffers(_cfg: &SniffersConfig) -> Result<(SnifferLoader, Sniffers)> {
     bail!(
         "this build of wayhouse was compiled without the `wasm-sniffers` cargo feature, \
-         so it cannot load sniffer plugins; remove `settings.sniffers` or use a full build"
+         so it cannot load sniffers; remove `settings.sniffers` or use a full build"
     )
 }
 

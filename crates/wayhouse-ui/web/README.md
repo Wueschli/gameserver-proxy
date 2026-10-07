@@ -3,7 +3,7 @@
 The React + Vite + TypeScript SPA `wayhouse-ui` (`crates/wayhouse-ui`, the phase 10+11
 admin GUI's BFF, `docs/10` "The admin GUI") serves to the browser. A
 **standalone `npm` project** — its own `package.json`, deliberately never a
-Cargo workspace member — the same reason `crates/plugins/` and
+Cargo workspace member — the same reason `crates/sniffers/` and
 `crates/wayhouse-config/fuzz/` are standalone: this build needs a different
 toolchain (Node/npm) than the rest of the repo, and `make check` on the main
 workspace must not require it.
@@ -40,7 +40,7 @@ make ui-test     # from the repo root
 CI runs them in the `ui` job, alongside `npm run build` (which type-checks).
 They mock `src/api.ts` / `useFleetSocket` at the module boundary, so they need no
 running `wayhouse-ui`. What they pin: every destructive action (drain, remove
-backend, set a backend `draining`/`disabled`, config rollback, plugin remove,
+backend, set a backend `draining`/`disabled`, config rollback, sniffer remove,
 applying Settings)
 asks for confirmation first and never calls the API on cancel; restorative
 actions (undrain, re-enable) don't ask; action buttons disable while a request
@@ -79,7 +79,7 @@ runs Vite's dev server with hot reload, proxying `/ui`, `/api`, `/ws`, and
 - `src/components/ConfigView.tsx` — the config editor + revision
   history/diff/rollback — phase 10's "full management" GUI level.
 
-Client-side routing uses `react-router` (`/fleet`, `/settings`, `/plugins`,
+Client-side routing uses `react-router` (`/fleet`, `/settings`, `/sniffers`,
 `/config-history`, `/tunnel`), so each page has its own URL and works with the
 browser back button.
 

@@ -23,12 +23,12 @@ the guidance here, not in them.
 
 ## What this is
 
-> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules;
-> they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
-> *Plugins* are integrations with other systems (e.g. the Pelican panel) and will live in
-> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
-> renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
-> "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
+> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules
+> (`crates/sniffers/`); they are moving to
+> [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). *Plugins* are
+> integrations with other systems (e.g. the Pelican panel) and will live in
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is
+> still open.
 
 A **game-agnostic game server reverse proxy**: one entry point in front of arbitrary
 game servers, forwarding TCP (and later UDP) transparently to backend pools without
@@ -141,7 +141,7 @@ crates/
                               child processes and drives them over real HTTP
                               (`cargo test -p wayhouse-fleet-tests`, included in `make check`); phase 14's
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
-  plugins/                   first-party sniffer plugins (a2s/minecraft/quic/wireguard/openvpn/raknet/teamspeak3/regex-firstbytes) + wayhouse-sniffer-abi — standalone workspace, `make plugins`
+  sniffers/                   first-party sniffers (a2s/minecraft/quic/wireguard/openvpn/raknet/teamspeak3/regex-firstbytes) + wayhouse-sniffer-abi — standalone workspace, `make sniffers`
 ```
 
 Dependency direction: `wayhouse` → `wayhouse-core` → `wayhouse-config` (`wayhouse-bench` → `wayhouse-core`
@@ -175,7 +175,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, sniffers and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/wayhouse-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/wayhouse-bench/README.md`) |
-| Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
+| Sniffers | `make sniffers` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/sniffers/` to `wasm32-unknown-unknown`; see `crates/sniffers/README.md`) |
 | wayhouse-ui frontend | `make ui` (needs Node/npm; builds `crates/wayhouse-ui/web/` to `dist/`, served by `wayhouse-ui --static-dir`; see `crates/wayhouse-ui/web/README.md`) |
 | wayhouse-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
 | Markdown | `make docs-fmt` (Prettier, writes) / `make docs-fmt-check` and `make docs-links` (relative links and anchors); both checks are the `docs` CI job. AGENTS.md, HANDOVER.md and `docs/NN-*.md` are in `.prettierignore` for now |
@@ -239,7 +239,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 - **Latency first.** Every design choice is weighed against added RTT (see NFR N1/N2
   in [`docs/01-requirements.md`](docs/01-requirements.md)). If you spawn a task or add
   a hop per connection, say so in the PR/commit and in `HANDOVER.md`.
-- **Agnostic core.** Game-specific knowledge only ever lives in optional sniffer
+- **Agnostic core.** Game-specific knowledge only ever lives in optional
   sniffers or in an external resolver — never in `wayhouse-core`'s routing/forwarding paths.
 - **Incremental, vertical slices.** Follow the phase plan in
   [`docs/08-roadmap.md`](docs/08-roadmap.md). Don't half-land a phase (e.g. don't add

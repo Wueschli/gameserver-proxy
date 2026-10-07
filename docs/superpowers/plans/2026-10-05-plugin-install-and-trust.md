@@ -1,6 +1,6 @@
 # Sniffer Install From a Registry (UI Backend and Sniffers Page) Implementation Plan (#183 phase C)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
@@ -100,7 +100,7 @@
 ### Task 5: Docs and manual items
 
 **Files:**
-- Modify: `docs/plugins.md` (operator section: adding registries, trust, risk, pinned instances), `docs/06-operations-observability.md` if metrics were added (none planned), `deploy/README.md` (UI flags), `HANDOVER.md`
+- Modify: `docs/sniffers.md` (operator section: adding registries, trust, risk, pinned instances), `docs/06-operations-observability.md` if metrics were added (none planned), `deploy/README.md` (UI flags), `HANDOVER.md`
 
 - [ ] **Step 1: Document** flags, default registry, risk model, and the **maintainer to-do list**: generate the minisign key pair offline, provide `OFFICIAL_PUBKEY`, store the signing secret in the sniffers repo (next plan).
 - [ ] **Step 2: Run** docs checks. **Commit** `docs: installing plugins from a registry (#183)`.

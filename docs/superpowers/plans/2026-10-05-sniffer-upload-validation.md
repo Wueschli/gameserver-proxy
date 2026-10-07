@@ -1,6 +1,6 @@
 # Sniffer Module Validation Implementation Plan (#171)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
@@ -18,7 +18,7 @@
 - ABI today: exports `memory`, `alloc(i32)->i32`, `sniff(i32,i32,i32,i32)->i64`; core module, **no imports** (no WASI).
 - Pin enforcement stays as is: with `settings.sniffers.modules` set, an unpinned or hash-mismatched file fails the whole scan (security property, keep).
 - `make check` (fmt, clippy `-D warnings`, tests, `test-minimal`) must pass; the minimal build (`--no-default-features`) uses `sniffer_loader_disabled.rs`, keep both in step.
-- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled sniffer is far smaller; check `ls -la crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
+- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled sniffer is far smaller; check `ls -la crates/sniffers/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
 
 ## Review Focus
 

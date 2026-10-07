@@ -1,6 +1,6 @@
 # Registry Crate: Index Format, Verification, Compatibility Implementation Plan (#183 phase B)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
@@ -38,8 +38,8 @@
 
 **Interfaces:**
 - Produces:
-  `pub struct Index { pub schema: u32, pub name: String, pub plugins: Vec<PluginEntry> }`,
-  `pub struct PluginEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
+  `pub struct Index { pub schema: u32, pub name: String, pub sniffers: Vec<SnifferEntry> }`,
+  `pub struct SnifferEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
   `pub struct VersionEntry { pub version: semver::Version, pub abi: String, pub min_proxy: semver::Version, pub url: String, pub sha256: String, pub size: u64, pub signature_url: Option<String>, pub limits: Limits, pub config: Option<String> }`,
   `pub struct Limits { pub max_memory_bytes: u64, pub call_timeout_ms: u64 }`,
   `pub fn parse_index(bytes: &[u8]) -> Result<Index, IndexError>` (size cap, JSON parse, `validate`), `impl Index { pub fn validate(&self) -> Result<(), IndexError> }`, `pub enum IndexError` (one variant per rule in Review Focus, `Display` texts name the sniffer and field).
@@ -56,7 +56,7 @@
 
 **Interfaces:**
 - Consumes: `Index`, `VersionEntry`.
-- Produces: `pub struct Environment { pub abi: String, pub proxy_versions: Vec<semver::Version> }` (all proxies the sniffer will be installed on: every one must satisfy `min_proxy`), `pub fn select(entry: &PluginEntry, env: &Environment) -> Result<&VersionEntry, Incompatible>`, `pub enum Incompatible { Abi { newest: String, host: String }, ProxyTooOld { needs: semver::Version, oldest_proxy: semver::Version }, NoVersions }`, `pub fn abi_matches(plugin: &str, host: &str) -> Result<bool, AbiParseError>` (exact match while major is 0, `plugin_minor <= host_minor` for major >= 1).
+- Produces: `pub struct Environment { pub abi: String, pub proxy_versions: Vec<semver::Version> }` (all proxies the sniffer will be installed on: every one must satisfy `min_proxy`), `pub fn select(entry: &SnifferEntry, env: &Environment) -> Result<&VersionEntry, Incompatible>`, `pub enum Incompatible { Abi { newest: String, host: String }, ProxyTooOld { needs: semver::Version, oldest_proxy: semver::Version }, NoVersions }`, `pub fn abi_matches(plugin: &str, host: &str) -> Result<bool, AbiParseError>` (exact match while major is 0, `plugin_minor <= host_minor` for major >= 1).
 
 - [ ] **Step 1: Write failing tests**: `selects_newest_compatible`, `skips_newer_version_with_other_abi`, `reports_abi_when_nothing_matches`, `reports_oldest_proxy_when_min_proxy_too_high`, `abi_zero_major_requires_exact_minor`, `abi_major_1_allows_older_minor`, `abi_rejects_garbage_string`, `prerelease_proxy_counts_as_its_release` (proxy `0.1.0-rc.1` satisfies `min_proxy 0.1.0`: use the stripped pre-release for the comparison and document it).
 - [ ] **Step 2: Run** `cargo test -p wayhouse-registry compat`. Expected: FAIL.
@@ -95,13 +95,13 @@
 ### Task 5: Docs
 
 **Files:**
-- Create: `docs/plugins.md` (format reference: index, manifest, ABI, limits, trust model, how to write and submit a sniffer; link to `crates/plugins/README.md` until the move); modify `docs/README.md` (list the chapter), `AGENTS.md` (layout and "when you touch X" row)
+- Create: `docs/sniffers.md` (format reference: index, manifest, ABI, limits, trust model, how to write and submit a sniffer; link to `crates/sniffers/README.md` until the move); modify `docs/README.md` (list the chapter), `AGENTS.md` (layout and "when you touch X" row)
 
-- [ ] **Step 1: Write** `docs/plugins.md` from the spec's Registry format and Trust sections; no new decisions.
+- [ ] **Step 1: Write** `docs/sniffers.md` from the spec's Registry format and Trust sections; no new decisions.
 - [ ] **Step 2: Run** the docs checks (`make docs-fmt-check`, link checker) if the docs overhaul landed. **Commit** `docs: plugin registry format reference (#183)`.
 
 ---
 
 ## Self-review
 
-Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the plugins-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `PluginEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.
+Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the sniffers-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `SnifferEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.

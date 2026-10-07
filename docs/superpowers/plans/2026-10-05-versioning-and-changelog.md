@@ -1,6 +1,6 @@
 # Versioning, Changelog and Release Automation Implementation Plan (#188)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
@@ -18,7 +18,7 @@
 - Versions stay 0.x. Nothing in this repo may produce `1.0.0`; going to 1.0 is the maintainer's explicit call and needs a deliberate policy-script edit.
 - 0.x rules: minor bump = anything breaking (config schema, CLI flags, admin/fleet HTTP APIs, wire protocols, plugin ABI, metric names, on-disk formats); patch = fixes and compatible additions.
 - `check_release.py` requires tag `== v<workspace version>`; so `v0.1.0-rc.1` needs `version = "0.1.0-rc.1"` in `Cargo.toml` and `Cargo.lock` (this corrects the transition plan, which said to bump to 0.1.0 before rc.1). The pre-release cut itself belongs to the rc plan; this plan only builds the machinery.
-- `crates/plugins/` keeps its own `0.0.1` (own workspace and lock; it leaves this repo in Phase 3). The policy script must not check it.
+- `crates/sniffers/` keeps its own `0.0.1` (own workspace and lock; it leaves this repo in Phase 3). The policy script must not check it.
 - Every `uses:` pinned by full commit SHA with a version comment, like the other workflows. Look the SHA up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` at implementation time and re-verify it.
 - `ci-ok` must not depend on release-please; the release-policy job may be added to its `needs`.
 - First changelog entry is handwritten (`Initial release`), release-please starts from `bootstrap-sha` = the merge commit of this PR, so 800 early commits do not become a changelog.
@@ -28,7 +28,7 @@
 - A release PR that bumps to `1.0.0` must fail CI (test with a fixture, not by trying).
 - A `Cargo.toml` bumped without `Cargo.lock` must fail CI with a message that names the fix.
 - Pre-release versions (`0.1.0-rc.1`) must pass the policy script and must not move `latest` (already handled in `release.yml`; add a regression assertion in the script test).
-- release-please must not touch `crates/plugins/`.
+- release-please must not touch `crates/sniffers/`.
 - Non-conventional PR titles are caught before merge (squash title is the changelog input).
 
 ---
@@ -87,7 +87,7 @@
 - [ ] **Step 1: Write `release-please-config.json`**: `{"bootstrap-sha":"<merge commit of this PR>","packages":{".":{"release-type":"simple","package-name":"wayhouse","bump-minor-pre-major":true,"bump-patch-for-minor-pre-major":true,"skip-github-release":true,"include-component-in-tag":false,"changelog-path":"CHANGELOG.md","extra-files":[{"type":"toml","path":"Cargo.toml","jsonpath":"$.workspace.package.version"}, <Cargo.lock entries>]}}}`. The `bootstrap-sha` is only known after merge: land the config in the PR with a placeholder-free approach by adding the SHA in a second tiny commit to main (`chore: set release-please bootstrap-sha`).
 - [ ] **Step 2: Spike the lockfile entries.** `Cargo.lock` has one `[[package]]` per workspace member (the 10 crates in the root `Cargo.toml`), each needing `$.package[?(@.name=='<crate>')].version`. Check release-please's TOML updater accepts filter expressions by running it locally: `npx release-please@latest release-pr --dry-run --repo-url wayhouse-proxy/wayhouse --token $GITHUB_TOKEN` (needs GitHub, so do this when the outage ends). Fallback if filters are unsupported: drop the lock entries and add a workflow step after the action that checks out the release branch, runs `cargo update --workspace`, commits `Cargo.lock` as the bot and pushes; either way the `release-policy` job proves the result.
 - [ ] **Step 3: Write the workflow**: `on: push: branches: [main]`; permissions `contents: write`, `pull-requests: write`, `actions: write`; step 1 the pinned action; step 2 (only when the action output `prs_created` is true or the PR exists): `gh workflow run ci.yml --ref release-please--branches--main` with `GH_TOKEN`, so `ci-ok` is reported on the release PR head. Document that fallback is a fine-grained PAT (`RELEASE_PLEASE_TOKEN`, contents and pull requests write) if dispatch checks do not satisfy the ruleset; the maintainer must create that secret, so ask rather than assume.
-- [ ] **Step 4: Verify with the real run** after merge: the release PR appears, proposes `0.1.0` once the first `feat`/breaking commit exists (use `release-as: 0.1.0` in the config for the first PR only, then remove it; note this in `RELEASING.md`), `release-policy` is green, no `crates/plugins` change in the diff. If it proposes `1.0.0`, `release-policy` must fail: confirm by reading the check.
+- [ ] **Step 4: Verify with the real run** after merge: the release PR appears, proposes `0.1.0` once the first `feat`/breaking commit exists (use `release-as: 0.1.0` in the config for the first PR only, then remove it; note this in `RELEASING.md`), `release-policy` is green, no `crates/sniffers` change in the diff. If it proposes `1.0.0`, `release-policy` must fail: confirm by reading the check.
 - [ ] **Step 5: Commit** `ci: release-please opens release PRs (#188)`.
 
 ---

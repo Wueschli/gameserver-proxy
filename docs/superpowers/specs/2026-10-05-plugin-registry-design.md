@@ -1,6 +1,6 @@
 # Sniffer registry, install and update design (#183, #184)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 Status: design for review (brainstormed 2026-10-05). Decisions from the maintainer are marked **[decided]**; everything else is a recommendation the implementation plans follow unless the maintainer changes it.
@@ -15,7 +15,7 @@ Sandboxing changes (the WASM sandbox stays: no imports, memory cap, call timeout
 
 ## Decisions already made
 
-- **[decided]** All bundled sniffers move to the sniffers repo; main keeps no sniffers, only the ABI crate and the conformance harness. Main's own tests use tiny WAT modules; e2e tests and the images that need real sniffers fetch a pinned sniffers release by tag and sha256 (`plugins.lock`).
+- **[decided]** All bundled sniffers move to the sniffers repo; main keeps no sniffers, only the ABI crate and the conformance harness. Main's own tests use tiny WAT modules; e2e tests and the images that need real sniffers fetch a pinned sniffers release by tag and sha256 (`sniffers.lock`).
 - **[decided]** Signatures: minisign for the official repo, **optional in the first cut** (verified when present). Sigstore deferred.
 - **[decided]** Update discovery is on demand from the UI only (no background polling).
 - **[decided]** Sniffers repo is bootstrapped after v0.1.0. ABI version lands before v0.1.0.

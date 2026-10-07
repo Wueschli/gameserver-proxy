@@ -49,7 +49,7 @@ pub(crate) struct RawSettings {
     /// filter. Startup-only.
     #[serde(default)]
     pub(crate) geo_db: Option<String>,
-    /// Sniffer plugin loader (phase 9). Absent ⇒ no plugins load; a `sniffer:`
+    /// Sniffer loader (phase 9). Absent ⇒ no sniffers load; a `sniffer:`
     /// route never matches. Startup-only for `dir` itself (rescanned on
     /// reload once the loader lands — phase 9 slice 4).
     #[serde(default)]
@@ -115,13 +115,13 @@ pub(crate) fn default_gossip_quorum_fraction() -> f64 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSniffers {
-    /// Directory scanned for `*.wasm` plugin modules.
+    /// Directory scanned for `*.wasm` sniffer modules.
     pub(crate) dir: String,
-    /// Per-call wall-clock budget (epoch interruption traps a plugin that
+    /// Per-call wall-clock budget (epoch interruption traps a sniffer that
     /// overruns this).
     #[serde(default = "default_sniffer_call_timeout_ms")]
     pub(crate) call_timeout_ms: u64,
-    /// Per-call memory ceiling for a plugin instance.
+    /// Per-call memory ceiling for a sniffer instance.
     #[serde(default = "default_sniffer_max_memory_bytes")]
     pub(crate) max_memory_bytes: usize,
     /// Optional supply-chain pin: a module whose file name isn't listed here,
@@ -135,9 +135,9 @@ pub(crate) struct RawSniffers {
 pub(crate) struct RawSnifferModule {
     pub(crate) name: String,
     pub(crate) sha256: String,
-    /// Opaque per-plugin configuration string, handed to the module on every
-    /// `sniff` call (the plugin parses it however it likes — e.g. a pattern for
-    /// `regex-firstbytes`). Omitted ⇒ the plugin gets an empty config.
+    /// Opaque per-sniffer configuration string, handed to the module on every
+    /// `sniff` call (the sniffer parses it however it likes — e.g. a pattern for
+    /// `regex-firstbytes`). Omitted ⇒ the sniffer gets an empty config.
     #[serde(default)]
     pub(crate) config: Option<String>,
 }
@@ -472,7 +472,7 @@ pub(crate) struct RawMatch {
     /// `sni` / `sniffer`: host patterns — exact, `*.suffix` or `.suffix`.
     #[serde(default)]
     pub(crate) host: Option<Vec<String>>,
-    /// `sniffer` only: the plugin name (see `KNOWN_SNIFFERS`).
+    /// `sniffer` only: the sniffer name (see `KNOWN_SNIFFERS`).
     #[serde(default)]
     pub(crate) sniffer: Option<String>,
 }

@@ -1,0 +1,13 @@
+[package]
+name = "openvpn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wayhouse sniffer: recognises OpenVPN client hard-reset packets (UDP and TCP framing)."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }

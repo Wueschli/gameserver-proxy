@@ -21,13 +21,13 @@ edits.
 
 Other targets (`make help` lists all):
 
-| Target                     | What it does                                                               |
-| -------------------------- | -------------------------------------------------------------------------- |
-| `make run`                 | run the proxy against `config.example.yaml`                                |
-| `make plugins`             | build the WASM sniffer plugins (needs the `wasm32-unknown-unknown` target) |
-| `make ui` / `make ui-test` | build / test the admin GUI frontend (needs Node and npm)                   |
-| `make bench` / `make fuzz` | latency harness / parser fuzzing (fuzz needs nightly and cargo-fuzz)       |
-| `make docs-fmt-check`      | check Markdown formatting (needs Node; see below)                          |
+| Target                     | What it does                                                         |
+| -------------------------- | -------------------------------------------------------------------- |
+| `make run`                 | run the proxy against `config.example.yaml`                          |
+| `make sniffers`            | build the WASM sniffers (needs the `wasm32-unknown-unknown` target)  |
+| `make ui` / `make ui-test` | build / test the admin GUI frontend (needs Node and npm)             |
+| `make bench` / `make fuzz` | latency harness / parser fuzzing (fuzz needs nightly and cargo-fuzz) |
+| `make docs-fmt-check`      | check Markdown formatting (needs Node; see below)                    |
 
 The full command table (tunnel e2e, deploy images, audit, and so on) is in
 [`AGENTS.md`](AGENTS.md#commands).
@@ -46,7 +46,7 @@ The full command table (tunnel e2e, deploy images, audit, and so on) is in
 | [`crates/wayhouse-http`](crates/wayhouse-http)               | Shared HTTP client and TLS server helpers                                         |
 | [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries                            |
 | [`crates/wayhouse-bench`](crates/wayhouse-bench)             | Latency / load harness                                                            |
-| [`crates/plugins`](crates/plugins)                           | First-party WASM sniffer plugins (standalone workspace)                           |
+| [`crates/sniffers`](crates/sniffers)                         | First-party WASM sniffers (standalone workspace)                                  |
 
 ## Conventions
 

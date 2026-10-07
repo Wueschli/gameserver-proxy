@@ -119,7 +119,7 @@ export function routeHint(srcIp: string, pool: string, ttlSec: number): Promise<
   });
 }
 
-// --- plugins (proxied to wayhouse-aggregator, fanned out to instances) ---
+// --- sniffers (proxied to wayhouse-aggregator, fanned out to instances) ---
 
 export function listInstanceSniffers(instance: string): Promise<SnifferInfo[]> {
   return requestJson(`/api/fleet/instances/${encodeURIComponent(instance)}/sniffers`);

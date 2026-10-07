@@ -23,7 +23,7 @@ impl HostPattern {
     }
 }
 
-/// Structured hints a sniffer plugin returns after inspecting a connection's
+/// Structured hints a sniffer returns after inspecting a connection's
 /// first bytes. Read-only: a sniffer never sees later bytes and never writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteHint {
@@ -39,7 +39,7 @@ pub struct RouteHint {
     pub reject: bool,
 }
 
-/// First-party sniffer plugins that recognise only a flow's handshake datagram
+/// First-party sniffers that recognise only a flow's handshake datagram
 /// (QUIC Initial, WireGuard initiation, OpenVPN hard reset, RakNet offline
 /// messages, TeamSpeak 3 init), by their conventional module names. A session
 /// that is evicted mid-flow reopens on a datagram none of them recognise.
@@ -77,7 +77,7 @@ pub enum Matcher {
     /// The TLS ClientHello's SNI host matches one of these patterns (TCP only;
     /// TLS is peeked, not terminated).
     Sni(Vec<HostPattern>),
-    /// The named sniffer plugin (see `wayhouse_core::sniff`) recognised the first
+    /// The named sniffer (see `wayhouse_core::sniff`) recognised the first
     /// bytes. With `host` patterns: also requires the hint's `host` to match
     /// one of them; empty `host` ⇒ matches on any recognition. A listener may
     /// use several sniffers; the first to recognise the bytes wins, and this
@@ -110,8 +110,8 @@ pub struct MatchContext<'a> {
     pub local: SocketAddr,
     pub first_bytes: &'a [u8],
     /// The listener's sniffer result, if it has `sniffer` routes and one of
-    /// its plugins recognised the bytes: the plugin's configured name and its
-    /// hint. A `sniffer` route only matches the plugin it names. `wayhouse-core`
+    /// its sniffers recognised the bytes: the sniffer's configured name and its
+    /// hint. A `sniffer` route only matches the sniffer it names. `wayhouse-core`
     /// fills this in before routing.
     pub sniff: Option<(&'a str, &'a RouteHint)>,
 }

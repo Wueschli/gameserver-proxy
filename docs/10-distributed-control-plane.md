@@ -981,7 +981,7 @@ under a self-reported `settings.group` path, e.g. `"eu/frankfurt/cluster-a"`
 in `IngestPayload`, unrelated to the Tier-1/Tier-2 hierarchy above), a
 schema-driven settings form over the same submitted YAML text (a raw-YAML
 panel stays underneath so every field — including ones the form has no
-control for yet — is always reachable), and a Plugins page for managing
+control for yet — is always reachable), and a Sniffers page for managing
 sniffer modules. (Later, 2026-10-03: a read-only Tunnel addresses page over
 the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Sniffer management needed new backend surface: `wayhouse` gained
 `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into

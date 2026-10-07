@@ -1,8 +1,8 @@
-//! Phase 9 slice 3: the WASM sniffer plugin loader.
+//! Phase 9 slice 3: the WASM sniffer loader.
 //!
 //! Loads `*.wasm` modules from `settings.sniffers.dir` into a
 //! [`wayhouse_core::sniff::Sniffers`] registry. Each module is a **core WASM
-//! module — no WASI, no host imports**: a plugin cannot touch the filesystem,
+//! module — no WASI, no host imports**: a sniffer cannot touch the filesystem,
 //! the clock, or the network; it only ever sees the bytes it's handed and
 //! returns a result. `wasmtime` is a binary-only dependency (like `reqwest`)
 //! — `wayhouse-core` has no sandboxing dependency, only the `Sniffer` trait /
@@ -26,21 +26,21 @@
 //! ```
 //!
 //! This encoding is also what the `wayhouse-sniffer-abi` guest helper crate
-//! (`crates/plugins/`) implements on the write side.
+//! (`crates/sniffers/`) implements on the write side.
 //!
 //! ### Version
 //! A module declares the ABI version it was built for in a custom section named
 //! `wayhouse.abi`: exactly 4 bytes, major then minor, both `u16` LE (now
 //! `0.1`, [`HOST_ABI`]). Depending on `wayhouse-sniffer-abi` adds the section to
-//! a plugin; nothing else to do. The host reads it with [`read_abi_version`]
+//! a sniffer; nothing else to do. The host reads it with [`read_abi_version`]
 //! before compiling, so no guest code runs, and rejects a module without the
 //! section, with a duplicate or wrong-sized one, or with another version. While
 //! the major is 0 the minor must match exactly (a 0.x minor bump may break the
-//! ABI); at 1.0 this relaxes to "same major, plugin minor <= host minor" by a
+//! ABI); at 1.0 this relaxes to "same major, sniffer minor <= host minor" by a
 //! deliberate decision. Other custom sections are ignored.
 //!
 //! ## Bounds
-//! Two independent bounds keep a plugin from stalling or ballooning the
+//! Two independent bounds keep a sniffer from stalling or ballooning the
 //! process: a shared `wasmtime::Engine` with epoch interruption — a ticker
 //! thread bumps the engine's epoch every `call_timeout_ms / 2`, and every call
 //! sets a two-tick deadline. The first tick can land anywhere after the call
@@ -70,7 +70,7 @@ struct StoreState {
     limits: StoreLimits,
 }
 
-/// One loaded plugin module, ready to be instantiated per call.
+/// One loaded sniffer module, ready to be instantiated per call.
 pub struct WasmSniffer {
     name: String,
     engine: Arc<Engine>,
@@ -92,7 +92,7 @@ enum CallError {
     Timeout,
     /// Any other WASM trap, or an instantiation / lookup failure.
     Trap,
-    /// The plugin returned a result the host couldn't decode.
+    /// The sniffer returned a result the host couldn't decode.
     BadOutput,
 }
 
@@ -215,7 +215,7 @@ const ABI_SECTION: &str = "wayhouse.abi";
 
 impl AbiVersion {
     /// While the major is 0 a minor bump may break the ABI (SemVer 0.x), so the
-    /// versions must match exactly. At 1.0 this relaxes to "same major, plugin
+    /// versions must match exactly. At 1.0 this relaxes to "same major, sniffer
     /// minor <= host minor" — a policy decision for then, not now.
     fn accepted_by(self, host: Self) -> bool {
         self.major == host.major && self.minor == host.minor
@@ -256,7 +256,7 @@ pub enum ModuleError {
     AbiMissing,
     AbiMalformed(usize),
     AbiIncompatible {
-        plugin: AbiVersion,
+        sniffer: AbiVersion,
         host: AbiVersion,
     },
     TooLarge {
@@ -286,9 +286,9 @@ impl std::fmt::Display for ModuleError {
                 "custom section `{ABI_SECTION}` must be one 4-byte section, found a {len}-byte payload \
                  or a duplicate"
             ),
-            Self::AbiIncompatible { plugin, host } => write!(
+            Self::AbiIncompatible { sniffer, host } => write!(
                 f,
-                "module targets sniffer ABI {plugin}, this host speaks {host}"
+                "module targets sniffer ABI {sniffer}, this host speaks {host}"
             ),
             Self::Compile(e) => write!(f, "not a valid wasm module: {e}"),
             Self::UnexpectedImport(i) => {
@@ -315,7 +315,7 @@ fn classify(e: wasmtime::Error) -> CallError {
 
 /// Decode the compact `RouteHint` encoding described in the module doc.
 /// `None` on any truncation / bad-UTF-8 / trailing-garbage shape — the caller
-/// counts that as `bad_output` rather than trusting a malformed plugin result.
+/// counts that as `bad_output` rather than trusting a malformed sniffer result.
 fn decode_route_hint(bytes: &[u8]) -> Option<RouteHint> {
     fn read_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
         let len = u16::from_le_bytes(bytes.get(*pos..*pos + 2)?.try_into().ok()?) as usize;
@@ -362,7 +362,7 @@ pub struct SnifferLoader {
 impl SnifferLoader {
     /// Build the engine and spawn its epoch-ticker thread (bumps the epoch
     /// every `call_timeout / 2`, forever — one thread for the process, not one
-    /// per plugin or per call).
+    /// per sniffer or per call).
     pub fn new(call_timeout: std::time::Duration) -> Result<Self> {
         let tick = call_timeout / EPOCH_DEADLINE_TICKS as u32;
         let mut engine_cfg = Config::new();
@@ -416,10 +416,10 @@ impl SnifferLoader {
                 max: MAX_MODULE_BYTES,
             });
         }
-        let plugin = read_abi_version(bytes)?;
-        if !plugin.accepted_by(HOST_ABI) {
+        let sniffer = read_abi_version(bytes)?;
+        if !sniffer.accepted_by(HOST_ABI) {
             return Err(ModuleError::AbiIncompatible {
-                plugin,
+                sniffer,
                 host: HOST_ABI,
             });
         }
@@ -469,7 +469,7 @@ impl SnifferLoader {
     }
 
     /// Scan `cfg.dir` for `*.wasm` modules and compile each into a
-    /// [`WasmSniffer`], returning the resulting name→plugin map. A module is
+    /// [`WasmSniffer`], returning the resulting name→sniffer map. A module is
     /// named after its file stem (`a2s.wasm` → sniffer `a2s`). When
     /// `cfg.modules` is non-empty every loaded file must have a matching pin
     /// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the
@@ -534,7 +534,7 @@ impl SnifferLoader {
                 max_memory_bytes: cfg.max_memory_bytes,
                 config,
             });
-            tracing::info!(sniffer = %name, path = %path.display(), "sniffer plugin loaded");
+            tracing::info!(sniffer = %name, path = %path.display(), "sniffer loaded");
             modules.insert(name, sniffer);
         }
         Ok(modules)
@@ -570,7 +570,7 @@ mod tests {
         }
     }
 
-    /// A minimal plugin: recognises `b"HOST:<name>\n"`, same contract as
+    /// A minimal sniffer: recognises `b"HOST:<name>\n"`, same contract as
     /// `wayhouse_core::sniff::tests::TestHost`, hand-written in WAT so the test
     /// needs no `wasm32-unknown-unknown` toolchain. It walks the input byte
     /// by byte looking for a `\n`, treats everything after `HOST:` (5 bytes)
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_plugin_recognises_the_host_end_to_end() {
+    fn wasm_sniffer_recognises_the_host_end_to_end() {
         let engine = epoch_engine();
         let sniffer = wasm_sniffer("test-host", HOST_SNIFFER_WAT, &engine);
         let hint = sniffer.sniff(b"HOST:survival.example.net").unwrap();
@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_plugin_call_times_out_under_the_epoch_deadline() {
+    fn wasm_sniffer_call_times_out_under_the_epoch_deadline() {
         // An infinite loop, no memory/sniff exports needed beyond what the
         // host looks up before calling — the trap must fire during the call.
         let wat = r#"
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_plugin_receives_its_config() {
+    fn wasm_sniffer_receives_its_config() {
         let engine = epoch_engine();
 
         let with_cfg = wasm_sniffer_cfg("cfg-echo", CFG_ECHO_WAT, &engine, b"eu-west".to_vec());
@@ -910,19 +910,19 @@ mod tests {
         p
     }
 
-    /// Every real built plugin must carry the host's ABI version in its
+    /// Every real built sniffer must carry the host's ABI version in its
     /// `wayhouse.abi` section — this is what catches the section being dropped by
-    /// `strip`/`lto` in the plugins release profile, and the host and guest
-    /// constants drifting apart. Needs `make plugins`; run with
-    /// `cargo test -p wayhouse built_plugins_declare -- --ignored`.
+    /// `strip`/`lto` in the sniffers release profile, and the host and guest
+    /// constants drifting apart. Needs `make sniffers`; run with
+    /// `cargo test -p wayhouse built_sniffers_declare -- --ignored`.
     #[test]
-    #[ignore = "needs `make plugins` to have built crates/plugins first"]
-    fn built_plugins_declare_the_host_abi() {
+    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
+    fn built_sniffers_declare_the_host_abi() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../plugins/target/wasm32-unknown-unknown/release");
+            .join("../sniffers/target/wasm32-unknown-unknown/release");
         assert!(
             dir.is_dir(),
-            "run `make plugins` first (looked in {})",
+            "run `make sniffers` first (looked in {})",
             dir.display()
         );
         let mut found = 0;
@@ -941,36 +941,36 @@ mod tests {
         }
         assert!(
             found >= 8,
-            "expected the 8 first-party plugins, found {found}"
+            "expected the 8 first-party sniffers, found {found}"
         );
     }
 
-    /// Loads the real first-party plugins (`crates/plugins/`) built by
-    /// `make plugins` and drives each one through this crate's own loader —
-    /// not just the plugin's own native `recognise()` unit tests, but the
+    /// Loads the real first-party sniffers (`crates/sniffers/`) built by
+    /// `make sniffers` and drives each one through this crate's own loader —
+    /// not just the sniffer's own native `recognise()` unit tests, but the
     /// actual `alloc`/`memory.write`/`sniff`/decode round trip through
     /// `wasmtime`. Ignored by default: it needs
-    /// `crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` to
+    /// `crates/sniffers/target/wasm32-unknown-unknown/release/*.wasm` to
     /// exist, which `cargo test -p wayhouse` alone does not build. Run with
-    /// `cargo test -p wayhouse plugin_artifacts -- --ignored` after `make plugins`.
+    /// `cargo test -p wayhouse sniffer_artifacts -- --ignored` after `make sniffers`.
     #[test]
-    #[ignore = "needs `make plugins` to have built crates/plugins first"]
-    fn first_party_plugin_artifacts_recognise_their_protocols() {
+    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
+    fn first_party_sniffer_artifacts_recognise_their_protocols() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../plugins/target/wasm32-unknown-unknown/release");
+            .join("../sniffers/target/wasm32-unknown-unknown/release");
         assert!(
             dir.is_dir(),
-            "run `make plugins` first (looked in {})",
+            "run `make sniffers` first (looked in {})",
             dir.display()
         );
-        // A real plugin's std allocator wants more than the 1 MiB `cfg()`
+        // A real sniffer's std allocator wants more than the 1 MiB `cfg()`
         // gives synthetic WAT fixtures above — use the config default.
         let mut sc = cfg(&dir);
         sc.max_memory_bytes = 16 * 1024 * 1024;
         // A long runway, as in `wasm_boundary_latency_vs_nfr_n1`: a call that
         // straddles an epoch tick legitimately times out, and on a busy CI
         // runner a 50 ms tick made this test fail now and then. Timeouts have
-        // their own test (`wasm_plugin_call_times_out_under_the_epoch_deadline`).
+        // their own test (`wasm_sniffer_call_times_out_under_the_epoch_deadline`).
         sc.call_timeout = Duration::from_secs(10);
         let (_loader, registry) = build_sniffers(&sc).unwrap();
 
@@ -990,9 +990,9 @@ mod tests {
         initial.extend_from_slice(&[0; 32]);
         assert_eq!(quic.sniff(&initial).unwrap().key.as_deref(), Some("quic"));
         assert!(quic.sniff(b"not quic at all").is_none());
-        // A real client Initial (aioquic, v1): the plugin decrypts it and
+        // A real client Initial (aioquic, v1): the sniffer decrypts it and
         // reports the SNI as the host.
-        let real: Vec<u8> = include_str!("../../plugins/quic/testdata/v1_mixed_case.hex")
+        let real: Vec<u8> = include_str!("../../sniffers/quic/testdata/v1_mixed_case.hex")
             .trim()
             .as_bytes()
             .chunks(2)
@@ -1054,16 +1054,16 @@ mod tests {
     }
 
     /// `regex_firstbytes` driven by a real `modules[].config` through the whole
-    /// loader path — proves the config-string plumbing (A2) plus the plugin's
+    /// loader path — proves the config-string plumbing (A2) plus the sniffer's
     /// own pattern language (A3) agree end to end.
     #[test]
-    #[ignore = "needs `make plugins` to have built crates/plugins first"]
+    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
     fn first_party_regex_firstbytes_matches_by_config() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../plugins/target/wasm32-unknown-unknown/release/regex_firstbytes.wasm");
+            .join("../sniffers/target/wasm32-unknown-unknown/release/regex_firstbytes.wasm");
         assert!(
             src.is_file(),
-            "run `make plugins` first (looked for {})",
+            "run `make sniffers` first (looked for {})",
             src.display()
         );
 
@@ -1104,29 +1104,29 @@ mod tests {
     /// from slice 3 — against NFR N1 (< 0.5 ms *added* latency; see
     /// `docs/01-requirements.md`), per the locked "latency is a gate, not an
     /// assumption" decision in `docs/08` Phase 9. Same ignored-by-default
-    /// convention as the artifact test above (needs `make plugins`); run with
+    /// convention as the artifact test above (needs `make sniffers`); run with
     /// `cargo test -p wayhouse --release wasm_boundary -- --ignored --nocapture`
     /// to see the printed report (release matters here — `wasmtime`'s
     /// Cranelift compiler and the sandboxed call are both far slower
     /// unoptimised).
     #[test]
-    #[ignore = "needs `make plugins` to have built crates/plugins first; run --release for real numbers"]
+    #[ignore = "needs `make sniffers` to have built crates/sniffers first; run --release for real numbers"]
     #[allow(clippy::items_after_statements)] // test-local items sit next to their only use
     fn wasm_boundary_latency_vs_nfr_n1() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../plugins/target/wasm32-unknown-unknown/release");
+            .join("../sniffers/target/wasm32-unknown-unknown/release");
         assert!(
             dir.is_dir(),
-            "run `make plugins` first (looked in {})",
+            "run `make sniffers` first (looked in {})",
             dir.display()
         );
         let mut sc = cfg(&dir);
         sc.max_memory_bytes = 16 * 1024 * 1024;
         // A long call_timeout for this bench specifically: the epoch ticker
-        // (slice 3) fires on wall-clock time shared across every plugin's
+        // (slice 3) fires on wall-clock time shared across every sniffer's
         // loop below, and a call that happens to straddle a tick boundary
         // legitimately traps — proven by
-        // `wasm_plugin_call_times_out_under_the_epoch_deadline` already. That
+        // `wasm_sniffer_call_times_out_under_the_epoch_deadline` already. That
         // mechanism is real and correct (and worth remembering: it means a
         // production `call_timeout_ms` is a *ceiling*, not a guarantee that
         // every call under it completes — a call started just before the
@@ -1155,7 +1155,7 @@ mod tests {
         }
         let (_loader, registry) = build_sniffers(&sc).unwrap();
 
-        // One representative, recognised payload per plugin — the
+        // One representative, recognised payload per sniffer — the
         // recognised path is the more expensive one (it also encodes and
         // decodes a `RouteHint`), so it's the one that matters for the gate.
         let minecraft_handshake = {
@@ -1200,7 +1200,7 @@ mod tests {
         let mut all_pass = true;
         println!(
             "\n{:<18} {:>10} {:>10} {:>10} {:>10}  N1",
-            "plugin", "p50 (us)", "p90 (us)", "p99 (us)", "max (us)"
+            "sniffer", "p50 (us)", "p90 (us)", "p99 (us)", "max (us)"
         );
         for (name, payload) in cases {
             let sniffer = registry
@@ -1236,12 +1236,12 @@ mod tests {
             );
         }
         println!(
-            "({ITERATIONS} calls/plugin after {WARMUP} warmup, one fresh Store+Instance per \
+            "({ITERATIONS} calls/sniffer after {WARMUP} warmup, one fresh Store+Instance per \
              call, release build matters — debug is not representative)\n"
         );
         assert!(
             all_pass,
-            "a plugin's median call exceeded NFR N1 (0.5ms) — see the InstancePre / \
+            "a sniffer's median call exceeded NFR N1 (0.5ms) — see the InstancePre / \
              warm-instance fallbacks noted in docs/08 Phase 9 if this trips in a real run"
         );
     }
@@ -1252,11 +1252,11 @@ mod tests {
     /// but a `host-echo.wasm` compiled from [`HOST_SNIFFER_WAT`] by
     /// [`build_sniffers`] scanning a directory, exactly as `settings.
     /// sniffers.dir` would at real startup, then a live TCP connection routed
-    /// by the hint that plugin returns. No `#[ignore]` needed — `wat::parse_str`
+    /// by the hint that sniffer returns. No `#[ignore]` needed — `wat::parse_str`
     /// builds the fixture inline, so this test needs neither
-    /// `wasm32-unknown-unknown` nor `make plugins`.
+    /// `wasm32-unknown-unknown` nor `make sniffers`.
     #[tokio::test]
-    async fn end_to_end_connection_routes_by_a_real_wasm_plugins_hint() {
+    async fn end_to_end_connection_routes_by_a_real_wasm_sniffers_hint() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
 
@@ -1520,8 +1520,8 @@ listeners:
         for minor in [0u16, 2] {
             let e = loader().validate(&with_abi(0, minor), MEM).unwrap_err();
             assert!(
-                matches!(e, ModuleError::AbiIncompatible { plugin, host }
-                    if plugin == AbiVersion { major: 0, minor } && host == HOST_ABI),
+                matches!(e, ModuleError::AbiIncompatible { sniffer, host }
+                    if sniffer == AbiVersion { major: 0, minor } && host == HOST_ABI),
                 "{e}"
             );
             let msg = e.to_string();
@@ -1686,7 +1686,7 @@ listeners:
         assert_eq!(sniffers.names(), ["good"], "the previous registry is kept");
         assert!(
             sniffers.get("good").is_some(),
-            "the previous plugin still resolves"
+            "the previous sniffer still resolves"
         );
     }
 

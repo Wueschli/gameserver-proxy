@@ -6,13 +6,13 @@ How a release is cut today, and how it would be cut from a release branch later.
 
 The workspace version in the root `Cargo.toml` (`[workspace.package] version`) is the single
 source of truth. Every binary reports it (`--version`, the `wayhouse_build_info` metric), and
-`release.yml` refuses a tag that is not `v` + that version. `crates/plugins/` has its own
+`release.yml` refuses a tag that is not `v` + that version. `crates/sniffers/` has its own
 workspace and keeps its own `0.0.1` until it leaves this repo.
 
 Versions stay `0.x`. Under 0.x:
 
 - **minor bump** (`0.N.0`): anything breaking: the config schema, CLI flags, the admin and
-  fleet HTTP APIs, wire protocols, the plugin ABI, metric names, on-disk formats;
+  fleet HTTP APIs, wire protocols, the sniffer ABI, metric names, on-disk formats;
 - **patch bump** (`0.N.P`): fixes and compatible additions.
 
 Moving to 1.0 is the maintainer's explicit call, never something tooling does.
@@ -96,7 +96,7 @@ Used when a batch of work must land together while `main` stays releasable.
 Switch to B when any of these holds:
 
 - a release needs several interdependent features that must land together (e.g. a wire
-  protocol or plugin ABI change spanning agent/controller/aggregator, cf. #185, #183, #184);
+  protocol or sniffer ABI change spanning agent/controller/aggregator, cf. #185, #183, #184);
 - `main` must stay releasable while such a batch is in flight;
 - the first 1.0 maintenance branch is needed.
 

@@ -203,16 +203,16 @@ Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
 Container images (six targets in one `Dockerfile`), a Docker Compose demo and plain
 Kubernetes manifests live in [`deploy/`](deploy/); they are reference material, not a
-supported deployment. Sniffers are described in [`crates/plugins`](crates/plugins).
+supported deployment. Sniffers are described in [`crates/sniffers`](crates/sniffers).
 
 ## Documentation
 
-> **Sniffers vs plugins.** _Sniffers_ are the WASM protocol/hostname sniffer modules;
-> they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
-> _Plugins_ are integrations with other systems (e.g. the Pelican panel) and will live in
-> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
-> renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
-> "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
+> **Sniffers vs plugins.** _Sniffers_ are the WASM protocol/hostname sniffer modules
+> (`crates/sniffers/`); they are moving to
+> [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). _Plugins_ are
+> integrations with other systems (e.g. the Pelican panel) and will live in
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is
+> still open.
 
 The design documents in [`docs/`](docs/) are the source of truth for how the proxy is
 meant to work. Start with the overview and the architecture chapter; the rest can be

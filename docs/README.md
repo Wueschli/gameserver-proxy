@@ -18,11 +18,11 @@ chapter disagree, the chapter wins and the code (or the chapter) gets fixed.
 | [00 Overview](00-overview.md)                                     | What problem this solves, goals, non-goals, glossary                                                  |
 | [01 Requirements](01-requirements.md)                             | Functional and non-functional requirements (the NFR latency budgets live here)                        |
 | [02 Architecture](02-architecture.md)                             | Data plane vs. control plane, components, data flows                                                  |
-| [03 Routing](03-routing.md)                                       | Route rules, matchers, balancers, sniffer plugins, external resolvers                                 |
+| [03 Routing](03-routing.md)                                       | Route rules, matchers, balancers, sniffers, external resolvers                                        |
 | [04 Transport and client IP](04-transport-and-client-ip.md)       | TCP/UDP handling, PROXY protocol, TPROXY transparent mode                                             |
 | [05 Configuration](05-configuration.md)                           | The full config schema with examples                                                                  |
 | [06 Operations and observability](06-operations-observability.md) | Metrics, logs, health checks, draining, admin and fleet endpoints, HA operations                      |
-| [07 Security and DDoS](07-security-ddos.md)                       | Filters, rate limits, amplification guard, plugin sandbox                                             |
+| [07 Security and DDoS](07-security-ddos.md)                       | Filters, rate limits, amplification guard, sniffer sandbox                                            |
 | [08 Roadmap](08-roadmap.md)                                       | Phases 0–14 with their status, and what is left                                                       |
 | [09 Technology choices](09-technology-choices.md)                 | Libraries, alternatives and the ADR table of locked decisions                                         |
 | [10 Distributed control plane](10-distributed-control-plane.md)   | `wayhouse-controller`, `wayhouse-aggregator`, `wayhouse-ui`, Raft HA, canary rollout, regional health |
@@ -40,8 +40,8 @@ finished. They are kept as a record of why things were built the way they were; 
 
 - [`../deploy/README.md`](../deploy/README.md): reference images, Compose demo and
   Kubernetes manifests.
-- [`../crates/plugins/README.md`](../crates/plugins/README.md): the WASM sniffer
-  plugin ABI and the first-party plugins.
+- [`../crates/sniffers/README.md`](../crates/sniffers/README.md): the WASM sniffer
+  ABI and the first-party sniffers.
 - [`../crates/wayhouse-bench/README.md`](../crates/wayhouse-bench/README.md): the latency / load
   harness.
 - [`../crates/wayhouse-config/fuzz/README.md`](../crates/wayhouse-config/fuzz/README.md): fuzz

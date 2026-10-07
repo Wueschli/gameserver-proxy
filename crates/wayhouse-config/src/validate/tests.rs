@@ -1134,7 +1134,7 @@ fn parses_sniffers_settings_with_defaults_and_pins() {
     assert!(s.modules.is_empty());
 
     let yaml = format!(
-        "settings:\n  sniffers:\n    dir: \"/plugins\"\n    call_timeout_ms: 5\n    \
+        "settings:\n  sniffers:\n    dir: \"/sniffers\"\n    call_timeout_ms: 5\n    \
          max_memory_bytes: 1048576\n    modules:\n      - name: a2s\n        sha256: \"{}\"\n      \
          - name: regex_firstbytes\n        sha256: \"{}\"\n        config: \"^GET \"\n\
          pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
@@ -1153,7 +1153,7 @@ fn parses_sniffers_settings_with_defaults_and_pins() {
 }
 
 #[test]
-fn absent_sniffers_settings_load_no_plugins() {
+fn absent_sniffers_settings_load_no_sniffers() {
     let yaml = "pools:\n  - name: p\n    targets: [\"127.0.0.1:1\"]\n\
                 listeners:\n  - name: l\n    bind: \"0.0.0.0:7777\"\n    pool: p\n";
     assert!(parse_str(yaml).unwrap().sniffers.is_none());

@@ -1,6 +1,6 @@
 # Sniffer Updates and Rollback Implementation Plan (#184)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
@@ -105,7 +105,7 @@
 ### Task 6: Docs
 
 **Files:**
-- Modify: `docs/plugins.md` (update and rollback section), `docs/06-operations-observability.md` if a metric was added (no), `HANDOVER.md`
+- Modify: `docs/sniffers.md` (update and rollback section), `docs/06-operations-observability.md` if a metric was added (no), `HANDOVER.md`
 
 - [ ] **Step 1: Document** the flow, `.prev` semantics, automatic fallback, the pinned-instance rule and what "unknown build" means. **Commit** `docs: plugin updates and rollback (#184)`.
 

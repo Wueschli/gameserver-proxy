@@ -19,7 +19,7 @@ runs:
       shell: bash
       run: |
         echo "rustc=$(rustc -V | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
-        echo "lock=$(cat Cargo.lock crates/plugins/Cargo.lock 2>/dev/null | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
+        echo "lock=$(cat Cargo.lock crates/sniffers/Cargo.lock 2>/dev/null | sha256sum | head -c 10)" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: |

@@ -137,7 +137,7 @@ unpinned code.
 "latency is a gate, not an assumption" decision from `docs/08` Phase 9,
 measured end to end (real `alloc`/`memory.write`/`sniff`/decode round trip,
 a fresh `Store` + `Instance` per call, release build) against the three
-first-party plugins in `crates/plugins/`:
+first-party sniffers in `crates/sniffers/`:
 
 | sniffer | p50 | p90 | p99 | max |
 |---|---|---|---|---|
@@ -146,7 +146,7 @@ first-party plugins in `crates/plugins/`:
 | `regex_firstbytes` | 8.3 µs | 9.1 µs | 12.0 µs | 361 µs |
 
 (Loopback numbers on the same box as `crates/wayhouse-bench`'s N1/N2 measurements;
-2000 calls/plugin after warmup. Reproduce with `make plugins` then
+2000 calls/sniffer after warmup. Reproduce with `make sniffers` then
 `cargo test -p wayhouse --release wasm_boundary -- --ignored --nocapture` in
 `crates/wayhouse/src/sniffer_loader.rs`.) All three pass N1 with wide margin — a
 fresh per-call `Store`/`Instance` (the "no state survives between
