@@ -68,6 +68,10 @@ pub fn operator_router() -> Router<AppState> {
             "/api/fleet/sniffers/{name}",
             axum::routing::delete(delete_sniffer),
         )
+        .route(
+            "/api/fleet/sniffers/{name}/rollback",
+            post(rollback_sniffer),
+        )
 }
 
 async fn get_pools(State(state): State<AppState>) -> Response {
@@ -219,6 +223,21 @@ async fn delete_sniffer(
     .await
 }
 
+async fn rollback_sniffer(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(name): Path<String>,
+) -> Response {
+    proxy(
+        &state,
+        Method::POST,
+        &format!("/fleet/sniffers/{name}/rollback"),
+        None,
+        actor,
+    )
+    .await
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -356,6 +375,67 @@ mod tests {
 
     fn cookie(session_id: &str) -> String {
         format!("{}={session_id}", crate::api::SESSION_COOKIE)
+    }
+
+    #[tokio::test]
+    async fn ui_proxies_rollback_with_the_actor_header_and_mutating_role() {
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let upstream = Router::new().route(
+            "/fleet/sniffers/demo/rollback",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let seen = seen2.clone();
+                async move {
+                    seen.lock().unwrap().push(
+                        headers
+                            .get("X-Actor")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    (StatusCode::OK, r#"{"results":[]}"#)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let state = crate::api::AppState::new(Some("secret".into()))
+            .with_aggregator(format!("http://{addr}"), None);
+        let sessions = state.sessions.clone();
+        let operator = sessions.create(crate::session::Session {
+            role: crate::role::Role::Operator,
+            username: Some("ann".into()),
+        });
+        let viewer = sessions.create(crate::session::Session {
+            role: crate::role::Role::Viewer,
+            username: Some("vic".into()),
+        });
+        let app = crate::api::router(state);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::post("/api/fleet/sniffers/demo/rollback")
+                    .header(header::COOKIE, cookie(&viewer))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert!(seen.lock().unwrap().is_empty(), "a viewer reaches nothing");
+
+        let ok = app
+            .oneshot(
+                Request::post("/api/fleet/sniffers/demo/rollback")
+                    .header(header::COOKIE, cookie(&operator))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(*seen.lock().unwrap(), vec![Some("ann".to_string())]);
     }
 
     #[tokio::test]

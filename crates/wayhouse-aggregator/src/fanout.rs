@@ -85,6 +85,7 @@ pub fn router() -> Router<AppState> {
             "/fleet/sniffers/{name}",
             axum::routing::delete(delete_sniffer),
         )
+        .route("/fleet/sniffers/{name}/rollback", post(rollback_sniffer))
 }
 
 fn bad_request(error: String) -> Response {
@@ -270,6 +271,27 @@ async fn delete_sniffer(
         &state,
         Method::DELETE,
         Target::new(&["admin", "sniffers", &name]),
+        None,
+        actor.as_deref(),
+    )
+    .await
+}
+
+/// `POST /fleet/sniffers/{name}/rollback` — broadcasts a rollback to every
+/// known instance's `POST /admin/sniffers/{name}/rollback`. An instance
+/// without a previous version answers `404`; that shows up per instance in
+/// the results rather than failing the whole call.
+async fn rollback_sniffer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let actor = actor_header(&headers);
+    tracing::info!(%name, ?actor, verb = "rollback_sniffer", "fan-out verb");
+    broadcast(
+        &state,
+        Method::POST,
+        Target::new(&["admin", "sniffers", &name, "rollback"]),
         None,
         actor.as_deref(),
     )
@@ -1014,6 +1036,82 @@ mod tests {
         assert_eq!(body["results"][0]["status"], 200);
     }
 
+    #[tokio::test]
+    async fn fleet_rollback_fans_out_to_every_instance() {
+        let (url_a, hit_a) = spawn_mock_instance(
+            "/admin/sniffers/demo/rollback",
+            Method::POST,
+            StatusCode::OK,
+            "rolled back demo\n",
+        )
+        .await;
+        let (url_b, hit_b) = spawn_mock_instance(
+            "/admin/sniffers/demo/rollback",
+            Method::POST,
+            StatusCode::OK,
+            "rolled back demo\n",
+        )
+        .await;
+        let state = test_state();
+        state.store.ingest(ingest_payload("a", &url_a));
+        state.store.ingest(ingest_payload("b", &url_b));
+        let resp = crate::api::router(state)
+            .oneshot(
+                Request::post("/fleet/sniffers/demo/rollback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 2);
+        assert!(hit_a.lock().unwrap().is_some() && hit_b.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn fleet_rollback_reports_partial_failures() {
+        let (ok_url, _) = spawn_mock_instance(
+            "/admin/sniffers/demo/rollback",
+            Method::POST,
+            StatusCode::OK,
+            "rolled back demo\n",
+        )
+        .await;
+        let (no_prev_url, _) = spawn_mock_instance(
+            "/admin/sniffers/demo/rollback",
+            Method::POST,
+            StatusCode::NOT_FOUND,
+            "no previous version\n",
+        )
+        .await;
+        let state = test_state();
+        state.store.ingest(ingest_payload("a", &ok_url));
+        state.store.ingest(ingest_payload("b", &no_prev_url));
+        let resp = crate::api::router(state)
+            .oneshot(
+                Request::post("/fleet/sniffers/demo/rollback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let statuses: Vec<i64> = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["status"].as_i64().unwrap())
+            .collect();
+        assert!(statuses.contains(&200) && statuses.contains(&404), "{body}");
+    }
+
     /// #111: a decoded `/` or `..` in a path parameter must not steer the
     /// forwarded request to another admin path (carrying the instance token).
     #[tokio::test]
@@ -1046,6 +1144,7 @@ mod tests {
             ),
             ("DELETE", "/fleet/pools/local/backends/%2e%2e"),
             ("DELETE", "/fleet/sniffers/..%2Fdrain"),
+            ("POST", "/fleet/sniffers/..%2Fdrain/rollback"),
         ] {
             let resp = app
                 .clone()
