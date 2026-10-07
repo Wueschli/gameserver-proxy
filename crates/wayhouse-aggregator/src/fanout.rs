@@ -365,6 +365,22 @@ struct InstanceResult {
     status: Option<u16>,
     /// Set instead of `status` when the instance couldn't be reached.
     error: Option<String>,
+    /// The start of the instance's reply text when it refused (non-2xx), so a
+    /// caller can tell apart refusals that share a status (e.g. two kinds of 409).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+/// How much of a refusing proxy's reply is passed on as `detail`.
+const DETAIL_BYTES: usize = 200;
+
+/// The first [`DETAIL_BYTES`] of `text`, cut on a character boundary.
+fn detail_of(text: &str) -> String {
+    let mut end = text.len().min(DETAIL_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// Calls every known instance's admin API at once, concurrently (a
@@ -419,6 +435,7 @@ async fn broadcast_with_content_type(
                         instance,
                         status: None,
                         error: Some(error),
+                        detail: None,
                     }
                 }
             };
@@ -440,17 +457,28 @@ async fn broadcast_with_content_type(
                         instance,
                         status: Some(resp.status().as_u16()),
                         error: Some(resp.text().await.unwrap_or_default()),
+                        detail: None,
                     }
                 }
-                Ok(resp) => InstanceResult {
-                    instance,
-                    status: Some(resp.status().as_u16()),
-                    error: None,
-                },
+                Ok(resp) => {
+                    let status = resp.status();
+                    let detail = if status.is_success() {
+                        None
+                    } else {
+                        resp.text().await.ok().map(|t| detail_of(&t))
+                    };
+                    InstanceResult {
+                        instance,
+                        status: Some(status.as_u16()),
+                        error: None,
+                        detail,
+                    }
+                }
                 Err(e) => InstanceResult {
                     instance,
                     status: None,
                     error: Some(wayhouse_http::error_chain(&e)),
+                    detail: None,
                 },
             }
         });
@@ -791,6 +819,33 @@ mod tests {
             .unwrap();
         assert!(bad["status"].is_null());
         assert!(bad["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_carries_the_start_of_the_proxys_reply_as_detail() {
+        let long = "x".repeat(500);
+        let long: &'static str = Box::leak(format!("pinned: {long}").into_boxed_str());
+        let (url, _) =
+            spawn_mock_instance("/admin/sniffers", Method::POST, StatusCode::CONFLICT, long).await;
+        let state = test_state();
+        state.store.ingest(ingest_payload("pinned-proxy", &url));
+        let resp = crate::api::router(state)
+            .oneshot(
+                Request::post("/fleet/sniffers?name=demo")
+                    .body(Body::from(vec![0u8; 8]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let r = &body["results"][0];
+        assert_eq!(r["status"], 409);
+        let detail = r["detail"].as_str().unwrap();
+        assert!(detail.starts_with("pinned: "), "{detail}");
+        assert!(detail.len() <= 200, "{}", detail.len());
     }
 
     #[tokio::test]

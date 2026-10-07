@@ -135,9 +135,11 @@ what it receives. The routes are `GET /api/registries` and `GET /api/registries/
 - **Signatures.** The official public key is not set yet, so signatures are not checked and installs
   are reported `signed: false`. See the maintainer to-do below.
 - **Partial installs.** The reply lists every proxy. A proxy that rejects the module because it pins
-  its sniffers (`settings.sniffers.modules`) answers `409`; it is reported as `pinned` together with
-  the `name` and `sha256` to add to its pin list, and does not count as a failure of the others.
-  `200` means every proxy accepted, `207` some did, `502` none did.
+  its sniffers (`settings.sniffers.modules`) answers `409` with a reply starting `pinned:`; it is
+  reported as `pinned` together with the `name` and `sha256` to add to its pin list. Any other
+  refusal (including the `409` of a proxy with `settings.sniffers` unset, which needs a restart) is
+  reported with its `detail` text, not as pinned. `200` means every proxy accepted, `207` some did
+  or some are pinned, `502` none did and none is pinned.
 
 **Maintainer to-do.** Generate the minisign key pair offline, put the public half in
 `crates/wayhouse-ui/src/registry_keys.rs`, and store the secret in the sniffers repository (see the

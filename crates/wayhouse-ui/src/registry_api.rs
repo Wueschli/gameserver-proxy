@@ -160,6 +160,22 @@ struct FanOutResult {
     instance: String,
     status: Option<u16>,
     error: Option<String>,
+    /// The start of a refusing proxy's reply; absent from older aggregators.
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+impl FanOutResult {
+    /// The proxy pins its sniffers and this module is not on the list. A proxy
+    /// answers `409` for that and also when `settings.sniffers` is unset, so the
+    /// status alone is not enough: the reply text starts with `pinned:`.
+    fn is_pinned(&self) -> bool {
+        self.status == Some(409)
+            && self
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("pinned:"))
+    }
 }
 
 async fn install(
@@ -266,13 +282,15 @@ async fn install(
     let pinned: Vec<_> = fan
         .results
         .iter()
-        .filter(|r| r.status == Some(409))
+        .filter(|r| r.is_pinned())
         .map(|r| json!({ "instance": r.instance, "pin": { "name": entry.name, "sha256": sha256 } }))
         .collect();
     let accepted = fan.results.iter().filter(|r| ok(r)).count();
+    // A pinned proxy is not a failed install, but nothing was installed on it
+    // either: it needs the operator to add the pin line.
     let status = if accepted == fan.results.len() {
         StatusCode::OK
-    } else if accepted > 0 {
+    } else if accepted + pinned.len() > 0 {
         StatusCode::MULTI_STATUS
     } else {
         StatusCode::BAD_GATEWAY
@@ -284,8 +302,9 @@ async fn install(
             json!({
                 "instance": r.instance,
                 "ok": ok(r),
-                "pinned": r.status == Some(409),
+                "pinned": r.is_pinned(),
                 "error": r.error,
+                "detail": r.detail,
                 "status": r.status,
             })
         })
@@ -700,7 +719,7 @@ mod tests {
         let base = fake_registry(module.clone(), "0.1", None).await;
         let (agg, _) = fake_aggregator(json!([
             { "instance": "a", "status": 200, "error": null },
-            { "instance": "b", "status": 409, "error": null },
+            { "instance": "b", "status": 409, "error": null, "detail": "pinned: demo is not listed" },
         ]))
         .await;
         let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
@@ -713,6 +732,43 @@ mod tests {
             body["pinned_instances"][0]["pin"]["sha256"],
             format!("{:x}", Sha256::digest(&module))
         );
+    }
+
+    #[tokio::test]
+    async fn a_409_that_is_not_a_pin_is_not_reported_as_pinned() {
+        let module = wat::parse_str(MODULE_WAT).unwrap();
+        let base = fake_registry(module, "0.1", None).await;
+        let (agg, _) = fake_aggregator(json!([
+            { "instance": "a", "status": 200, "error": null },
+            { "instance": "b", "status": 409, "error": null,
+              "detail": "settings.sniffers is not configured on this instance; turning it on needs a restart" },
+        ]))
+        .await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = h.install().await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert_eq!(body["results"][1]["pinned"], false);
+        assert_eq!(body["results"][1]["ok"], false);
+        assert!(body["results"][1]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
+        assert!(body["pinned_instances"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fleet_that_is_all_pinned_is_a_207_not_a_502() {
+        let module = wat::parse_str(MODULE_WAT).unwrap();
+        let base = fake_registry(module, "0.1", None).await;
+        let (agg, _) = fake_aggregator(json!([
+            { "instance": "a", "status": 409, "error": null, "detail": "pinned: demo is not listed" },
+            { "instance": "b", "status": 409, "error": null, "detail": "pinned: demo is not listed" },
+        ]))
+        .await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = h.install().await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert_eq!(body["pinned_instances"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
