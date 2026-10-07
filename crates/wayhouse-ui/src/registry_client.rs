@@ -67,7 +67,25 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
     let unique_local = (s[0] & 0xfe00) == 0xfc00;
     let link_local = (s[0] & 0xffc0) == 0xfe80;
-    !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || unique_local || link_local)
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || unique_local || link_local {
+        return false;
+    }
+    // An IPv4 address carried inside IPv6 is judged as that IPv4 address: a DNS64/NAT64
+    // gateway, a 6to4 relay or an old IPv4-compatible address would reach it.
+    let embedded = |hi: u16, lo: u16| {
+        let [a, b] = hi.to_be_bytes();
+        let [c, d] = lo.to_be_bytes();
+        Ipv4Addr::new(a, b, c, d)
+    };
+    let nat64 = s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0);
+    let ipv4_compatible = s[..6].iter().all(|&x| x == 0);
+    if nat64 || ipv4_compatible {
+        return is_public_v4(embedded(s[6], s[7]));
+    }
+    if s[0] == 0x2002 {
+        return is_public_v4(embedded(s[1], s[2]));
+    }
+    true
 }
 
 /// Why a URL (the first one, or a redirect target) may not be fetched. `None`
@@ -152,7 +170,10 @@ impl RegistryClient {
                 None => attempt.follow(),
             }
         });
+        // `no_proxy`: a forward proxy resolves the destination itself, which would walk
+        // around the address guard in the resolver below.
         let mut builder = wayhouse_http::builder()
+            .no_proxy()
             .redirect(policy)
             .connect_timeout(Duration::from_secs(10))
             .timeout(total);
@@ -439,12 +460,33 @@ mod tests {
             "fe80::1",
             "ff02::1",
             "::ffff:10.0.0.1",
+            // IPv4 hidden inside IPv6: NAT64, 6to4 and the old IPv4-compatible form.
+            "64:ff9b::a00:1",
+            "64:ff9b::7f00:1",
+            "2002:a00:1::",
+            "2002:a9fe:a9fe::",
+            "::a00:1",
         ] {
             assert!(!is_public(private.parse().unwrap()), "{private}");
         }
-        for public in ["1.1.1.1", "8.8.8.8", "140.82.112.3", "2606:4700::1111"] {
+        for public in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "140.82.112.3",
+            "2606:4700::1111",
+            // The same embeddings of a public IPv4 stay reachable (IPv6-only networks use NAT64).
+            "64:ff9b::808:808",
+            "2002:808:808::",
+        ] {
             assert!(is_public(public.parse().unwrap()), "{public}");
         }
+    }
+
+    #[test]
+    fn the_client_never_uses_an_environment_proxy() {
+        // A proxy resolves the destination itself, which would bypass the address guard.
+        let shown = format!("{:?}", RegistryClient::new().http);
+        assert!(!shown.contains("proxies:"), "{shown}");
     }
 
     #[tokio::test]

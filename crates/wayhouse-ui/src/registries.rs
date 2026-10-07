@@ -148,8 +148,12 @@ impl Registries {
             url,
             official: false,
         };
-        inner.added.push(entry.clone());
-        self.persist(&inner)?;
+        // Write first, change memory after: a failed write must not leave the list
+        // showing something that would be gone after a restart.
+        let mut candidate = inner.added.clone();
+        candidate.push(entry.clone());
+        self.persist(&candidate, inner.default_removed)?;
+        inner.added = candidate;
         Ok(entry)
     }
 
@@ -169,29 +173,29 @@ impl Registries {
 
     pub fn remove(&self, id: &str) -> Result<bool, RegistriesError> {
         let mut inner = self.inner.lock().unwrap();
-        let before = inner.added.len();
-        inner.added.retain(|r| r.id != id);
+        let candidate: Vec<RegistryRef> =
+            inner.added.iter().filter(|r| r.id != id).cloned().collect();
         let removed_default =
             self.include_default && !inner.default_removed && id == default_ref().id;
-        if removed_default {
-            inner.default_removed = true;
-        }
-        let changed = inner.added.len() != before || removed_default;
+        let changed = candidate.len() != inner.added.len() || removed_default;
         if changed {
-            self.persist(&inner)?;
+            let default_removed = inner.default_removed || removed_default;
+            self.persist(&candidate, default_removed)?;
+            inner.added = candidate;
+            inner.default_removed = default_removed;
         }
         Ok(changed)
     }
 
     /// Write the file atomically (temp file in the same directory, then rename),
     /// mode 0600. In-memory only when no path was configured.
-    fn persist(&self, inner: &Inner) -> Result<(), RegistriesError> {
+    fn persist(&self, added: &[RegistryRef], default_removed: bool) -> Result<(), RegistriesError> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         let stored = Stored {
-            registries: inner.added.clone(),
-            default_removed: inner.default_removed,
+            registries: added.to_vec(),
+            default_removed,
         };
         let json =
             serde_json::to_vec_pretty(&stored).map_err(|e| RegistriesError::File(e.to_string()))?;
@@ -322,6 +326,40 @@ mod tests {
         r.remove(&id).unwrap();
         let again = Registries::load(Some(file), true).unwrap();
         assert!(again.get(&id).is_none(), "a removed default stays removed");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_list_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("registries.json");
+        let r = Registries::load(Some(file.clone()), false).unwrap();
+        let kept = r.add("https://example.com/a.json", None).unwrap();
+        // The temp file's path is a directory, so every later write fails.
+        std::fs::create_dir(dir.path().join("registries.json.tmp")).unwrap();
+
+        assert!(matches!(
+            r.add("https://example.com/b.json", None),
+            Err(RegistriesError::File(_))
+        ));
+        assert_eq!(
+            r.list(),
+            vec![kept.clone()],
+            "a failed add must not show up"
+        );
+
+        assert!(matches!(r.remove(&kept.id), Err(RegistriesError::File(_))));
+        assert_eq!(r.list(), vec![kept], "a failed remove must not take effect");
+    }
+
+    #[test]
+    fn a_failed_write_does_not_forget_the_default_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("registries.json");
+        let r = Registries::load(Some(file), true).unwrap();
+        std::fs::create_dir(dir.path().join("registries.json.tmp")).unwrap();
+        let id = r.list()[0].id.clone();
+        assert!(r.remove(&id).is_err());
+        assert!(r.get(&id).is_some());
     }
 
     #[test]
