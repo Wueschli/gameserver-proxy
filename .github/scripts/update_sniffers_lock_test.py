@@ -8,6 +8,9 @@ import tempfile
 import tomllib
 import unittest
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from fetch_sniffers import load_lock  # noqa: E402
+
 SCRIPT = pathlib.Path(__file__).with_name("update_sniffers_lock.py")
 BASE = "https://github.com/wayhouse-proxy/sniffers/releases/download"
 H = lambda c: c * 64  # noqa: E731
@@ -66,6 +69,7 @@ class UpdateLock(unittest.TestCase):
         index = {"sniffers": [entry("quic", [("0.1.0", H("c"))]), entry("a2s", [("0.1.0", H("a"))])]}
         _, out = self.run_it(index)
         first = out.read_text()
+        load_lock(out)
         _, out = self.run_it(index)
         self.assertEqual(first, out.read_text())
         self.assertLess(first.index("[sniffers.a2s]"), first.index("[sniffers.quic]"))

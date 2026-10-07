@@ -91,7 +91,7 @@ class FetchTest(unittest.TestCase):
 
     def test_test_flag_needs_the_environment_variable(self):
         self.publish("a2s", b"AAA")
-        r = self.run_fetch(self.lock(a2s=sha(b"AAA")), test_mode=False)
+        self.lock(a2s=sha(b"AAA"))
         env = {k: v for k, v in os.environ.items() if k != "WAYHOUSE_FETCH_TEST"}
         r = subprocess.run(
             [sys.executable, str(SCRIPT), "--lock", str(self.root / "sniffers.lock"),

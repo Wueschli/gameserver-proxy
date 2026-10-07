@@ -110,9 +110,17 @@ def main():
         if got != digest:
             failures.append(f"{name}: sha256 mismatch for {url}: lock has {digest}, got {got}")
             continue
-        with tempfile.NamedTemporaryFile(dir=out, delete=False, suffix=".part") as t:
-            t.write(data)
-        os.replace(t.name, dest)
+        part = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=out, delete=False, suffix=".part") as t:
+                part = t.name
+                t.write(data)
+            os.replace(part, dest)
+        except OSError as e:
+            if part:
+                pathlib.Path(part).unlink(missing_ok=True)
+            failures.append(f"{name}: cannot write {dest}: {e}")
+            continue
         print(f"{name}: fetched {len(data)} bytes", file=sys.stderr)
 
     if failures:

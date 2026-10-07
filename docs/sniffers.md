@@ -194,9 +194,9 @@ This writes into the same `dir` and triggers the same rescan, so it is interchan
 copying files. `wayhouse-aggregator` fans the upload and delete out to every known instance
 (`POST`/`DELETE /fleet/sniffers[/{name}]`), and the UI's Sniffers page uses that fan-out. All three
 routes answer `409` on an instance with no `settings.sniffers` block (turning sniffing on from
-nothing is startup-only, see `docs/05-configuration.md`). If `modules` pins hashes, an unpinned new
-module loads but the next rescan rejects the whole update until the pin list is changed the normal
-way (file edit or controller revision).
+nothing is startup-only, see `docs/05-configuration.md`). If `modules` pins hashes, an upload whose
+name and hash are not listed is refused with `409` (`pinned:`) and writes nothing; add the matching
+name and SHA-256 to `modules` first.
 
 ## What this repository tests against the official sniffers
 
