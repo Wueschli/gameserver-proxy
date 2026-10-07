@@ -252,8 +252,9 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 
 Game-protocol sniffers load into a running proxy from disk, sandboxed, never
 compiled in and never a fork. A `sniffer:` route resolves its name against the
-loaded set. The first-party sniffers (`a2s`, `minecraft`, `regex-firstbytes`) live in
-[`crates/sniffers/`](../crates/sniffers/README.md).
+loaded set. The official sniffers (`a2s`, `minecraft`, `regex_firstbytes`, ...) live in
+[`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers); the ABI crate they
+link is [`crates/sniffer-abi/`](../crates/sniffer-abi/README.md).
 
 ### Locked decisions
 - **Sandbox: `wasmtime`, core module, no WASI.** A narrow ABI — the guest
@@ -308,13 +309,13 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   `ArcSwap` interior mutability (mirrors `RouteHints`) so `replace()` from the
   reload task is visible to every worker instantly; a scan error keeps the
   previous sniffer set. Engine params stay startup-only.
-- ✅ **Slice 5**: first-party sniffer crates in the standalone
-  `crates/sniffers/` workspace (own `[workspace]`, never a dep of
+- ✅ **Slice 5**: first-party sniffer crates (built at the time in a standalone
+  sniffers workspace in this repo, moved to `wayhouse-proxy/sniffers` in #183; never a dep of
   `wayhouse`/`wayhouse-core`) — `wayhouse-sniffer-abi` (guest-side ABI helper) + `a2s`
   (Source-engine query packets), `minecraft` (Handshake `server address`,
   the BungeeCord/Velocity virtual-host trick), `regex-firstbytes` (a bounded
   pattern-matcher template, later made genuinely configurable by ADR 16a).
-  `make sniffers`; CI job `sniffers`.
+  Now: `make sniffers-fetch`; CI job `sniffers-e2e`.
 - ✅ **Slice 6**: WASM-boundary latency bench vs. N1
   (`sniffer_loader::tests::wasm_boundary_latency_vs_nfr_n1`, `#[ignore]`d,
   run in the `sniffers` CI job). **Result: p50 8–10 µs, p99 12–26 µs** across
@@ -610,7 +611,7 @@ token, is ever exposed to a human directly.
      `X-Config-Revision: 3` (the new post-rollback revision, not a rewind).
 11f. ✅ Frontend: React + Vite + TypeScript in `crates/wayhouse-ui/web/` (own
      `package.json`, never a Cargo workspace member — same reasoning as
-     `crates/sniffers/`; `make ui` runs `npm install && npm run build`,
+     `crates/wayhouse-config/fuzz/`; `make ui` runs `npm install && npm run build`,
      output goes to `dist/`). `wayhouse-ui` gained `--static-dir` (default
      `crates/wayhouse-ui/web/dist`), served as a fallback under whatever the API
      routes don't claim, via `tower-http::services::ServeDir` (new

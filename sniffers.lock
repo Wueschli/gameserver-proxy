@@ -1,0 +1,43 @@
+# The official sniffers the `sniffers-e2e` CI job loads, pinned by release tag and sha256.
+# Regenerate with: python3 .github/scripts/update_sniffers_lock.py (docs/sniffers.md).
+repo = "wayhouse-proxy/sniffers"
+
+[sniffers.a2s]
+tag = "a2s-v0.1.0"
+file = "a2s.wasm"
+sha256 = "c0ee11d92952e0bf641d8660d2be13a3636a3e18d4cb14f9da9f148a2db21afb"
+
+[sniffers.minecraft]
+tag = "minecraft-v0.1.0"
+file = "minecraft.wasm"
+sha256 = "bd7916420223fcde1f6dd979ea3a6d90077cab348c6a33c4b8da1fe3036b46ca"
+
+[sniffers.openvpn]
+tag = "openvpn-v0.1.0"
+file = "openvpn.wasm"
+sha256 = "fc167cdd92959ab8637da514876ca0bbb1f121a2df0d5c120a19df163c9d2d37"
+
+[sniffers.quic]
+tag = "quic-v0.1.0"
+file = "quic.wasm"
+sha256 = "1e09d343c29c1145612016220ea7ec84f62eafc658ceeb037cd10a7f9ce19729"
+
+[sniffers.raknet]
+tag = "raknet-v0.1.0"
+file = "raknet.wasm"
+sha256 = "ad70511d0fd113b58a88862a3e2e2d3b78de4fc365b5843f23f56a45137a8c5b"
+
+[sniffers.regex_firstbytes]
+tag = "regex_firstbytes-v0.1.0"
+file = "regex_firstbytes.wasm"
+sha256 = "184f65d13e301125d2f269db192586080f1183774fca9cfcf9e1172eab8a2a9c"
+
+[sniffers.teamspeak3]
+tag = "teamspeak3-v0.1.0"
+file = "teamspeak3.wasm"
+sha256 = "7b8f50cb3b9e46b6b13d98a526723a21c597164c92be5c57d1d73b4af808ceba"
+
+[sniffers.wireguard]
+tag = "wireguard-v0.1.0"
+file = "wireguard.wasm"
+sha256 = "889d33972308b54b2358f67595b25f1242cf275fd766e81a6ffd5e16512e9460"

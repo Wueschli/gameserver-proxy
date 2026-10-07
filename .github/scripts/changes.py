@@ -35,8 +35,9 @@ AREAS = ("ui", "sniffers", "tunnel", "deploy", "fuzz", "release")
 # The packages each Rust job builds or tests. A name, or a directory ending in
 # "/" for every package under it.
 ROOTS = {
-    # crates/sniffers (wasm) + `cargo nextest -p wayhouse` loading the built sniffers.
-    "sniffers": ["wayhouse", "crates/sniffers/"],
+    # `cargo nextest -p wayhouse --run-ignored only` over the pinned official sniffers
+    # (sniffers.lock); no sniffer is built from this repository any more.
+    "sniffers": ["wayhouse"],
     # make tunnel-e2e-ci: debug-builds the five binaries, runs wayhouse-fleet-tests.
     "tunnel": ["wayhouse", "wayhouse-agent", "wayhouse-controller", "wayhouse-aggregator", "wayhouse-ui", "wayhouse-fleet-tests"],
     # crates/wayhouse-config/fuzz (its own workspace; depends on wayhouse-config).
@@ -54,8 +55,10 @@ DOCS_ONLY = re.compile(r"\.md$|^docs/|^LICENSE-")
 # Non-Cargo paths per area, on top of the package graph.
 EXTRA = {
     "ui": re.compile(r"^crates/wayhouse-ui/web/"),
-    # .config/nextest.toml holds the `ci` profile both jobs run under.
-    "sniffers": re.compile(r"^\.config/"),
+    # .config/nextest.toml holds the `ci` profile the job runs under; sniffers.lock
+    # pins the modules it fetches. (fetch_sniffers.py lives under .github/, which
+    # already runs everything.)
+    "sniffers": re.compile(r"^\.config/|^sniffers\.lock$"),
     "tunnel": re.compile(r"^Makefile$|^\.config/"),
     # The UI's npm lockfile is here too: those packages end up in the wayhouse-ui
     # image's bundle, and the deploy job's Trivy scan checks them.
@@ -196,10 +199,14 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
             rustwide = True  # unknown crate path: don't guess
         changed |= o or set()
     hit = dependents(changed, g) | locked
+    # The e2e job reads sniffers.lock and .config/, which build nothing: they must not
+    # start the release build, so `release` looks at the Rust packages alone.
+    rust_sniffers = rustwide or bool(_roots("sniffers", g) & hit)
     for a in ROOTS:
         out[a] = out.get(a, False) or rustwide or bool(_roots(a, g) & hit)
-    # The shared release build (build-release job) feeds sniffers and deploy.
-    out["release"] = out["sniffers"] or out["deploy"]
+    # The shared release build (build-release job) feeds deploy and the musl job, which
+    # ride along with any change to the packages the sniffers e2e job covers.
+    out["release"] = rust_sniffers or out["deploy"]
     return {a: out.get(a, False) for a in AREAS}
 
 

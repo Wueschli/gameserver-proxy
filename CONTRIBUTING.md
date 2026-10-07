@@ -24,7 +24,7 @@ Other targets (`make help` lists all):
 | Target                     | What it does                                                         |
 | -------------------------- | -------------------------------------------------------------------- |
 | `make run`                 | run the proxy against `config.example.yaml`                          |
-| `make sniffers`            | build the WASM sniffers (needs the `wasm32-unknown-unknown` target)  |
+| `make sniffers-fetch`      | download the pinned official sniffers for the e2e tests (network)    |
 | `make ui` / `make ui-test` | build / test the admin GUI frontend (needs Node and npm)             |
 | `make bench` / `make fuzz` | latency harness / parser fuzzing (fuzz needs nightly and cargo-fuzz) |
 | `make docs-fmt-check`      | check Markdown formatting (needs Node; see below)                    |
@@ -46,7 +46,7 @@ The full command table (tunnel e2e, deploy images, audit, and so on) is in
 | [`crates/wayhouse-http`](crates/wayhouse-http)               | Shared HTTP client and TLS server helpers                                         |
 | [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries                            |
 | [`crates/wayhouse-bench`](crates/wayhouse-bench)             | Latency / load harness                                                            |
-| [`crates/sniffers`](crates/sniffers)                         | First-party WASM sniffers (standalone workspace)                                  |
+| [`crates/sniffer-abi`](crates/sniffer-abi)                   | Guest-side ABI crate the official sniffers link (they live in the sniffers repo)  |
 
 ## Conventions
 

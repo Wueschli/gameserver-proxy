@@ -3,7 +3,7 @@
 A **sniffer** is a WASM module that peeks at the first bytes of a connection or
 datagram and returns a routing hint (a hostname or a tag). This page is the format
 reference for authors and registry operators. The ABI itself is documented in
-[`crates/sniffers/README.md`](../crates/sniffers/README.md) and the module doc of
+[`crates/sniffer-abi/README.md`](../crates/sniffer-abi/README.md) and the module doc of
 `crates/wayhouse/src/sniffer_loader.rs`; the design and its reasons are in the
 [registry spec](superpowers/specs/2026-10-05-plugin-registry-design.md).
 
@@ -144,3 +144,63 @@ what it receives. The routes are `GET /api/registries` and `GET /api/registries/
 **Maintainer to-do.** Generate the minisign key pair offline, put the public half in
 `crates/wayhouse-ui/src/registry_keys.rs`, and store the secret in the sniffers repository (see the
 bootstrap plan). Until then everything installs unsigned.
+
+## Installing by hand
+
+Download `<name>.wasm` from a [sniffers release](https://github.com/wayhouse-proxy/sniffers/releases)
+(or build your own) and copy it into the directory named by `settings.sniffers.dir`, named
+`<sniffer-name>.wasm`: the proxy names a sniffer after its file stem (so the regex sniffer is
+`regex_firstbytes`). Then use the name in a route:
+
+```yaml
+settings:
+    sniffers:
+        dir: "/etc/wayhouse/sniffers"
+
+listeners:
+    - name: mc
+      bind: "0.0.0.0:25565"
+      routes:
+          - match: { type: sniffer, sniffer: minecraft, host: ["survival.example.net"] }
+            action: { pool: survival }
+          - match: { type: always }
+            action: { pool: lobby }
+```
+
+A config reload rescans `dir` live, so an added, removed or replaced module needs no restart.
+`settings.sniffers.modules: [{ name, sha256 }]` optionally pins each file's hash (`sha256sum
+<file>.wasm`).
+
+An instance with `settings.sniffers` configured also accepts modules over its admin API, so
+no filesystem access is needed:
+
+```sh
+curl -X POST --data-binary @a2s.wasm "http://<admin-listen>/admin/sniffers?name=a2s"
+curl "http://<admin-listen>/admin/sniffers"                # list, with sha256 + loaded state
+curl -X DELETE "http://<admin-listen>/admin/sniffers/a2s"
+```
+
+This writes into the same `dir` and triggers the same rescan, so it is interchangeable with
+copying files. `wayhouse-aggregator` fans the upload and delete out to every known instance
+(`POST`/`DELETE /fleet/sniffers[/{name}]`), and the UI's Sniffers page uses that fan-out. All three
+routes answer `409` on an instance with no `settings.sniffers` block (turning sniffing on from
+nothing is startup-only, see `docs/05-configuration.md`). If `modules` pins hashes, an unpinned new
+module loads but the next rescan rejects the whole update until the pin list is changed the normal
+way (file edit or controller revision).
+
+## What this repository tests against the official sniffers
+
+Main builds no sniffer. The loader's own tests use small WAT modules (accept, reject, trap,
+timeout, memory cap, wrong ABI version). On top of that, `sniffers.lock` pins the official releases
+by tag and sha256, and the `sniffers-e2e` CI job (`make sniffers-fetch`, then the `#[ignore]`d
+`wayhouse` tests) loads exactly those bytes through the real loader on amd64 and arm64: the ABI
+check, every sniffer's recognition, and the latency gate. It is deliberately **not** a required
+check, so an outage of the sniffers repository never blocks a PR; it runs when `wayhouse` or
+`sniffers.lock` changes and in the nightly run. Community sniffers are tested by the CI of the
+repository that hosts them, not here.
+
+When the ABI changes (`HOST_ABI`, the wire format): update `crates/sniffer-abi`, bump the revision
+the sniffers repo pins, release the rebuilt sniffers there (its **Release** workflow), then run
+`python3 .github/scripts/update_sniffers_lock.py` here to pin the new tags and hashes from the
+published `index.json`, and the e2e job is green again. The same command is how a newer official
+sniffer release gets picked up.

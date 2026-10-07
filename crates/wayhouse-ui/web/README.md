@@ -3,8 +3,8 @@
 The React + Vite + TypeScript SPA `wayhouse-ui` (`crates/wayhouse-ui`, the phase 10+11
 admin GUI's BFF, `docs/10` "The admin GUI") serves to the browser. A
 **standalone `npm` project** — its own `package.json`, deliberately never a
-Cargo workspace member — the same reason `crates/sniffers/` and
-`crates/wayhouse-config/fuzz/` are standalone: this build needs a different
+Cargo workspace member — the same reason `crates/wayhouse-config/fuzz/`
+is standalone: this build needs a different
 toolchain (Node/npm) than the rest of the repo, and `make check` on the main
 workspace must not require it.
 

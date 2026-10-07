@@ -78,11 +78,14 @@ class RealRepo(unittest.TestCase):
             {"fuzz"},
         )
 
-    def test_a_sniffer_crate_only_runs_sniffers(self):
-        self.assertEqual(self.areas("crates/sniffers/a2s/src/lib.rs"), {"sniffers", "release"})
+    def test_the_sniffer_abi_crate_reaches_the_ui_and_so_the_tunnel_job(self):
+        # wayhouse-ui reads its ABI constants; the e2e job fetches released sniffers and
+        # builds nothing from it, so only the always-on test job and the tunnel job run.
+        self.assertEqual(self.areas("crates/sniffer-abi/src/lib.rs"), {"tunnel"})
 
-    def test_sniffers_workspace_root_files_run_sniffers(self):
-        self.assertEqual(self.areas("crates/sniffers/Cargo.lock"), {"sniffers", "release"})
+    def test_the_sniffer_pins_only_run_the_e2e_job(self):
+        # No build is involved, so the shared release build does not start.
+        self.assertEqual(self.areas("sniffers.lock"), {"sniffers"})
 
     def test_wayhouse_agent_is_tunnel_only(self):
         self.assertEqual(self.areas("crates/wayhouse-agent/src/main.rs"), {"tunnel"})
@@ -109,7 +112,7 @@ class RealRepo(unittest.TestCase):
         )
 
     def test_nextest_config_runs_the_nextest_jobs(self):
-        self.assertEqual(self.areas(".config/nextest.toml"), {"sniffers", "tunnel", "release"})
+        self.assertEqual(self.areas(".config/nextest.toml"), {"sniffers", "tunnel"})
 
     def test_root_cargo_lock_runs_its_workspace_and_deploy_not_fuzz(self):
         # crates/wayhouse-config/fuzz has its own workspace and lockfile.
@@ -148,7 +151,7 @@ class RealRepo(unittest.TestCase):
 
     def test_every_package_is_loaded(self):
         names = {p.name for p in self.graph.packages.values()}
-        for n in ("wayhouse", "wayhouse-agent", "wayhouse-fleet-tests", "a2s", "wayhouse-config-fuzz"):
+        for n in ("wayhouse", "wayhouse-agent", "wayhouse-fleet-tests", "wayhouse-sniffer-abi", "wayhouse-config-fuzz"):
             self.assertIn(n, names)
 
 
@@ -170,12 +173,11 @@ class SyntheticGraph(unittest.TestCase):
             "crates/wayhouse-ui": pkg("wayhouse-ui"),
             "crates/wayhouse-fleet-tests": pkg("wayhouse-fleet-tests"),
             "crates/wayhouse-config/fuzz": pkg("wayhouse-config-fuzz", "crates/wayhouse-config"),
-            "crates/sniffers/a2s": pkg("a2s"),
+            "crates/sniffer-abi": pkg("wayhouse-sniffer-abi"),
         }
         packages.update(extra)
         return changes.Graph(packages, {
-            "": [d for d in packages if not d.startswith(("crates/sniffers/", "crates/wayhouse-config/fuzz"))],
-            "crates/sniffers": ["crates/sniffers/a2s"],
+            "": [d for d in packages if not d.startswith("crates/wayhouse-config/fuzz")],
             "crates/wayhouse-config/fuzz": ["crates/wayhouse-config/fuzz"],
         })
 

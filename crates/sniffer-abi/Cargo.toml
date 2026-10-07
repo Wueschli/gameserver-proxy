@@ -1,0 +1,16 @@
+[package]
+name = "wayhouse-sniffer-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Guest-side ABI helper for wayhouse sniffers (phase 9)."
+publish = false
+
+# Linked by every official sniffer (github.com/wayhouse-proxy/sniffers) through a pinned git
+# revision, which finds this crate by name, so keep the name and a path that stays inside
+# this repository. The host (wayhouse-ui) reads its ABI_MAJOR / ABI_MINOR constants.
+# It has no dependencies and builds natively; the sniffers build it for wasm32.
+
+[lib]
+crate-type = ["lib"]
