@@ -175,7 +175,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, sniffers and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/wayhouse-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/wayhouse-bench/README.md`) |
-| Sniffer sniffers | `make sniffers` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/sniffers/` to `wasm32-unknown-unknown`; see `crates/sniffers/README.md`) |
+| Sniffers | `make sniffers` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/sniffers/` to `wasm32-unknown-unknown`; see `crates/sniffers/README.md`) |
 | wayhouse-ui frontend | `make ui` (needs Node/npm; builds `crates/wayhouse-ui/web/` to `dist/`, served by `wayhouse-ui --static-dir`; see `crates/wayhouse-ui/web/README.md`) |
 | wayhouse-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
 | Markdown | `make docs-fmt` (Prettier, writes) / `make docs-fmt-check` and `make docs-links` (relative links and anchors); both checks are the `docs` CI job. AGENTS.md, HANDOVER.md and `docs/NN-*.md` are in `.prettierignore` for now |

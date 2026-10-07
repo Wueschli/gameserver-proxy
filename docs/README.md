@@ -41,7 +41,7 @@ finished. They are kept as a record of why things were built the way they were; 
 - [`../deploy/README.md`](../deploy/README.md): reference images, Compose demo and
   Kubernetes manifests.
 - [`../crates/sniffers/README.md`](../crates/sniffers/README.md): the WASM sniffer
-  sniffer ABI and the first-party sniffers.
+  ABI and the first-party sniffers.
 - [`../crates/wayhouse-bench/README.md`](../crates/wayhouse-bench/README.md): the latency / load
   harness.
 - [`../crates/wayhouse-config/fuzz/README.md`](../crates/wayhouse-config/fuzz/README.md): fuzz

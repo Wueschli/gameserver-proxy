@@ -49,7 +49,7 @@ pub(crate) struct RawSettings {
     /// filter. Startup-only.
     #[serde(default)]
     pub(crate) geo_db: Option<String>,
-    /// Sniffer sniffer loader (phase 9). Absent ⇒ no sniffers load; a `sniffer:`
+    /// Sniffer loader (phase 9). Absent ⇒ no sniffers load; a `sniffer:`
     /// route never matches. Startup-only for `dir` itself (rescanned on
     /// reload once the loader lands — phase 9 slice 4).
     #[serde(default)]

@@ -342,7 +342,7 @@ function StructuredForm({
       </section>
 
       <section className="rounded border border-line bg-surface p-4">
-        <h3 className="mb-3 text-sm font-medium text-ink">Sniffer sniffers</h3>
+        <h3 className="mb-3 text-sm font-medium text-ink">Sniffers</h3>
         <Field label="sniffers.dir">
           <Input
             value={s.sniffers?.dir ?? ""}

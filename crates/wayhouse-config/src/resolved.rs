@@ -231,7 +231,7 @@ pub struct Config {
     /// Path to the MaxMind Country DB, if any listener uses a `geo` filter.
     /// Startup-only.
     pub geo_db: Option<String>,
-    /// Sniffer sniffer loader settings (phase 9). `None` ⇒ no sniffers load.
+    /// Sniffer loader settings (phase 9). `None` ⇒ no sniffers load.
     pub sniffers: Option<SniffersConfig>,
     /// Tier-2 regional health fabric identity (phase 13). `None` ⇒ gossip
     /// fully disabled, today's local-only health behaviour.
