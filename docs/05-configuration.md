@@ -155,7 +155,10 @@
 > version or another one than the host's, fails to instantiate, empty) is `400`, a body over 8 MiB is `413`, and on an instance
 > with `settings.sniffers.modules` pins an unlisted name or a different sha256
 > is `409`. A bad `.wasm` file already in `dir` is logged and skipped by every
-> rescan; only a pin violation fails the whole scan. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
+> rescan when `modules` is not set. When `modules` pins are set, a pin
+> violation or a pinned module that fails validation fails the whole scan:
+> the process refuses to start (naming the module), and a reload keeps the
+> previous plugin set. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
 > `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Plugins page —
 > see `crates/plugins/README.md` "Installing over HTTP instead of `cp`".
 >
