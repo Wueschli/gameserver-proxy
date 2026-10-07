@@ -1655,6 +1655,41 @@ listeners:
         assert_eq!(loader().scan(&c).unwrap().len(), 1);
     }
 
+    /// The reload path (`rescan_sniffers`) keeps the last good registry when a
+    /// pinned module stops validating, and picks up a repaired one.
+    #[test]
+    fn reload_keeps_the_last_good_registry_when_a_pinned_module_breaks() {
+        let dir = tempdir();
+        let good = wat_bytes(HOST_SNIFFER_WAT);
+        std::fs::write(dir.join("good.wasm"), &good).unwrap();
+        let l = loader();
+        let mut c = cfg(&dir);
+        pin(&mut c, "good", &good);
+        let mut config = wayhouse_config::parse_str(
+            "pools:\n  - name: p\n    targets: [\"127.0.0.1:9\"]\n    health_check:\n      type: none\n\
+             listeners:\n  - name: l1\n    bind: \"127.0.0.1:0\"\n    pool: p\n",
+        )
+        .unwrap();
+        config.sniffers = Some(c.clone());
+        let sniffers = Sniffers::default();
+        crate::reload::rescan_sniffers(&config, Some(&l), &sniffers);
+        assert_eq!(sniffers.names(), ["good"]);
+
+        // The pinned file is replaced by an ABI-less module, re-pinned so
+        // only validation fails.
+        let bad = wat_bytes(BARE_WAT);
+        std::fs::write(dir.join("good.wasm"), &bad).unwrap();
+        let mut c2 = cfg(&dir);
+        pin(&mut c2, "good", &bad);
+        config.sniffers = Some(c2);
+        crate::reload::rescan_sniffers(&config, Some(&l), &sniffers);
+        assert_eq!(sniffers.names(), ["good"], "the previous registry is kept");
+        assert!(
+            sniffers.get("good").is_some(),
+            "the previous plugin still resolves"
+        );
+    }
+
     #[test]
     fn scan_records_the_live_pins() {
         let dir = tempdir();
