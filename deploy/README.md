@@ -51,6 +51,33 @@ binaries you built yourself from `deploy/prebuilt/` (`wayhouse`, `wayhouse-minim
 with the plugins tests; they must be built against a glibc no newer than the
 runtime's (2.41). The nightly CI run uses the default, self-contained path.
 
+## Pulling private images
+
+The six `ghcr.io/<owner>/wayhouse*` packages are **private** for now, so an anonymous `docker pull` fails with `unauthorized` or `denied`. A public repository does not make its packages public.
+
+1. Create a **personal access token (classic)** with the `read:packages` scope. GitHub Packages (GHCR) does not accept fine-grained tokens ([GitHub docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)).
+2. Log in:
+
+    ```sh
+    echo "$CR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
+    ```
+
+    Docker Compose (`deploy/compose`) uses the same login; set the image names to `ghcr.io/<owner>/<image>:<version>` first.
+
+3. **Kubernetes:** create a pull secret in the namespace and reference it from every workload (each manifest in `deploy/k8s` has the commented `imagePullSecrets` line to enable):
+
+    ```sh
+    kubectl -n wayhouse create secret docker-registry ghcr \
+      --docker-server=ghcr.io --docker-username=<github-user> --docker-password="$CR_PAT"
+    ```
+
+    ```yaml
+    spec:
+        imagePullSecrets: [{ name: ghcr }]
+    ```
+
+**Making the images public later:** (1) set each of the six packages (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`, `wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`) to public under the package settings, (2) remove the token and `imagePullSecrets` notes from these docs and manifests, (3) announce it.
+
 ## Run the demo
 
 ```sh
@@ -95,7 +122,7 @@ Ingress/LoadBalancer (with TLS) in front of it.
 
 ## Caveats
 
-- Reference only; no published images, no multi-arch.
+- Reference only; the published images are private (see "Pulling private images").
 - Tokens are visible in `docker inspect` / the Pod spec env — fine for a demo;
   use real secret management in production.
 - These examples run every service on **plain HTTP**: bearer tokens and

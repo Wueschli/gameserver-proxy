@@ -8,6 +8,8 @@ spec:
     metadata: { labels: { app: wayhouse-ui } }
     spec:
       securityContext: { runAsNonRoot: true }
+      # Private GHCR images: uncomment (see deploy/README.md "Pulling private images").
+      # imagePullSecrets: [{ name: ghcr }]
       containers:
         - name: ui
           image: wayhouse-deploy/wayhouse-ui:local

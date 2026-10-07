@@ -18,6 +18,8 @@ dropped feature (`settings.sniffers`, a `grpc` resolver, a `dns_srv` source, `se
 a `tunnel` source, `--tunnel-iface`) is refused at startup and under `--check`, naming the
 cargo feature.
 
+The published `ghcr.io` images are private for now; how to pull them (classic PAT with `read:packages`, Kubernetes pull secret) and how to make them public later is in [`deploy/README.md`](../deploy/README.md#pulling-private-images).
+
 None of these five binaries shell out to an
 external command at runtime (WireGuard interface management in `wayhouse`/`wayhouse-agent`
 goes through kernel netlink directly via `defguard/wireguard-rs`, not the
