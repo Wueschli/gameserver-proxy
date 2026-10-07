@@ -102,10 +102,24 @@ pub enum IndexError {
     },
 }
 
+/// Just the `kind`, read before the rest of the index (see `parse_index`).
+#[derive(Deserialize)]
+struct Head {
+    kind: Option<Kind>,
+}
+
 /// Parse and validate an index. Never panics on hostile input.
 pub fn parse_index(bytes: &[u8]) -> Result<Index, IndexError> {
     if bytes.len() > MAX_INDEX_BYTES {
         return Err(IndexError::TooLarge(bytes.len()));
+    }
+    // Look at `kind` first: another kind of registry has a different payload, and
+    // "missing field `sniffers`" would not tell the operator what they added.
+    if let Ok(Head {
+        kind: Some(kind @ Kind::Plugin),
+    }) = serde_json::from_slice(bytes)
+    {
+        return Err(IndexError::UnsupportedKind(kind));
     }
     let index: Index =
         serde_json::from_slice(bytes).map_err(|e| IndexError::Json(e.to_string()))?;
@@ -259,6 +273,17 @@ mod tests {
         let mut v = example();
         v["schema"] = 2.into();
         assert_eq!(parse(&v), Err(IndexError::UnsupportedSchema(2)));
+    }
+
+    #[test]
+    fn a_plugin_registry_gets_the_kind_error_not_a_missing_field() {
+        // A plugin index lists `plugins`, not `sniffers`; the message must say what
+        // the registry is, not that a field is missing.
+        let plugin_index = br#"{"schema":1,"kind":"plugin","name":"x","plugins":[]}"#;
+        assert_eq!(
+            parse_index(plugin_index),
+            Err(IndexError::UnsupportedKind(Kind::Plugin))
+        );
     }
 
     #[test]
