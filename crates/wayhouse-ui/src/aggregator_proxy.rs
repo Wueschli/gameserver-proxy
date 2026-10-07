@@ -18,7 +18,7 @@
 //! instance's own admin API, where the eventual effect lands.
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -58,7 +58,12 @@ pub fn operator_router() -> Router<AppState> {
             patch(patch_backend).delete(delete_backend),
         )
         .route("/api/fleet/route-hint", post(route_hint))
-        .route("/api/fleet/sniffers", post(upload_sniffer))
+        .route(
+            "/api/fleet/sniffers",
+            post(upload_sniffer).layer(DefaultBodyLimit::max(
+                wayhouse_http::MAX_SNIFFER_MODULE_BYTES,
+            )),
+        )
         .route(
             "/api/fleet/sniffers/{name}",
             axum::routing::delete(delete_sniffer),
@@ -328,7 +333,10 @@ mod tests {
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = Router::new().route(path, method_router);
+        // The stand-in must not impose axum's 2 MiB default on top of what is under test.
+        let app = Router::new()
+            .route(path, method_router)
+            .layer(axum::extract::DefaultBodyLimit::disable());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -348,6 +356,60 @@ mod tests {
 
     fn cookie(session_id: &str) -> String {
         format!("{}={session_id}", crate::api::SESSION_COOKIE)
+    }
+
+    #[tokio::test]
+    async fn upload_sniffer_forwards_a_module_the_proxy_would_accept() {
+        // Between axum's 2 MiB default and the proxy's 8 MiB cap (#197).
+        let (url, captured) = spawn_mock_aggregator(
+            "/fleet/sniffers",
+            Method::POST,
+            StatusCode::OK,
+            r#"{"results":[]}"#,
+        )
+        .await;
+        let (app, session_id) = logged_in_app(url, None);
+        let module = vec![7u8; 3 * 1024 * 1024];
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/fleet/sniffers?name=big")
+                    .header(header::COOKIE, cookie(&session_id))
+                    .body(Body::from(module.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(captured.lock().unwrap().clone().unwrap().0, module);
+    }
+
+    #[tokio::test]
+    async fn upload_sniffer_rejects_more_than_the_proxy_cap() {
+        let (url, captured) = spawn_mock_aggregator(
+            "/fleet/sniffers",
+            Method::POST,
+            StatusCode::OK,
+            r#"{"results":[]}"#,
+        )
+        .await;
+        let (app, session_id) = logged_in_app(url, None);
+        let too_big = vec![0u8; wayhouse_http::MAX_SNIFFER_MODULE_BYTES + 1];
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/fleet/sniffers?name=big")
+                    .header(header::COOKIE, cookie(&session_id))
+                    .body(Body::from(too_big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            captured.lock().unwrap().is_none(),
+            "nothing may be forwarded"
+        );
     }
 
     #[tokio::test]

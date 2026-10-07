@@ -107,3 +107,7 @@ Each directory holds `manifest.toml` and `<name>.wasm` (and optionally
 order), older versions are kept, and re-running with identical bytes changes nothing. A
 published version is immutable: the same version with a different sha256 is refused, so
 bump the version instead. A failed run leaves the existing file untouched.
+
+If `--previous` is left out and `--out` already exists, `--out` is read as the previous
+index, so a plain regenerate cannot replace a published version. If that file exists but is
+not a valid index, the run fails instead of overwriting it; fix or remove the file first.
