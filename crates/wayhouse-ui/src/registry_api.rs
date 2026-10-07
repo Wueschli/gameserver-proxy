@@ -47,6 +47,7 @@ pub fn operator_router() -> Router<AppState> {
         .route("/api/registries", post(add_registry))
         .route("/api/registries/{id}", delete(remove_registry))
         .route("/api/registries/{id}/install", post(install))
+        .route("/api/registries/updates/check", post(check_updates))
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -322,6 +323,226 @@ async fn install(
         })),
     )
         .into_response()
+}
+
+/// One instance's `GET /admin/sniffers` row, as far as the check needs it.
+#[derive(Deserialize)]
+struct InstalledSniffer {
+    name: String,
+    sha256: String,
+    #[serde(default)]
+    has_previous: bool,
+    #[serde(default)]
+    fallback: bool,
+}
+
+#[derive(Deserialize)]
+struct HealthEntry {
+    instance: String,
+}
+
+/// Instances that run one build of one sniffer.
+#[derive(Default)]
+struct InstalledGroup {
+    instances: Vec<String>,
+    has_previous: bool,
+    fallback: bool,
+}
+
+/// A newer version of an installed sniffer, from one registry.
+struct Update {
+    registry_id: String,
+    version: semver::Version,
+    compatible: bool,
+    reason: Option<String>,
+}
+
+/// Why the newest version cannot be installed here, or `None` if it can.
+fn update_from(
+    reg: &RegistryRef,
+    entry: &SnifferEntry,
+    installed: &semver::Version,
+) -> Option<Update> {
+    let newest = entry
+        .versions
+        .iter()
+        .max_by(|a, b| a.version.cmp(&b.version))?;
+    if newest.version <= *installed {
+        return None;
+    }
+    let env = environment();
+    let pick = |compatible, version: &semver::Version, reason| Update {
+        registry_id: reg.id.clone(),
+        version: version.clone(),
+        compatible,
+        reason,
+    };
+    match select(entry, &env) {
+        Ok(v) if v.version > *installed => Some(pick(true, &v.version, None)),
+        other => {
+            let reason = if abi_matches(&newest.abi, &env.abi).unwrap_or(false) {
+                match other {
+                    Err(why) => why.to_string(),
+                    Ok(_) => "no newer version is compatible with this release".to_string(),
+                }
+            } else {
+                format!(
+                    "version {} is built for sniffer ABI {}, but this proxy speaks ABI {}",
+                    newest.version, newest.abi, env.abi
+                )
+            };
+            Some(pick(false, &newest.version, Some(reason)))
+        }
+    }
+}
+
+/// `POST /api/registries/updates/check` — on demand only, never on a timer.
+/// Refetches every registry's index (a cached one would hide a release), asks
+/// each proxy what it has installed, and maps each installed build's sha256 to
+/// a version in the indexes. A build in no index is "unknown" and gets no
+/// update: guessing from a name would offer to replace something hand-built.
+/// An unreachable registry or proxy is reported and the rest still answers.
+async fn check_updates(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+) -> Response {
+    let mut set = tokio::task::JoinSet::new();
+    for (n, reg) in state.registries.list().into_iter().enumerate() {
+        let client = state.registry_client.clone();
+        set.spawn(async move {
+            client.invalidate(&reg.url);
+            let index = client.fetch_index(&reg.url).await;
+            (n, reg, index)
+        });
+    }
+    let mut fetched = Vec::new();
+    while let Some(done) = set.join_next().await {
+        if let Ok(r) = done {
+            fetched.push(r);
+        }
+    }
+    fetched.sort_by_key(|(n, ..)| *n);
+    let fetched: Vec<_> = fetched.into_iter().map(|(_, r, i)| (r, i)).collect();
+    let mut registries = Vec::new();
+    let mut indexes: Vec<(RegistryRef, std::sync::Arc<Index>)> = Vec::new();
+    for (reg, index) in fetched {
+        match index {
+            Ok(i) => {
+                registries.push(json!({ "id": reg.id, "name": reg.name, "ok": true }));
+                indexes.push((reg, i));
+            }
+            Err(e) => registries.push(
+                json!({ "id": reg.id, "name": reg.name, "ok": false, "error": e.to_string() }),
+            ),
+        }
+    }
+
+    let health = crate::aggregator_proxy::proxy_raw(
+        &state,
+        Method::GET,
+        "/fleet/healthz",
+        None,
+        "application/json",
+        actor.clone(),
+    )
+    .await;
+    let (parts, body) = health.into_parts();
+    let body = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    if parts.status != StatusCode::OK {
+        return (parts.status, parts.headers, body).into_response();
+    }
+    let Ok(mut instances) = serde_json::from_slice::<Vec<HealthEntry>>(&body) else {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "the aggregator's reply was not understood",
+        );
+    };
+    instances.sort_by(|a, b| a.instance.cmp(&b.instance));
+
+    let mut groups: std::collections::BTreeMap<(String, String), InstalledGroup> =
+        std::collections::BTreeMap::new();
+    let mut instance_errors = Vec::new();
+    for inst in &instances {
+        let resp = crate::aggregator_proxy::proxy_raw(
+            &state,
+            Method::GET,
+            &format!("/fleet/instances/{}/sniffers", inst.instance),
+            None,
+            "application/json",
+            actor.clone(),
+        )
+        .await;
+        let (parts, body) = resp.into_parts();
+        let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let listed = (parts.status == StatusCode::OK)
+            .then(|| serde_json::from_slice::<Vec<InstalledSniffer>>(&body).ok())
+            .flatten();
+        let Some(listed) = listed else {
+            instance_errors.push(json!({
+                "instance": inst.instance,
+                "status": parts.status.as_u16(),
+                "detail": String::from_utf8_lossy(&body).chars().take(200).collect::<String>(),
+            }));
+            continue;
+        };
+        for s in listed {
+            let g = groups.entry((s.name, s.sha256)).or_default();
+            g.instances.push(inst.instance.clone());
+            g.has_previous |= s.has_previous;
+            g.fallback |= s.fallback;
+        }
+    }
+
+    let rows: Vec<_> = groups
+        .into_iter()
+        .map(|((name, sha256), g)| {
+            let known = indexes.iter().find_map(|(_, index)| {
+                index
+                    .sniffers
+                    .iter()
+                    .filter(|e| e.name == name)
+                    .flat_map(|e| &e.versions)
+                    .find(|v| v.sha256.eq_ignore_ascii_case(&sha256))
+                    .map(|v| v.version.clone())
+            });
+            let update = known.as_ref().and_then(|installed| {
+                indexes
+                    .iter()
+                    .filter_map(|(reg, index)| {
+                        let entry = index.sniffers.iter().find(|e| e.name == name)?;
+                        update_from(reg, entry, installed)
+                    })
+                    .max_by(|a, b| (a.compatible, &a.version).cmp(&(b.compatible, &b.version)))
+            });
+            json!({
+                "sniffer": name,
+                "installed_sha256": sha256,
+                "installed_version": known.as_ref().map(ToString::to_string),
+                "known": known.is_some(),
+                "has_previous": g.has_previous,
+                "fallback": g.fallback,
+                "update": update.map(|u| json!({
+                    "registry_id": u.registry_id,
+                    "version": u.version.to_string(),
+                    "compatible": u.compatible,
+                    "reason": u.reason,
+                })),
+                "instances": g.instances,
+            })
+        })
+        .collect();
+    Json(json!({
+        "host_abi": host_abi(),
+        "min_proxy_checked": false,
+        "registries": registries,
+        "sniffers": rows,
+        "instance_errors": instance_errors,
+    }))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -792,5 +1013,235 @@ mod tests {
         .await;
         let (status, _) = h.install().await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    // ---- on-demand update check (#184) ----
+
+    fn sha_of(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    /// Hits on `/index.json` of a registry serving `demo` with `versions`
+    /// `(version, abi, sha256)`, newest first.
+    async fn registry_with_versions(
+        versions: &[(&str, &str, String)],
+    ) -> (String, Arc<Mutex<u32>>) {
+        let hits = Arc::new(Mutex::new(0u32));
+        let counted = hits.clone();
+        let list: Vec<_> = versions
+            .iter()
+            .map(|(v, abi, sha)| {
+                json!({
+                    "version": v, "abi": abi, "min_proxy": "0.1.0",
+                    "url": "https://registry.test/demo.wasm",
+                    "sha256": sha, "size": 10,
+                    "limits": { "max_memory_bytes": 1048576, "call_timeout_ms": 50 }
+                })
+            })
+            .collect();
+        let index = json!({
+            "schema": 1, "kind": "sniffer", "name": "test registry",
+            "sniffers": [{ "name": "demo", "description": "d", "license": "MIT", "versions": list }]
+        })
+        .to_string();
+        let app = Router::new().route(
+            "/index.json",
+            get(move || {
+                let index = index.clone();
+                let counted = counted.clone();
+                async move {
+                    *counted.lock().unwrap() += 1;
+                    index
+                }
+            }),
+        );
+        (serve(app).await, hits)
+    }
+
+    /// An aggregator that knows `instances` `(name, sniffer listing)`.
+    async fn fake_fleet(instances: serde_json::Value) -> String {
+        let health: Vec<_> = instances
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| json!({ "instance": k, "last_seen_ms_ago": 1, "stale": false }))
+            .collect();
+        let app = Router::new()
+            .route(
+                "/fleet/healthz",
+                get(move || {
+                    let health = health.clone();
+                    async move { Json(health) }
+                }),
+            )
+            .route(
+                "/fleet/instances/{instance}/sniffers",
+                get(move |Path(i): Path<String>| {
+                    let instances = instances.clone();
+                    async move {
+                        match instances.get(&i) {
+                            Some(v) => (StatusCode::OK, Json(v.clone())).into_response(),
+                            None => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }),
+            );
+        serve(app).await
+    }
+
+    fn listing(sha: &str) -> serde_json::Value {
+        json!([{ "name": "demo", "sha256": sha, "size_bytes": 10, "loaded": true,
+                 "has_previous": false, "fallback": false }])
+    }
+
+    /// A UI whose registry list is `bases` (each an `/index.json` server).
+    fn checker(bases: &[&str], aggregator: &str) -> Harness {
+        let regs = Arc::new(Registries::load(None, false).unwrap());
+        let mut first = String::new();
+        for b in bases {
+            let r = regs.add_unchecked(&format!("{b}/index.json"), false);
+            if first.is_empty() {
+                first = r.id;
+            }
+        }
+        let state = AppState::new(Some("secret".into()))
+            .with_aggregator(aggregator.to_string(), None)
+            .with_registries(regs, false)
+            .with_registry_client(RegistryClient::for_tests());
+        let session = state.sessions.create(crate::session::Session {
+            role: crate::role::Role::Operator,
+            username: None,
+        });
+        Harness {
+            app: crate::api::router(state),
+            cookie: format!("{}={session}", crate::api::SESSION_COOKIE),
+            registry_id: first,
+        }
+    }
+
+    async fn check(h: &Harness) -> (StatusCode, serde_json::Value) {
+        h.call("POST", "/api/registries/updates/check", None).await
+    }
+
+    #[tokio::test]
+    async fn check_finds_newer_compatible_version() {
+        let old = sha_of(b"v1");
+        let (reg, _) = registry_with_versions(&[
+            ("0.2.0", "0.1", sha_of(b"v2")),
+            ("0.1.0", "0.1", old.clone()),
+        ])
+        .await;
+        let fleet = fake_fleet(json!({ "a": listing(&old) })).await;
+        let (status, body) = check(&checker(&[&reg], &fleet)).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = &body["sniffers"][0];
+        assert_eq!(row["sniffer"], "demo");
+        assert_eq!(row["known"], true);
+        assert_eq!(row["installed_version"], "0.1.0");
+        assert_eq!(row["update"]["version"], "0.2.0");
+        assert_eq!(row["update"]["compatible"], true);
+        assert!(row["update"]["registry_id"].is_string());
+        assert_eq!(row["instances"], json!(["a"]));
+    }
+
+    #[tokio::test]
+    async fn check_marks_unknown_build_without_update() {
+        let (reg, _) = registry_with_versions(&[("0.2.0", "0.1", sha_of(b"v2"))]).await;
+        let fleet = fake_fleet(json!({ "a": listing(&sha_of(b"hand built")) })).await;
+        let (_, body) = check(&checker(&[&reg], &fleet)).await;
+        let row = &body["sniffers"][0];
+        assert_eq!(row["known"], false);
+        assert!(row["update"].is_null(), "{row}");
+        assert!(row["installed_version"].is_null());
+    }
+
+    #[tokio::test]
+    async fn check_ignores_incompatible_newer_version_but_reports_reason() {
+        let old = sha_of(b"v1");
+        let (reg, _) = registry_with_versions(&[
+            ("0.3.0", "9.0", sha_of(b"v3")),
+            ("0.1.0", "0.1", old.clone()),
+        ])
+        .await;
+        let fleet = fake_fleet(json!({ "a": listing(&old) })).await;
+        let (_, body) = check(&checker(&[&reg], &fleet)).await;
+        let update = &body["sniffers"][0]["update"];
+        assert_eq!(update["version"], "0.3.0");
+        assert_eq!(update["compatible"], false);
+        assert!(
+            update["reason"].as_str().unwrap().contains("ABI"),
+            "{update}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_groups_instances_by_installed_hash() {
+        let (v1, v2) = (sha_of(b"v1"), sha_of(b"v2"));
+        let (reg, _) =
+            registry_with_versions(&[("0.2.0", "0.1", v2.clone()), ("0.1.0", "0.1", v1.clone())])
+                .await;
+        let fleet =
+            fake_fleet(json!({ "a": listing(&v1), "b": listing(&v2), "c": listing(&v1) })).await;
+        let (_, body) = check(&checker(&[&reg], &fleet)).await;
+        let rows = body["sniffers"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "a half-upgraded fleet is two rows: {body}");
+        let old = rows
+            .iter()
+            .find(|r| r["installed_version"] == "0.1.0")
+            .unwrap();
+        let new = rows
+            .iter()
+            .find(|r| r["installed_version"] == "0.2.0")
+            .unwrap();
+        assert_eq!(old["instances"], json!(["a", "c"]));
+        assert_eq!(new["instances"], json!(["b"]));
+        assert!(new["update"].is_null(), "already on the newest");
+    }
+
+    #[tokio::test]
+    async fn check_refetches_even_when_cached() {
+        let old = sha_of(b"v1");
+        let (reg, hits) = registry_with_versions(&[("0.1.0", "0.1", old.clone())]).await;
+        let fleet = fake_fleet(json!({ "a": listing(&old) })).await;
+        let h = checker(&[&reg], &fleet);
+        let id = h.registry_id.clone();
+        h.call("GET", &format!("/api/registries/{id}/sniffers"), None)
+            .await;
+        assert_eq!(*hits.lock().unwrap(), 1, "the listing fills the cache");
+        check(&h).await;
+        check(&h).await;
+        assert_eq!(*hits.lock().unwrap(), 3, "every check goes to the registry");
+    }
+
+    #[tokio::test]
+    async fn check_with_unreachable_registry_reports_it_and_still_answers_for_the_rest() {
+        let old = sha_of(b"v1");
+        let (good, _) = registry_with_versions(&[
+            ("0.2.0", "0.1", sha_of(b"v2")),
+            ("0.1.0", "0.1", old.clone()),
+        ])
+        .await;
+        let fleet = fake_fleet(json!({ "a": listing(&old) })).await;
+        let (status, body) = check(&checker(&["http://127.0.0.1:1", &good], &fleet)).await;
+        assert_eq!(status, StatusCode::OK);
+        let regs = body["registries"].as_array().unwrap();
+        assert_eq!(
+            regs.iter().filter(|r| r["ok"] == false).count(),
+            1,
+            "{body}"
+        );
+        assert!(regs
+            .iter()
+            .any(|r| r["ok"] == false && r["error"].is_string()));
+        assert_eq!(body["sniffers"][0]["update"]["version"], "0.2.0");
+    }
+
+    #[tokio::test]
+    async fn check_needs_the_operator_role() {
+        let (reg, _) = registry_with_versions(&[("0.1.0", "0.1", sha_of(b"v1"))]).await;
+        let fleet = fake_fleet(json!({})).await;
+        let h = harness(&reg, &fleet, false, crate::role::Role::Viewer).await;
+        let (status, _) = check(&h).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }
