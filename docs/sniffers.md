@@ -127,7 +127,9 @@ what it receives. The routes are `GET /api/registries` and `GET /api/registries/
   are installed from at the operator's own risk; the page shows that before every install.
 - **Network guards.** Only `https://` is fetched, a redirect is held to the same rules, and a URL or
   hostname that resolves to a private, loopback, link-local or unique-local address is refused.
-  Bodies are cut off at the size limits while streaming, and requests time out.
+  Bodies are cut off at the size limits while streaming, and requests time out. The client does not
+  use `HTTPS_PROXY`/`HTTP_PROXY`: a forward proxy resolves the destination itself and would bypass
+  the address check, so the UI host needs direct outbound HTTPS to the registry.
 - **ABI and `min_proxy`.** The ABI is this release's. The aggregator does not report proxy versions
   yet, so `min_proxy` cannot be enforced and the listing says `min_proxy_checked: false`.
 - **Signatures.** The official public key is not set yet, so signatures are not checked and installs
