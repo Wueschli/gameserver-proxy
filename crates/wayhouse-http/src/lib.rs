@@ -20,6 +20,10 @@ mod build_sha;
 /// `.git` was unavailable (a source tarball).
 pub const COMMIT: &str = env!("WAYHOUSE_GIT_SHA");
 
+/// Largest sniffer module (`.wasm`) any hop accepts: the proxy's `POST /admin/sniffers`, and the
+/// aggregator and UI routes in front of it. One constant so the three limits cannot drift.
+pub const MAX_SNIFFER_MODULE_BYTES: usize = 8 * 1024 * 1024;
+
 /// `<version> (<commit>)`: what every binary prints for `--version`, so the commit
 /// is compiled into each of them (`deploy/check-image-commit.sh` looks for it).
 pub const LONG_VERSION: &str = env!("WAYHOUSE_LONG_VERSION");

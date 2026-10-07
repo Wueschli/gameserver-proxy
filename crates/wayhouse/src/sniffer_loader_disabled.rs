@@ -17,7 +17,7 @@ use wayhouse_core::sniff::{Sniffer, Sniffers};
 pub enum SnifferLoader {}
 
 /// Same cap as the full build, so the admin route compiles unchanged.
-pub const MAX_MODULE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_MODULE_BYTES: usize = wayhouse_http::MAX_SNIFFER_MODULE_BYTES;
 
 impl SnifferLoader {
     pub fn pins(&self) -> Vec<SnifferModulePin> {

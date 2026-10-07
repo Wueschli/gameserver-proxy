@@ -192,7 +192,7 @@ fn new_store(engine: &Engine, max_memory_bytes: usize) -> Store<StoreState> {
 }
 
 /// Largest module the loader and the admin upload accept.
-pub const MAX_MODULE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_MODULE_BYTES: usize = wayhouse_http::MAX_SNIFFER_MODULE_BYTES;
 
 /// The ABI version a sniffer module declares (or the host speaks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
