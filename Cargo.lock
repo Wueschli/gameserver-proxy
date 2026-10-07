@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4306,7 +4306,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-agent"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4326,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-aggregator"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4345,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-bench"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4357,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-config"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -4367,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-controller"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4392,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-core"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4417,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-fleet-tests"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "nix 0.29.0",
@@ -4431,7 +4431,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-http"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "arc-swap",
  "axum",
@@ -4449,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "wayhouse-ui"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "argon2",
