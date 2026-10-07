@@ -69,6 +69,9 @@ wat = "1"
 wasmparser = { version = "0.254", default-features = false, features = ["std"] }
 sha2 = "0.10"
 semver = { version = "1", features = ["serde"] }
+# Verification only (no signing code in the product); the maintainer signs in CI with
+# the minisign CLI. Used by wayhouse-registry.
+minisign-verify = "0.3"
 toml = "0.8"
 sled = "0.34"
 tempfile = "3"
