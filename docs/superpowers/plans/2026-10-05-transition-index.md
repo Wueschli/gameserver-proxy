@@ -1,6 +1,6 @@
 # Transition to v0.1.0 and the Sniffer Registry: Plan Index
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is in the [plugin system design](../specs/2026-10-07-plugin-system-design.md) (WASM with capabilities, hosted in the controller; build is Wave 5). Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 Execution order, dependencies and open items for the plans written on 2026-10-05 from `/mnt/project-files/wayhouse/transition-plan.md` (decisions recorded there). Every plan is written for a thread that has not seen this repository; implementation goes to separate threads, one per row below, in this order. Versions stay 0.x throughout.
@@ -23,7 +23,7 @@ Execution order, dependencies and open items for the plans written on 2026-10-05
 | 12 | [Sniffer updates and rollback](2026-10-05-plugin-updates.md) | #184 | 3 | #3, #10 |
 | 13 | [Component upgrades](2026-10-05-component-upgrades.md) | #185 B | 4 | #7, v0.1.0, #186 for the proxy runbook |
 
-Specs written because none existed: [sniffer registry, install and updates](../specs/2026-10-05-plugin-registry-design.md) (#183, #184) and [component versioning and rolling upgrades](../specs/2026-10-05-component-versioning-design.md) (#185).
+Specs written because none existed: [plugin system design](../specs/2026-10-07-plugin-system-design.md) (integrations, 2026-10-07); [sniffer registry, install and updates](../specs/2026-10-05-plugin-registry-design.md) (#183, #184) and [component versioning and rolling upgrades](../specs/2026-10-05-component-versioning-design.md) (#185).
 
 ## Proposed order
 
@@ -32,8 +32,9 @@ Specs written because none existed: [sniffer registry, install and updates](../s
 3. **Wave 2:** thread G = #8 once everything above is on main, the runners are healthy, and CI is green on the exact commit to tag. Includes the maintainer-assisted steps (tag push, package visibility, PAT).
 4. **Wave 3 (after v0.1.0):** #9, then #11 Part A and #10 in parallel, then #11 Part B, then #12.
 5. **Wave 4:** #186 (draining UDP worker drops new sessions), then #13.
+6. **Wave 5 (new, 2026-10-07):** plugin system build per the plugin system design; Pelican plugin after #213 is verified.
 
-About 12 implementation threads in total; per the project budget, run at most about 8 code threads per session, so Waves 0 and 1 are one session, Wave 2 plus #9 and #10 the next, the rest after that.
+About 12 implementation threads in total for Waves 0 to 4 (Wave 5, the plugin build in #220, is planned separately); per the project budget, run at most about 8 code threads per session, so Waves 0 and 1 are one session, Wave 2 plus #9 and #10 the next, the rest after that.
 
 ## Corrections to the transition plan found while planning
 
