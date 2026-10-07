@@ -32,6 +32,9 @@ rand.workspace = true
 tower-http = { version = "0.6", features = ["fs"] }
 serde_norway.workspace = true
 argon2 = "0.6.0"
+wayhouse-registry = { path = "../wayhouse-registry" }
+sha2.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tower = "0.5"

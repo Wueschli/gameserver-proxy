@@ -4628,7 +4628,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -4636,6 +4638,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayhouse-http",
+ "wayhouse-registry",
 ]
 
 [[package]]
