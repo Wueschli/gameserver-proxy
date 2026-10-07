@@ -610,7 +610,8 @@ async fn upload_sniffer(
     };
     let bytes = body.clone();
     // Compiling a module is CPU work; keep it off the async workers.
-    let verdict = tokio::task::spawn_blocking(move || validator(&bytes)).await;
+    let v0 = validator.clone();
+    let verdict = tokio::task::spawn_blocking(move || v0(&bytes)).await;
     match verdict {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -653,6 +654,17 @@ async fn upload_sniffer(
     ));
     let path = dir.join(format!("{}.wasm", q.name));
     let new_sha = format!("{:x}", Sha256::digest(&body));
+    // Only a current file that is itself a loadable module may become `.prev`:
+    // a rejected one (fallback active) must not replace the known-good rollback target.
+    let keep_current = match std::fs::read(&path) {
+        Ok(cur) => {
+            let v = validator.clone();
+            tokio::task::spawn_blocking(move || v(&cur).is_ok())
+                .await
+                .unwrap_or(false)
+        }
+        Err(_) => false,
+    };
     let prev = prev_path(dir, &q.name);
     let written = {
         let _guard = SWAP_LOCK
@@ -663,7 +675,10 @@ async fn upload_sniffer(
             // via a hard link, so `<name>.wasm` is never missing: link the
             // current file to a temp name, rename that over `.prev`, then
             // rename the new file over the current one.
-            if path.is_file() && sha_of_file(&path).as_deref() != Some(new_sha.as_str()) {
+            if keep_current
+                && path.is_file()
+                && sha_of_file(&path).as_deref() != Some(new_sha.as_str())
+            {
                 let keep = dir.join(format!(
                     ".{}.{}.keep",
                     q.name,
@@ -1271,7 +1286,8 @@ mod tests {
             let dir = scratch("big-ok");
             let (base, _rt) = spawn(&dir, no_pins()).await;
             let r = post(&base, "big", module_padded_to(3 << 20)).await;
-            assert!(r.status().is_success(), "{}", r.status());
+            let st = r.status();
+            assert!(st.is_success(), "{st} {}", r.text().await.unwrap());
             assert_eq!(
                 std::fs::metadata(dir.join("big.wasm")).unwrap().len(),
                 3 << 20
@@ -1340,6 +1356,20 @@ mod tests {
             assert_eq!(l.len(), 1, "the .prev file is not a module of its own");
             assert!(l[0].has_previous);
             assert!(!l[0].fallback);
+        }
+
+        #[tokio::test]
+        async fn invalid_current_never_replaces_the_known_good_prev() {
+            let dir = scratch("bad-current");
+            std::fs::write(dir.join("demo.wasm"), b"not wasm").unwrap();
+            std::fs::write(dir.join(".demo.wasm.prev"), module_padded_to(1 << 20)).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            assert!(post(&base, "demo", module_padded_to(2 << 20))
+                .await
+                .status()
+                .is_success());
+            assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20, "good prev kept");
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
         }
 
         #[tokio::test]
