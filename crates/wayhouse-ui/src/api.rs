@@ -91,6 +91,12 @@ pub struct AppState {
     /// Bounds concurrent Argon2 verifications, so a flood of logins can't
     /// occupy every blocking thread.
     pub verify_permits: Arc<tokio::sync::Semaphore>,
+    /// Sniffer registries the operator can install from ([`crate::registry_api`]).
+    pub registries: Arc<crate::registries::Registries>,
+    /// Whether `registries` is backed by a file (`--registries-file`); `false` means
+    /// changes are lost on restart, which the Sniffers page says.
+    pub registries_persistent: bool,
+    pub registry_client: crate::registry_client::RegistryClient,
 }
 
 /// Longest username accepted at login; longer is rejected before any
@@ -114,7 +120,28 @@ impl AppState {
             ws_session_recheck: Duration::from_secs(30),
             login_limiter: Arc::new(LoginLimiter::default()),
             verify_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES)),
+            registries: Arc::new(
+                crate::registries::Registries::load(None, true)
+                    .expect("no file to read, so loading cannot fail"),
+            ),
+            registries_persistent: false,
+            registry_client: crate::registry_client::RegistryClient::new(),
         }
+    }
+
+    pub fn with_registries(
+        mut self,
+        registries: Arc<crate::registries::Registries>,
+        persistent: bool,
+    ) -> Self {
+        self.registries = registries;
+        self.registries_persistent = persistent;
+        self
+    }
+
+    pub fn with_registry_client(mut self, client: crate::registry_client::RegistryClient) -> Self {
+        self.registry_client = client;
+        self
     }
 
     pub fn with_session_limits(mut self, limits: SessionLimits) -> Self {
@@ -192,11 +219,13 @@ pub fn router(state: AppState) -> Router {
         .route("/ui/session", get(session_status))
         .merge(crate::aggregator_proxy::viewer_router())
         .merge(crate::controller_proxy::viewer_router())
+        .merge(crate::registry_api::viewer_router())
         .merge(crate::ws::router())
         .route_layer(role_layer!(Role::Viewer));
 
-    let operator =
-        crate::aggregator_proxy::operator_router().route_layer(role_layer!(Role::Operator));
+    let operator = crate::aggregator_proxy::operator_router()
+        .merge(crate::registry_api::operator_router())
+        .route_layer(role_layer!(Role::Operator));
 
     let admin = crate::controller_proxy::admin_router().route_layer(role_layer!(Role::Admin));
 

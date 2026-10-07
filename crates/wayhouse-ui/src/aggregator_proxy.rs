@@ -243,7 +243,7 @@ async fn proxy(
 /// Like [`proxy`], but lets the caller pick the forwarded body's
 /// `content-type` — needed for `/api/fleet/sniffers` uploads, which carry
 /// raw `.wasm` bytes rather than JSON.
-async fn proxy_raw(
+pub(crate) async fn proxy_raw(
     state: &AppState,
     method: Method,
     path_suffix: &str,

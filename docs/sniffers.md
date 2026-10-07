@@ -111,3 +111,36 @@ bump the version instead. A failed run leaves the existing file untouched.
 If `--previous` is left out and `--out` already exists, `--out` is read as the previous
 index, so a plain regenerate cannot replace a published version. If that file exists but is
 not a valid index, the run fails instead of overwriting it; fix or remove the file first.
+
+## Installing from a registry (UI backend)
+
+`wayhouse-ui` fetches indexes and artifacts itself, runs every check above, and only then hands
+the verified bytes to the fleet upload, so a proxy needs no internet access and still re-validates
+what it receives. The routes are `GET /api/registries` and `GET /api/registries/{id}/sniffers`
+(viewer), `POST /api/registries`, `DELETE /api/registries/{id}` and
+`POST /api/registries/{id}/install` (operator, the same level as uploading a module by hand).
+
+- **Flags.** `--registries-file <path>` keeps the list across restarts (JSON, written atomically,
+  mode 0600; without it changes live in memory only). `--no-default-registry` hides the official
+  registry. The official index is `https://raw.githubusercontent.com/wayhouse-proxy/sniffers/main/index.json`.
+- **Risk.** Every response says whether a registry is `official` or `external`. External registries
+  are installed from at the operator's own risk; the page shows that before every install.
+- **Network guards.** Only `https://` is fetched, a redirect is held to the same rules, and a URL or
+  hostname that resolves to a private, loopback, link-local or unique-local address is refused.
+  Bodies are cut off at the size limits while streaming, and requests time out. The client does not
+  use `HTTPS_PROXY`/`HTTP_PROXY`: a forward proxy resolves the destination itself and would bypass
+  the address check, so the UI host needs direct outbound HTTPS to the registry.
+- **ABI and `min_proxy`.** The ABI is this release's. The aggregator does not report proxy versions
+  yet, so `min_proxy` cannot be enforced and the listing says `min_proxy_checked: false`.
+- **Signatures.** The official public key is not set yet, so signatures are not checked and installs
+  are reported `signed: false`. See the maintainer to-do below.
+- **Partial installs.** The reply lists every proxy. A proxy that rejects the module because it pins
+  its sniffers (`settings.sniffers.modules`) answers `409` with a reply starting `pinned:`; it is
+  reported as `pinned` together with the `name` and `sha256` to add to its pin list. Any other
+  refusal (including the `409` of a proxy with `settings.sniffers` unset, which needs a restart) is
+  reported with its `detail` text, not as pinned. `200` means every proxy accepted, `207` some did
+  or some are pinned, `502` none did and none is pinned.
+
+**Maintainer to-do.** Generate the minisign key pair offline, put the public half in
+`crates/wayhouse-ui/src/registry_keys.rs`, and store the secret in the sniffers repository (see the
+bootstrap plan). Until then everything installs unsigned.

@@ -462,7 +462,8 @@ un-namespaced names.
 
 Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
 — one entry per known instance, `status: null` (not a failed request) for one
-that couldn't be reached; a broadcast never fails or blocks on one bad
+that couldn't be reached; an instance that refuses (non-2xx) also carries
+`detail`, the first 200 bytes of its reply; a broadcast never fails or blocks on one bad
 instance. A `wayhouse` instance opts in with `--aggregator <url>` (+
 `--aggregator-token`, `--aggregator-instance`, `--aggregator-interval-sec`,
 default 10s, and `--aggregator-admin-url`, the base URL the aggregator should

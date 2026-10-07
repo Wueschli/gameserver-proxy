@@ -114,6 +114,17 @@ struct Args {
     #[arg(long)]
     ca_file: Option<PathBuf>,
 
+    /// JSON file remembering the sniffer registries added in the UI. Omitted: the
+    /// list lives in memory only and changes are lost on restart (the Sniffers
+    /// page says so). Written atomically, mode 0600.
+    #[arg(long)]
+    registries_file: Option<PathBuf>,
+
+    /// Do not list the official sniffer registry by default (operators can still
+    /// add it, or any other, by URL).
+    #[arg(long)]
+    no_default_registry: bool,
+
     #[command(flatten)]
     tls: wayhouse_http::tls::TlsArgs,
 }
@@ -173,6 +184,13 @@ async fn main() -> anyhow::Result<()> {
         );
         state = state.with_users(users);
     }
+    let persistent = args.registries_file.is_some();
+    if !persistent {
+        tracing::warn!("no --registries-file: registries added in the UI are lost on restart");
+    }
+    let registries =
+        wayhouse_ui::registries::Registries::load(args.registries_file, !args.no_default_registry)?;
+    state = state.with_registries(std::sync::Arc::new(registries), persistent);
     let mut feed_task = None;
     if let Some(aggregator_url) = args.aggregator_url {
         state = state.with_aggregator(aggregator_url.clone(), args.aggregator_token.clone());
