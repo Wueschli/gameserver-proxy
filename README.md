@@ -207,9 +207,9 @@ supported deployment. Sniffers are described in [`crates/plugins`](crates/plugin
 
 ## Documentation
 
-> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules;
+> **Sniffers vs plugins.** _Sniffers_ are the WASM protocol/hostname sniffer modules;
 > they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
-> *Plugins* are integrations with other systems (e.g. the Pelican panel) and will live in
+> _Plugins_ are integrations with other systems (e.g. the Pelican panel) and will live in
 > [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
 > renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
 > "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
