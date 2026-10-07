@@ -1,6 +1,13 @@
-# wayhouse sniffer plugins
+# wayhouse sniffers
 
-First-party sniffer plugins for the phase 9 WASM loader
+> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules;
+> they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
+> *Plugins* are integrations with other systems (e.g. the Pelican panel) and will live in
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
+> renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
+> "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
+
+First-party sniffers for the phase 9 WASM loader
 (`crates/wayhouse/src/sniffer_loader.rs`, `docs/08-roadmap.md` Phase 9). This is a
 **standalone workspace**, deliberately outside the main one — the same reason
 as `crates/wayhouse-config/fuzz`: these crates build for

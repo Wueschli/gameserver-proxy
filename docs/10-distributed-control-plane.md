@@ -249,7 +249,7 @@ HMAC-SHA256 tag (new `hmac` dep; `sha2` is already a workspace dependency via
 `crates/wayhouse/Cargo.toml`, promoted to a `wayhouse-core` dependency too) computed over
 a per-domain pre-shared key (`settings.gossip.psk`); a bad or missing tag is
 dropped silently and bumps a metric, the same "malformed input is discarded,
-never trusted, never a panic" posture `sniff.rs` already has for plugin
+never trusted, never a panic" posture `sniff.rs` already has for sniffer
 input. **Deliberately not full mTLS**: a client-cert mesh is proportionate to
 Tier 1, which actually accepts writes; Tier 2 is advisory-only and can never
 independently move traffic (see the authority model above — it can only
@@ -983,7 +983,7 @@ schema-driven settings form over the same submitted YAML text (a raw-YAML
 panel stays underneath so every field — including ones the form has no
 control for yet — is always reachable), and a Plugins page for managing
 sniffer modules. (Later, 2026-10-03: a read-only Tunnel addresses page over
-the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Plugin management needed new backend surface: `wayhouse` gained
+the controller's `GET /tunnel/addresses`, `docs/11` "Address authority".) Sniffer management needed new backend surface: `wayhouse` gained
 `GET/POST /admin/sniffers` + `DELETE /admin/sniffers/{name}` (writes into
 `settings.sniffers.dir`, then reuses the existing live rescan-on-reload
 mechanism — no new hot-reload path), fanned out fleet-wide via

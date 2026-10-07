@@ -92,7 +92,7 @@ state (a pushed `instance` name is not bound to a credential).
   controller, `deny_unknown_fields`, validated into a resolved `Config`;
   cargo-fuzz harnesses exist for `parse_config`, `extract_sni` and route
   matching.
-- **WASM sniffer plugins** (`crates/wayhouse/src/sniffer_loader.rs`): wasmtime
+- **WASM sniffers** (`crates/wayhouse/src/sniffer_loader.rs`): wasmtime
   with epoch-interruption timeouts and a per-call `StoreLimits` memory cap.
 - **`unsafe`**: only in the `crates/plugins/*` guest crates (the wasm ABI's
   `alloc` and raw input slices), which run inside the wasmtime sandbox. None

@@ -1,5 +1,8 @@
 # Component versioning and rolling upgrades design (#185)
 
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
+
 Status: design for review (brainstormed 2026-10-05). Phase A (version fields) is planned in `docs/superpowers/plans/2026-10-05-protocol-and-config-versions.md`; Phase B (this design's behaviour) in `2026-10-05-component-upgrades.md`.
 
 ## Goal

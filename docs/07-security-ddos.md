@@ -92,12 +92,12 @@ Guarded by `crates/wayhouse-core/tests/amplification.rs`:
       no session and are never forwarded
       (`rate_limit_is_enforced_before_any_state_change`).
 
-## Sniffer plugin sandbox guarantees (phase 9)
+## Sniffer sandbox guarantees (phase 9)
 
-A loaded sniffer plugin (`settings.sniffers`, `crates/wayhouse/src/sniffer_loader.rs`)
+A loaded sniffer (`settings.sniffers`, `crates/wayhouse/src/sniffer_loader.rs`)
 runs under `wasmtime` as a **core WASM module with no WASI and no host
-imports** — nothing is wired in beyond the `alloc`/`sniff` exports the plugin
-itself provides. Concretely, a plugin cannot:
+imports** — nothing is wired in beyond the `alloc`/`sniff` exports the sniffer
+itself provides. Concretely, a sniffer cannot:
 
 - read or write the filesystem — no `wasi_snapshot_preview1`, no ambient
   authority of any kind is linked in;
@@ -113,7 +113,7 @@ itself provides. Concretely, a plugin cannot:
   (host / key / reject); it has no reply path, so the amplifier checklist
   above is untouched by sniffers entirely.
 
-Two independent bounds cap what a *misbehaving* (buggy or malicious) plugin
+Two independent bounds cap what a *misbehaving* (buggy or malicious) sniffer
 can cost the process, checked every call, not just at load time:
 
 - **Time**: `wasmtime` epoch interruption. A dedicated ticker thread bumps
@@ -125,7 +125,7 @@ can cost the process, checked every call, not just at load time:
   under half the timeout never traps
   (`sniffer_loader::tests::short_calls_never_time_out_under_the_shipped_ticker`).
 - **Memory**: a `StoreLimits` cap (`max_memory_bytes`) on the `Store` — a
-  plugin that tries to grow its linear memory past the cap gets a failed
+  sniffer that tries to grow its linear memory past the cap gets a failed
   `memory.grow` (WASM-spec `-1`), not more memory.
 
 Supply chain: `settings.sniffers.modules: [{ name, sha256 }]` optionally
@@ -139,7 +139,7 @@ measured end to end (real `alloc`/`memory.write`/`sniff`/decode round trip,
 a fresh `Store` + `Instance` per call, release build) against the three
 first-party plugins in `crates/plugins/`:
 
-| plugin | p50 | p90 | p99 | max |
+| sniffer | p50 | p90 | p99 | max |
 |---|---|---|---|---|
 | `a2s` | 10.0 µs | 11.4 µs | 25.8 µs | 399 µs |
 | `minecraft` | 8.9 µs | 10.2 µs | 16.9 µs | 217 µs |

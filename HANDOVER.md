@@ -105,7 +105,7 @@ details are in `git log`.
   ≤1024 ports, one socket/port × workers).
 - External resolvers (HTTP / gRPC, TTL-LRU cache) and backend discovery sources
   (DNS SRV / Consul / Kubernetes / tunnel) behind live-reloadable `ArcSwap` seams.
-- Sniffer plugins via `wasmtime` — no game-protocol code in core. First-party
+- Sniffers via `wasmtime` — no game-protocol code in core. First-party
   `a2s` / `minecraft` / `regex-firstbytes` plugins in `crates/plugins/`
   (standalone workspace, `make plugins`). Per-plugin config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
@@ -137,7 +137,7 @@ details are in `git log`.
   react-router, grouped fleet tree via `settings.group`, schema-driven settings
   form over a raw-YAML escape hatch, Plugins page backed by `GET/POST/DELETE
   /admin/sniffers`). Destructive actions (drain, remove backend, set a backend
-  `draining`/`disabled`, rollback, plugin remove, applying Settings) confirm first via
+  `draining`/`disabled`, rollback, sniffer remove, applying Settings) confirm first via
   `useConfirm()`; action buttons disable while a request is in flight; a
   vitest suite (`make ui-test`, CI `ui` job) pins that, a Playwright smoke test
   (`make ui-e2e`, same job, backend stubbed with `page.route`) drives the Settings
@@ -391,14 +391,14 @@ per-connection or per-datagram task, hop, or allocation, add it here.**
   default 40 ms) on the routing path, in the spawned task — never the accept
   loop. With `cache:` a repeat key is a `Mutex<LruCache>` get instead. A
   `target` connection skips `Pool::acquire_for` entirely — cheaper than pooled.
-- **Sniffer plugin** (`WasmSniffer`): one `Store::new` + `Instance::new` (fresh
+- **Sniffer** (`WasmSniffer`): one `Store::new` + `Instance::new` (fresh
   per call) + `memory.write` of the peeked bytes + one guest call + decode, all
   synchronous on the per-conn task. Bounded by `call_timeout_ms` (epoch
   interruption) + `max_memory_bytes`. **Benchmarked**: p50 8–10 µs, p99 12–26 µs
-  for the three first-party plugins — comfortably inside NFR N1 (500 µs), so the
+  for the three first-party sniffers — comfortably inside NFR N1 (500 µs), so the
   fresh-`Store`-per-call design needs none of the `InstancePre` / pooling /
   warm-instance fallbacks held in reserve. Listeners without a `sniffer:` route
-  pay one `HashMap::get`. See `docs/07` "Sniffer plugin sandbox guarantees".
+  pay one `HashMap::get`. See `docs/07` "Sniffer sandbox guarantees".
 - **Filter chain** — CIDR ACL: a bounded bit-walk of the `deny` (and, if
   non-empty, `allow`) radix trie, ≤32/128 hops, no alloc/lock. GeoIP: one
   MaxMind tree lookup + a small `Vec` scan. Rate limit / `per_source` / global
@@ -500,7 +500,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   `.wasm` artifact round-trip and the WASM-boundary N1 latency bench.
 - `wasmtime` is a normal `cargo` dep — it does **not** need the
   `wasm32-unknown-unknown` rustc target; that target is only needed to *build*
-  the plugin crates. Loader tests assemble WASM from inline WAT via the `wat`
+  the sniffer crates. Loader tests assemble WASM from inline WAT via the `wat`
   crate.
 
 ---
@@ -547,7 +547,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   assumed one shared process breaks (found: the tunnel lab's in-process namespace counter,
   fixed by probing for a free index in `Lab::add_ns`).
   `build-release` also runs `cargo test -p wayhouse --release --no-run`: cargo unifies features per
-  invocation, so the plugins job's `-p wayhouse` test build needs different dependency artifacts
+  invocation, so the sniffers job's `-p wayhouse` test build needs different dependency artifacts
   than the five-binary build, and it recompiled 293 crates even on an exact cache hit until
   the snapshot held both.
   **Shared release stage:** a `build-release` job compiles the five release binaries once
@@ -558,7 +558,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
   built there might need a newer glibc than the distroless runtime's 2.41. (Since
   2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.py`
-  emits a `release` flag (= plugins or deploy). Debug jobs (`test`, `tunnel`) deliberately
+  emits a `release` flag (= sniffers or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
   cache each only recompiles ~35 crates (~1 min).

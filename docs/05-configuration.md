@@ -47,10 +47,10 @@
 > and `{ type: sni, host: ["exact", "*.suffix", ".suffix"] }` — the `server_name`
 > from the peeked (not terminated) TLS ClientHello, TCP listeners only. The
 > `{ type: sniffer, sniffer: <name>, host: [...] }` matcher parses (a listener
-> may use several sniffers, see `docs/03-routing.md`) but matches nothing until a sniffer plugin is loaded — no
+> may use several sniffers, see `docs/03-routing.md`) but matches nothing until a sniffer is loaded — no
 > sniffers are built in; the name is checked at listener start, not by
 > `validate()`. The sniffer loader is Phase 9; regex-over-first-bytes is a Phase
-> 9 plugin concern, not a `first_bytes` sub-form.
+> 9 sniffer concern, not a `first_bytes` sub-form.
 >
 > **External resolver** (phase 4, slices 1–4): a top-level `resolvers:` list of
 > `{ name, type: http|grpc, endpoint, timeout_ms, on_error: reject|fallback_route|stale_ok,
@@ -126,20 +126,20 @@
 > `wayhouse_filter_blocked_total{listener,filter="geo"}`. Startup-only, like
 > `settings.workers`.
 >
-> **Sniffer plugin loader** (phase 9; config schema slice 2, the `wasmtime`
+> **Sniffer loader** (phase 9; config schema slice 2, the `wasmtime`
 > loader slice 3, live `dir` rescanning slice 4 — all landed):
 > `settings.sniffers: { dir, call_timeout_ms, max_memory_bytes, modules: [{
-> name, sha256, config? }] }`. Absent ⇒ no plugins load and a `sniffer:` route
+> name, sha256, config? }] }`. Absent ⇒ no sniffers load and a `sniffer:` route
 > never matches. `dir` is a directory of `*.wasm` modules, scanned at startup and
 > rescanned on every reload (added modules load, removed ones drop, changed
 > ones recompile — swapped in atomically, no listener restart); `call_timeout_ms`
-> (default 20) bounds a plugin's wall-clock time per call via `wasmtime` epoch
+> (default 20) bounds a sniffer's wall-clock time per call via `wasmtime` epoch
 > interruption; `max_memory_bytes` (default 16 MiB) caps a call's instance
 > memory; `modules:` optionally pins each module's SHA-256 for supply-chain
 > verification — when non-empty, a `dir` entry not listed there (or whose hash
-> doesn't match) is refused (and, on a rescan, keeps the previous plugin set
+> doesn't match) is refused (and, on a rescan, keeps the previous sniffer set
 > rather than applying a half-updated one). `modules[].config` is an optional
-> opaque string handed to that plugin on every `sniff` call (the plugin parses
+> opaque string handed to that sniffer on every `sniff` call (the sniffer parses
 > it itself — e.g. a match pattern for `regex-firstbytes`); a module needs a
 > `modules[]` entry (hence its `sha256`) to carry a `config`. `validate()`
 > rejects an empty `dir`, a zero `call_timeout_ms` / `max_memory_bytes`, a
@@ -218,7 +218,7 @@
 > client a new backend. See `config.example.yaml`.
 >
 > **Handshake-only sniffers (UDP, #131):** the `quic`, `wireguard`, `openvpn`,
-> `raknet` and `teamspeak3` plugins recognise only a flow's handshake datagram.
+> `raknet` and `teamspeak3` sniffers recognise only a flow's handshake datagram.
 > The route is decided when a session opens, not per connection, so a flow whose
 > session was evicted by `idle_timeout_sec` (or whose NAT mapping changed, or
 > that reached this proxy after a restart or an ECMP move) reopens on a
@@ -230,7 +230,7 @@
 > route after such a sniffer that goes to a different pool is rejected unless
 > `first_packet_gate: true` is set; and use `route_hint`, or a pool with
 > `balancer: consistent_hash` (`hash_on: src_ip`), so a reopened session still
-> reaches the same backend. The check goes by the plugin's module name.
+> reaches the same backend. The check goes by the sniffer's module name.
 >
 > **Admin API auth** (phase 10+11 slice 10): `settings.admin.auth_token`
 > (a flat string, not the target schema's `auth: { mode, token }` object

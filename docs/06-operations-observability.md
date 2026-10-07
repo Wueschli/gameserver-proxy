@@ -4,7 +4,7 @@
 
 ### Listener / connections
 - `wayhouse_listener_connections_total{listener,result}` – `result` =
-  `accepted|no_route|sniffer_reject` (`sniffer_reject`: a `sniffer` plugin
+  `accepted|no_route|sniffer_reject` (`sniffer_reject`: a `sniffer` sniffer
   returned a `reject` hint for the first bytes; the connection is dropped
   before routing). ACL / rate-limit / geo / cap rejections do **not** get a
   `result` value here — they increment `wayhouse_filter_blocked_total` instead
@@ -25,7 +25,7 @@
   `no_route|no_backend|upstream_bind|upstream_send|outside_prefix|draining|reply_bind|first_packet_gate|sniffer_reject|pending_full`
   (`outside_prefix`: prefix-mode listener, datagram destination not in `prefix`;
   `first_packet_gate`: `first_packet_gate` listener, first datagram not recognised;
-  `sniffer_reject`: a `sniffer` plugin returned a `reject` hint — no session, no reply;
+  `sniffer_reject`: a `sniffer` sniffer returned a `reject` hint — no session, no reply;
   `pending_full`: a new session's external resolver call is still in flight and the
   per-worker pending cap (1024 sessions, 1 MiB buffered) or the per-session buffer (4 datagrams) is full)
 
@@ -65,12 +65,12 @@
   connection / session cap was reached, `max_conn` / `max_udp` / `max_new_rate` =
   a process-wide `settings.limits` cap was hit
 
-### Sniffer plugins (phase 9)
+### Sniffers (phase 9)
 - `wayhouse_sniffer_calls_total{name,result}` – `result` = `ok` | `unrecognised` |
   `timeout` | `trap` | `bad_output`; one increment per `sniff()` call through
   the WASM loader. `timeout` = the epoch-interruption deadline
   (`settings.sniffers.call_timeout_ms`) fired; `trap` = any other WASM trap or
-  an instantiation failure; `bad_output` = the plugin returned a result the
+  an instantiation failure; `bad_output` = the sniffer returned a result the
   host couldn't decode as a `RouteHint`.
 - `wayhouse_sniffer_call_seconds{name}` (histogram) – wall-clock time of one
   `sniff()` call, instantiation included.

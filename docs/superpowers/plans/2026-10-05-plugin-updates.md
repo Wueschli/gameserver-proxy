@@ -1,8 +1,11 @@
-# Plugin Updates and Rollback Implementation Plan (#184)
+# Sniffer Updates and Rollback Implementation Plan (#184)
+
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** From the Plugins page an operator checks on demand whether installed plugins have newer compatible versions, updates them across the fleet, and can roll back, with the proxy falling back to the previous module automatically when a new file fails validation.
+**Goal:** From the Sniffers page an operator checks on demand whether installed sniffers have newer compatible versions, updates them across the fleet, and can roll back, with the proxy falling back to the previous module automatically when a new file fails validation.
 
 **Architecture:** Proxy side: the upload handler keeps the replaced module as `.<name>.wasm.prev` (dotfile, ignored by the `*.wasm` scan), a rollback endpoint swaps it back, and `scan` prefers `.prev` when the current file fails validation. UI backend side: an "check updates" route maps each instance's installed `sha256` to versions in the loaded registry indexes and reports updates; the update itself is the install flow from the previous plan with the target version.
 
@@ -80,12 +83,12 @@
 - Consumes: `RegistryClient::fetch_index` (with `invalidate` so the button always refetches), per-instance sniffer listings (`GET /api/fleet/instances/{instance}/sniffers`).
 - Produces: `POST /api/registries/updates/check` (POST because it refetches; no body) -> `[{plugin, installed_sha256, installed_version?: string, known: bool, update?: {registry_id, version, compatible: bool, reason?: string}, instances:[string]}]`; `POST /api/registries/{id}/install {name, version}` is reused for the update itself (Task 3 of the previous plan).
 
-- [ ] **Step 1: Write failing tests**: `check_finds_newer_compatible_version`, `check_marks_unknown_build_without_update`, `check_ignores_incompatible_newer_version_but_reports_reason`, `check_groups_instances_by_installed_hash` (a half-upgraded fleet shows two rows for one plugin), `check_refetches_even_when_cached`, `check_with_unreachable_registry_reports_it_and_still_answers_for_the_rest`.
+- [ ] **Step 1: Write failing tests**: `check_finds_newer_compatible_version`, `check_marks_unknown_build_without_update`, `check_ignores_incompatible_newer_version_but_reports_reason`, `check_groups_instances_by_installed_hash` (a half-upgraded fleet shows two rows for one sniffer), `check_refetches_even_when_cached`, `check_with_unreachable_registry_reports_it_and_still_answers_for_the_rest`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-ui updates`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** **Commit** `feat(ui): on-demand plugin update check (#184)`.
 
-### Task 5: Plugins page: update and rollback
+### Task 5: Sniffers page: update and rollback
 
 **Files:**
 - Modify: `PluginsPage.tsx`, `PluginsPage.test.tsx`, `api.ts`, `types.ts`

@@ -47,7 +47,7 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Matchers: `always`, `port` (destination port), `client-cidr` (source IP).
 - ✅ `first-bytes` matcher — `prefix` (`hex:` / `ascii:`, ≤ 512 B) and/or
   `length: { min, max }`; TCP peek / first UDP datagram. (Regex-over-first-bytes
-  moved to Phase 9 — it is a plugin concern, not a `first-bytes` sub-form.)
+  moved to Phase 9 — it is a sniffer concern, not a `first-bytes` sub-form.)
 - ✅ `consistent_hash` balancer (rendezvous/HRW hash, pool `hash_on: src_ip |
   src_ip_port`) — session affinity without a sticky table.
 - ✅ SNI peek matcher (`sni`, `host` exact / `*.suffix` / `.suffix`; ClientHello
@@ -59,10 +59,10 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Sniffer API **seam** — `wayhouse_core::sniff::Sniffer` → `RouteHint`, the
   `sniffer` matcher, and the listener wiring that feeds a hint into routing.
   **No built-in sniffers ship** (game-specific parsing does not belong in the
-  proxy binary); a `sniffer:` route only matches once a plugin is loaded. The
+  proxy binary); a `sniffer:` route only matches once a sniffer is loaded. The
   loader is Phase 9.
 - **Result**: multiple games/regions behind one port (via `dst` / `sni` /
-  `first-bytes`; game-protocol sniffing once plugins land).
+  `first-bytes`; game-protocol sniffing once sniffers land).
 - ✅ F1.4's port-range listener (`docs/01-requirements.md`) — `bind:
   "host:lo-hi"` (e.g. `"0.0.0.0:30000-30999"`) spawns one real socket per
   port (× `workers`, `SO_REUSEPORT`-shared) under one listener config, for
@@ -248,11 +248,11 @@ Status legend: ✅ done · 🔜 next · ⬜ planned.
 - ✅ `backend_sources:` live reload (`SourceManager`) — landed in the
   data-plane-completion pass; see Phase 4's post-phase note.
 
-## Phase 9 – Sniffer plugin loader ✅
+## Phase 9 – Sniffer loader ✅
 
 Game-protocol sniffers load into a running proxy from disk, sandboxed, never
 compiled in and never a fork. A `sniffer:` route resolves its name against the
-loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) live in
+loaded set. The first-party sniffers (`a2s`, `minecraft`, `regex-firstbytes`) live in
 [`crates/plugins/`](../crates/plugins/README.md).
 
 ### Locked decisions
@@ -260,9 +260,9 @@ loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) liv
   exports `memory`, `alloc(u32) -> u32`, and
   `sniff(ptr: u32, len: u32) -> u64` (packed `ptr<<32 | len`; `0` = not
   recognised); the result bytes are a compact encoding of `RouteHint`. No WASI,
-  no host functions ⇒ a plugin cannot touch the filesystem, clock, or network.
+  no host functions ⇒ a sniffer cannot touch the filesystem, clock, or network.
 - **Time bound: epoch interruption.** A host thread calls
-  `Engine::increment_epoch()` every `call_timeout_ms`; a plugin that overruns
+  `Engine::increment_epoch()` every `call_timeout_ms`; a sniffer that overruns
   traps. (Fuel is optional on top.)
 - **Memory bound:** `StoreLimits` `max_memory` + one instance per call, from
   `settings.sniffers.max_memory_bytes`.
@@ -273,7 +273,7 @@ loaded set. The first-party plugins (`a2s`, `minecraft`, `regex-firstbytes`) liv
   becomes an `Arc<Sniffers>` map (`HashMap<String, Arc<dyn Sniffer>>`) threaded
   runtime → `ListenerManager` → workers, exactly like `Arc<Resolvers>` /
   `Option<Arc<GeoDb>>`. This is the one real refactor.
-- **First-party plugins ship built, the same way:** `a2s`, `minecraft`, and a
+- **First-party sniffers ship built, the same way:** `a2s`, `minecraft`, and a
   generic bounded `regex-firstbytes` (keeps `regex` off the core routing path).
   `sni` stays a native `Matcher` — it is not a sniffer.
 - **Latency is a gate, not an assumption.** Bench the WASM boundary vs. NFR N1
@@ -302,13 +302,13 @@ route's `peek_len()` ≤ `PEEK_MAX`.
   `sniff(ptr,len) -> packed|0` (later widened by ADR 16a); host decodes a
   compact `RouteHint` — any bad pointer/length/UTF-8 is `bad_output`, never a
   panic. `build_sniffers(&SniffersConfig)` scans `dir`, verifies `sha256`
-  pins, fails closed on a bad plugin (like `geo_db`).
+  pins, fails closed on a bad sniffer (like `geo_db`).
   `wayhouse_sniffer_calls_total{name,result}` / `wayhouse_sniffer_call_seconds{name}`.
 - ✅ **Slice 4**: live `dir` rescanning on reload — `Sniffers` gained
   `ArcSwap` interior mutability (mirrors `RouteHints`) so `replace()` from the
   reload task is visible to every worker instantly; a scan error keeps the
-  previous plugin set. Engine params stay startup-only.
-- ✅ **Slice 5**: first-party plugin crates in the standalone
+  previous sniffer set. Engine params stay startup-only.
+- ✅ **Slice 5**: first-party sniffer crates in the standalone
   `crates/plugins/` workspace (own `[workspace]`, never a dep of
   `wayhouse`/`wayhouse-core`) — `wayhouse-sniffer-abi` (guest-side ABI helper) + `a2s`
   (Source-engine query packets), `minecraft` (Handshake `server address`,
@@ -318,11 +318,11 @@ route's `peek_len()` ≤ `PEEK_MAX`.
 - ✅ **Slice 6**: WASM-boundary latency bench vs. N1
   (`sniffer_loader::tests::wasm_boundary_latency_vs_nfr_n1`, `#[ignore]`d,
   run in the `plugins` CI job). **Result: p50 8–10 µs, p99 12–26 µs** across
-  all three plugins — comfortably inside N1, so the fresh-`Store`-per-call
+  all three sniffers — comfortably inside N1, so the fresh-`Store`-per-call
   design needs none of the `InstancePre` / warm-instance fallbacks held in
   reserve. Found along the way: the epoch ticker runs on wall-clock time for
   the loader's whole lifetime, so `call_timeout_ms` is a *ceiling*, not a
-  per-call guarantee — documented in `docs/07` "Sniffer plugin sandbox
+  per-call guarantee — documented in `docs/07` "Sniffer sandbox
   guarantees".
 - ✅ **Slice 7 — phase 9 complete**: end-to-end test driving a live `Runtime`
   + real TCP connection through the real `build_sniffers` directory scan (a
@@ -332,10 +332,10 @@ route's `peek_len()` ≤ `PEEK_MAX`.
 - **Result — phase 9 complete**: runtime-loaded, sandboxed game-protocol
   sniffers (`a2s`, `minecraft`) plus a `regex-firstbytes` template, all
   measured inside NFR N1; `regex` first-bytes matching lives in an optional
-  plugin, never in core. Known follow-ups, not blocking:
+  sniffer, never in core. Known follow-ups, not blocking:
   per-source cap LRU eviction — see
   `HANDOVER.md`. (`GET /sessions` since landed — data-plane completion.)
-- ✅ **Post-phase-9 (data-plane completion)**: per-plugin config. ADR 16a
+- ✅ **Post-phase-9 (data-plane completion)**: per-sniffer config. ADR 16a
   widens the guest ABI to
   `sniff(in_ptr, in_len, cfg_ptr, cfg_len)`; `settings.sniffers.modules[]`
   grows a `config` string, marshalled into a second linear-memory region on
@@ -1113,7 +1113,7 @@ slice 1.
 - **v1.0**: + phase 3–5 (routing, resolver, zero-downtime).
 - **v1.1**: + phase 6–7 (client IP, hardening).
 - **v1.2**: + phase 8 (discovery, HA operations docs).
-- **v1.3**: + phase 9–10+11 (sniffer plugin loader; single-controller +
+- **v1.3**: + phase 9–10+11 (sniffer loader; single-controller +
   single-aggregator PoC — fleet config distribution & operational Web
   UI). Both additive — the data-plane contract is unchanged.
 - **v2.0**: + phase 12–13 (fleet hierarchy / HA / shared intent; regional
