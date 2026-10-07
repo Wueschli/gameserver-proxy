@@ -704,12 +704,33 @@ async fn promote(
     }
 
     // A proxy that predates the revision's schema may have registered since it
-    // was staged: promoting it would hand that proxy a document it rejects.
-    if let Ok(Some(bytes)) = state.store.get(revision) {
-        if let Ok(cfg) = wayhouse_config::parse_str(&String::from_utf8_lossy(&bytes)) {
-            if let Some(rejection) = schema_floor_rejection(&state, &cfg) {
-                return rejection;
-            }
+    // was staged: promoting it would hand that proxy a document it rejects. With
+    // a gate configured, a stored revision that cannot be read or parsed fails
+    // the promote rather than skipping the check. A revision that does not exist
+    // falls through to the 404 below.
+    if state.schema_floor.is_some() {
+        match state.store.get(revision) {
+            Ok(Some(bytes)) => match wayhouse_config::parse_str(&String::from_utf8_lossy(&bytes)) {
+                Ok(cfg) => {
+                    if let Some(rejection) = schema_floor_rejection(&state, &cfg) {
+                        return rejection;
+                    }
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "cannot check the config schema of revision {revision}: \
+                                     the stored document does not parse: {e}"
+                            ),
+                        }),
+                    )
+                        .into_response();
+                }
+            },
+            Ok(None) => {}
+            Err(e) => return store_error_response(e),
         }
     }
 
@@ -2031,6 +2052,57 @@ listeners:
         // Back at the document's own level it promotes.
         floor.store(1, std::sync::atomic::Ordering::SeqCst);
         let promote = app
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(promote.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn promote_fails_closed_when_the_stored_revision_cannot_be_parsed() {
+        let (state, _dir) = test_state();
+        state
+            .apply_revision_with_stage_and_actor(
+                b"pools: [this is not a config".to_vec(),
+                Stage {
+                    promoted: false,
+                    canary_groups: vec!["eu".into()],
+                },
+                None,
+            )
+            .unwrap();
+        let app = router(state.with_schema_floor(Arc::new(|| Ok(Some(0)))));
+        let promote = app
+            .oneshot(
+                Request::post("/config/promote/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = status_and_error(promote).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("revision 1"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn promote_without_a_schema_gate_does_not_parse_the_revision() {
+        let (state, _dir) = test_state();
+        state
+            .apply_revision_with_stage_and_actor(
+                b"pools: [this is not a config".to_vec(),
+                Stage {
+                    promoted: false,
+                    canary_groups: vec!["eu".into()],
+                },
+                None,
+            )
+            .unwrap();
+        let promote = router(state)
             .oneshot(
                 Request::post("/config/promote/1")
                     .body(Body::empty())

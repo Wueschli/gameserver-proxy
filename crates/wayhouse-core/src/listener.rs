@@ -33,6 +33,49 @@ const PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 /// (rather than spinning until `PEEK_TIMEOUT`).
 const PEEK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// First pause after a failed `accept`; doubles per consecutive failure up to
+/// [`ACCEPT_BACKOFF_MAX`]. Out of file descriptors (EMFILE) the pending connection
+/// stays in the backlog, so retrying at once only spins and floods the log (#174).
+const ACCEPT_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+/// At most one "accept failed" warning per this interval; the rest are counted.
+const ACCEPT_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Backoff and warning rate limit for consecutive `accept` failures of one worker.
+#[derive(Default)]
+struct AcceptErrors {
+    /// Consecutive failures since the last successful accept.
+    streak: u32,
+    last_warned: Option<std::time::Instant>,
+    suppressed: u64,
+}
+
+impl AcceptErrors {
+    /// Records a failure at `now`. Returns how long to pause before accepting
+    /// again, and `Some(n)` when a warning is due, `n` being the failures
+    /// swallowed since the previous one.
+    fn record(&mut self, now: std::time::Instant) -> (std::time::Duration, Option<u64>) {
+        let delay = ACCEPT_BACKOFF_MIN
+            .saturating_mul(1u32 << self.streak.min(16))
+            .min(ACCEPT_BACKOFF_MAX);
+        self.streak = self.streak.saturating_add(1);
+        let due = self
+            .last_warned
+            .is_none_or(|at| now.duration_since(at) >= ACCEPT_WARN_INTERVAL);
+        if due {
+            self.last_warned = Some(now);
+            (delay, Some(std::mem::take(&mut self.suppressed)))
+        } else {
+            self.suppressed += 1;
+            (delay, None)
+        }
+    }
+
+    fn reset(&mut self) {
+        self.streak = 0;
+    }
+}
+
 // Plumbing entry point: each argument is a distinct shared handle wired in by
 // `ListenerManager::spawn_group` (its only caller), which also binds `socket`
 // (see `net::bind_reuseport_tcp`) so a bind failure surfaces before any task runs. Bundling them would just
@@ -63,6 +106,7 @@ pub async fn run_tcp_listener(
         "tcp listener started"
     );
 
+    let mut accept_errors = AcceptErrors::default();
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
@@ -73,9 +117,31 @@ pub async fn run_tcp_listener(
             }
             accepted = listener.accept() => {
                 let (stream, peer) = match accepted {
-                    Ok(v) => v,
+                    Ok(v) => {
+                        accept_errors.reset();
+                        v
+                    }
                     Err(e) => {
-                        tracing::warn!(listener = %cfg.name, error = %e, "accept failed");
+                        metrics::counter!(m::ACCEPT_ERRORS_TOTAL, "listener" => cfg.name.clone())
+                            .increment(1);
+                        let (delay, warn) = accept_errors.record(std::time::Instant::now());
+                        if let Some(suppressed) = warn {
+                            tracing::warn!(
+                                listener = %cfg.name, error = %e, suppressed,
+                                retry_in_ms = delay.as_millis() as u64,
+                                "accept failed"
+                            );
+                        }
+                        // Pause, but stay responsive to a shutdown.
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = shutdown.changed() => {
+                                if *shutdown.borrow() {
+                                    tracing::info!(listener = %cfg.name, worker = worker_id, "listener stopping");
+                                    return Ok(());
+                                }
+                            }
+                        }
                         continue;
                     }
                 };
@@ -388,7 +454,42 @@ fn routing_bytes_complete(buf: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::routing_bytes_complete;
+    use super::{routing_bytes_complete, AcceptErrors};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn accept_errors_back_off_exponentially_up_to_a_cap() {
+        let mut errors = AcceptErrors::default();
+        let t = Instant::now();
+        let delays: Vec<u64> = (0..8)
+            .map(|_| errors.record(t).0.as_millis() as u64)
+            .collect();
+        assert_eq!(delays, [50, 100, 200, 400, 800, 1000, 1000, 1000]);
+    }
+
+    #[test]
+    fn a_successful_accept_resets_the_backoff() {
+        let mut errors = AcceptErrors::default();
+        let t = Instant::now();
+        errors.record(t);
+        errors.record(t);
+        errors.reset();
+        assert_eq!(errors.record(t).0, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn accept_error_warnings_are_limited_to_one_per_second_and_count_the_rest() {
+        let mut errors = AcceptErrors::default();
+        let t = Instant::now();
+        // The first error is reported at once, with nothing suppressed.
+        assert_eq!(errors.record(t).1, Some(0));
+        for i in 1..=4 {
+            assert_eq!(errors.record(t + Duration::from_millis(i * 100)).1, None);
+        }
+        // A second later, one warning carries the number swallowed since the last.
+        assert_eq!(errors.record(t + Duration::from_millis(1000)).1, Some(4));
+        assert_eq!(errors.record(t + Duration::from_millis(1500)).1, None);
+    }
 
     #[test]
     fn non_tls_first_byte_is_always_complete() {
