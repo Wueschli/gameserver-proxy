@@ -325,6 +325,21 @@ async fn install(
         .into_response()
 }
 
+/// `name` as one URL path segment: everything but unreserved characters is
+/// percent-encoded, so a `/`, `?`, `#` or `%` in an instance name cannot change
+/// the route.
+fn path_segment(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// One instance's `GET /admin/sniffers` row, as far as the check needs it.
 #[derive(Deserialize)]
 struct InstalledSniffer {
@@ -461,30 +476,50 @@ async fn check_updates(
     };
     instances.sort_by(|a, b| a.instance.cmp(&b.instance));
 
+    // One request per instance at once, so a slow proxy delays the check by its
+    // own timeout, not the sum of them. Results are merged in `instances` order.
+    let mut set = tokio::task::JoinSet::new();
+    for (n, inst) in instances.iter().enumerate() {
+        let state = state.clone();
+        let actor = actor.clone();
+        let name = inst.instance.clone();
+        set.spawn(async move {
+            let resp = crate::aggregator_proxy::proxy_raw(
+                &state,
+                Method::GET,
+                &format!("/fleet/instances/{}/sniffers", path_segment(&name)),
+                None,
+                "application/json",
+                actor,
+            )
+            .await;
+            let (parts, body) = resp.into_parts();
+            let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
+                .await
+                .unwrap_or_default();
+            (n, parts.status, body)
+        });
+    }
+    let mut answers = Vec::new();
+    while let Some(done) = set.join_next().await {
+        if let Ok(r) = done {
+            answers.push(r);
+        }
+    }
+    answers.sort_by_key(|(n, ..)| *n);
+
     let mut groups: std::collections::BTreeMap<(String, String), InstalledGroup> =
         std::collections::BTreeMap::new();
     let mut instance_errors = Vec::new();
-    for inst in &instances {
-        let resp = crate::aggregator_proxy::proxy_raw(
-            &state,
-            Method::GET,
-            &format!("/fleet/instances/{}/sniffers", inst.instance),
-            None,
-            "application/json",
-            actor.clone(),
-        )
-        .await;
-        let (parts, body) = resp.into_parts();
-        let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
-            .await
-            .unwrap_or_default();
-        let listed = (parts.status == StatusCode::OK)
+    for (n, status, body) in answers {
+        let inst = &instances[n];
+        let listed = (status == StatusCode::OK)
             .then(|| serde_json::from_slice::<Vec<InstalledSniffer>>(&body).ok())
             .flatten();
         let Some(listed) = listed else {
             instance_errors.push(json!({
                 "instance": inst.instance,
-                "status": parts.status.as_u16(),
+                "status": status.as_u16(),
                 "detail": String::from_utf8_lossy(&body).chars().take(200).collect::<String>(),
             }));
             continue;
@@ -1243,5 +1278,12 @@ mod tests {
         let h = harness(&reg, &fleet, false, crate::role::Role::Viewer).await;
         let (status, _) = check(&h).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn instance_names_are_encoded_as_one_path_segment() {
+        assert_eq!(path_segment("fra-1.eu_a~b"), "fra-1.eu_a~b");
+        assert_eq!(path_segment("a/b?c#d%e f"), "a%2Fb%3Fc%23d%25e%20f");
+        assert_eq!(path_segment("../x"), "..%2Fx");
     }
 }

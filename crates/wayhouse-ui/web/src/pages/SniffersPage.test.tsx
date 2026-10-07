@@ -203,4 +203,34 @@ describe("SniffersPage updates and rollback", () => {
         expect(updates).toHaveTextContent(/unknown build/i);
         expect(within(updates).queryByRole("button", { name: /^Update to/ })).toBeNull();
     });
+
+  it("does not claim a rollback when no instance rolled back", async () => {
+    api.listInstanceSniffers.mockResolvedValue([
+      { name: "kept", sha256: "ab".repeat(32), size_bytes: 1, loaded: true, has_previous: true, fallback: false },
+    ]);
+    api.rollbackSniffer.mockResolvedValue({ results: [{ instance: "fra-1", status: 404, error: null }] });
+    render(<SniffersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "roll back" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Roll back" }));
+    expect(await screen.findByText("roll back kept failed on all 1 instances")).toBeInTheDocument();
+  });
+
+  it("opens the update dialog once and clears an old error", async () => {
+    api.checkUpdates.mockResolvedValue(checked([row()]));
+    let release: (l: ReturnType<typeof installable>) => void = () => {};
+    api.listRegistrySniffers
+      .mockRejectedValueOnce(new Error("registry down"))
+      .mockImplementationOnce(() => new Promise((r) => (release = r)));
+    render(<SniffersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    const updates = await screen.findByRole("region", { name: "Updates" });
+    await userEvent.click(within(updates).getByRole("button", { name: "Update to 0.2.0" }));
+    expect(await within(updates).findByText("registry down")).toBeInTheDocument();
+    await userEvent.click(within(updates).getByRole("button", { name: "Update to 0.2.0" }));
+    expect(within(updates).queryByText("registry down")).toBeNull();
+    expect(within(updates).getByRole("button", { name: "Update to 0.2.0" })).toBeDisabled();
+    release(installable());
+    expect(await screen.findByRole("dialog")).toHaveTextContent("demo");
+  });
 });
+

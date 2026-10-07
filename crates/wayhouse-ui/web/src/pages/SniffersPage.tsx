@@ -69,7 +69,11 @@ export function SniffersPage() {
     try {
       const res = await rollbackSniffer(name);
       const done = res.results.filter((r) => r.status !== null && r.status >= 200 && r.status < 300).length;
-      setNotice(`rolled back ${name} on ${done} of ${res.results.length} instances`);
+      setNotice(
+        done === 0
+          ? `roll back ${name} failed on all ${res.results.length} instances`
+          : `rolled back ${name} on ${done} of ${res.results.length} instances`,
+      );
     } catch (err) {
       setNotice(`roll back ${name} failed: ${err instanceof ApiError ? err.message : err}`);
     } finally {
