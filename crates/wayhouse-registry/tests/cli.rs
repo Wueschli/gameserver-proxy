@@ -119,6 +119,27 @@ fn generate_refuses_to_change_a_published_version() {
 }
 
 #[test]
+fn an_existing_out_file_is_the_previous_index_when_none_is_given() {
+    let t = tempfile::tempdir().unwrap();
+    let out = t.path().join("index.json");
+    let d1 = sniffer_dir(t.path(), "a2s", "0.1.0", "x", false);
+    assert!(run(&gen_args(&out, None, &[&d1])).status.success());
+    let before = std::fs::read(&out).unwrap();
+    // Same version, different bytes, and no --previous: must still be refused.
+    let rebuilt = t.path().join("rebuilt");
+    let d2 = sniffer_dir(&rebuilt, "a2s", "0.1.0", "other", false);
+    let r = run(&gen_args(&out, None, &[&d2]));
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("immutable"));
+    assert_eq!(std::fs::read(&out).unwrap(), before);
+    // A new version keeps the old one instead of replacing the index.
+    let d3 = sniffer_dir(t.path(), "a2s", "0.2.0", "y", false);
+    assert!(run(&gen_args(&out, None, &[&d3])).status.success());
+    let index = wayhouse_registry::parse_index(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(index.sniffers[0].versions.len(), 2);
+}
+
+#[test]
 fn verify_accepts_a_generated_index_and_rejects_garbage() {
     let t = tempfile::tempdir().unwrap();
     let out = t.path().join("index.json");

@@ -23,7 +23,7 @@ enum Command {
         /// Registry name stored in the index.
         #[arg(long)]
         name: String,
-        /// Existing index to merge into (older versions are kept).
+        /// Existing index to merge into (older versions are kept). Defaults to --out when that exists.
         #[arg(long)]
         previous: Option<PathBuf>,
         /// Where to write the index (may equal --previous).
@@ -48,7 +48,10 @@ fn main() -> Result<()> {
             base_url,
             dirs,
         } => {
+            // Regenerating into an existing index must still honour version immutability,
+            // so an existing --out is the comparison source unless --previous says otherwise.
             let previous = previous
+                .or_else(|| out.exists().then(|| out.clone()))
                 .map(|p| -> Result<_> {
                     let bytes =
                         std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
