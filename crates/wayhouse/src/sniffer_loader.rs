@@ -473,9 +473,11 @@ impl SnifferLoader {
     /// named after its file stem (`a2s.wasm` → sniffer `a2s`). When
     /// `cfg.modules` is non-empty every loaded file must have a matching pin
     /// (`name` + `sha256`) — an unpinned or hash-mismatched file fails the
-    /// whole scan; a file that is not a loadable module (see
-    /// [`SnifferLoader::validate`]) is logged and skipped, never fatal (an old, still-pinned registry should be kept by the
-    /// caller rather than left half-updated). A module's `modules[].config`
+    /// whole scan, and so does a pinned module that is not loadable (see
+    /// [`SnifferLoader::validate`]; a silent skip would downgrade the pin), so
+    /// the caller keeps its old registry rather than a half-updated one. When
+    /// nothing is pinned, a file that is not a loadable module is logged and
+    /// skipped so one bad `.wasm` cannot block rescans. A module's `modules[].config`
     /// string, if any, is baked onto its `WasmSniffer` here and handed to the
     /// guest on every `sniff` call.
     pub fn scan(&self, cfg: &SniffersConfig) -> Result<HashMap<String, Arc<dyn Sniffer>>> {
@@ -517,6 +519,9 @@ impl SnifferLoader {
 
             let module = match self.compile_checked(&bytes, cfg.max_memory_bytes) {
                 Ok(m) => m,
+                Err(e) if pin.is_some() => {
+                    bail!("sniffer {name}: pinned module failed validation: {e}")
+                }
                 Err(e) => {
                     tracing::error!(sniffer = %name, error = %e, "sniffer module rejected, skipping");
                     continue;
@@ -1595,6 +1600,94 @@ listeners:
             config: None,
         });
         assert!(loader().scan(&c).is_err());
+    }
+
+    /// Pin `bytes` as `name` in `c` (matching sha256, so only validation can fail).
+    fn pin(c: &mut SniffersConfig, name: &str, bytes: &[u8]) {
+        c.modules.push(wayhouse_config::SnifferModulePin {
+            name: name.into(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            config: None,
+        });
+    }
+
+    const IMPORTING_WAT: &str = r#"(module (import "env" "x" (func))
+          (@custom "wayhouse.abi" "\00\00\01\00")
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "sniff") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#;
+
+    #[test]
+    fn scan_fails_on_pinned_module_without_abi() {
+        let dir = tempdir();
+        let bytes = wat_bytes(BARE_WAT);
+        std::fs::write(dir.join("old.wasm"), &bytes).unwrap();
+        let mut c = cfg(&dir);
+        pin(&mut c, "old", &bytes);
+        let e = loader()
+            .scan(&c)
+            .err()
+            .expect("pinned invalid module must fail the scan");
+        assert!(e.to_string().contains("old"), "error names the module: {e}");
+    }
+
+    #[test]
+    fn scan_fails_on_pinned_module_with_import() {
+        let dir = tempdir();
+        let bytes = wat_bytes(IMPORTING_WAT);
+        std::fs::write(dir.join("imp.wasm"), &bytes).unwrap();
+        let mut c = cfg(&dir);
+        pin(&mut c, "imp", &bytes);
+        let e = loader()
+            .scan(&c)
+            .err()
+            .expect("pinned invalid module must fail the scan");
+        assert!(e.to_string().contains("imp"), "error names the module: {e}");
+    }
+
+    #[test]
+    fn scan_with_a_valid_pinned_module_still_loads() {
+        let dir = tempdir();
+        let bytes = wat_bytes(HOST_SNIFFER_WAT);
+        std::fs::write(dir.join("good.wasm"), &bytes).unwrap();
+        let mut c = cfg(&dir);
+        pin(&mut c, "good", &bytes);
+        assert_eq!(loader().scan(&c).unwrap().len(), 1);
+    }
+
+    /// The reload path (`rescan_sniffers`) keeps the last good registry when a
+    /// pinned module stops validating, and picks up a repaired one.
+    #[test]
+    fn reload_keeps_the_last_good_registry_when_a_pinned_module_breaks() {
+        let dir = tempdir();
+        let good = wat_bytes(HOST_SNIFFER_WAT);
+        std::fs::write(dir.join("good.wasm"), &good).unwrap();
+        let l = loader();
+        let mut c = cfg(&dir);
+        pin(&mut c, "good", &good);
+        let mut config = wayhouse_config::parse_str(
+            "pools:\n  - name: p\n    targets: [\"127.0.0.1:9\"]\n    health_check:\n      type: none\n\
+             listeners:\n  - name: l1\n    bind: \"127.0.0.1:0\"\n    pool: p\n",
+        )
+        .unwrap();
+        config.sniffers = Some(c.clone());
+        let sniffers = Sniffers::default();
+        crate::reload::rescan_sniffers(&config, Some(&l), &sniffers);
+        assert_eq!(sniffers.names(), ["good"]);
+
+        // The pinned file is replaced by an ABI-less module, re-pinned so
+        // only validation fails.
+        let bad = wat_bytes(BARE_WAT);
+        std::fs::write(dir.join("good.wasm"), &bad).unwrap();
+        let mut c2 = cfg(&dir);
+        pin(&mut c2, "good", &bad);
+        config.sniffers = Some(c2);
+        crate::reload::rescan_sniffers(&config, Some(&l), &sniffers);
+        assert_eq!(sniffers.names(), ["good"], "the previous registry is kept");
+        assert!(
+            sniffers.get("good").is_some(),
+            "the previous plugin still resolves"
+        );
     }
 
     #[test]

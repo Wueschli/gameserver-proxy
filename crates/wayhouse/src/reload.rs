@@ -218,7 +218,7 @@ fn rebuild_resolvers(cfg: &wayhouse_config::Config, resolvers: &Resolvers) {
 /// `settings.workers` — `sniffer_loader` is `None` unless `settings.sniffers`
 /// was present at process start, and enabling/disabling the block itself
 /// still needs a restart.
-fn rescan_sniffers(
+pub(crate) fn rescan_sniffers(
     cfg: &wayhouse_config::Config,
     sniffer_loader: Option<&SnifferLoader>,
     sniffers: &Sniffers,
