@@ -52,6 +52,10 @@ export interface SnifferInfo {
   sha256: string;
   size_bytes: number;
   loaded: boolean;
+  /** A previous version is kept and can be rolled back to. */
+  has_previous?: boolean;
+  /** The live module is the previous version because the current file failed validation. */
+  fallback?: boolean;
 }
 
 /** One row of wayhouse-controller's `GET /tunnel/addresses` (`docs/11` "Address authority"). */
@@ -138,4 +142,33 @@ export interface InstallResponse {
   sha256: string;
   results: InstallInstanceResult[];
   pinned_instances: { instance: string; pin: { name: string; sha256: string } }[];
+}
+
+/** A newer version of an installed sniffer (`POST /api/registries/updates/check`). */
+export interface SnifferUpdate {
+  registry_id: string;
+  version: string;
+  compatible: boolean;
+  reason: string | null;
+}
+
+/** Instances that run one build of one sniffer. */
+export interface UpdateCheckRow {
+  sniffer: string;
+  installed_sha256: string;
+  /** Null for an unknown build: its hash is in no registry index. */
+  installed_version: string | null;
+  known: boolean;
+  has_previous: boolean;
+  fallback: boolean;
+  update: SnifferUpdate | null;
+  instances: string[];
+}
+
+export interface UpdateCheck {
+  host_abi: string;
+  min_proxy_checked: boolean;
+  registries: { id: string; name: string; ok: boolean; error?: string }[];
+  sniffers: UpdateCheckRow[];
+  instance_errors: { instance: string; status: number; detail: string }[];
 }
