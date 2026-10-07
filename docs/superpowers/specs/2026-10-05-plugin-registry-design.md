@@ -1,6 +1,6 @@
 # Sniffer registry, install and update design (#183, #184)
 
-> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is [here](2026-10-07-plugin-system-design.md). Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crates and paths were renamed to "sniffer" in the same PR as this banner; older text below may still show the old names.
 
 
 Status: design for review (brainstormed 2026-10-05). Decisions from the maintainer are marked **[decided]**; everything else is a recommendation the implementation plans follow unless the maintainer changes it.
@@ -29,11 +29,12 @@ Custom section `wayhouse.abi` (major u16 LE, minor u16 LE), read by the host wit
 
 ## Registry format
 
-A registry is a static HTTPS location serving `index.json` (the same format for the official repo and external ones) and the artifacts it references.
+A registry is a static HTTPS location serving `index.json` (the same format for the official repo and external ones) and the artifacts it references. The top-level `kind` says what the registry serves: `sniffer` here; `plugin` is reserved for the plugin registry (see [plugin system design](2026-10-07-plugin-system-design.md)) and is rejected until that is built.
 
 ```json
 {
   "schema": 1,
+  "kind": "sniffer",
   "name": "wayhouse official sniffers",
   "sniffers": [
     {

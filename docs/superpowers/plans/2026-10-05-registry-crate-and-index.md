@@ -38,13 +38,14 @@
 
 **Interfaces:**
 - Produces:
-  `pub struct Index { pub schema: u32, pub name: String, pub sniffers: Vec<SnifferEntry> }`,
+  `pub struct Index { pub schema: u32, pub kind: Kind, pub name: String, pub sniffers: Vec<SnifferEntry> }`,
   `pub struct SnifferEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
   `pub struct VersionEntry { pub version: semver::Version, pub abi: String, pub min_proxy: semver::Version, pub url: String, pub sha256: String, pub size: u64, pub signature_url: Option<String>, pub limits: Limits, pub config: Option<String> }`,
+  `pub enum Kind { Sniffer, Plugin }` (serde lowercase; `validate` accepts only `Sniffer` for now, so the plugin wave only relaxes that check),
   `pub struct Limits { pub max_memory_bytes: u64, pub call_timeout_ms: u64 }`,
   `pub fn parse_index(bytes: &[u8]) -> Result<Index, IndexError>` (size cap, JSON parse, `validate`), `impl Index { pub fn validate(&self) -> Result<(), IndexError> }`, `pub enum IndexError` (one variant per rule in Review Focus, `Display` texts name the sniffer and field).
 
-- [ ] **Step 1: Write failing tests** in `index.rs`: `parses_the_example_from_the_spec` (paste the JSON from the spec as a fixture), `rejects_schema_2`, `rejects_duplicate_plugin_name`, `rejects_duplicate_version`, `rejects_unsorted_versions`, `rejects_http_url`, `rejects_uppercase_or_short_sha`, `rejects_bad_name` (`../evil`, empty, space), `rejects_oversize_module`, `rejects_oversize_index_bytes`, `rejects_garbage_json_without_panic`.
+- [ ] **Step 1: Write failing tests** in `index.rs`: `parses_the_example_from_the_spec` (paste the JSON from the spec as a fixture), `rejects_schema_2`, `rejects_missing_kind`, `rejects_plugin_kind_until_supported`, `rejects_duplicate_sniffer_name`, `rejects_duplicate_version`, `rejects_unsorted_versions`, `rejects_http_url`, `rejects_uppercase_or_short_sha`, `rejects_bad_name` (`../evil`, empty, space), `rejects_oversize_module`, `rejects_oversize_index_bytes`, `rejects_garbage_json_without_panic`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-registry index`. Expected: FAIL (crate missing).
 - [ ] **Step 3: Implement** types with `serde(deny_unknown_fields)` **off** for forward compatibility (a newer registry may add fields), plus the validation.
 - [ ] **Step 4: Run** the same command. Expected: PASS. **Commit** `feat: wayhouse-registry crate with the index format (#183)`.
