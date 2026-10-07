@@ -46,7 +46,7 @@ The full command table (tunnel e2e, deploy images, audit, and so on) is in
 | [`crates/wayhouse-http`](crates/wayhouse-http)               | Shared HTTP client and TLS server helpers                                         |
 | [`crates/wayhouse-fleet-tests`](crates/wayhouse-fleet-tests) | Multi-process integration tests over the real binaries                            |
 | [`crates/wayhouse-bench`](crates/wayhouse-bench)             | Latency / load harness                                                            |
-| [`crates/wayhouse-sniffer-abi`](crates/wayhouse-sniffer-abi)                   | Guest-side ABI crate the official sniffers link (they live in the sniffers repo)  |
+| [`crates/wayhouse-sniffer-abi`](crates/wayhouse-sniffer-abi) | Guest-side ABI crate the official sniffers link (they live in the sniffers repo)  |
 
 ## Conventions
 
