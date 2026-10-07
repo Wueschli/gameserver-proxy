@@ -34,7 +34,7 @@ Typical goals:
   admin GUI for a whole fleet of proxies.
 
 Game knowledge never lives in the core. It comes from optional, sandboxed WASM
-sniffer plugins (Minecraft virtual hosts and Source-engine A2S queries ship as
+sniffers (Minecraft virtual hosts and Source-engine A2S queries ship as
 examples) or from an external routing service you control.
 
 ## Contents
@@ -88,8 +88,8 @@ configuration and fleet-wide operation once you run more than one proxy.
 - Per-listener route rules (`routes:`, first match wins) with `always`,
   `client_cidr`, `dst`, `port`, `first_bytes` (prefix and/or length) and `sni`
   (host from the peeked, non-terminated TLS ClientHello) matchers.
-- A `sniffer` matcher backed by sandboxed WASM plugins (`wasmtime`, no WASI, no host
-  imports, time and memory bounded), rescanned on every reload. First-party plugins:
+- A `sniffer` matcher backed by sandboxed WASM sniffers (`wasmtime`, no WASI, no host
+  imports, time and memory bounded), rescanned on every reload. First-party sniffers:
   `a2s`, `minecraft`, `quic`, `wireguard`, `openvpn`, `raknet`, `teamspeak3` and a `regex-firstbytes` template.
 - External resolvers over HTTP or gRPC (`action: { resolver: <name> }`) with
   `on_error` handling and a TTL'd LRU result cache.
@@ -203,9 +203,16 @@ Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
 Container images (six targets in one `Dockerfile`), a Docker Compose demo and plain
 Kubernetes manifests live in [`deploy/`](deploy/); they are reference material, not a
-supported deployment. Sniffer plugins are described in [`crates/plugins`](crates/plugins).
+supported deployment. Sniffers are described in [`crates/plugins`](crates/plugins).
 
 ## Documentation
+
+> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules;
+> they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
+> *Plugins* are integrations with other systems (e.g. the Pelican panel) and will live in
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
+> renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
+> "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
 
 The design documents in [`docs/`](docs/) are the source of truth for how the proxy is
 meant to work. Start with the overview and the architecture chapter; the rest can be

@@ -1,5 +1,8 @@
 # Docs Overhaul Implementation Plan (#187)
 
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** A user-facing `README.md`, a contributor-facing `CONTRIBUTING.md`, and Prettier-checked Markdown, with contributor-only text moved out of the files users read first.
@@ -36,8 +39,8 @@
 - Produces: `CONTRIBUTING.md` headings `## Build and test`, `## Conventions`, `## Pull requests`, `## Releasing` (one link to `RELEASING.md`), referenced by README and AGENTS.
 
 - [ ] **Step 1: Inventory.** Run `grep -n "^#" README.md AGENTS.md HANDOVER.md` and write a table in the PR description: each section, audience (user / contributor / agent), destination. Sections about `make`, TDD, repo layout, conventions are contributor material.
-- [ ] **Step 2: Create `CONTRIBUTING.md`** by moving (not copying) the contributor sections of README, keeping `AGENTS.md`'s agent-only guardrails where they are. Content: toolchain (`rust-toolchain.toml`, protoc), `make check`, `make plugins` (until the plugins move), commit and PR title format (conventional commits, which #188 needs), `Closes #N`, review and CI rules, where specs and plans live.
-- [ ] **Step 3: Rewrite README sections**: Features, Quick start (build from source, run `config.example.yaml`, the admin port), Configuration pointer to `docs/05-configuration.md`, Plugins pointer, License; links to `CONTRIBUTING.md`, `RELEASING.md` (exists after #190), `docs/`.
+- [ ] **Step 2: Create `CONTRIBUTING.md`** by moving (not copying) the contributor sections of README, keeping `AGENTS.md`'s agent-only guardrails where they are. Content: toolchain (`rust-toolchain.toml`, protoc), `make check`, `make plugins` (until the sniffers move), commit and PR title format (conventional commits, which #188 needs), `Closes #N`, review and CI rules, where specs and plans live.
+- [ ] **Step 3: Rewrite README sections**: Features, Quick start (build from source, run `config.example.yaml`, the admin port), Configuration pointer to `docs/05-configuration.md`, Sniffers pointer, License; links to `CONTRIBUTING.md`, `RELEASING.md` (exists after #190), `docs/`.
 - [ ] **Step 4: Trim AGENTS.md and HANDOVER.md**: replace duplicated contributor text by links to `CONTRIBUTING.md`; keep the "when you touch X, also touch Y" table in AGENTS.md. Add `CONTRIBUTING.md` and `RELEASING.md` to that table's rows for "release/version changes".
 - [ ] **Step 5: Link check.** Run `python3 .github/scripts/check_md_links.py README.md CONTRIBUTING.md AGENTS.md HANDOVER.md RELEASING.md deploy/README.md` (created in Task 3; for now check by hand with `grep -on "](\.[^)]*)"`). Expected: every target exists.
 - [ ] **Step 6: Commit** `docs: split the README for users from CONTRIBUTING for contributors (#187)`.

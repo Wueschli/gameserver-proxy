@@ -1,5 +1,8 @@
 # Versioning, Changelog and Release Automation Implementation Plan (#188)
 
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** One written version policy for 0.x, CI that keeps `Cargo.toml` and `Cargo.lock` in step and can never reach 1.0.0, a changelog, and release-please opening the release PRs.
@@ -56,7 +59,7 @@
 
 - [ ] **Step 1: Versioning section**: single source of truth, the 0.x rules from Global Constraints, what "breaking" covers (the list), what changes at 1.0 (not decided here), where `wayhouse_build_info` and `--version` get the number.
 - [ ] **Step 2: Cutting a release**: numbered runbook: (1) merge the release-please PR (title `chore(main): release 0.N.P`), (2) wait for CI on main, (3) tag `v0.N.P` on that commit and push the tag (release-please can create tags itself; we keep the tag manual so the `verify` job order stays as designed: set `skip-github-release: true` in config), (4) watch `release.yml`, (5) for a pre-release use a manual commit setting the version (`0.N.P-rc.K`) and tag it. State what to do if `publish` fails half-way (re-run; pushes are idempotent).
-- [ ] **Step 3: Changelog section** plus `CHANGELOG.md` seeded with `## 0.1.0 (unreleased)` / `Initial release` and bullet areas (proxy, controller, aggregator, UI, agent, plugins) taken from README Features.
+- [ ] **Step 3: Changelog section** plus `CHANGELOG.md` seeded with `## 0.1.0 (unreleased)` / `Initial release` and bullet areas (proxy, controller, aggregator, UI, agent, sniffers) taken from README Features.
 - [ ] **Step 4: Verify** `python3 .github/scripts/check_md_links.py RELEASING.md CHANGELOG.md` if the #187 script exists. **Commit** `docs: version policy, release runbook and changelog (#188)`.
 
 ### Task 3: Conventional-commit PR title check

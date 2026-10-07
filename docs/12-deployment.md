@@ -57,7 +57,7 @@ root once its sockets are bound; see `--tunnel-*`'s capability
 requirements below for the one exception).
 
 `wayhouse` and `wayhouse-controller` are the two heaviest either way, for real
-reasons: `wayhouse` links `wasmtime` (phase 9 sniffer plugins) and
+reasons: `wayhouse` links `wasmtime` (phase 9 sniffers) and
 `defguard_wireguard_rs`/`boringtun` (phase 14 backend transport);
 `wayhouse-controller` links `openraft` + `sled` for the HA/Raft log store
 (phase 12). `wayhouse-agent`/`wayhouse-aggregator`/`wayhouse-ui` don't carry those.

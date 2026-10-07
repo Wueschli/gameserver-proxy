@@ -1,5 +1,8 @@
 # Sniffer Module Validation Implementation Plan (#171)
 
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** `POST /admin/sniffers` rejects anything that is not a loadable sniffer module, and a bad `.wasm` file on disk can never block a rescan or startup.
@@ -15,14 +18,14 @@
 - ABI today: exports `memory`, `alloc(i32)->i32`, `sniff(i32,i32,i32,i32)->i64`; core module, **no imports** (no WASI).
 - Pin enforcement stays as is: with `settings.sniffers.modules` set, an unpinned or hash-mismatched file fails the whole scan (security property, keep).
 - `make check` (fmt, clippy `-D warnings`, tests, `test-minimal`) must pass; the minimal build (`--no-default-features`) uses `sniffer_loader_disabled.rs`, keep both in step.
-- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled plugin is far smaller; check `ls -la crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
+- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled sniffer is far smaller; check `ls -la crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
 
 ## Review Focus
 
 - A zero-byte upload and a valid-header-but-truncated module must give 400, not 500, and leave no file behind.
 - A module with an import (for example WASI `fd_write`) must be rejected with a message naming the import.
 - Two concurrent uploads of the same name must not interleave bytes (atomic rename).
-- The default axum body limit (2 MiB) must not silently reject a valid 3 MiB plugin with a confusing error.
+- The default axum body limit (2 MiB) must not silently reject a valid 3 MiB sniffer with a confusing error.
 - A garbage file already in `dir` must not stop the other modules from loading at startup.
 - On an instance with pins, an upload that the pins would reject must never reach the disk: a stray unpinned file makes the next startup fatal (`build_sniffers(...)?` in `main.rs`) and blocks every other module's rescan.
 

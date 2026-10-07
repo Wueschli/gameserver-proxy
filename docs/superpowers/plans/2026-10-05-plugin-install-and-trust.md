@@ -1,8 +1,11 @@
-# Plugin Install From a Registry (UI Backend and Plugins Page) Implementation Plan (#183 phase C)
+# Sniffer Install From a Registry (UI Backend and Sniffers Page) Implementation Plan (#183 phase C)
+
+> **Terminology update (2026-10-07).** Leandro split the old "plugin" concept in two. **Sniffers** are the WASM protocol/hostname sniffer modules and live in [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). **Plugins** are integrations with other systems (e.g. the Pelican panel, #213) and live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is still open. Wherever this document says "plugin" or "plugins repo" for a WASM sniffer module, read **sniffer** / **sniffers repo**. Code identifiers, crate names, config keys, file names and the "plugin ABI" keep their old names for now (rename pending a decision).
+
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (project convention: no subagents in implementation threads). Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** From the Plugins page an operator browses the official registry and external registries, installs a verified plugin on the fleet, and sees what it will run with, with an "at your own risk" gate for external registries.
+**Goal:** From the Sniffers page an operator browses the official registry and external registries, installs a verified sniffer on the fleet, and sees what it will run with, with an "at your own risk" gate for external registries.
 
 **Architecture:** `wayhouse-ui` backend gains a registry client (`registry_client.rs`: fetch index, fetch artifact, with HTTPS-only and size and time caps), a persisted registry list (`registries.rs`), and routes `/api/registries/*` that use `wayhouse-registry` for validation, compatibility and verification, then reuse the existing fleet upload fan-out (`POST /api/fleet/sniffers`, i.e. `aggregator_proxy::upload_sniffer`) to deliver the module. Proxies keep only their upload endpoint (re-validated there, #171) and need no internet access. The React page `PluginsPage.tsx` is extended.
 
@@ -15,7 +18,7 @@
 - Registry URLs `https://` only; redirects followed only to `https://` (reqwest `redirect::Policy::custom`, max 5); timeouts 10 s connect and 30 s total; index body cap 1 MiB; artifact cap `min(size from index, 8 MiB)`; never log tokens or full response bodies.
 - Mutating routes (`POST`/`DELETE` under `/api/registries`) require the same session role as other mutating UI routes (see `role.rs` and how `/api/fleet/sniffers` is guarded; do not invent new auth); read routes need an authenticated session.
 - Persisted registry list: JSON file `--registries-file <path>` (default: unset, in-memory only with a warning in the UI that changes are lost on restart); atomic write (temp file + rename), file mode 0600, max 32 registries.
-- Default registry: `https://raw.githubusercontent.com/wayhouse-proxy/plugins/main/index.json`; removable; disabled entirely by `--no-default-registry`. (Confirm the final index location during the bootstrap plan; it is a constant in one place.)
+- Default registry: `https://raw.githubusercontent.com/wayhouse-proxy/sniffers/main/index.json`; removable; disabled entirely by `--no-default-registry`. (Confirm the final index location during the bootstrap plan; it is a constant in one place.)
 - Official public key constant lives in `crates/wayhouse-ui/src/registry_keys.rs` as `OFFICIAL_PUBKEY: Option<&str>`; `None` until the maintainer provides the key (**manual step**), in which case signatures are shown as "cannot verify" and installs proceed unsigned (first-cut rule: signatures optional).
 - Warnings are part of the API contract: responses for external registries carry `"risk": "external"`; the UI must show the warning on add and before every install.
 - `make check`, `make ui-test` pass.
@@ -71,15 +74,15 @@
 - Produces (JSON):
   - `GET /api/registries` -> `[{id,name,url,official,risk}]`
   - `POST /api/registries {url,name?}` -> `RegistryRef`; `DELETE /api/registries/{id}` -> 204/404
-  - `GET /api/registries/{id}/plugins` -> index plugins with, per plugin, `compatible: {version, reason?}` computed by `select`
+  - `GET /api/registries/{id}/plugins` -> index sniffers with, per sniffer, `compatible: {version, reason?}` computed by `select`
   - `POST /api/registries/{id}/install {name, version?}` -> `{plugin, version, signed, risk, results:[{instance, ok, error?}], pinned_instances:[{instance, pin:{name,sha256}}]}`; status `200` when every instance accepted, `207` when partial, `422` for compatibility or verification failure with `{"error": "<reason>"}`, `502` when the registry is unreachable.
 
 - [ ] **Step 1: Write failing tests** with a fake registry server and a fake aggregator (the existing `aggregator_proxy` tests show the pattern): `lists_registries_with_risk_flag`, `add_then_list_then_delete`, `plugins_listing_marks_incompatible_with_reason`, `min_proxy_check_is_skipped_with_a_note_when_no_instance_versions`, `install_happy_path_uploads_verified_bytes_under_the_plugin_name`, `install_refuses_sha_mismatch_and_uploads_nothing`, `install_refuses_abi_mismatch_and_uploads_nothing`, `install_refuses_module_with_import`, `install_reports_partial_fanout_as_207`, `install_reports_pinned_instance_from_409_without_marking_it_failed`, `install_external_registry_response_carries_risk_external`, `mutating_routes_need_the_mutating_role` (reuse the role test helpers), `install_unknown_registry_is_404`.
 - [ ] **Step 2: Run** `cargo test -p wayhouse-ui registry_api`. Expected: FAIL.
-- [ ] **Step 3: Implement** the handlers; install order: select version, fetch artifact, fetch signature if listed, `verify_artifact` (key from `registry_keys`), then `fan_out_upload`. Log `actor`, registry id, plugin, version and result at info.
+- [ ] **Step 3: Implement** the handlers; install order: select version, fetch artifact, fetch signature if listed, `verify_artifact` (key from `registry_keys`), then `fan_out_upload`. Log `actor`, registry id, sniffer, version and result at info.
 - [ ] **Step 4: Run** the same command and `cargo test -p wayhouse-ui`. Expected: PASS. **Commit** `feat(ui): browse registries and install verified plugins (#183)`.
 
-### Task 4: Plugins page
+### Task 4: Sniffers page
 
 **Files:**
 - Modify: `crates/wayhouse-ui/web/src/pages/PluginsPage.tsx`, `PluginsPage.test.tsx`, `api.ts`, `api.test.ts`, `types.ts`
@@ -87,7 +90,7 @@
 
 **Interfaces:**
 - Consumes: the Task 3 JSON routes.
-- Produces: UI states: registry list with "official" badge and "external, at your own risk" badge; "Add registry" form with the risk dialog (must be confirmed); plugin table (name, description, versions, compatible/incompatible with reason, signed/unsigned); install button opening a dialog that shows `limits.max_memory_bytes`, `limits.call_timeout_ms`, the `config` documentation and, for external, the risk text; per-instance result list after install; for `pinned_instances` the exact pin snippet with a copy button.
+- Produces: UI states: registry list with "official" badge and "external, at your own risk" badge; "Add registry" form with the risk dialog (must be confirmed); sniffer table (name, description, versions, compatible/incompatible with reason, signed/unsigned); install button opening a dialog that shows `limits.max_memory_bytes`, `limits.call_timeout_ms`, the `config` documentation and, for external, the risk text; per-instance result list after install; for `pinned_instances` the exact pin snippet with a copy button.
 
 - [ ] **Step 1: Write failing tests** (vitest + Testing Library, same style as the page's existing tests with a mocked `fetch`): `lists_registries_and_marks_external`, `adding_external_registry_requires_confirming_the_risk`, `incompatible_plugin_shows_reason_and_disables_install`, `install_dialog_shows_limits_and_config`, `external_install_dialog_shows_risk_text`, `partial_install_result_lists_failed_instances`, `pinned_instance_shows_pin_snippet`.
 - [ ] **Step 2: Run** `make ui-test`. Expected: FAIL.
@@ -99,7 +102,7 @@
 **Files:**
 - Modify: `docs/plugins.md` (operator section: adding registries, trust, risk, pinned instances), `docs/06-operations-observability.md` if metrics were added (none planned), `deploy/README.md` (UI flags), `HANDOVER.md`
 
-- [ ] **Step 1: Document** flags, default registry, risk model, and the **maintainer to-do list**: generate the minisign key pair offline, provide `OFFICIAL_PUBKEY`, store the signing secret in the plugins repo (next plan).
+- [ ] **Step 1: Document** flags, default registry, risk model, and the **maintainer to-do list**: generate the minisign key pair offline, provide `OFFICIAL_PUBKEY`, store the signing secret in the sniffers repo (next plan).
 - [ ] **Step 2: Run** docs checks. **Commit** `docs: installing plugins from a registry (#183)`.
 
 ---

@@ -1,7 +1,7 @@
 # 03 – Routing
 
 Goal: map an incoming connection/session to a **pool** (and optionally an affinity
-key) — ideally without game-protocol knowledge, with optional plugins where needed.
+key) — ideally without game-protocol knowledge, with optional sniffers where needed.
 
 > **Implementation status (phase 3, partial).** `listeners[].routes` is a
 > priority-ordered `[{ match, action }]` list, first match wins, with
@@ -16,7 +16,7 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > from the peeked, non-terminated TLS ClientHello; TCP listeners only). The
 > `sniffer` matcher exists (`{ type: sniffer, sniffer: <name>, host: [...] }`,
 > several per listener) but **no sniffers are built in** — a `sniffer:`
-> route never matches until a plugin is loaded (Phase 9). The TCP path
+> route never matches until a sniffer is loaded (Phase 9). The TCP path
 > `MSG_PEEK`s up to 4096 B (250 ms budget) before routing, only when a route
 > needs bytes; UDP inspects the first datagram it already holds. A ClientHello
 > split across TCP segments is reassembled: the path re-peeks every 5 ms until
@@ -53,7 +53,7 @@ key) — ideally without game-protocol knowledge, with optional plugins where ne
 > the `first_available` balancer. The `weighted` balancer is implemented
 > (`balancer: weighted` + a `weights:` map of `"ip:port"` → share, default 1) —
 > weighted round-robin over the healthy set, one atomic tick per selection.
-> Regex-over-first-bytes is folded into the Phase 9 plugin layer, not a
+> Regex-over-first-bytes is folded into the Phase 9 sniffer layer, not a
 > `first-bytes` sub-form. A listener with a bare `pool:` is normalised to one
 > `always` route.
 
@@ -119,16 +119,16 @@ short-lived `src_ip → pool` mapping.
 - `regex`: regex over the first `N` bytes (precompiled, `N` bounded).
 - `length`: datagram length within a range (coarse heuristic, e.g. query vs.
   gameplay).
-- `sniffer: <name>`: a named plugin returns structured hints, e.g.:
+- `sniffer: <name>`: a named sniffer returns structured hints, e.g.:
   - `sni` (generic, see above)
   - `minecraft` → handshake hostname + protocol version
   - `a2s` / `source-query` → Valve query recognized (route to a query pool)
-  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`). The plugin also decrypts the Initial (its keys derive from the packet's own destination connection ID and a public salt, RFC 9001 §5.2) and returns the TLS SNI as the hint's `host` (v1, v2 and drafts 29 to 34). When the SNI cannot be read (an older draft, or a ClientHello split across Initial packets with the SNI in a later one) only the key is set, so a `host:` route does not match and an empty-`host:` route still does
+  - `quic` → QUIC Initial recognized (v1, v2, IETF drafts; key `quic`). The sniffer also decrypts the Initial (its keys derive from the packet's own destination connection ID and a public salt, RFC 9001 §5.2) and returns the TLS SNI as the hint's `host` (v1, v2 and drafts 29 to 34). When the SNI cannot be read (an older draft, or a ClientHello split across Initial packets with the SNI in a later one) only the key is set, so a `host:` route does not match and an empty-`host:` route still does
   - `wireguard` → handshake initiation recognized (key `wireguard`)
-  - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal: about 3 in 256 random datagrams match, so it makes the first-packet gate leaky and belongs after stronger plugins in the sniffer list)
+  - `openvpn` → client hard reset recognized, UDP or TCP-framed (key `openvpn`; a weak one-byte signal: about 3 in 256 random datagrams match, so it makes the first-packet gate leaky and belongs after stronger sniffers in the sniffer list)
   - `raknet` → RakNet offline handshake recognized by its magic (Minecraft Bedrock and other RakNet games; key `raknet`)
   - `teamspeak3` → TeamSpeak 3 `TS3INIT1` client init recognized (key `teamspeak3`)
-- Plugin contract: **read-only**, receives up to `peek_max_bytes`, returns
+- Sniffer contract: **read-only**, receives up to `peek_max_bytes`, returns
   `Option<RouteHint { key?: String, pool_hint?: String, reject?: bool }>`. No access to
   later bytes, no writing.
 
@@ -273,7 +273,7 @@ listener public-tcp (0.0.0.0:443/tcp)
   route 3: always                        → pool lobby-default
 ```
 
-### C) Minecraft network (plugin only reads the hostname)
+### C) Minecraft network (sniffer only reads the hostname)
 ```
 listener public-tcp (0.0.0.0:25565/tcp)
   route 1: sniffer minecraft, host == "survival.example.net" → pool mc-survival

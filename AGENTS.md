@@ -23,6 +23,13 @@ the guidance here, not in them.
 
 ## What this is
 
+> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules;
+> they are moving to [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
+> *Plugins* are integrations with other systems (e.g. the Pelican panel) and will live in
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Until the code is
+> renamed, some identifiers (`crates/plugins/`, `make plugins`, the `plugins` CI job, the
+> "plugin ABI", the UI's Plugins page) still say "plugin" but mean sniffers.
+
 A **game-agnostic game server reverse proxy**: one entry point in front of arbitrary
 game servers, forwarding TCP (and later UDP) transparently to backend pools without
 knowing the game protocol. Written in Rust on `tokio`.
@@ -54,7 +61,7 @@ crates/
     listeners.rs            `ListenerManager` — runtime listener add/remove/rebind, reconciled by name on reload
     proxy.rs                per-connection byte pump (+ PROXY protocol header write)
     proxy_protocol.rs       PROXY protocol v1/v2 header encoder (write-only)
-    sniff.rs                sniffer API seam (trait + ArcSwap-backed registry) — no built-in sniffers; game protocol parsing loads as plugins (Phase 9)
+    sniff.rs                sniffer API seam (trait + ArcSwap-backed registry) — no built-in sniffers; game protocol parsing loads as sniffers (Phase 9)
     resolver.rs             external resolver seam: trait Resolver + resolve_route (the async route walk), ArcSwap-backed registry; transports live in wayhouse
     discovery.rs            `BackendSource` seam + `Discovery` last-known-good cache + refresh_loop (Phase 8)
     sources.rs              `SourceManager` — runtime `backend_sources:` reconcile on reload (discovery analogue of ListenerManager)
@@ -79,7 +86,7 @@ crates/
     discovery.rs            ConsulSource / KubernetesSource adapters (Phase 8) + TunnelSource (phase 14 slice 5, `docs/11`) — resolves a pool's backends from wayhouse-controller's backend-peers registry, pinned to a configured pubkey
     dns_srv.rs              DnsSrvSource (Phase 8) — behind the `dns-srv` feature (`hickory-resolver`), `dns_srv_disabled.rs` stands in without it
     grpc_resolver.rs        GrpcResolver (tonic) — behind the `grpc-resolver` feature (`tonic`/`prost`, and `protoc` in `build.rs`), `grpc_resolver_disabled.rs` stands in without it
-    sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer plugin loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
+    sniffer_loader.rs       WasmSniffer + SnifferLoader — the wasmtime-based sniffer loader (Phase 9); behind the `wasm-sniffers` feature, `sniffer_loader_disabled.rs` stands in without it
     procinfo.rs             wayhouse_fd_open / wayhouse_fd_limit — fd sampling (wayhouse_build_info lives in wayhouse_http::metrics)
     reload.rs               SIGHUP + file-watch + admin-triggered reload → rebuild snapshot → atomic swap
     controller_client.rs    `--controller <url>` config source (phase 10+11): initial GET /config + a GET /config/subscribe (SSE) client, reconnect w/ backoff, feeds reload::apply_config
@@ -165,7 +172,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Deploy scan | `make deploy-scan` (after `deploy-images`; needs Docker + `trivy`): Trivy over the six images (OS packages, embedded Rust crates, secrets) and `Cargo.lock` / the UI's `package-lock.json`, HIGH/CRITICAL with a fix; exits 1 on findings, reports in `target/trivy/`. In CI it is the separate, **informational** `trivy` job after `deploy` (non-blocking; scans `deploy`'s images from a `docker save` artifact; run summary + warnings + `trivy-reports` artifact; the official `aquasec/trivy` image pinned by digest, not `trivy-action`). Rust coverage is GHSA only — `cargo audit` (the `audit` CI job, `make audit`) covers RustSec. Accepted findings: `.trivyignore` |
 | Deploy smoke | `make deploy-smoke` (needs Docker; compose demo + `deploy/smoke.sh`; also the `deploy` CI job) |
 | Tunnel e2e (nextest) | `make tunnel-e2e-ci` (needs `cargo install cargo-nextest --locked`; writes `target/nextest/ci/junit.xml`; what the CI `tunnel` job runs) |
-| Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, plugins and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
+| Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, sniffers and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/wayhouse-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/wayhouse-bench/README.md`) |
 | Sniffer plugins | `make plugins` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/plugins/` to `wasm32-unknown-unknown`; see `crates/plugins/README.md`) |
@@ -233,7 +240,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
   in [`docs/01-requirements.md`](docs/01-requirements.md)). If you spawn a task or add
   a hop per connection, say so in the PR/commit and in `HANDOVER.md`.
 - **Agnostic core.** Game-specific knowledge only ever lives in optional sniffer
-  plugins or in an external resolver — never in `wayhouse-core`'s routing/forwarding paths.
+  sniffers or in an external resolver — never in `wayhouse-core`'s routing/forwarding paths.
 - **Incremental, vertical slices.** Follow the phase plan in
   [`docs/08-roadmap.md`](docs/08-roadmap.md). Don't half-land a phase (e.g. don't add
   a UDP listener type without the session table). Update the roadmap's status legend
@@ -270,7 +277,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Config field (even optional) | bump `CONFIG_SCHEMA_VERSION` and add the dotted path to `FIELD_SINCE` in `wayhouse-config/src/version.rs` (`docs/05` "Schema version") |
 | Controller store layout | bump `STORE_FORMAT` in `wayhouse-controller/src/store.rs` and migrate older formats in `Store::open` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
-| New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as plugins (Phase 9), never as core code or a fork. |
+| New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as sniffers (Phase 9), never as core code or a fork. |
 | New optional `wayhouse` cargo feature | `crates/wayhouse/Cargo.toml` `[features]` (on by default), a `*_disabled.rs` stub that fails startup with a message naming the feature when the config needs it, a `--no-default-features` test, the AGENTS.md command table |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |

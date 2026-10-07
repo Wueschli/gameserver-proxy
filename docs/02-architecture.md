@@ -118,7 +118,7 @@ struct, the rest is shared).
   data plane, not a separate pool — simpler than the originally-planned split,
   and safe because control-plane work never blocks (rule: it may be slow, but
   never blocking-syscall slow) and never touches the hot path's locks.
-- One dedicated OS thread (not a tokio task) for the sniffer plugin engine's
+- One dedicated OS thread (not a tokio task) for the sniffer engine's
   epoch ticker — a `wasmtime::Engine::increment_epoch` heartbeat that arms the
   per-call timeout for WASM sniffers. Spawned once with the `SnifferLoader`, runs
   for the process lifetime, does no I/O. Absent when no `settings.sniffers` is
@@ -140,9 +140,9 @@ struct, the rest is shared).
 
 ## Extension points
 
-- **Sniffer plugin API**: `fn sniff(&[u8]) -> Option<RouteHint>` (SNI, Minecraft,
+- **Sniffer API**: `fn sniff(&[u8]) -> Option<RouteHint>` (SNI, Minecraft,
   Steam A2S, FiveM …). In-process (statically linked) in v1; WASM/out-of-process
-  plugins later.
+  sniffers later.
 - **BackendSource** adapters (see above).
 - **Filter chain** before routing (ACL, rate limit, geo) as an ordered, configurable
   list.

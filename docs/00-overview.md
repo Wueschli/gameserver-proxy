@@ -17,8 +17,8 @@ each solve this for **one** game only, and often for **one** transport protocol 
 
 A reverse proxy for game servers that works **protocol-agnostically at layer 4**
 (TCP + UDP) and optionally derives routing decisions from the first handshake packet
-via **pluggable L7 plugins**. The core knows no game; game knowledge lives exclusively
-in optional plugins or in external routing logic.
+via **pluggable L7 sniffers**. The core knows no game; game knowledge lives exclusively
+in optional sniffers or in external routing logic.
 
 ## Use cases
 
@@ -45,7 +45,7 @@ in optional plugins or in external routing logic.
 ## Non-goals
 
 - **No game logic**, no matchmaking, no anti-cheat, no lobby system.
-- **No parsing/rewriting of game packets** in the core (only optional plugins may read
+- **No parsing/rewriting of game packets** in the core (only optional sniffers may read
   the first N bytes — never modify the running stream).
 - **Not a NAT replacement** for arbitrary client-to-client traffic (no TURN/relay mesh).
 - **Does not force transport encryption** where the game does not use it (optional
@@ -61,8 +61,8 @@ in optional plugins or in external routing logic.
 
 - **Latency first.** Every extra hop costs RTT. The data path must be
   allocation-light, copy-light, and free of unnecessary serialization.
-- **Agnostic by default, plugin as the exception.** Pure L4 forwarding must work
-  without any plugin.
+- **Agnostic by default, sniffer as the exception.** Pure L4 forwarding must work
+  without any sniffer.
 - **Separate control plane from data plane.** Config/backend changes must not block the
   data path.
 - **Operations is a feature.** Health checks, draining, metrics, reload belong in the
@@ -77,7 +77,8 @@ in optional plugins or in external routing logic.
 | **Backend / target** | A concrete game server instance (IP:port). |
 | **Pool / upstream** | A set of equivalent backends with a selection strategy. |
 | **Session** | For UDP: a logical connection, identified by the 4-tuple. |
-| **Sniffer / L7 plugin** | Optional parser that extracts a routing hint from the first bytes (e.g. SNI, Minecraft handshake hostname). |
+| **Sniffer (L7 module)** | Optional parser that extracts a routing hint from the first bytes (e.g. SNI, Minecraft handshake hostname). |
+| **Plugin** | An integration with another system (e.g. the Pelican panel, #213). Not the same as a sniffer; plugins will live in [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins). Design pending. |
 | **Draining** | Backend accepts no new sessions; existing ones drain. |
 | **PROXY protocol** | Header (v1/v2) prepended to the connection carrying the real client address to the backend. |
 | **TPROXY** | Linux kernel feature for transparent proxying that preserves the source IP. |

@@ -42,22 +42,22 @@ settings:
   # Path to a MaxMind Country .mmdb, required if any listener has a `geo` filter.
   # The proxy fails startup / --check if it can't be opened. Startup-only.
   # geo_db: "/var/lib/GeoIP/GeoLite2-Country.mmdb"
-  # Sniffer plugin loader (phase 9). Absent => no plugins load; a `sniffer:`
+  # Sniffer loader (phase 9). Absent => no sniffers load; a `sniffer:`
   # route never matches. `dir` is scanned for *.wasm modules at startup and
   # rescanned on every reload. `modules:` optionally pins each module's
   # SHA-256 (supply-chain check) — a module not listed there, or whose hash
   # doesn't match, is refused. A module's optional `config` string is handed
-  # to that plugin on every call (the plugin parses it itself).
+  # to that sniffer on every call (the sniffer parses it itself).
   # sniffers:
   #   dir: "/etc/wayhouse/sniffers"
-  #   call_timeout_ms: 20        # epoch-interrupted if a plugin overruns this
+  #   call_timeout_ms: 20        # epoch-interrupted if a sniffer overruns this
   #   max_memory_bytes: 16777216 # per-call instance memory ceiling
   #   modules:
   #     - name: a2s
   #       sha256: "..."
   #     - name: regex_firstbytes
   #       sha256: "..."
-  #       config: "^GET /"       # opaque to the loader; the plugin's own format
+  #       config: "^GET /"       # opaque to the loader; the sniffer's own format
   # Tier-2 regional health fabric (phase 13, design only — not yet built, see
   # docs/10 "Tier 2"). `failure_domain` and `gossip` must be set together, or
   # not at all. `failure_domain` is this instance's reachability-equivalence
@@ -214,7 +214,7 @@ listeners:
   # a `length: { min, max }` byte-count window; on TCP the length is only what a
   # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
   # only, not terminated; `host` patterns: exact, `*.suffix` or `.suffix`).
-  # A `sniffer` matcher also exists but needs a loaded plugin (roadmap Phase 9);
+  # A `sniffer` matcher also exists but needs a loaded sniffer (roadmap Phase 9);
   # nothing is built in, so it is not shown here.
   # `pool` and `routes` are mutually exclusive.
   - name: public-tcp

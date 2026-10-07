@@ -55,7 +55,7 @@ The full command table (tunnel e2e, deploy images, audit, and so on) is in
   sockets and no other network.
 - **Latency first.** Weigh every design choice against added round-trip time. If you add a task or
   a hop per connection, say so in the PR.
-- **Agnostic core.** Game-specific knowledge lives only in sniffer plugins or an external resolver.
+- **Agnostic core.** Game-specific knowledge lives only in sniffers or an external resolver.
 - **Pre-1.0: clean breaks over shims.** When the config schema changes, update the
   `wayhouse-config` types and `validate()`, `config.example.yaml` and `docs/05-configuration.md`.
   [`AGENTS.md`](AGENTS.md#when-you-touch-x-also-touch-y) lists what else to touch for other changes.

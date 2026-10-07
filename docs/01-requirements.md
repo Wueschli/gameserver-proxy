@@ -69,7 +69,7 @@
 - F8.1 IP allow/deny lists (CIDR), per listener.
 - F8.2 Rate limiting: new connections/datagrams per source IP and per subnet.
 - F8.3 SYN-flood protection (SYN cookies via the kernel), UDP amplification protection
-  (respond-only-after-first-valid-packet heuristic, optional plugin).
+  (respond-only-after-first-valid-packet heuristic, optional sniffer).
 - F8.4 Resource caps against memory/FD exhaustion.
 
 ## Non-functional requirements
