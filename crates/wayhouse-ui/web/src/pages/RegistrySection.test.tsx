@@ -141,7 +141,7 @@ describe("RegistrySection", () => {
     expect(go).toBeDisabled();
     await userEvent.click(within(dlg).getByRole("checkbox"));
     await userEvent.click(go);
-    expect(api.installFromRegistry).toHaveBeenCalledWith(EXTERNAL.id, "demo");
+    expect(api.installFromRegistry).toHaveBeenCalledWith(EXTERNAL.id, "demo", "1.2.0");
   });
 
   it("an official install needs no risk confirmation", async () => {
@@ -149,7 +149,7 @@ describe("RegistrySection", () => {
     const dlg = await openInstall();
     expect(within(dlg).queryByRole("checkbox")).toBeNull();
     await userEvent.click(within(dlg).getByRole("button", { name: "Install on every instance" }));
-    expect(api.installFromRegistry).toHaveBeenCalledWith(OFFICIAL.id, "demo");
+    expect(api.installFromRegistry).toHaveBeenCalledWith(OFFICIAL.id, "demo", "1.2.0");
     expect(await screen.findByText(/unsigned/i)).toBeInTheDocument();
   });
 

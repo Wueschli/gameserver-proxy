@@ -335,7 +335,7 @@ function InstallDialog({
     setBusy(true);
     setError(null);
     try {
-      const res = await installFromRegistry(registry.id, sniffer.name);
+      const res = await installFromRegistry(registry.id, sniffer.name, wanted ?? undefined);
       setOutcome(res);
       if (res.results.some((r) => r.ok)) onInstalled?.(sniffer.name);
     } catch (err) {

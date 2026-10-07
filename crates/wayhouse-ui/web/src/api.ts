@@ -165,15 +165,16 @@ export function listRegistrySniffers(id: string): Promise<RegistrySniffers> {
 }
 
 /**
- * Install onto the fleet. 200 and 207 are ordinary replies; a 502 whose body
+ * Install onto the fleet. Passing `version` installs exactly the version the
+ * operator was shown, even if the index changed since. 200 and 207 are ordinary replies; a 502 whose body
  * carries `results` means no proxy accepted it, which the page shows per
  * instance like any other outcome. Any other error body is thrown.
  */
-export async function installFromRegistry(id: string, name: string): Promise<InstallResponse> {
+export async function installFromRegistry(id: string, name: string, version?: string): Promise<InstallResponse> {
   const resp = await request(`/api/registries/${encodeURIComponent(id)}/install`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(version ? { name, version } : { name }),
   });
   const text = await resp.text();
   let body: unknown;
