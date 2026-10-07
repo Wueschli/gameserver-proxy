@@ -239,7 +239,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 - **Latency first.** Every design choice is weighed against added RTT (see NFR N1/N2
   in [`docs/01-requirements.md`](docs/01-requirements.md)). If you spawn a task or add
   a hop per connection, say so in the PR/commit and in `HANDOVER.md`.
-- **Agnostic core.** Game-specific knowledge only ever lives in optional sniffer
+- **Agnostic core.** Game-specific knowledge only ever lives in optional
   sniffers or in an external resolver — never in `wayhouse-core`'s routing/forwarding paths.
 - **Incremental, vertical slices.** Follow the phase plan in
   [`docs/08-roadmap.md`](docs/08-roadmap.md). Don't half-land a phase (e.g. don't add
