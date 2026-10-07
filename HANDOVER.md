@@ -26,7 +26,14 @@ Tags stay manual (release-please runs with `skip-github-release`); the steps are
 the UI backend (`/api/registries/*`, `--registries-file`, `--no-default-registry`) and the Sniffers page
 ("Install from a registry") are built; see [`docs/sniffers.md`](docs/sniffers.md). Not yet: the sniffers
 repo bootstrap and move, the official minisign key (`OFFICIAL_PUBKEY` is `None`, so installs are unsigned),
-`min_proxy` enforcement (the aggregator reports no proxy versions), and updates/rollback (#184).
+`min_proxy` enforcement (the aggregator reports no proxy versions).
+
+**Sniffer updates and rollback (Wave 3, #184):** an upload keeps the replaced module as `.<name>.wasm.prev`,
+`POST /admin/sniffers/{name}/rollback` (fleet: `/fleet/sniffers/{name}/rollback`) swaps it back, the loader
+falls back to it when the current file fails validation, and the Sniffers page has an on-demand "Check for
+updates", "Update to X", "roll back" and a `fallback active` badge; see [`docs/sniffers.md`](docs/sniffers.md)
+"Updates and rollback". Follow-up: #246 (a pinned proxy can keep an unpinned current module as `.prev`; harmless,
+it is never loaded).
 
 The repository is **public** since 2026-10-03 (history scanned, clean), so
 GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,

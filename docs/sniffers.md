@@ -151,6 +151,49 @@ failed with the reason); for pinned proxies it shows the `name`/`sha256` entry t
 `settings.sniffers.modules`, with a Copy button. When wayhouse-ui runs without `--registries-file` the
 page warns that added registries are lost on restart.
 
+## Updates and rollback
+
+Updating a sniffer is installing a newer version over the old one; the proxy keeps the old one so an
+operator can go back, and falls back to it on its own when a new file turns out to be unusable.
+
+- **The kept version.** An upload over an existing module saves the replaced file as the dotfile
+  `.<name>.wasm.prev` in `settings.sniffers.dir`. Exactly one previous version is kept: a second
+  update replaces it, so two updates followed by a rollback give the version before the last update
+  only. The replaced file is not kept when it no longer loads (it would push out a working
+  previous version) or when the upload is the same build. The
+  `*.wasm` scan and `GET /admin/sniffers` skip dotfiles; the listing reports `has_previous` and
+  `fallback` for each module. Removing a module removes its previous version too.
+- **Rollback.** `POST /admin/sniffers/{name}/rollback` on a proxy swaps `<name>.wasm` with
+  `.<name>.wasm.prev` and requests a reload, so a second rollback undoes the first. It answers `404`
+  when there is nothing to go back to. The fleet verb is `POST /fleet/sniffers/{name}/rollback` on the
+  aggregator (`/api/fleet/sniffers/{name}/rollback` in the UI, operator role); the reply lists every
+  proxy, and one without a previous version shows its `404` without failing the others.
+- **Pinned instances.** A proxy with `settings.sniffers.modules` only runs a version whose sha256 is
+  pinned, so an update upload is refused (`409 pinned:`) until the new hash is in the pin list, and a
+  rollback is `409 pinned:` and changes nothing when the previous version's hash is not pinned. An
+  update never changes a pin. A rolled-back file never leaves a state the next scan would reject.
+- **Automatic fallback.** When `<name>.wasm` fails validation at a rescan (a bad file copied in by
+  hand, for instance) the loader runs `.<name>.wasm.prev` instead, if it validates and, on a pinned
+  proxy, matches the pin. It logs an error naming both files and the reason on every rescan, and the
+  listing shows `fallback: true`. Without a usable previous version a bad file is skipped as before
+  (or fails the scan, with pins). A call already running when a rescan swaps the module finishes on
+  the old instance.
+- **Checking for updates.** `POST /api/registries/updates/check` (operator) refetches every
+  registry's index (a cached one would hide a release) and asks each proxy what it runs. There is no
+  timer and no background fetch: it runs when someone clicks "Check for updates". Each installed
+  build's sha256 is looked up in the indexes. One row comes back per sniffer and build, with the
+  instances running it, so a half-updated fleet shows two rows. A row carries `installed_version`,
+  and `update` when a newer version exists: `compatible: true`, or `compatible: false` with a
+  `reason` (for example another sniffer ABI). A build whose hash is in no index is an **unknown
+  build**, typically a module uploaded by hand or built locally. It has `known: false`, no update
+  is offered, and the page says so rather than guessing from the name. An unreachable registry or
+  proxy is listed in the reply (`registries`, `instance_errors`) and the rest still answers.
+- **Updating.** The Updates section's "Update to X" button opens the install dialog for exactly that
+  version: same limits, signature notes and risk confirmation as an install. The update itself is the
+  fleet upload from "Installing from a registry".
+- **The page.** The module table shows a `fallback active` badge and a "roll back" button (with a
+  confirmation that it acts on every instance) for modules that keep a previous version.
+
 **Maintainer to-do.** Generate the minisign key pair offline, put the public half in
 `crates/wayhouse-ui/src/registry_keys.rs`, and store the secret in the sniffers repository (see the
 bootstrap plan). Until then everything installs unsigned.
