@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "kind": "sniffer",
+  "name": "golden registry",
+  "sniffers": [
+    {
+      "name": "a2s",
+      "description": "a2s sniffer",
+      "license": "MIT OR Apache-2.0",
+      "versions": [
+        {
+          "version": "0.2.0",
+          "abi": "0.1",
+          "min_proxy": "0.1.0",
+          "url": "https://example.com/dl/a2s-v0.2.0/a2s.wasm",
+          "sha256": "41ab716bb3e37c60a2fe6e3f569b8484136676ad38202af70e4e08917a135ee2",
+          "size": 55,
+          "signature_url": "https://example.com/dl/a2s-v0.2.0/a2s.wasm.minisig",
+          "limits": {
+            "max_memory_bytes": 1048576,
+            "call_timeout_ms": 50
+          }
+        },
+        {
+          "version": "0.1.0",
+          "abi": "0.1",
+          "min_proxy": "0.1.0",
+          "url": "https://example.com/dl/a2s-v0.1.0/a2s.wasm",
+          "sha256": "a02ff435834eea647f7e8416a6fa66adf85cec041d9d0bced52cd0475305faf5",
+          "size": 55,
+          "signature_url": "https://example.com/dl/a2s-v0.1.0/a2s.wasm.minisig",
+          "limits": {
+            "max_memory_bytes": 1048576,
+            "call_timeout_ms": 50
+          }
+        }
+      ]
+    },
+    {
+      "name": "wireguard",
+      "description": "wireguard sniffer",
+      "license": "MIT OR Apache-2.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "abi": "0.1",
+          "min_proxy": "0.1.0",
+          "url": "https://example.com/dl/wireguard-v0.1.0/wireguard.wasm",
+          "sha256": "9148b224788c2ed700ee0d6440ed8019fec939b3bae6ca71c6d30806c7c3bded",
+          "size": 55,
+          "signature_url": "https://example.com/dl/wireguard-v0.1.0/wireguard.wasm.minisig",
+          "limits": {
+            "max_memory_bytes": 1048576,
+            "call_timeout_ms": 50
+          }
+        }
+      ]
+    }
+  ]
+}

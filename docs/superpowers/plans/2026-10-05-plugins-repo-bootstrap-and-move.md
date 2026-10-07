@@ -56,14 +56,14 @@
 
 **Files:** `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Write the workflow**: on PR and push to main: native tests (`cargo nextest run` or `cargo test`), wasm build, manifest check, `wayhouse-registry-gen` dry run into a temp `index.json` then `wayhouse-registry-gen --verify index.json` (parses with the real parser), size table in the job summary. One aggregate job `ci-ok` like main's.
+- [ ] **Step 1: Write the workflow**: on PR and push to main: native tests (`cargo nextest run` or `cargo test`), wasm build, manifest check, `wayhouse-registry-gen` dry run into a temp `index.json` then `wayhouse-registry-gen verify index.json` (parses with the real parser), size table in the job summary. One aggregate job `ci-ok` like main's.
 - [ ] **Step 2: Run on a PR** (when the Actions outage is over). Expected: green. **Commit** `ci: build, test and validate the plugins`.
 
 ### Task A4: Release workflow and index
 
 **Files:** `.github/workflows/release.yml`, `scripts/publish_index.sh`
 
-- [ ] **Step 1: Write the workflow**: trigger `push` tags `*-v[0-9]*`; parse `<name>` and `<version>`; require tag `==` the manifest `name-v<version>`; build that sniffer for wasm; sign with `minisign -S` when `MINISIGN_SECRET_KEY` is set (write the key to a temp file with mode 0600, remove it in an `always()` step); create a GitHub release `<name>-v<version>` with `<name>.wasm` and `<name>.wasm.minisig`; run `wayhouse-registry-gen --previous index.json` (it refuses changed hashes of published versions); commit the new `index.json` to `main` as `github-actions[bot]` (the maintainer must allow that in the repo's rules; if it cannot push, upload `index.json` as a release asset on a rolling release `index` instead and change `DEFAULT_REGISTRY_URL` in the UI crate to match).
+- [ ] **Step 1: Write the workflow**: trigger `push` tags `*-v[0-9]*`; parse `<name>` and `<version>`; require tag `==` the manifest `name-v<version>`; build that sniffer for wasm; sign with `minisign -S` when `MINISIGN_SECRET_KEY` is set (write the key to a temp file with mode 0600, remove it in an `always()` step); create a GitHub release `<name>-v<version>` with `<name>.wasm` and `<name>.wasm.minisig`; run `wayhouse-registry-gen generate --previous index.json --out index.json --name <registry> --base-url <release download prefix> <dir>...` (subcommands as built in `crates/wayhouse-registry`, see `docs/sniffers.md`) (it refuses changed hashes of published versions); commit the new `index.json` to `main` as `github-actions[bot]` (the maintainer must allow that in the repo's rules; if it cannot push, upload `index.json` as a release asset on a rolling release `index` instead and change `DEFAULT_REGISTRY_URL` in the UI crate to match).
 - [ ] **Step 2: Dry run** with a throwaway tag in a fork or with `workflow_dispatch` and `--dry-run` input. Expected: a generated `index.json` artifact that passes the parser.
 - [ ] **Step 3: Commit** `ci: tag-driven plugin releases with signing and index generation`.
 

@@ -1,0 +1,34 @@
+[package]
+name = "wayhouse-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Sniffer registry formats and checks (index, manifest, compatibility, verification,
+# index generation): pure functions over bytes and strings, no I/O, no network. The
+# network client lives in wayhouse-ui; the sniffers repo CI consumes the generator.
+# Spec: docs/superpowers/specs/2026-10-05-plugin-registry-design.md
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+wasmparser = { workspace = true, features = ["validate"] }
+minisign-verify.workspace = true
+
+[dev-dependencies]
+wat.workspace = true
+tempfile.workspace = true
+# Signs fixtures in tests only: a throwaway key pair is generated per test run, so
+# no secret key or fixture signature is checked in.
+minisign = "0.10"

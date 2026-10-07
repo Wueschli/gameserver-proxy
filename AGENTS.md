@@ -117,6 +117,7 @@ crates/
     fanout.rs               intent-verb fan-out to instance admin APIs — targeted (drain/undrain) + broadcast (backend add/patch/delete, route-hint)
     target.rs               `Target` — the forwarded path as validated segments, pushed onto the instance URL with `path_segments_mut` (never `format!` a decoded path param into a URL)
     trust.rs                `AdminUrlPolicy` — which self-reported `admin_url`s ingest accepts (pusher's own IP, or `--instance-url-allow`); `--ingest-token` (POST /ingest only) vs `--auth-token` (/fleet/*) live in api.rs
+  wayhouse-registry/              sniffer registry formats and checks (index, manifest, version selection, verification, `wayhouse-registry-gen`); pure functions, no network; the client lives in wayhouse-ui (docs/sniffers.md)
   wayhouse-ui/                    binary — the admin GUI's BFF (phase 10+11, docs/10 "The admin GUI"); dedicated process, not hosted in the controller or aggregator; holds neither's authority, no wayhouse-core/wayhouse-config dependency
     session.rs              `SessionStore` — in-memory random session ids (ephemeral, like the aggregator's store)
     api.rs                  POST /ui/login|logout, GET /ui/session; merges aggregator_proxy/controller_proxy/ws into the session-gated route group
@@ -277,6 +278,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Config field (even optional) | bump `CONFIG_SCHEMA_VERSION` and add the dotted path to `FIELD_SINCE` in `wayhouse-config/src/version.rs` (`docs/05` "Schema version") |
 | Controller store layout | bump `STORE_FORMAT` in `wayhouse-controller/src/store.rs` and migrate older formats in `Store::open` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
+| Registry index / manifest format or the sniffer ABI version rules | `wayhouse-registry` (`index.rs`, `compat.rs`), the golden `tests/golden/index.json`, `docs/sniffers.md`, the registry spec |
 | New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as sniffers (Phase 9), never as core code or a fork. |
 | New optional `wayhouse` cargo feature | `crates/wayhouse/Cargo.toml` `[features]` (on by default), a `*_disabled.rs` stub that fails startup with a message naming the feature when the config needs it, a `--no-default-features` test, the AGENTS.md command table |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |

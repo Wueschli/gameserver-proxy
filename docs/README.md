@@ -42,6 +42,7 @@ finished. They are kept as a record of why things were built the way they were; 
   Kubernetes manifests.
 - [`../crates/sniffers/README.md`](../crates/sniffers/README.md): the WASM sniffer
   ABI and the first-party sniffers.
+- [`sniffers.md`](sniffers.md): sniffer manifest, registry index and verification formats.
 - [`../crates/wayhouse-bench/README.md`](../crates/wayhouse-bench/README.md): the latency / load
   harness.
 - [`../crates/wayhouse-config/fuzz/README.md`](../crates/wayhouse-config/fuzz/README.md): fuzz
