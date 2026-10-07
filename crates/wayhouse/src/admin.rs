@@ -654,42 +654,48 @@ async fn upload_sniffer(
     ));
     let path = dir.join(format!("{}.wasm", q.name));
     let new_sha = format!("{:x}", Sha256::digest(&body));
-    // Only a current file that is itself a loadable module may become `.prev`:
-    // a rejected one (fallback active) must not replace the known-good rollback target.
-    let keep_current = match std::fs::read(&path) {
-        Ok(cur) => {
-            let v = validator.clone();
-            tokio::task::spawn_blocking(move || v(&cur).is_ok())
-                .await
-                .unwrap_or(false)
-        }
-        Err(_) => false,
-    };
     let prev = prev_path(dir, &q.name);
+    // The whole swap, including the decision to keep the current file, runs
+    // under SWAP_LOCK on a blocking thread (it validates a module), so
+    // concurrent uploads each see the file the other installed.
     let written = {
-        let _guard = SWAP_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::fs::write(&tmp, &body).and_then(|()| {
-            // Keep the module being replaced (unless this is the same build)
-            // via a hard link, so `<name>.wasm` is never missing: link the
-            // current file to a temp name, rename that over `.prev`, then
-            // rename the new file over the current one.
-            if keep_current
-                && path.is_file()
-                && sha_of_file(&path).as_deref() != Some(new_sha.as_str())
-            {
-                let keep = dir.join(format!(
-                    ".{}.{}.keep",
-                    q.name,
-                    TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                std::fs::hard_link(&path, &keep)
-                    .or_else(|_| std::fs::copy(&path, &keep).map(|_| ()))?;
-                std::fs::rename(&keep, &prev)?;
-            }
-            std::fs::rename(&tmp, &path)
+        let (tmp, path, prev, dir, name, body, validator) = (
+            tmp.clone(),
+            path.clone(),
+            prev,
+            dir.clone(),
+            q.name.clone(),
+            body.clone(),
+            validator.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let _guard = SWAP_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::fs::write(&tmp, &body).and_then(|()| {
+                // Keep the module being replaced when it is itself a loadable
+                // module (a rejected one must not displace the known-good
+                // previous) and not the same build, via a hard link so
+                // `<name>.wasm` is never missing: link the current file to a
+                // temp name, rename that over `.prev`, then rename the new
+                // file over the current one.
+                let keep_current = std::fs::read(&path).is_ok_and(|cur| {
+                    format!("{:x}", Sha256::digest(&cur)) != new_sha && validator(&cur).is_ok()
+                });
+                if keep_current {
+                    let keep = dir.join(format!(
+                        ".{name}.{}.keep",
+                        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    ));
+                    std::fs::hard_link(&path, &keep)
+                        .or_else(|_| std::fs::copy(&path, &keep).map(|_| ()))?;
+                    std::fs::rename(&keep, &prev)?;
+                }
+                std::fs::rename(&tmp, &path)
+            })
         })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
     };
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
@@ -725,7 +731,19 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = std::fs::remove_file(&path);
         if r.is_ok() {
-            let _ = std::fs::remove_file(prev_path(dir, &name));
+            match std::fs::remove_file(prev_path(dir, &name)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    s.runtime.request_reload();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "removed {name}.wasm but not its previous version: {e}; retry the delete\n"
+                        ),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
         }
         r
     };
@@ -1380,6 +1398,21 @@ mod tests {
                 .is_success());
             assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20, "good prev kept");
             assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
+        }
+
+        #[tokio::test]
+        async fn concurrent_first_uploads_still_keep_one_as_prev() {
+            let dir = scratch("concurrent-new");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let (a, b) = tokio::join!(
+                post(&base, "demo", module_padded_to(1 << 20)),
+                post(&base, "demo", module_padded_to(2 << 20)),
+            );
+            assert!(a.status().is_success() && b.status().is_success());
+            assert!(
+                dir.join(".demo.wasm.prev").is_file(),
+                "the first install is rollbackable"
+            );
         }
 
         #[tokio::test]
