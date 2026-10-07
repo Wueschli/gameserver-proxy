@@ -160,7 +160,7 @@
 > the process refuses to start (naming the module), and a reload keeps the
 > previous sniffer set. Uploads are fanned out fleet-wide via `wayhouse-aggregator`'s
 > `POST/DELETE /fleet/sniffers[/{name}]` and the admin GUI's Sniffers page —
-> see `crates/sniffers/README.md` "Installing over HTTP instead of `cp`".
+> see `docs/sniffers.md` "Installing by hand".
 >
 > **Tier-2 regional health fabric** (phase 13, docs/10 "Tier 2" — built):
 > `settings.failure_domain` (a string identity — this instance's

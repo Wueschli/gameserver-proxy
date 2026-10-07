@@ -203,12 +203,12 @@ Set the log level with `WAYHOUSE_LOG` (for example `WAYHOUSE_LOG=debug`).
 
 Container images (six targets in one `Dockerfile`), a Docker Compose demo and plain
 Kubernetes manifests live in [`deploy/`](deploy/); they are reference material, not a
-supported deployment. Sniffers are described in [`crates/sniffers`](crates/sniffers).
+supported deployment. Sniffers are described in [`docs/sniffers.md`](docs/sniffers.md).
 
 ## Documentation
 
-> **Sniffers vs plugins.** _Sniffers_ are the WASM protocol/hostname sniffer modules
-> (`crates/sniffers/`); they are moving to
+> **Sniffers vs plugins.** _Sniffers_ are the WASM protocol/hostname sniffer modules; the
+> official ones live in
 > [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). _Plugins_ are
 > integrations with other systems (e.g. the Pelican panel) and will live in
 > [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is

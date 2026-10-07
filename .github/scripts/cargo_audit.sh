@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 out=${1:-target/cargo-audit}
 rm -rf "$out" && mkdir -p "$out"
 rc=0
-for lock in Cargo.lock crates/sniffers/Cargo.lock crates/wayhouse-config/fuzz/Cargo.lock; do
+for lock in Cargo.lock crates/wayhouse-config/fuzz/Cargo.lock; do
   name=$(printf '%s' "$lock" | tr '/' '_' | sed 's/_Cargo.lock$//; s/^Cargo.lock$/root/')
   echo "== $lock"
   cargo audit --json --file "$lock" >"$out/$name.json" || rc=1

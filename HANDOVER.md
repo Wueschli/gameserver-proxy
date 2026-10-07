@@ -112,8 +112,9 @@ details are in `git log`.
 - External resolvers (HTTP / gRPC, TTL-LRU cache) and backend discovery sources
   (DNS SRV / Consul / Kubernetes / tunnel) behind live-reloadable `ArcSwap` seams.
 - Sniffers via `wasmtime` — no game-protocol code in core. First-party
-  `a2s` / `minecraft` / `regex-firstbytes` sniffers in `crates/sniffers/`
-  (standalone workspace, `make sniffers`). Per-sniffer config, benchmarked p50 ~8–10 µs.
+  `a2s` / `minecraft` / `regex_firstbytes` etc. sniffers in `wayhouse-proxy/sniffers` (this repo
+  keeps the ABI crate `crates/wayhouse-sniffer-abi/` and pins their releases in `sniffers.lock`).
+  Per-sniffer config, benchmarked p50 ~8–10 µs.
 - Perf pass: `splice(2)` zero-copy TCP pump, `recvmmsg(2)` UDP ingress batching,
   single-level timing-wheel UDP idle expiry.
 - Ops: `wayhouse_build_info{component,version,commit}`, `wayhouse_fd_open` / `wayhouse_fd_limit` sampling.
@@ -200,7 +201,7 @@ built; verified live in 4 Docker containers (`--cap-add=NET_ADMIN
 - **`make deploy-lint` and the locale.** Its ruby checks read the Dockerfile as
   US-ASCII under a `C`/POSIX locale and fail with `invalid byte sequence`; run it with
   `LANG=C.UTF-8 LC_ALL=C.UTF-8` (CI's runners are UTF-8 already).
-- **`make audit`** runs `cargo audit` over all three lockfiles (root, `crates/sniffers`,
+- **`make audit`** runs `cargo audit` over both lockfiles (root and
   the fuzz harness; `.github/scripts/cargo_audit.sh`, JSON in `target/cargo-audit/`;
   needs `cargo install cargo-audit --locked`). In CI since 2026-10-02 as the
   **informational** `audit` job (every push/PR + nightly; summary table, warnings,
@@ -469,7 +470,7 @@ rebuild reads `Discovery::get`).
 | `crates/wayhouse-controller/src/{peers,proxy_peers}.rs` + `{peers,proxy_peers}/api.rs` | The two mirrored registries (origins register in `peers`, proxies in `proxy_peers`): `POST` claims an address atomically with the registration (under a per-registry write lock), `DELETE` releases it and logs a tombstone, SSE `subscribe` replays registrations and tombstones. |
 | `crates/wayhouse-agent/src/{register,address_store,proxy_subscribe,interface,keypair,main}.rs` | Origin agent: register first (bounded `http_client()`), `resolve_startup` picks controller answer vs saved `<data_dir>/tunnel-address`, `/32` proxy peers, `plan()`/`Action` for events and tombstones. |
 | `crates/wayhouse/src/{proxy_register,tunnel_address,tunnel_client}.rs` (+ the `--tunnel-*` block in `main.rs`) | Proxy side of the same: register before bringing the interface up (before any listener binds), saved address at `<tunnel-key-file>.address`, `/32` origin peers, tombstones. |
-| `crates/sniffers/` | Standalone workspace (own `[workspace]`): `wayhouse-sniffer-abi` guest helper + `a2s` / `minecraft` / `regex-firstbytes` sniffers. `make sniffers`. Never a dep of `wayhouse` / `wayhouse-core`. |
+| `crates/wayhouse-sniffer-abi/` | `wayhouse-sniffer-abi`, the guest-side ABI crate (workspace member; `wayhouse-ui` reads its ABI constants). The official sniffers are in `wayhouse-proxy/sniffers` and pin this crate by git revision; their releases are pinned here in `sniffers.lock` (`make sniffers-fetch`). |
 | `crates/wayhouse-bench/` | `make bench` — `latency` mode (in-process, added p50/p99 vs. NFR N1/N2) + `concurrency` mode (real separate `wayhouse` process, connection-count ramp, `/proc` RSS/fd sampling). |
 | `crates/wayhouse-fleet-tests/` | Phase 10+11 slice 12 (+ phase 14 `tests/tunnel.rs`, `#[ignore]`d, `make tunnel-e2e`, with `src/{netns,echo,tunnel}.rs` helpers): `cargo test -p wayhouse-fleet-tests` (part of `make check`) spawns real `wayhouse`/`wayhouse-controller`/`wayhouse-aggregator` binaries as child processes and drives them over real HTTP — controller reconnect/freeze/catch-up, reject-keeps-previous, aggregator push/ingest, fan-out partial failure. |
 | `crates/wayhouse-config/fuzz/` | Standalone workspace: `extract_sni` / `route_match` / `parse_config` `cargo-fuzz` targets. `make fuzz` (nightly). |
@@ -502,12 +503,13 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   `docs/04`.
 - The UDP `prefix:` e2e needs a Linux host with `IP_PKTINFO` and loopback
   `127.0.0.2` / `127.0.0.3`; not portable to macOS/Windows CI.
-- `#[ignore]`d, run in the `sniffers` CI job after `make sniffers`: the first-party
-  `.wasm` artifact round-trip and the WASM-boundary N1 latency bench.
+- `#[ignore]`d, run in the `sniffers-e2e` CI job (not required) after `make sniffers-fetch`, on the
+  official sniffers pinned in `sniffers.lock`: the ABI check, the `.wasm` artifact round-trip and
+  the WASM-boundary N1 latency bench.
 - `wasmtime` is a normal `cargo` dep — it does **not** need the
   `wasm32-unknown-unknown` rustc target; that target is only needed to *build*
   the sniffer crates. Loader tests assemble WASM from inline WAT via the `wat`
-  crate.
+  crate (including the trap, timeout, memory-cap and ABI-version conformance cases).
 
 ---
 

@@ -23,9 +23,11 @@ the guidance here, not in them.
 
 ## What this is
 
-> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules
-> (`crates/sniffers/`); they are moving to
-> [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers). *Plugins* are
+> **Sniffers vs plugins.** *Sniffers* are the WASM protocol/hostname sniffer modules; the
+> official ones live in
+> [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers) (this repository
+> keeps only the ABI crate, `crates/wayhouse-sniffer-abi/`, and pins their releases in `sniffers.lock`
+> for the e2e tests). *Plugins* are
 > integrations with other systems (e.g. the Pelican panel) and will live in
 > [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); design:
 > [plugin system](docs/superpowers/specs/2026-10-07-plugin-system-design.md) and
@@ -143,7 +145,7 @@ crates/
                               child processes and drives them over real HTTP
                               (`cargo test -p wayhouse-fleet-tests`, included in `make check`); phase 14's
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
-  sniffers/                   first-party sniffers (a2s/minecraft/quic/wireguard/openvpn/raknet/teamspeak3/regex-firstbytes) + wayhouse-sniffer-abi — standalone workspace, `make sniffers`
+  sniffer-abi/                wayhouse-sniffer-abi: the guest-side ABI crate the official sniffers (github.com/wayhouse-proxy/sniffers) link; the sniffers themselves are not in this repo
 ```
 
 Dependency direction: `wayhouse` → `wayhouse-core` → `wayhouse-config` (`wayhouse-bench` → `wayhouse-core`
@@ -177,7 +179,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Audit | `make audit` (needs `cargo install cargo-audit --locked`): `cargo audit` over the root, sniffers and fuzz lockfiles; exits 1 on a vulnerability, JSON in `target/cargo-audit/`. In CI the **informational** `audit` job (every push/PR, plus nightly; run summary + warnings + `cargo-audit` artifact). Accepted advisories go in `.cargo/audit.toml` (none yet, so the file does not exist) |
 | Fuzz | `make fuzz` (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`; see `crates/wayhouse-config/fuzz/README.md`) |
 | Bench | `make bench` (latency / load harness vs. NFR N1/N2; see `crates/wayhouse-bench/README.md`) |
-| Sniffers | `make sniffers` (needs `rustup target add wasm32-unknown-unknown`; builds `crates/sniffers/` to `wasm32-unknown-unknown`; see `crates/sniffers/README.md`) |
+| Official sniffers (e2e) | `make sniffers-fetch` (downloads the releases pinned in `sniffers.lock` to `target/sniffers`; needs network), then `cargo test -p wayhouse --release -- --ignored`; CI job `sniffers-e2e` (not required) |
 | wayhouse-ui frontend | `make ui` (needs Node/npm; builds `crates/wayhouse-ui/web/` to `dist/`, served by `wayhouse-ui --static-dir`; see `crates/wayhouse-ui/web/README.md`) |
 | wayhouse-ui frontend tests | `make ui-test` (vitest) and `make ui-e2e` (Playwright, backend stubbed; both in the `ui` CI job) |
 | Markdown | `make docs-fmt` (Prettier, writes) / `make docs-fmt-check` and `make docs-links` (relative links and anchors); both checks are the `docs` CI job. AGENTS.md, HANDOVER.md and `docs/NN-*.md` are in `.prettierignore` for now |
@@ -281,6 +283,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
 | Registry index / manifest format or the sniffer ABI version rules | `wayhouse-registry` (`index.rs`, `compat.rs`), the golden `tests/golden/index.json`, `docs/sniffers.md`, the registry spec |
 | New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as sniffers (Phase 9), never as core code or a fork. |
+| Sniffer ABI (wire format or `wayhouse.abi` version) | `crates/wayhouse-sniffer-abi`, `HOST_ABI` in `sniffer_loader.rs`, the rev pinned in the sniffers repo's `Cargo.toml`, rebuilt sniffer releases, then `sniffers.lock` (`docs/sniffers.md`) |
 | New optional `wayhouse` cargo feature | `crates/wayhouse/Cargo.toml` `[features]` (on by default), a `*_disabled.rs` stub that fails startup with a message naming the feature when the config needs it, a `--no-default-features` test, the AGENTS.md command table |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |

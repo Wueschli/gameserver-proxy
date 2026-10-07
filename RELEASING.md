@@ -6,8 +6,8 @@ How a release is cut today, and how it would be cut from a release branch later.
 
 The workspace version in the root `Cargo.toml` (`[workspace.package] version`) is the single
 source of truth. Every binary reports it (`--version`, the `wayhouse_build_info` metric), and
-`release.yml` refuses a tag that is not `v` + that version. `crates/sniffers/` has its own
-workspace and keeps its own `0.0.1` until it leaves this repo.
+`release.yml` refuses a tag that is not `v` + that version. The official sniffers have their own
+repository (`wayhouse-proxy/sniffers`), versions and release flow.
 
 Versions stay `0.x`. Under 0.x:
 

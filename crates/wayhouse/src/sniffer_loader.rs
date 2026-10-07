@@ -26,7 +26,7 @@
 //! ```
 //!
 //! This encoding is also what the `wayhouse-sniffer-abi` guest helper crate
-//! (`crates/sniffers/`) implements on the write side.
+//! (`crates/wayhouse-sniffer-abi/`) implements on the write side.
 //!
 //! ### Version
 //! A module declares the ABI version it was built for in a custom section named
@@ -750,6 +750,53 @@ mod tests {
         assert!(sniffer.sniff(b"anything").is_none());
     }
 
+    /// A trap inside `sniff` (here `unreachable`) is a failed call: the sniffer
+    /// reports no hint, and the next call on the same sniffer works. Together with
+    /// the timeout, memory-cap and ABI tests this is the loader's conformance
+    /// suite now that no real sniffer is built in this repository.
+    #[test]
+    fn wat_module_trap_is_a_call_error() {
+        let wat = r#"
+            (module
+              (@custom "wayhouse.abi" "\00\00\01\00")
+              (memory (export "memory") 1)
+              (func (export "alloc") (param i32) (result i32) (i32.const 0))
+              (func (export "sniff") (param i32 i32 i32 i32) (result i64)
+                (if (i32.eq (local.get 1) (i32.const 4)) (then unreachable))
+                (i64.const 0)))
+        "#;
+        let engine = epoch_engine();
+        let sniffer = wasm_sniffer("trapper", wat, &engine);
+        assert!(sniffer.sniff(b"trap").is_none());
+        assert!(sniffer.sniff(b"fine!").is_none());
+    }
+
+    /// `memory.grow` past `max_memory_bytes` fails inside the guest (returns -1)
+    /// instead of growing the host: this fixture recognises a packet only when its
+    /// grow succeeded, so a refused grow shows up as "not recognised". The cap in
+    /// `wasm_sniffer_cfg` is 1 MiB (16 pages).
+    #[test]
+    fn wat_module_memory_grow_past_cap_fails() {
+        fn grower(pages: u32) -> String {
+            format!(
+                r#"(module
+                  (@custom "wayhouse.abi" "\00\00\01\00")
+                  (memory (export "memory") 1)
+                  (data (i32.const 1024) "\02\01\00x")
+                  (func (export "alloc") (param i32) (result i32) (i32.const 0))
+                  (func (export "sniff") (param i32 i32 i32 i32) (result i64)
+                    (if (i32.eq (memory.grow (i32.const {pages})) (i32.const -1))
+                      (then (return (i64.const 0))))
+                    (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const 4))))"#
+            )
+        }
+        let engine = epoch_engine();
+        let within = wasm_sniffer("within-cap", &grower(2), &engine);
+        assert_eq!(within.sniff(b"x").unwrap().host.as_deref(), Some("x"));
+        let past = wasm_sniffer("past-cap", &grower(100), &engine);
+        assert!(past.sniff(b"x").is_none());
+    }
+
     #[test]
     fn short_calls_never_time_out_under_the_shipped_ticker() {
         // Regression (#173): a one-tick deadline traps at the *next* tick,
@@ -910,21 +957,35 @@ mod tests {
         p
     }
 
-    /// Every real built sniffer must carry the host's ABI version in its
-    /// `wayhouse.abi` section — this is what catches the section being dropped by
-    /// `strip`/`lto` in the sniffers release profile, and the host and guest
-    /// constants drifting apart. Needs `make sniffers`; run with
-    /// `cargo test -p wayhouse built_sniffers_declare -- --ignored`.
-    #[test]
-    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
-    fn built_sniffers_declare_the_host_abi() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sniffers/target/wasm32-unknown-unknown/release");
+    /// Where the official sniffers pinned in `sniffers.lock` were fetched to
+    /// (`make sniffers-fetch`, `.github/scripts/fetch_sniffers.py`):
+    /// `WAYHOUSE_SNIFFERS_DIR`, default `target/sniffers` in the workspace root.
+    /// The `#[ignore]`d tests below fail with this path when it is missing.
+    fn fetched_sniffers_dir() -> std::path::PathBuf {
+        let dir = std::env::var_os("WAYHOUSE_SNIFFERS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/sniffers")
+            });
         assert!(
             dir.is_dir(),
-            "run `make sniffers` first (looked in {})",
+            "run `make sniffers-fetch` first (looked in {})",
             dir.display()
         );
+        dir
+    }
+
+    /// Every official sniffer in the pinned releases must carry the host's ABI
+    /// version in its `wayhouse.abi` section: this is the cross-repo contract (the
+    /// sniffers repo builds against a pinned ABI crate, the host here reads
+    /// [`HOST_ABI`]), so a host ABI bump fails here until the sniffers are rebuilt
+    /// and `sniffers.lock` is updated. Run with
+    /// `cargo test -p wayhouse built_sniffers_declare -- --ignored` after
+    /// `make sniffers-fetch`.
+    #[test]
+    #[ignore = "needs the pinned official sniffers: run `make sniffers-fetch` first"]
+    fn built_sniffers_declare_the_host_abi() {
+        let dir = fetched_sniffers_dir();
         let mut found = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -945,24 +1006,19 @@ mod tests {
         );
     }
 
-    /// Loads the real first-party sniffers (`crates/sniffers/`) built by
-    /// `make sniffers` and drives each one through this crate's own loader —
+    /// Loads the real official sniffers (released from `wayhouse-proxy/sniffers`,
+    /// pinned in `sniffers.lock`, fetched by `make sniffers-fetch`) and drives each
+    /// one through this crate's own loader —
     /// not just the sniffer's own native `recognise()` unit tests, but the
     /// actual `alloc`/`memory.write`/`sniff`/decode round trip through
-    /// `wasmtime`. Ignored by default: it needs
-    /// `crates/sniffers/target/wasm32-unknown-unknown/release/*.wasm` to
-    /// exist, which `cargo test -p wayhouse` alone does not build. Run with
-    /// `cargo test -p wayhouse sniffer_artifacts -- --ignored` after `make sniffers`.
+    /// `wasmtime`. Ignored by default: it needs the fetched modules in
+    /// `target/sniffers` (or `WAYHOUSE_SNIFFERS_DIR`), which `cargo test -p wayhouse`
+    /// alone does not provide. Run with
+    /// `cargo test -p wayhouse sniffer_artifacts -- --ignored` after `make sniffers-fetch`.
     #[test]
-    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
+    #[ignore = "needs the pinned official sniffers: run `make sniffers-fetch` first"]
     fn first_party_sniffer_artifacts_recognise_their_protocols() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sniffers/target/wasm32-unknown-unknown/release");
-        assert!(
-            dir.is_dir(),
-            "run `make sniffers` first (looked in {})",
-            dir.display()
-        );
+        let dir = fetched_sniffers_dir();
         // A real sniffer's std allocator wants more than the 1 MiB `cfg()`
         // gives synthetic WAT fixtures above — use the config default.
         let mut sc = cfg(&dir);
@@ -992,7 +1048,7 @@ mod tests {
         assert!(quic.sniff(b"not quic at all").is_none());
         // A real client Initial (aioquic, v1): the sniffer decrypts it and
         // reports the SNI as the host.
-        let real: Vec<u8> = include_str!("../../sniffers/quic/testdata/v1_mixed_case.hex")
+        let real: Vec<u8> = include_str!("../testdata/quic_v1_mixed_case.hex")
             .trim()
             .as_bytes()
             .chunks(2)
@@ -1057,15 +1113,10 @@ mod tests {
     /// loader path — proves the config-string plumbing (A2) plus the sniffer's
     /// own pattern language (A3) agree end to end.
     #[test]
-    #[ignore = "needs `make sniffers` to have built crates/sniffers first"]
+    #[ignore = "needs the pinned official sniffers: run `make sniffers-fetch` first"]
     fn first_party_regex_firstbytes_matches_by_config() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sniffers/target/wasm32-unknown-unknown/release/regex_firstbytes.wasm");
-        assert!(
-            src.is_file(),
-            "run `make sniffers` first (looked for {})",
-            src.display()
-        );
+        let src = fetched_sniffers_dir().join("regex_firstbytes.wasm");
+        assert!(src.is_file(), "{} is missing", src.display());
 
         let dir = tempdir();
         let bytes = std::fs::read(&src).unwrap();
@@ -1104,22 +1155,16 @@ mod tests {
     /// from slice 3 — against NFR N1 (< 0.5 ms *added* latency; see
     /// `docs/01-requirements.md`), per the locked "latency is a gate, not an
     /// assumption" decision in `docs/08` Phase 9. Same ignored-by-default
-    /// convention as the artifact test above (needs `make sniffers`); run with
+    /// convention as the artifact test above (needs `make sniffers-fetch`); run with
     /// `cargo test -p wayhouse --release wasm_boundary -- --ignored --nocapture`
     /// to see the printed report (release matters here — `wasmtime`'s
     /// Cranelift compiler and the sandboxed call are both far slower
     /// unoptimised).
     #[test]
-    #[ignore = "needs `make sniffers` to have built crates/sniffers first; run --release for real numbers"]
+    #[ignore = "needs the pinned official sniffers: run `make sniffers-fetch` first; run --release for real numbers"]
     #[allow(clippy::items_after_statements)] // test-local items sit next to their only use
     fn wasm_boundary_latency_vs_nfr_n1() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sniffers/target/wasm32-unknown-unknown/release");
-        assert!(
-            dir.is_dir(),
-            "run `make sniffers` first (looked in {})",
-            dir.display()
-        );
+        let dir = fetched_sniffers_dir();
         let mut sc = cfg(&dir);
         sc.max_memory_bytes = 16 * 1024 * 1024;
         // A long call_timeout for this bench specifically: the epoch ticker
@@ -1254,7 +1299,7 @@ mod tests {
     /// sniffers.dir` would at real startup, then a live TCP connection routed
     /// by the hint that sniffer returns. No `#[ignore]` needed — `wat::parse_str`
     /// builds the fixture inline, so this test needs neither
-    /// `wasm32-unknown-unknown` nor `make sniffers`.
+    /// `wasm32-unknown-unknown` nor the fetched official sniffers.
     #[tokio::test]
     async fn end_to_end_connection_routes_by_a_real_wasm_sniffers_hint() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
