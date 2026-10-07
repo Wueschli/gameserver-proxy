@@ -27,7 +27,9 @@ call_timeout_ms = 50
         manifest,
         bytes,
         url: format!("https://example.com/dl/{name}-v{version}/{name}.wasm"),
-        signature_url: Some(format!("https://example.com/dl/{name}-v{version}/{name}.wasm.minisig")),
+        signature_url: Some(format!(
+            "https://example.com/dl/{name}-v{version}/{name}.wasm.minisig"
+        )),
     }
 }
 
