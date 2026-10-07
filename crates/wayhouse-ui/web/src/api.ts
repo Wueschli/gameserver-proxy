@@ -3,7 +3,16 @@
 // frontend never holds or sends a bearer token; wayhouse-ui presents those to
 // the controller/aggregator itself (docs/10 "The admin GUI").
 
-import type { FanoutResponse, RevisionSummary, SnifferInfo, TunnelAddresses } from "./types";
+import type {
+  FanoutResponse,
+  InstallResponse,
+  RegistryList,
+  RegistryRef,
+  RegistrySniffers,
+  RevisionSummary,
+  SnifferInfo,
+  TunnelAddresses,
+} from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -131,6 +140,53 @@ export function uploadSniffer(name: string, bytes: ArrayBuffer): Promise<FanoutR
     headers: { "content-type": "application/octet-stream" },
     body: bytes,
   });
+}
+
+// --- sniffer registries (wayhouse-ui's own routes) ---
+
+export function listRegistries(): Promise<RegistryList> {
+  return requestJson("/api/registries");
+}
+
+export function addRegistry(url: string, name?: string): Promise<RegistryRef> {
+  return requestJson("/api/registries", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(name ? { url, name } : { url }),
+  });
+}
+
+export function removeRegistry(id: string): Promise<void> {
+  return requestJson(`/api/registries/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function listRegistrySniffers(id: string): Promise<RegistrySniffers> {
+  return requestJson(`/api/registries/${encodeURIComponent(id)}/sniffers`);
+}
+
+/**
+ * Install onto the fleet. 200 and 207 are ordinary replies; a 502 whose body
+ * carries `results` means no proxy accepted it, which the page shows per
+ * instance like any other outcome. Any other error body is thrown.
+ */
+export async function installFromRegistry(id: string, name: string): Promise<InstallResponse> {
+  const resp = await request(`/api/registries/${encodeURIComponent(id)}/install`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const text = await resp.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const parsed = body as Partial<InstallResponse> & { error?: string };
+  if (resp.ok || (resp.status === 502 && Array.isArray(parsed?.results))) {
+    return parsed as InstallResponse;
+  }
+  throw new ApiError(resp.status, (typeof parsed?.error === "string" ? parsed.error : text) || resp.statusText);
 }
 
 export function deleteSniffer(name: string): Promise<FanoutResponse> {

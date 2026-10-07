@@ -74,3 +74,68 @@ export interface TunnelAddresses {
   capacity: number | null;
   entries: TunnelAddressEntry[];
 }
+
+/** One sniffer registry the UI knows (`GET /api/registries`). */
+export interface RegistryRef {
+  id: string;
+  name: string;
+  url: string;
+  official: boolean;
+  risk: "official" | "external";
+}
+
+export interface RegistryList {
+  registries: RegistryRef[];
+  /** False when the list lives in memory only and is lost on restart. */
+  persistent: boolean;
+}
+
+export interface RegistryVersion {
+  version: string;
+  abi: string;
+  min_proxy: string;
+  url: string;
+  sha256: string;
+  size: number;
+  signature_url?: string;
+  limits: { max_memory_bytes: number; call_timeout_ms: number };
+  config?: string;
+}
+
+/** `compatible` has `version` when this release can run it, else `reason`. */
+export interface RegistrySniffer {
+  name: string;
+  description: string;
+  license: string;
+  homepage?: string;
+  versions: RegistryVersion[];
+  compatible: { version: string } | { reason: string };
+}
+
+export interface RegistrySniffers {
+  registry: RegistryRef;
+  index_name: string;
+  host_abi: string;
+  min_proxy_checked: boolean;
+  sniffers: RegistrySniffer[];
+}
+
+export interface InstallInstanceResult {
+  instance: string;
+  ok: boolean;
+  pinned: boolean;
+  error: string | null;
+  status: number | null;
+  /** The start of a refusing proxy's reply. */
+  detail?: string | null;
+}
+
+export interface InstallResponse {
+  sniffer: string;
+  version: string;
+  signed: boolean;
+  risk: "official" | "external";
+  sha256: string;
+  results: InstallInstanceResult[];
+  pinned_instances: { instance: string; pin: { name: string; sha256: string } }[];
+}
