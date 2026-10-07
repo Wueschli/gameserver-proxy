@@ -815,16 +815,19 @@ async fn rollback_sniffer(State(s): State<AdminState>, Path(name): Path<String>)
             }
             Ok::<(), std::io::Error>(())
         })();
-        if r.is_err() {
-            // Keep the former current as the rollback target rather than
-            // dropping it when only the last rename failed.
-            if tmp.exists() && !prev.exists() {
-                let _ = std::fs::rename(&tmp, &prev);
-            } else {
-                let _ = std::fs::remove_file(&tmp);
+        match r {
+            Err(_) if tmp.exists() && !prev.exists() => {
+                // Only the last rename failed: retry it. If it lands the swap
+                // is complete (report success); otherwise the former current
+                // stays staged under its temp name.
+                std::fs::rename(&tmp, &prev)
             }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+            ok => ok,
         }
-        r
     };
     match swapped {
         Ok(()) => {
