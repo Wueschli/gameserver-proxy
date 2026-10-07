@@ -75,6 +75,7 @@ fn router(state: AdminState) -> Router {
                 )),
         )
         .route("/admin/sniffers/{name}", delete(delete_sniffer))
+        .route("/admin/sniffers/{name}/rollback", post(rollback_sniffer))
         .route_layer(middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref())
                 .with_body("unauthorized\n"),
@@ -501,6 +502,13 @@ struct SnifferInfo {
     /// now (a file can exist on disk but have failed its last scan — e.g. a
     /// hash-pin mismatch — in which case this is `false`).
     loaded: bool,
+    /// A previous version is kept (`POST /admin/sniffers/{name}/rollback`).
+    #[serde(default)]
+    has_previous: bool,
+    /// The live instance runs the previous version because the current file
+    /// failed validation at the last scan.
+    #[serde(default)]
+    fallback: bool,
 }
 
 /// `GET /admin/sniffers` — lists every `.wasm` file in `settings.sniffers.dir`
@@ -540,6 +548,8 @@ async fn list_sniffers(State(s): State<AdminState>) -> Response {
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             size_bytes: bytes.len() as u64,
             loaded: loaded.contains(&name),
+            has_previous: prev_path(dir, &name).is_file(),
+            fallback: s.sniffers.get(&name).is_some_and(|x| x.is_fallback()),
             name,
         });
     }
@@ -560,6 +570,21 @@ async fn list_sniffers(State(s): State<AdminState>) -> Response {
 #[derive(Deserialize)]
 struct SnifferUploadQuery {
     name: String,
+}
+
+/// The kept previous version of `<name>.wasm`: a dotfile, so the `*.wasm` scan
+/// and the listing never treat it as a module of its own.
+pub(crate) fn prev_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    dir.join(format!(".{name}.wasm.prev"))
+}
+
+/// Serialises every swap of `<name>.wasm` / `.prev` (upload, rollback, delete).
+static SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn sha_of_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|b| format!("{:x}", Sha256::digest(&b)))
 }
 
 /// Uniquifies upload temp files so concurrent uploads never share one.
@@ -585,7 +610,8 @@ async fn upload_sniffer(
     };
     let bytes = body.clone();
     // Compiling a module is CPU work; keep it off the async workers.
-    let verdict = tokio::task::spawn_blocking(move || validator(&bytes)).await;
+    let v0 = validator.clone();
+    let verdict = tokio::task::spawn_blocking(move || v0(&bytes)).await;
     match verdict {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -627,7 +653,50 @@ async fn upload_sniffer(
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let path = dir.join(format!("{}.wasm", q.name));
-    let written = std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, &path));
+    let new_sha = format!("{:x}", Sha256::digest(&body));
+    let prev = prev_path(dir, &q.name);
+    // The whole swap, including the decision to keep the current file, runs
+    // under SWAP_LOCK on a blocking thread (it validates a module), so
+    // concurrent uploads each see the file the other installed.
+    let written = {
+        let (tmp, path, prev, dir, name, body, validator) = (
+            tmp.clone(),
+            path.clone(),
+            prev,
+            dir.clone(),
+            q.name.clone(),
+            body.clone(),
+            validator.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let _guard = SWAP_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::fs::write(&tmp, &body).and_then(|()| {
+                // Keep the module being replaced when it is itself a loadable
+                // module (a rejected one must not displace the known-good
+                // previous) and not the same build, via a hard link so
+                // `<name>.wasm` is never missing: link the current file to a
+                // temp name, rename that over `.prev`, then rename the new
+                // file over the current one.
+                let keep_current = std::fs::read(&path).is_ok_and(|cur| {
+                    format!("{:x}", Sha256::digest(&cur)) != new_sha && validator(&cur).is_ok()
+                });
+                if keep_current {
+                    let keep = dir.join(format!(
+                        ".{name}.{}.keep",
+                        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    ));
+                    std::fs::hard_link(&path, &keep)
+                        .or_else(|_| std::fs::copy(&path, &keep).map(|_| ()))?;
+                    std::fs::rename(&keep, &prev)?;
+                }
+                std::fs::rename(&tmp, &path)
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+    };
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
         return (
@@ -656,7 +725,29 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
         return (StatusCode::BAD_REQUEST, "invalid module name\n".to_string()).into_response();
     }
     let path = dir.join(format!("{name}.wasm"));
-    match std::fs::remove_file(&path) {
+    let removed = {
+        let _guard = SWAP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r = std::fs::remove_file(&path);
+        if r.is_ok() {
+            match std::fs::remove_file(prev_path(dir, &name)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    s.runtime.request_reload();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "removed {name}.wasm but not its previous version: {e}; retry the delete\n"
+                        ),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
+        }
+        r
+    };
+    match removed {
         Ok(()) => {
             s.runtime.request_reload();
             tracing::info!(%name, "sniffer module removed via admin API");
@@ -670,6 +761,89 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
             format!("removing {}: {e}\n", path.display()),
         )
             .into_response(),
+    }
+}
+
+/// `POST /admin/sniffers/{name}/rollback` — swaps `<name>.wasm` with the kept
+/// previous version (so a second rollback undoes the first; exactly one
+/// previous is ever kept). `404` without a previous version. On a pinned
+/// instance only when the previous version's sha256 equals the pin (`409
+/// pinned:`), because anything else would make the next rescan reject the file.
+async fn rollback_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Some(dir) = &s.sniffers_dir else {
+        return sniffers_disabled();
+    };
+    if !valid_module_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid module name\n".to_string()).into_response();
+    }
+    let path = dir.join(format!("{name}.wasm"));
+    let prev = prev_path(dir, &name);
+    let swapped = {
+        let _guard = SWAP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(prev_sha) = sha_of_file(&prev) else {
+            return (
+                StatusCode::NOT_FOUND,
+                "no previous version kept\n".to_string(),
+            )
+                .into_response();
+        };
+        let pins = (s.sniffer_pins)();
+        if !pins.is_empty() && !pins.iter().any(|p| p.name == name && p.sha256 == prev_sha) {
+            return (
+                StatusCode::CONFLICT,
+                format!("pinned: the previous version of {name} (sha256 {prev_sha}) does not match its pin\n"),
+            )
+                .into_response();
+        }
+        // current -> temp link, prev -> current, temp -> prev; the current
+        // file is replaced atomically and never missing.
+        let tmp = dir.join(format!(
+            ".{name}.{}.swap",
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let had_current = path.is_file();
+        let r = (|| {
+            if had_current {
+                std::fs::hard_link(&path, &tmp)
+                    .or_else(|_| std::fs::copy(&path, &tmp).map(|_| ()))?;
+            }
+            std::fs::rename(&prev, &path)?;
+            if had_current {
+                std::fs::rename(&tmp, &prev)?;
+            }
+            Ok::<(), std::io::Error>(())
+        })();
+        match r {
+            Err(_) if tmp.exists() && !prev.exists() => {
+                // Only the last rename failed: retry it. If it lands the swap
+                // is complete (report success); otherwise the former current
+                // stays staged under its temp name.
+                std::fs::rename(&tmp, &prev)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+            ok => ok,
+        }
+    };
+    match swapped {
+        Ok(()) => {
+            s.runtime.request_reload();
+            tracing::info!(%name, "sniffer module rolled back via admin API");
+            (StatusCode::OK, format!("rolled back {name}.wasm\n")).into_response()
+        }
+        Err(e) => {
+            // The files may have changed before the failure; let the next scan see them.
+            s.runtime.request_reload();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("rolling back {}: {e}\n", path.display()),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1143,7 +1317,8 @@ mod tests {
             let dir = scratch("big-ok");
             let (base, _rt) = spawn(&dir, no_pins()).await;
             let r = post(&base, "big", module_padded_to(3 << 20)).await;
-            assert!(r.status().is_success(), "{}", r.status());
+            let st = r.status();
+            assert!(st.is_success(), "{st} {}", r.text().await.unwrap());
             assert_eq!(
                 std::fs::metadata(dir.join("big.wasm")).unwrap().len(),
                 3 << 20
@@ -1163,9 +1338,185 @@ mod tests {
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(names, ["same.wasm"], "no tmp file may remain");
+            assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
+            assert!(names.contains(&"same.wasm".to_string()), "{names:?}");
             let len = std::fs::metadata(dir.join("same.wasm")).unwrap().len();
             assert!(len == 1 << 20 || len == 2 << 20, "whole file, got {len}");
+        }
+
+        async fn rollback(base: &str, name: &str) -> reqwest::Response {
+            reqwest::Client::new()
+                .post(format!("{base}/admin/sniffers/{name}/rollback"))
+                .send()
+                .await
+                .unwrap()
+        }
+
+        async fn list(base: &str) -> Vec<SnifferInfo> {
+            reqwest::get(format!("{base}/admin/sniffers"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap()
+        }
+
+        fn len_of(dir: &std::path::Path, file: &str) -> u64 {
+            std::fs::metadata(dir.join(file)).unwrap().len()
+        }
+
+        #[tokio::test]
+        async fn upload_keeps_the_replaced_module_as_prev_and_lists_it() {
+            let dir = scratch("keep-prev");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            assert!(post(&base, "demo", module_padded_to(1 << 20))
+                .await
+                .status()
+                .is_success());
+            assert!(
+                !list(&base).await[0].has_previous,
+                "first install has no prev"
+            );
+            assert!(post(&base, "demo", module_padded_to(2 << 20))
+                .await
+                .status()
+                .is_success());
+            assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20);
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
+            let l = list(&base).await;
+            assert_eq!(l.len(), 1, "the .prev file is not a module of its own");
+            assert!(l[0].has_previous);
+            assert!(!l[0].fallback);
+        }
+
+        #[tokio::test]
+        async fn invalid_current_never_replaces_the_known_good_prev() {
+            let dir = scratch("bad-current");
+            std::fs::write(dir.join("demo.wasm"), b"not wasm").unwrap();
+            std::fs::write(dir.join(".demo.wasm.prev"), module_padded_to(1 << 20)).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            assert!(post(&base, "demo", module_padded_to(2 << 20))
+                .await
+                .status()
+                .is_success());
+            assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20, "good prev kept");
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
+        }
+
+        #[tokio::test]
+        async fn concurrent_first_uploads_still_keep_one_as_prev() {
+            let dir = scratch("concurrent-new");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let (a, b) = tokio::join!(
+                post(&base, "demo", module_padded_to(1 << 20)),
+                post(&base, "demo", module_padded_to(2 << 20)),
+            );
+            assert!(a.status().is_success() && b.status().is_success());
+            assert!(
+                dir.join(".demo.wasm.prev").is_file(),
+                "the first install is rollbackable"
+            );
+        }
+
+        #[tokio::test]
+        async fn identical_reupload_does_not_overwrite_prev() {
+            let dir = scratch("same-sha");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            for n in [1, 2, 2] {
+                assert!(post(&base, "demo", module_padded_to(n << 20))
+                    .await
+                    .status()
+                    .is_success());
+            }
+            assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20, "prev stays v1");
+        }
+
+        #[tokio::test]
+        async fn rollback_swaps_current_and_prev() {
+            let dir = scratch("rollback");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            for n in [1, 2, 3] {
+                assert!(post(&base, "demo", module_padded_to(n << 20))
+                    .await
+                    .status()
+                    .is_success());
+            }
+            // Two updates, then a rollback: the version before the last update.
+            let r = rollback(&base, "demo").await;
+            assert!(r.status().is_success(), "{}", r.status());
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
+            assert_eq!(
+                len_of(&dir, ".demo.wasm.prev"),
+                3 << 20,
+                "swap keeps exactly one"
+            );
+            let names: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names.len(), 2, "{names:?}");
+        }
+
+        #[tokio::test]
+        async fn rollback_without_prev_is_404_and_bad_name_is_400() {
+            let dir = scratch("rollback-none");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            assert!(post(&base, "demo", module()).await.status().is_success());
+            assert_eq!(
+                rollback(&base, "demo").await.status(),
+                reqwest::StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                rollback(&base, "ghost").await.status(),
+                reqwest::StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                rollback(&base, "a.b").await.status(),
+                reqwest::StatusCode::BAD_REQUEST
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_removes_prev_too() {
+            let dir = scratch("delete-prev");
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            for n in [1, 2] {
+                assert!(post(&base, "demo", module_padded_to(n << 20))
+                    .await
+                    .status()
+                    .is_success());
+            }
+            let r = reqwest::Client::new()
+                .delete(format!("{base}/admin/sniffers/demo"))
+                .send()
+                .await
+                .unwrap();
+            assert!(r.status().is_success());
+            assert!(dir_is_empty(&dir));
+        }
+
+        #[tokio::test]
+        async fn pinned_rollback_only_when_prev_matches_the_pin() {
+            let dir = scratch("rollback-pin");
+            let v1 = module_padded_to(1 << 20);
+            let v2 = module_padded_to(2 << 20);
+            // Pinned to v2: prev (v1) differs, so rollback is refused with `pinned:`.
+            std::fs::write(dir.join("demo.wasm"), &v2).unwrap();
+            std::fs::write(dir.join(".demo.wasm.prev"), &v1).unwrap();
+            let pins = Arc::new(Mutex::new(vec![pin("demo", &v2)]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            let r = rollback(&base, "demo").await;
+            assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+            assert!(r.text().await.unwrap().starts_with("pinned:"));
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20, "nothing changed");
+            // Pinned to v1 while v2 is current: rollback to v1 is allowed.
+            let dir2 = scratch("rollback-pin-ok");
+            std::fs::write(dir2.join("demo.wasm"), &v2).unwrap();
+            std::fs::write(dir2.join(".demo.wasm.prev"), &v1).unwrap();
+            let pins = Arc::new(Mutex::new(vec![pin("demo", &v1)]));
+            let (base2, _rt2) = spawn(&dir2, pins).await;
+            assert!(rollback(&base2, "demo").await.status().is_success());
+            assert_eq!(len_of(&dir2, "demo.wasm"), 1 << 20);
         }
 
         #[tokio::test]

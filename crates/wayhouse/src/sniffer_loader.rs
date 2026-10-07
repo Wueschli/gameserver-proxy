@@ -53,6 +53,9 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
+
+use crate::admin::prev_path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -79,6 +82,8 @@ pub struct WasmSniffer {
     /// This module's `settings.sniffers.modules[].config` string as bytes
     /// (empty when unset); marshalled into linear memory on every `sniff` call.
     config: Vec<u8>,
+    /// Running the kept previous version because the current file was rejected.
+    fallback: bool,
 }
 
 /// Epoch ticks a call may span before it traps. A deadline of one tick fires
@@ -99,6 +104,10 @@ enum CallError {
 impl Sniffer for WasmSniffer {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn is_fallback(&self) -> bool {
+        self.fallback
     }
 
     fn sniff(&self, first: &[u8]) -> Option<RouteHint> {
@@ -501,30 +510,53 @@ impl SnifferLoader {
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
 
             let pin = cfg.modules.iter().find(|m| m.name == name);
-            if !cfg.modules.is_empty() {
-                let digest = format!("{:x}", Sha256::digest(&bytes));
-                match pin {
-                    Some(p) if p.sha256 == digest => {}
-                    Some(p) => bail!(
-                        "sniffer {name}: sha256 mismatch (pinned {}, loaded {digest})",
-                        p.sha256
-                    ),
-                    None => bail!("sniffer {name}: not listed in settings.sniffers.modules"),
-                }
-            }
             let config = pin
                 .and_then(|p| p.config.clone())
                 .unwrap_or_default()
                 .into_bytes();
-
-            let module = match self.compile_checked(&bytes, cfg.max_memory_bytes) {
-                Ok(m) => m,
-                Err(e) if pin.is_some() => {
-                    bail!("sniffer {name}: pinned module failed validation: {e}")
+            // Pin check (when pinned) then validation, for either file.
+            let check = |bytes: &[u8]| -> Result<Module> {
+                if !cfg.modules.is_empty() {
+                    let digest = format!("{:x}", Sha256::digest(bytes));
+                    match pin {
+                        Some(p) if p.sha256 == digest => {}
+                        Some(p) => bail!(
+                            "sniffer {name}: sha256 mismatch (pinned {}, loaded {digest})",
+                            p.sha256
+                        ),
+                        None => bail!("sniffer {name}: not listed in settings.sniffers.modules"),
+                    }
                 }
+                self.compile_checked(bytes, cfg.max_memory_bytes)
+                    .map_err(|e| {
+                        if pin.is_some() {
+                            anyhow::anyhow!("sniffer {name}: pinned module failed validation: {e}")
+                        } else {
+                            anyhow::anyhow!("sniffer {name}: {e}")
+                        }
+                    })
+            };
+            let (module, fallback) = match check(&bytes) {
+                Ok(m) => (m, false),
                 Err(e) => {
-                    tracing::error!(sniffer = %name, error = %e, "sniffer module rejected, skipping");
-                    continue;
+                    // The previous version (kept by the admin upload) stands in
+                    // when it passes the same checks; with pins that means its
+                    // sha256 equals the pin.
+                    let prev = prev_path(Path::new(&cfg.dir), &name);
+                    match fs::read(&prev).ok().and_then(|pb| check(&pb).ok()) {
+                        Some(m) => {
+                            tracing::error!(
+                                sniffer = %name, current = %path.display(), previous = %prev.display(),
+                                error = %e, "sniffer module rejected, running the previous version"
+                            );
+                            (m, true)
+                        }
+                        None if !cfg.modules.is_empty() => return Err(e),
+                        None => {
+                            tracing::error!(sniffer = %name, error = %e, "sniffer module rejected, skipping");
+                            continue;
+                        }
+                    }
                 }
             };
             let sniffer: Arc<dyn Sniffer> = Arc::new(WasmSniffer {
@@ -533,6 +565,7 @@ impl SnifferLoader {
                 module,
                 max_memory_bytes: cfg.max_memory_bytes,
                 config,
+                fallback,
             });
             tracing::info!(sniffer = %name, path = %path.display(), "sniffer loaded");
             modules.insert(name, sniffer);
@@ -688,6 +721,7 @@ mod tests {
             module,
             max_memory_bytes: 1 << 20,
             config,
+            fallback: false,
         }
     }
 
@@ -1645,6 +1679,97 @@ listeners:
             config: None,
         });
         assert!(loader().scan(&c).is_err());
+    }
+
+    #[test]
+    fn fallback_scan_falls_back_to_previous_when_current_is_invalid() {
+        let dir = tempdir();
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(BARE_WAT)).unwrap();
+        std::fs::write(dir.join(".demo.wasm.prev"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let map = loader().scan(&cfg(&dir)).unwrap();
+        let s = map.get("demo").expect("loaded under its own name");
+        assert!(s.is_fallback());
+        assert_eq!(
+            s.sniff(b"HOST:a.example").unwrap().host.as_deref(),
+            Some("a.example")
+        );
+    }
+
+    #[test]
+    fn fallback_is_not_used_when_current_is_valid() {
+        let dir = tempdir();
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        std::fs::write(dir.join(".demo.wasm.prev"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let map = loader().scan(&cfg(&dir)).unwrap();
+        assert!(!map["demo"].is_fallback());
+    }
+
+    #[test]
+    fn fallback_scan_without_previous_skips_as_before() {
+        let dir = tempdir();
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(BARE_WAT)).unwrap();
+        // A missing current file never triggers the fallback.
+        std::fs::write(dir.join(".gone.wasm.prev"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        assert!(loader().scan(&cfg(&dir)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fallback_with_invalid_previous_too_skips() {
+        let dir = tempdir();
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(BARE_WAT)).unwrap();
+        std::fs::write(dir.join(".demo.wasm.prev"), b"junk").unwrap();
+        assert!(loader().scan(&cfg(&dir)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fallback_respects_pins_hash_mismatch_means_no_fallback() {
+        // Pinned to the (invalid) current file: prev has another hash, so no
+        // fallback and the scan stays fatal exactly as before.
+        let dir = tempdir();
+        let bad = wat_bytes(BARE_WAT);
+        std::fs::write(dir.join("demo.wasm"), &bad).unwrap();
+        std::fs::write(dir.join(".demo.wasm.prev"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let mut c = cfg(&dir);
+        pin(&mut c, "demo", &bad);
+        assert!(loader().scan(&c).is_err());
+    }
+
+    #[test]
+    fn fallback_with_pins_loads_previous_only_when_it_matches_the_pin() {
+        let dir = tempdir();
+        let good = wat_bytes(HOST_SNIFFER_WAT);
+        // Current was swapped for something unpinned; prev is the pinned build.
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(BARE_WAT)).unwrap();
+        std::fs::write(dir.join(".demo.wasm.prev"), &good).unwrap();
+        let mut c = cfg(&dir);
+        pin(&mut c, "demo", &good);
+        let map = loader().scan(&c).unwrap();
+        assert!(map["demo"].is_fallback());
+    }
+
+    #[test]
+    fn fallback_instance_reports_fallback_true_and_normal_false() {
+        let engine = epoch_engine();
+        assert!(!wasm_sniffer("x", HOST_SNIFFER_WAT, &engine).is_fallback());
+    }
+
+    #[test]
+    fn call_spanning_a_rescan_completes_on_the_old_instance() {
+        let dir = tempdir();
+        std::fs::write(dir.join("demo.wasm"), wat_bytes(HOST_SNIFFER_WAT)).unwrap();
+        let (loader, registry) = build_sniffers(&cfg(&dir)).unwrap();
+        let in_flight = registry.get("demo").unwrap();
+        std::fs::remove_file(dir.join("demo.wasm")).unwrap();
+        registry.replace(loader.scan(&cfg(&dir)).unwrap());
+        assert!(registry.get("demo").is_none());
+        assert_eq!(
+            in_flight
+                .sniff(b"HOST:old.example")
+                .unwrap()
+                .host
+                .as_deref(),
+            Some("old.example")
+        );
     }
 
     /// Pin `bytes` as `name` in `c` (matching sha256, so only validation can fail).
