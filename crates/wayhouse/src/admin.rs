@@ -798,7 +798,13 @@ async fn rollback_sniffer(State(s): State<AdminState>, Path(name): Path<String>)
             Ok::<(), std::io::Error>(())
         })();
         if r.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+            // Keep the former current as the rollback target rather than
+            // dropping it when only the last rename failed.
+            if tmp.exists() && !prev.exists() {
+                let _ = std::fs::rename(&tmp, &prev);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
         r
     };
@@ -808,11 +814,15 @@ async fn rollback_sniffer(State(s): State<AdminState>, Path(name): Path<String>)
             tracing::info!(%name, "sniffer module rolled back via admin API");
             (StatusCode::OK, format!("rolled back {name}.wasm\n")).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("rolling back {}: {e}\n", path.display()),
-        )
-            .into_response(),
+        Err(e) => {
+            // The files may have changed before the failure; let the next scan see them.
+            s.runtime.request_reload();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("rolling back {}: {e}\n", path.display()),
+            )
+                .into_response()
+        }
     }
 }
 
