@@ -109,8 +109,9 @@ pub async fn run_tcp_listener(
     let mut accept_errors = AcceptErrors::default();
     loop {
         tokio::select! {
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            changed = shutdown.changed() => {
+                // A dropped sender (the runtime went away) also means stop.
+                if changed.is_err() || *shutdown.borrow() {
                     tracing::info!(listener = %cfg.name, worker = worker_id, "listener stopping");
                     return Ok(());
                 }
@@ -135,8 +136,8 @@ pub async fn run_tcp_listener(
                         // Pause, but stay responsive to a shutdown.
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
-                            _ = shutdown.changed() => {
-                                if *shutdown.borrow() {
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() {
                                     tracing::info!(listener = %cfg.name, worker = worker_id, "listener stopping");
                                     return Ok(());
                                 }
