@@ -46,10 +46,11 @@ const HMAC_TAG_LEN: usize = 32;
 const TIMESTAMP_LEN: usize = 8;
 /// Bytes `tag` adds around a foca packet: timestamp, version byte, HMAC tag.
 const FRAME_OVERHEAD: usize = TIMESTAMP_LEN + 1 + HMAC_TAG_LEN;
-/// The gossip wire version, the second field of every datagram: the protocol
-/// major (`wayhouse_http::protocol`, #185). A datagram carrying another value is
-/// dropped before its payload is decoded.
-const GOSSIP_VERSION: u8 = wayhouse_http::protocol::PROTOCOL_MAJOR as u8;
+/// The gossip wire version, the second field of every datagram. Bump it on an
+/// incompatible gossip format change; it is independent of the HTTP protocol major
+/// (`wayhouse_http::protocol`, #185). A datagram carrying another value is dropped
+/// before its payload is decoded.
+const GOSSIP_VERSION: u8 = 1;
 /// How far a datagram's sender timestamp may sit from our clock before it is
 /// dropped as a replay (security review O4). Also the clock skew the mesh
 /// tolerates between instances; a replay inside the window is still possible.
