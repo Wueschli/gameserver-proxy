@@ -22,6 +22,12 @@ owner's call).
 Tags stay manual (release-please runs with `skip-github-release`); the steps are in
 [`RELEASING.md`](RELEASING.md). Automating the tag is backlog #210.
 
+**Sniffer registry (Wave 3, #183):** the `wayhouse-registry` crate (index, verify, `wayhouse-registry-gen`),
+the UI backend (`/api/registries/*`, `--registries-file`, `--no-default-registry`) and the Sniffers page
+("Install from a registry") are built; see [`docs/sniffers.md`](docs/sniffers.md). Not yet: the sniffers
+repo bootstrap and move, the official minisign key (`OFFICIAL_PUBKEY` is `None`, so installs are unsigned),
+`min_proxy` enforcement (the aggregator reports no proxy versions), and updates/rollback (#184).
+
 The repository is **public** since 2026-10-03 (history scanned, clean), so
 GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,
 03:17 UTC) is on again; it exercises the nightly-only paths (the in-Docker

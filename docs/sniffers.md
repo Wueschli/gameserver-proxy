@@ -141,6 +141,16 @@ what it receives. The routes are `GET /api/registries` and `GET /api/registries/
   reported with its `detail` text, not as pinned. `200` means every proxy accepted, `207` some did
   or some are pinned, `502` none did and none is pinned.
 
+**The Sniffers page.** Under "Install from a registry" the page lists the registries (a badge says
+`official registry` or `external, at your own risk`), the sniffers of the selected one with the
+version this release can run (or the reason none can), and an Install button. The install dialog shows
+the version, size, memory and time limits, signature and config notes before anything happens; for an
+external registry it also shows the risk text and needs a tick before it enables the button. Adding a
+registry needs the same tick. After an install the dialog lists every proxy (installed, pinned,
+failed with the reason); for pinned proxies it shows the `name`/`sha256` entry to add to
+`settings.sniffers.modules`, with a Copy button. When wayhouse-ui runs without `--registries-file` the
+page warns that added registries are lost on restart.
+
 **Maintainer to-do.** Generate the minisign key pair offline, put the public half in
 `crates/wayhouse-ui/src/registry_keys.rs`, and store the secret in the sniffers repository (see the
 bootstrap plan). Until then everything installs unsigned.
