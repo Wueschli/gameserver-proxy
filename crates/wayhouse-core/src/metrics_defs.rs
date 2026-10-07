@@ -72,6 +72,11 @@ pub const PROXY_PROTOCOL_HEADERS: &str = "wayhouse_proxy_protocol_headers_total"
 /// `max_udp` / `max_new_rate` = a process-wide `settings.limits` cap was hit.
 pub const FILTER_BLOCKED: &str = "wayhouse_filter_blocked_total";
 
+/// Counter. Label: `listener`. A TCP `accept` call failed (typically `EMFILE`: the
+/// process is out of file descriptors). The worker pauses 50 ms, doubling to 1 s,
+/// and logs at most one warning per second (#174).
+pub const ACCEPT_ERRORS_TOTAL: &str = "wayhouse_accept_errors_total";
+
 /// Counter. Labels: `pool`, `kind` (`dns_srv` | `consul` | `kubernetes`),
 /// `result` (`ok` | `empty` | `error`). One increment per backend-discovery
 /// refresh attempt. `empty` / `error` keep the last-known-good backend set.
@@ -131,7 +136,7 @@ pub const GOSSIP_AUTH_REJECTED_TOTAL: &str = "wayhouse_gossip_auth_rejected_tota
 pub const GOSSIP_STALE_REJECTED_TOTAL: &str = "wayhouse_gossip_stale_rejected_total";
 
 /// Counter, no labels. Authentic, fresh gossip datagrams dropped because their
-/// version byte is not this build's protocol major (#185): a peer on an
+/// version byte is not this build's gossip version (#185): a peer on an
 /// incompatible release. Dropped before decoding.
 pub const GOSSIP_VERSION_REJECTED_TOTAL: &str = "wayhouse_gossip_version_rejected_total";
 

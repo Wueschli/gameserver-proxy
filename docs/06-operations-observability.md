@@ -55,6 +55,11 @@
   source at its last successful refresh.
 
 ### Security / filter chain
+- `wayhouse_accept_errors_total{listener}` (counter, #174) – a TCP `accept` failed,
+  typically `EMFILE` (out of file descriptors). The
+  worker pauses 50 ms, doubling to 1 s, until an accept succeeds, and logs at most
+  one `accept failed` warning per second with a `suppressed` count; this counter
+  carries the full rate.
 - `wayhouse_filter_blocked_total{listener,filter}` – `filter` = `acl` | `geo` |
   `rate_ip` | `rate_net` | `src_conn_ip` | `src_conn_net` | `max_conn` |
   `max_udp` | `max_new_rate`; a connection / new UDP session was dropped by the
@@ -120,7 +125,7 @@
   node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `wayhouse_gossip_version_rejected_total` (counter, no labels, #185) — authentic,
   fresh gossip datagrams dropped because their version byte is not this build's
-  protocol major: a peer on an incompatible release. Dropped before decoding; the
+  gossip version: a peer on an incompatible release. Dropped before decoding; the
   first one per process is logged as a warning.
 - `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"|"proxy"}`
   (counter, #185) — component requests refused with `426` because the caller's
@@ -460,7 +465,7 @@ un-namespaced names.
 - `POST /fleet/route-hint` — broadcast to every instance's own
   `POST /route-hint`.
 
-Every broadcast response is `{"results": [{"instance", "status", "body"}, ...]}`
+Every broadcast response is `{"results": [{"instance", "status", "error", "detail"?}, ...]}`
 — one entry per known instance, `status: null` (not a failed request) for one
 that couldn't be reached; an instance that refuses (non-2xx) also carries
 `detail`, the first 200 bytes of its reply; a broadcast never fails or blocks on one bad

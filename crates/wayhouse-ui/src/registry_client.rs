@@ -38,8 +38,9 @@ pub enum FetchError {
 }
 
 /// True for an address a registry may legitimately live at: anything that is
-/// not loopback, private, link-local, unspecified, multicast, broadcast, CGNAT
-/// or unique-local. An IPv4-mapped IPv6 address is judged as its IPv4 form.
+/// not loopback, private, link-local, unspecified, "this network", multicast,
+/// broadcast, CGNAT, benchmarking, documentation, reserved, site-local or
+/// unique-local. An IPv4-mapped IPv6 address is judged as its IPv4 form.
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
@@ -53,7 +54,15 @@ pub fn is_public(ip: IpAddr) -> bool {
 fn is_public_v4(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
     let cgnat = o[0] == 100 && (o[1] & 0xc0) == 64;
-    !(ip.is_loopback()
+    let this_network = o[0] == 0; // 0.0.0.0/8
+    let protocol_assignments = o[..3] == [192, 0, 0]; // 192.0.0.0/24
+    let benchmarking = o[0] == 198 && (o[1] & 0xfe) == 18; // 198.18.0.0/15
+    let reserved = o[0] >= 240; // 240.0.0.0/4 (255.255.255.255 is also broadcast)
+    !(this_network
+        || protocol_assignments
+        || benchmarking
+        || reserved
+        || ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
@@ -67,7 +76,20 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
     let unique_local = (s[0] & 0xfe00) == 0xfc00;
     let link_local = (s[0] & 0xffc0) == 0xfe80;
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || unique_local || link_local {
+    let site_local = (s[0] & 0xffc0) == 0xfec0; // fec0::/10, deprecated
+    let documentation = s[0] == 0x2001 && s[1] == 0x0db8; // 2001:db8::/32
+    let teredo = s[0] == 0x2001 && s[1] == 0; // 2001::/32
+    let discard = s[0] == 0x0100 && s[1..4].iter().all(|&x| x == 0); // 100::/64
+    if ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || unique_local
+        || link_local
+        || site_local
+        || documentation
+        || teredo
+        || discard
+    {
         return false;
     }
     // An IPv4 address carried inside IPv6 is judged as that IPv4 address: a DNS64/NAT64
@@ -466,6 +488,20 @@ mod tests {
             "2002:a00:1::",
             "2002:a9fe:a9fe::",
             "::a00:1",
+            // Special-use ranges the std helpers do not cover (#230).
+            "0.1.2.3",
+            "198.18.0.1",
+            "198.19.255.255",
+            "192.0.0.1",
+            "240.0.0.1",
+            "250.1.1.1",
+            "fec0::1",
+            "febf::1",
+            "2001:db8::1",
+            "2001:db8:ffff::1",
+            "2001::1",
+            "100::1",
+            "::ffff:198.18.0.1",
         ] {
             assert!(!is_public(private.parse().unwrap()), "{private}");
         }
@@ -477,6 +513,13 @@ mod tests {
             // The same embeddings of a public IPv4 stay reachable (IPv6-only networks use NAT64).
             "64:ff9b::808:808",
             "2002:808:808::",
+            // Neighbours of the refused ranges stay reachable.
+            "198.17.255.255",
+            "198.20.0.1",
+            "192.0.1.1",
+            "223.255.255.255",
+            "2001:4860:4860::8888",
+            "2001:db9::1",
         ] {
             assert!(is_public(public.parse().unwrap()), "{public}");
         }
