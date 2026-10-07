@@ -153,6 +153,20 @@ impl Registries {
         Ok(entry)
     }
 
+    /// Tests only: register a registry without the https check, so a local plain-http
+    /// server can stand in for one.
+    #[cfg(test)]
+    pub(crate) fn add_unchecked(&self, url: &str, official: bool) -> RegistryRef {
+        let entry = RegistryRef {
+            id: id_for(url),
+            name: "test registry".into(),
+            url: url.into(),
+            official,
+        };
+        self.inner.lock().unwrap().added.push(entry.clone());
+        entry
+    }
+
     pub fn remove(&self, id: &str) -> Result<bool, RegistriesError> {
         let mut inner = self.inner.lock().unwrap();
         let before = inner.added.len();

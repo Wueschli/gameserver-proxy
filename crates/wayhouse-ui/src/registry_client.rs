@@ -123,6 +123,10 @@ pub struct RegistryClient {
     allow_private: bool,
     ttl: Duration,
     cache: IndexCache,
+    /// Tests only: `https://registry.test` URLs (the only kind an index may hold) are
+    /// fetched from this local server instead.
+    #[cfg(test)]
+    rewrite_to: Option<String>,
 }
 
 impl RegistryClient {
@@ -161,7 +165,15 @@ impl RegistryClient {
             allow_private,
             ttl,
             cache: Arc::default(),
+            #[cfg(test)]
+            rewrite_to: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_rewrite(mut self, local_base: &str) -> Self {
+        self.rewrite_to = Some(local_base.trim_end_matches('/').to_string());
+        self
     }
 
     pub fn invalidate(&self, url: &str) {
@@ -193,6 +205,11 @@ impl RegistryClient {
 
     /// GET with the byte cap enforced while the body streams in.
     async fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, FetchError> {
+        #[cfg(test)]
+        let url = &match &self.rewrite_to {
+            Some(local) => url.replacen("https://registry.test", local, 1),
+            None => url.to_string(),
+        };
         let parsed = reqwest::Url::parse(url).map_err(|e| FetchError::Io(e.to_string()))?;
         if let Some(why) = url_refusal(&parsed, self.allow_http, self.allow_private) {
             return Err(why);

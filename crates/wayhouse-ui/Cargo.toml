@@ -34,6 +34,9 @@ serde_norway.workspace = true
 argon2 = "0.6.0"
 wayhouse-registry = { path = "../wayhouse-registry" }
 sha2.workspace = true
+minisign-verify.workspace = true
+wayhouse-sniffer-abi = { path = "../sniffers/wayhouse-sniffer-abi" }
+semver.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -41,6 +44,7 @@ tower = "0.5"
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false }
 tempfile.workspace = true
+wat.workspace = true
 # HTTP/2 WebSocket (extended CONNECT) test client; all already in the lockfile.
 hyper = { version = "1", features = ["client", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
