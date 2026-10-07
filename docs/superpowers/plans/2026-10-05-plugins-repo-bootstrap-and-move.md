@@ -29,7 +29,7 @@
 - An outage of the sniffers repo must not block ordinary PRs in main (the e2e job is not in `ci-ok.needs`; it runs on `sniffers.lock` changes, pushes to main and a nightly schedule).
 - After the move, no tracked file in main still says `make sniffers` or `crates/sniffers/`, except under `docs/superpowers/` and in `CHANGELOG.md` (grep gate in the plan's last task).
 - History: `git log --follow` on one sniffer's `src/lib.rs` in the new repo reaches the original commits.
-- The `index.json` the sniffers repo publishes must parse with `wayhouse_registry::parse_index` (CI runs the real parser).
+- The `index.json` the sniffers repo publishes must parse with `wayhouse_registry::parse_index` (CI runs the real parser) and carries `"kind": "sniffer"`; `wayhouse-registry-gen` emits it, and the golden test covers it.
 
 ---
 

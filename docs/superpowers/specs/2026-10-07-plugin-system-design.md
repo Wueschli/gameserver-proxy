@@ -21,31 +21,47 @@ Let anyone write a plugin, let operators install it from a registry and enable i
 ## Plugin ABI (sketch)
 
 - Custom section `wayhouse.plugin-abi` (major, minor), exact minor match while major is 0, checked before instantiation, same policy as the sniffer ABI.
-- Guest exports: `memory`, `alloc`, `init(config_ptr, len)`, `tick()`; optional `on_event(ptr, len)`. The host drives the guest on a manifest-declared interval (minimum enforced by the host, e.g. 10 s). The guest never runs its own loop or threads.
+- Guest exports: `memory`, `alloc`, `init(config_ptr, len)`, `tick()`. The host drives the guest on a manifest-declared interval (minimum enforced by the host, e.g. 10 s). The guest never runs its own loop or threads.
 - Host imports (all capability-gated; a call without the capability traps the call, not the controller):
-  - `http(request) -> response`: HTTPS only, destinations restricted to `net.hosts` patterns from the approved manifest, body/time/call-count budgets, the same resolver-level SSRF guard as the registry client. Header values may contain `${secret:NAME}`; the **host expands it, so the guest never sees the secret**.
+  - `http(request) -> response`: HTTPS only, destinations restricted to the approved `net.hosts`, body/time/call-count budgets. Header values may contain `${secret:NAME}`; the **host expands it, so the guest never sees the secret**, and only when the destination is a host that slot is bound to (see Secrets). Private destinations: see Network access below.
   - `state_get/state_put`: private key-value store per plugin, size-capped, replicated.
-  - `routes_replace(set)`: declarative sync of the routes the plugin owns. A plugin can only create, change and delete entries in its own namespace (`source = plugin:<name>`) and cannot touch operator-defined routes.
+  - `routes_replace(set)`: declarative sync of the routes the plugin owns. A plugin can only create, change and delete entries it owns (`source = plugin:<install id>`, see Install identity) and cannot touch operator-defined routes. Ownership alone does not bound what an entry points at, so see Route limits below.
   - `log(level, msg)`: rate-limited, tagged with the plugin name.
 - Limits as for sniffers: memory cap, epoch timeout per call, fresh `Store` per call; additionally a per-tick HTTP budget.
+- The controller holds secrets and the store, so a module is also bounded at compile time: size cap (8 MiB as for sniffers), a compile timeout, and wasmtime limits on function count, locals and table size; compilation runs off the leader's main loop on a bounded pool. A wasmtime bug or compile-time DoS matters more here than on a proxy; this is listed under Risks.
 
 ## Manifest and registry
 
+- Capabilities are **embedded in the module** (custom section `wayhouse.plugin-caps`, read without instantiating) and bound to its sha256. The index's `capabilities` copy is informational for browsing only; the controller reads the section from the downloaded bytes, rejects a module whose section differs from the index, and shows the section's content in the approval screen. An unsigned or external registry therefore cannot show one thing and install another.
 - Per-plugin `manifest.toml` in the plugins repo: `name`, `description`, `license`, `version`, `plugin_abi`, `min_controller`, `limits`, `tick_interval`, `capabilities` (`net.hosts`, `secrets` slot names with descriptions, `routes.namespace`, `state` size), `config` schema (non-secret settings).
 - The registry `index.json` is the sniffer format with a top-level `"kind": "plugin"` and a `plugins` list whose version entries add `capabilities`. The crate parses `kind` now and accepts only `sniffer`; adding `plugin` is part of the plugin build wave. `schema` stays 1 (nothing is released).
 - Official plugins are the small tested set from #219; community plugins are tested by the plugins repo's own CI.
 
 ## Capabilities and trust
 
-- At install the UI shows the requested capabilities in plain words (hosts it may call, secret slots it needs, route namespace) and the registry's trust state (official signed / unsigned / external at own risk). The operator approves; the approved set is stored with the install.
-- On update, any capability not already approved needs approval again. An update never silently widens access.
-- Secrets are entered by the operator per plugin instance, stored in the controller, never returned by any API, never logged, never passed to the guest.
+- At install the UI shows the requested capabilities in plain words (hosts it may call, secret slots and which hosts they are bound to, hostname patterns and backend constraints for routes, route-count cap) and the registry's trust state (official signed / unsigned / external at own risk). The operator approves; **approval is recorded against the module's sha256 plus the capability set**.
+- On update (a new sha256), any capability not already approved needs approval again. An update never silently widens access.
+- **Secrets.** Entered by the operator per plugin instance, stored in the controller, never returned by any API, never logged, never passed to the guest, and redacted from any response or log line that would echo a request or response. Each secret slot is **bound to specific hosts** in the manifest and approved as such, so a token cannot be sent to a second approved host. **Hard gate:** secrets in the replicated log and snapshots persist in old log segments and backups, so the secret storage review (at-rest encryption, key management, log compaction) must be finished before any plugin that uses secrets ships.
+
+### Network access
+
+The `http` import does not reuse the registry client's guard unchanged, because a Pelican panel is often on a LAN address or the same host. Rules: public destinations are allowed once the host is approved; **private, loopback and link-local destinations need explicit per-host operator approval** (shown as such in the approval screen, default off); the resolved IP is pinned at connect time and checked on every connection (stops DNS rebinding); redirects are followed only within the approved hosts and never to a private address that was not approved.
+
+### Route limits
+
+`routes_replace` is bounded by approved capabilities: allowed hostname patterns (a plugin can only claim hostnames matching them), constraints on backend addresses (patterns or CIDRs), and a route-count cap. **Operator routes always win** on a conflict. The approval screen shows all of these.
+
+### Install identity and uninstall
+
+Each install gets an install id, and route ownership is `plugin:<install id>`, so two registries shipping the same plugin name do not collide. Disabling or uninstalling a plugin removes its routes and state after a short grace period configured per install (default: routes removed immediately on uninstall, kept as last-known-good for a bounded time, default 10 minutes, when the plugin is disabled or its ticks keep failing, then removed with a visible alert).
 - Admin-authenticated like every other mutating route; no new auth scheme.
 
 ## HA and state
 
 - Plugin installs, approved capabilities, config, secrets and plugin state are part of the replicated controller state.
-- A plugin ticks on the HA leader only; on leadership change the new leader starts it from the replicated state. `routes_replace` goes through the same replicated write path as other route changes, so a follower never writes.
+- A plugin ticks on the HA leader only. Raft rejects a deposed leader's proposals, but a plugin's HTTP calls and in-memory state are not fenced, so the tick result is committed as **one replicated entry at the end of the tick** holding `state_put` and `routes_replace` together, tagged with the **leader term and the state revision the tick read** (compare-and-set on apply). A stale leader's entry is rejected on apply. If there is no quorum the tick is skipped. A new leader waits a grace period before its first tick (the tunnel sweeper in `docs/11-backend-transport.md` does the same, and its `Expire` entry re-checks on apply).
+- **Rolling upgrades (N and N-1).** Plugin entry types are gated until every replica supports them, following the gating rule in the [component versioning spec](2026-10-05-component-versioning-design.md); an N-1 leader would also refuse a module with a newer plugin ABI (exact minor match while major is 0).
+- **Slave tiers.** A `--role slave` controller receives its writes from the parent by relay, so plugins run on the **root tier only** in the first cut; a plugin in a slave tier would conflict with relayed config.
 - Open: how module bytes (up to 8 MiB) are replicated (store them in the replicated state, or each node fetches by sha256 from the leader).
 
 ## Pelican as the first plugin (#213)
@@ -66,5 +82,6 @@ Plugins on the proxy data path (that is what sniffers are); plugin-to-plugin cal
 
 - Secret storage in the replicated store (at-rest encryption, key management): needs its own review before the build.
 - The route model the host exposes (`routes_replace` shape) must be checked against the controller's intent and route types when planning.
+- The controller hosts wasmtime and the secrets store: a compile-time or memory DoS on a module, or a wasmtime bug, is a control-plane problem. Mitigated by the compile limits above and by running compilation on a bounded pool; needs its own fuzz/limit tests in the plan.
 - A malicious plugin within its approved hosts can still exfiltrate data it can read (route data, its own state); capabilities bound this, they do not remove it. The UI wording must say so.
 - Budget and fairness: a slow plugin must not stall the leader's other work; ticks run on a bounded worker pool.
