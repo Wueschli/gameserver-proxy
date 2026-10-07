@@ -105,7 +105,7 @@
 ### Task 6: Docs
 
 **Files:**
-- Modify: `docs/plugins.md` (update and rollback section), `docs/06-operations-observability.md` if a metric was added (no), `HANDOVER.md`
+- Modify: `docs/sniffers.md` (update and rollback section), `docs/06-operations-observability.md` if a metric was added (no), `HANDOVER.md`
 
 - [ ] **Step 1: Document** the flow, `.prev` semantics, automatic fallback, the pinned-instance rule and what "unknown build" means. **Commit** `docs: plugin updates and rollback (#184)`.
 

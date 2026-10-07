@@ -19,7 +19,7 @@
 - Compatibility: same major, sniffer minor <= host minor. While major is 0, a minor bump may be breaking by SemVer 0.x convention, so for major 0 the rule is **exact minor match**: `plugin == host` (document this; it relaxes at 1.0 by a policy decision, not here).
 - Reading the section must not instantiate or run any guest code.
 - Prerequisite: `validate` and `ModuleError` from `2026-10-05-sniffer-upload-validation.md` exist (extend them, do not add a second validator).
-- Sniffers workspace (`crates/plugins/`) is a separate Cargo workspace; the host must not depend on it. Share the constants by having the host crate define its own copy and a test that builds a sniffer and compares (Task 3).
+- Sniffers workspace (`crates/sniffers/`) is a separate Cargo workspace; the host must not depend on it. Share the constants by having the host crate define its own copy and a test that builds a sniffer and compares (Task 3).
 - `make check` and `make plugins` pass.
 
 ## Review Focus
@@ -52,15 +52,15 @@
 ### Task 2: Guest ABI crate emits the section
 
 **Files:**
-- Modify: `crates/plugins/wayhouse-sniffer-abi/src/lib.rs`, its `Cargo.toml` (none expected), `crates/plugins/README.md`, module doc in `sniffer_loader.rs` (ABI section gets a "Version" paragraph)
-- Test: `crates/plugins/wayhouse-sniffer-abi/src/lib.rs` `mod tests`
+- Modify: `crates/sniffers/wayhouse-sniffer-abi/src/lib.rs`, its `Cargo.toml` (none expected), `crates/sniffers/README.md`, module doc in `sniffer_loader.rs` (ABI section gets a "Version" paragraph)
+- Test: `crates/sniffers/wayhouse-sniffer-abi/src/lib.rs` `mod tests`
 
 **Interfaces:**
 - Produces: `pub const ABI_MAJOR: u16 = 0; pub const ABI_MINOR: u16 = 1;` and
   `#[used] #[link_section = "wayhouse.abi"] static ABI_VERSION: [u8; 4] = [0, 0, 1, 0];` (major LE, minor LE) compiled only for `target_arch = "wasm32"` (on native test builds the attribute would put a section in the host binary; use `#[cfg(target_arch = "wasm32")]`).
 
 - [ ] **Step 1: Write failing test** `abi_bytes_match_constants`: asserts `u16::from_le_bytes([b[0],b[1]]) == ABI_MAJOR` and the minor, where `b` is a `pub const ABI_BYTES: [u8; 4]` built from the constants (the static uses `ABI_BYTES`, so the test checks the single source).
-- [ ] **Step 2: Run** `cd crates/plugins && cargo test -p wayhouse-sniffer-abi`. Expected: FAIL.
+- [ ] **Step 2: Run** `cd crates/sniffers && cargo test -p wayhouse-sniffer-abi`. Expected: FAIL.
 - [ ] **Step 3: Implement** the constants, `ABI_BYTES`, and the wasm32-only static. Update `README.md` ("a sniffer gets its ABI declaration by depending on this crate; nothing else to do") and the host module doc.
 - [ ] **Step 4: Run** the test and `make plugins`. Expected: PASS; 8 `.wasm` files built.
 - [ ] **Step 5: Commit** `feat: the ABI crate stamps every plugin with its ABI version (#183)`.
@@ -68,12 +68,12 @@
 ### Task 3: Conformance against real built sniffers
 
 **Files:**
-- Modify: the existing `#[ignore]`d artifact test in `crates/wayhouse` that loads built sniffers (grep `crates/plugins/target` in `crates/wayhouse/src` and `crates/wayhouse/tests`)
+- Modify: the existing `#[ignore]`d artifact test in `crates/wayhouse` that loads built sniffers (grep `crates/sniffers/target` in `crates/wayhouse/src` and `crates/wayhouse/tests`)
 
 **Interfaces:**
 - Consumes: `read_abi_version`, `HOST_ABI`.
 
-- [ ] **Step 1: Write failing test** `built_plugins_declare_the_host_abi`: for each `*.wasm` in `crates/plugins/target/wasm32-unknown-unknown/release/`, `assert_eq!(read_abi_version(&bytes).unwrap(), HOST_ABI)`; also asserts at least 8 modules were found (guards against an empty dir passing vacuously).
+- [ ] **Step 1: Write failing test** `built_plugins_declare_the_host_abi`: for each `*.wasm` in `crates/sniffers/target/wasm32-unknown-unknown/release/`, `assert_eq!(read_abi_version(&bytes).unwrap(), HOST_ABI)`; also asserts at least 8 modules were found (guards against an empty dir passing vacuously).
 - [ ] **Step 2: Run** `make plugins && cargo test -p wayhouse -- --ignored built_plugins_declare`. Expected: PASS if the section survived `strip`/`lto`. If FAIL with `AbiMissing`, do not guess: first check `wasm-tools objdump` (or `wasm-objdump -x`) on one `.wasm`; the fix candidates in order: keep `strip = "debuginfo"` instead of `true` for the sniffers profile (custom sections other than names are kept by `strip = "debuginfo"`), then fall back to a host-callable exported function `wayhouse_abi() -> i32` read after instantiation (and document the loss of "without instantiating").
 - [ ] **Step 3: Confirm CI wiring**: the `plugins` job already runs `--run-ignored only` for `wayhouse`; no workflow change.
 - [ ] **Step 4: Run `make check`.** Commit `test: built plugins declare the host ABI version (#183)`.

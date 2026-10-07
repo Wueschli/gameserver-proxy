@@ -18,7 +18,7 @@
 - ABI today: exports `memory`, `alloc(i32)->i32`, `sniff(i32,i32,i32,i32)->i64`; core module, **no imports** (no WASI).
 - Pin enforcement stays as is: with `settings.sniffers.modules` set, an unpinned or hash-mismatched file fails the whole scan (security property, keep).
 - `make check` (fmt, clippy `-D warnings`, tests, `test-minimal`) must pass; the minimal build (`--no-default-features`) uses `sniffer_loader_disabled.rs`, keep both in step.
-- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled sniffer is far smaller; check `ls -la crates/plugins/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
+- Maximum module size: `MAX_MODULE_BYTES = 8 * 1024 * 1024` (8 MiB; the largest bundled sniffer is far smaller; check `ls -la crates/sniffers/target/wasm32-unknown-unknown/release/*.wasm` and note the number in the PR).
 
 ## Review Focus
 

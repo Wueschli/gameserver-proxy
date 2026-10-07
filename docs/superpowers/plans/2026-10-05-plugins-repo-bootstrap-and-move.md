@@ -7,7 +7,7 @@
 
 **Goal:** `wayhouse-proxy/sniffers` becomes the home of all 8 sniffers with CI that builds, tests, signs and publishes them and generates `index.json`; the main repo keeps no sniffers, only the ABI crate and WAT-based loader tests, and fetches pinned sniffer releases for its e2e checks.
 
-**Architecture:** Sniffers repo: one Cargo workspace (`plugins/<name>/` each with `manifest.toml`), the ABI crate as a git dependency pinned by the main repo's `v0.1.0` tag, tag-driven releases per sniffer (`<name>-v<version>`), `wayhouse-registry-gen` (git dependency on main's `wayhouse-registry` crate, same tag) to produce `index.json`. Main: `crates/plugins/` shrinks to the standalone ABI crate (`crates/sniffer-abi/`), real-plugin tests read `WAYHOUSE_PLUGINS_DIR`, populated by `fetch_plugins.py` from `plugins.lock` (release tag + sha256 per sniffer) in a separate, non-required CI job.
+**Architecture:** Sniffers repo: one Cargo workspace (`plugins/<name>/` each with `manifest.toml`), the ABI crate as a git dependency pinned by the main repo's `v0.1.0` tag, tag-driven releases per sniffer (`<name>-v<version>`), `wayhouse-registry-gen` (git dependency on main's `wayhouse-registry` crate, same tag) to produce `index.json`. Main: `crates/sniffers/` shrinks to the standalone ABI crate (`crates/sniffer-abi/`), real-plugin tests read `WAYHOUSE_PLUGINS_DIR`, populated by `fetch_plugins.py` from `plugins.lock` (release tag + sha256 per sniffer) in a separate, non-required CI job.
 
 **Tech Stack:** Cargo, GitHub Actions, `git subtree split` (history-preserving move), minisign CLI in CI, Python 3 stdlib.
 
@@ -27,7 +27,7 @@
 
 - `plugins.lock` hash mismatch must fail the e2e job loudly, and the fetch script must refuse non-`https` and redirects to other schemes.
 - An outage of the sniffers repo must not block ordinary PRs in main (the e2e job is not in `ci-ok.needs`; it runs on `plugins.lock` changes, pushes to main and a nightly schedule).
-- After the move, no file in main still says `make plugins` or `crates/plugins/` (grep gate in the plan's last task).
+- After the move, no file in main still says `make plugins` or `crates/sniffers/` (grep gate in the plan's last task).
 - History: `git log --follow` on one sniffer's `src/lib.rs` in the new repo reaches the original commits.
 - The `index.json` the sniffers repo publishes must parse with `wayhouse_registry::parse_index` (CI runs the real parser).
 
@@ -39,7 +39,7 @@
 
 **Files:** (in `wayhouse-proxy/sniffers`) `Cargo.toml` (workspace), `plugins/<name>/` for `a2s minecraft openvpn quic raknet regex-firstbytes teamspeak3 wireguard`, `rust-toolchain.toml`, `LICENSE-MIT`, `LICENSE-APACHE`
 
-- [ ] **Step 1: Split history.** In a clone of main at the `v0.1.0` tag: `git subtree split --prefix=crates/plugins -b plugins-only`. Expected: a branch whose root contains `Cargo.toml`, `wayhouse-sniffer-abi/`, `a2s/` ... Check `git log --oneline plugins-only | wc -l`.
+- [ ] **Step 1: Split history.** In a clone of main at the `v0.1.0` tag: `git subtree split --prefix=crates/sniffers -b plugins-only`. Expected: a branch whose root contains `Cargo.toml`, `wayhouse-sniffer-abi/`, `a2s/` ... Check `git log --oneline plugins-only | wc -l`.
 - [ ] **Step 2: Import** into the sniffers repo: `git remote add main-split <path>`, `git fetch main-split plugins-only`, `git merge --allow-unrelated-histories main-split/plugins-only`, then `git mv` each sniffer crate under `plugins/<name>/` and delete the `wayhouse-sniffer-abi` directory (it stays in main). Commit message trailer per session rules.
 - [ ] **Step 3: Re-point the ABI dependency** in each sniffer `Cargo.toml` to `wayhouse-sniffer-abi = { git = "https://github.com/wayhouse-proxy/wayhouse", tag = "v0.1.0" }` (cargo finds the crate by name inside the repo; verify with `cargo metadata`; if cargo cannot find it because the crate moved in main, point at the tag that still has it, which is `v0.1.0`: the ABI crate relocates only after this plan's Part B and later tags keep it findable by name).
 - [ ] **Step 4: Verify.** `cargo test --workspace` (native unit tests) and `cargo build --release --target wasm32-unknown-unknown --workspace`. Expected: PASS and 8 `.wasm` files. Commit `chore: import the bundled plugins from wayhouse`.
@@ -48,7 +48,7 @@
 
 **Files:** `plugins/<name>/manifest.toml` x8
 
-- [ ] **Step 1: Write one manifest per sniffer** (fields per spec: `name`, `description` copied from `crates/plugins/README.md`, `license = "MIT OR Apache-2.0"`, `version = "0.1.0"`, `abi = "0.1"`, `min_proxy = "0.1.0"`, `[limits] max_memory_bytes`, `call_timeout_ms` taken from the example `settings.sniffers` defaults in `docs/05-configuration.md`, `config` documentation string where the sniffer reads one, e.g. `regex-firstbytes` and `a2s` if they do; read each sniffer's source for its `config` use).
+- [ ] **Step 1: Write one manifest per sniffer** (fields per spec: `name`, `description` copied from `crates/sniffers/README.md`, `license = "MIT OR Apache-2.0"`, `version = "0.1.0"`, `abi = "0.1"`, `min_proxy = "0.1.0"`, `[limits] max_memory_bytes`, `call_timeout_ms` taken from the example `settings.sniffers` defaults in `docs/05-configuration.md`, `config` documentation string where the sniffer reads one, e.g. `regex-firstbytes` and `a2s` if they do; read each sniffer's source for its `config` use).
 - [ ] **Step 2: Add a CI-less check script** `scripts/check_manifests.sh` running `wayhouse-registry-gen --check plugins/*/manifest.toml` (add a `--check` mode to the generator in the main repo only if missing: it parses manifests and exits non-zero on errors; if the main repo lacks it, do that as a one-task PR there first). Expected: exit 0.
 - [ ] **Step 3: Commit** `feat: manifests for the eight plugins`.
 
@@ -71,7 +71,7 @@
 
 **Files:** `README.md`, `CONTRIBUTING.md`
 
-- [ ] **Step 1: Write** README (what this is, official vs external, how to install via the UI, trust model in three lines linking to `docs/plugins.md` in main) and CONTRIBUTING (submission rules: licence, ABI crate tag, tests required, no network or clock in tests, manifest fields, review policy, how a release is cut, the "at your own risk" line for external registries).
+- [ ] **Step 1: Write** README (what this is, official vs external, how to install via the UI, trust model in three lines linking to `docs/sniffers.md` in main) and CONTRIBUTING (submission rules: licence, ABI crate tag, tests required, no network or clock in tests, manifest fields, review policy, how a release is cut, the "at your own risk" line for external registries).
 - [ ] **Step 2: Cut the first releases**: tags `<name>-v0.1.0` for all 8 (maintainer approves the tag push or a thread with rights does it); verify `index.json` lists 8 sniffers and that the UI client from the install plan can browse and install one (manual check, record in the PR).
 - [ ] **Step 3: Commit** `docs: README and CONTRIBUTING`.
 
@@ -91,21 +91,21 @@
 - [ ] **Step 1: Write failing tests** `fetch_plugins_test.py` with a local `http.server` over a temp dir and an `--allow-insecure-test-url` hidden flag only usable when env `WAYHOUSE_FETCH_TEST=1`: `downloads_and_verifies`, `hash_mismatch_fails_and_names_the_plugin`, `refuses_http_without_the_test_flag`, `partial_failure_reports_all`, `second_run_skips_files_with_matching_hash`.
 - [ ] **Step 2: Run** `python3 .github/scripts/fetch_plugins_test.py`. Expected: FAIL. **Step 3: Implement.** **Step 4: Run.** Expected: PASS.
 - [ ] **Step 5: Add WAT conformance tests** to `sniffer_loader.rs` for the cases the real sniffers used to cover that are not yet covered by WAT fixtures: `wat_module_trap_is_a_call_error`, `wat_module_infinite_loop_hits_the_timeout`, `wat_module_memory_grow_past_cap_fails`, `wat_module_wrong_abi_version_rejected` (some exist from earlier plans; add only the missing ones, list which in the PR).
-- [ ] **Step 6: Change the three ignored tests** to read `WAYHOUSE_PLUGINS_DIR` instead of `crates/plugins/target/...` and skip with a clear `#[ignore = "needs WAYHOUSE_PLUGINS_DIR; run 'make plugins-fetch' first"]`.
+- [ ] **Step 6: Change the three ignored tests** to read `WAYHOUSE_PLUGINS_DIR` instead of `crates/sniffers/target/...` and skip with a clear `#[ignore = "needs WAYHOUSE_PLUGINS_DIR; run 'make plugins-fetch' first"]`.
 - [ ] **Step 7: Run** `make check`. Create `plugins.lock` with the 8 real hashes (copy from the sniffers repo release assets). **Commit** `feat: fetch pinned plugins for the e2e tests (#183)`.
 
 ### Task B2: Remove the sniffers from main, keep the ABI crate
 
 **Files:**
-- Move: `crates/plugins/wayhouse-sniffer-abi/` to `crates/sniffer-abi/` with its own `[workspace]` `Cargo.toml` and `Cargo.lock`
-- Delete: `crates/plugins/*` except what moved (8 sniffer crates, `crates/plugins/Cargo.toml`, `Cargo.lock`, `README.md`)
-- Modify: `Makefile` (`plugins` target replaced by `plugins-fetch` and `sniffer-abi-test`), `.github/workflows/ci.yml` (remove `plugins` and `plugins-arm64` jobs; add `sniffer-abi` job running `cd crates/sniffer-abi && cargo test`; add `plugins-e2e` job, **not** in `ci-ok.needs`, triggers: changes to `plugins.lock` or `crates/wayhouse/**`, push to main, nightly `schedule`; steps: install nextest, `python3 .github/scripts/fetch_plugins.py`, `cargo nextest run -p wayhouse --release --run-ignored only`), `.github/scripts/changes.py` (+ test: area `plugins` now maps to `plugins.lock`, `crates/sniffer-abi/`), `.github/actions/cargo-cache/action.yml` and `.github/scripts/cargo_audit.sh` (drop sniffers paths, add `crates/sniffer-abi`), `README.md`, `AGENTS.md`, `HANDOVER.md`, docs that mention `crates/plugins` (grep list: `docs/05-configuration.md`, `docs/07-security-ddos.md`, `docs/08-roadmap.md`, `docs/README.md`, `crates/wayhouse-ui/web/README.md`), `crates/wayhouse/src/sniffer_loader.rs` module doc path
+- Move: `crates/sniffers/wayhouse-sniffer-abi/` to `crates/sniffer-abi/` with its own `[workspace]` `Cargo.toml` and `Cargo.lock`
+- Delete: `crates/sniffers/*` except what moved (8 sniffer crates, `crates/sniffers/Cargo.toml`, `Cargo.lock`, `README.md`)
+- Modify: `Makefile` (`plugins` target replaced by `plugins-fetch` and `sniffer-abi-test`), `.github/workflows/ci.yml` (remove `plugins` and `plugins-arm64` jobs; add `sniffer-abi` job running `cd crates/sniffer-abi && cargo test`; add `plugins-e2e` job, **not** in `ci-ok.needs`, triggers: changes to `plugins.lock` or `crates/wayhouse/**`, push to main, nightly `schedule`; steps: install nextest, `python3 .github/scripts/fetch_plugins.py`, `cargo nextest run -p wayhouse --release --run-ignored only`), `.github/scripts/changes.py` (+ test: area `plugins` now maps to `plugins.lock`, `crates/sniffer-abi/`), `.github/actions/cargo-cache/action.yml` and `.github/scripts/cargo_audit.sh` (drop sniffers paths, add `crates/sniffer-abi`), `README.md`, `AGENTS.md`, `HANDOVER.md`, docs that mention `crates/sniffers` (grep list: `docs/05-configuration.md`, `docs/07-security-ddos.md`, `docs/08-roadmap.md`, `docs/README.md`, `crates/wayhouse-ui/web/README.md`), `crates/wayhouse/src/sniffer_loader.rs` module doc path
 
 **Interfaces:**
 - Consumes: Part A releases, `plugins.lock`.
 - Produces: `crates/sniffer-abi` (crate name `wayhouse-sniffer-abi` unchanged so the sniffers repo's git dependency by name keeps resolving at later tags).
 
-- [ ] **Step 1: Gate test first.** Add `.github/scripts/no_bundled_plugins_test.py` asserting `crates/plugins` does not exist and no tracked file matches `crates/plugins/` except in `docs/superpowers/` and `CHANGELOG.md`; run it. Expected: FAIL.
+- [ ] **Step 1: Gate test first.** Add `.github/scripts/no_bundled_plugins_test.py` asserting `crates/sniffers` does not exist and no tracked file matches `crates/sniffers/` except in `docs/superpowers/` and `CHANGELOG.md`; run it. Expected: FAIL.
 - [ ] **Step 2: Do the move and edits** listed above with `git mv`.
 - [ ] **Step 3: Run** `python3 .github/scripts/no_bundled_plugins_test.py`, `python3 .github/scripts/changes_test.py`, `make check`, `cd crates/sniffer-abi && cargo test`, then `make plugins-fetch && cargo test -p wayhouse --release -- --ignored`. Expected: all PASS.
 - [ ] **Step 4: Update `HANDOVER.md`**, `CHANGELOG.md` is automated. **Commit** `refactor!: move the bundled plugins to wayhouse-proxy/sniffers (#183)` (the `!` marks the breaking layout change for release-please).

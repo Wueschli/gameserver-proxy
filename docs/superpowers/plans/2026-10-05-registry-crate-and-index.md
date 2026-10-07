@@ -38,8 +38,8 @@
 
 **Interfaces:**
 - Produces:
-  `pub struct Index { pub schema: u32, pub name: String, pub plugins: Vec<PluginEntry> }`,
-  `pub struct PluginEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
+  `pub struct Index { pub schema: u32, pub name: String, pub sniffers: Vec<SnifferEntry> }`,
+  `pub struct SnifferEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
   `pub struct VersionEntry { pub version: semver::Version, pub abi: String, pub min_proxy: semver::Version, pub url: String, pub sha256: String, pub size: u64, pub signature_url: Option<String>, pub limits: Limits, pub config: Option<String> }`,
   `pub struct Limits { pub max_memory_bytes: u64, pub call_timeout_ms: u64 }`,
   `pub fn parse_index(bytes: &[u8]) -> Result<Index, IndexError>` (size cap, JSON parse, `validate`), `impl Index { pub fn validate(&self) -> Result<(), IndexError> }`, `pub enum IndexError` (one variant per rule in Review Focus, `Display` texts name the sniffer and field).
@@ -95,13 +95,13 @@
 ### Task 5: Docs
 
 **Files:**
-- Create: `docs/plugins.md` (format reference: index, manifest, ABI, limits, trust model, how to write and submit a sniffer; link to `crates/plugins/README.md` until the move); modify `docs/README.md` (list the chapter), `AGENTS.md` (layout and "when you touch X" row)
+- Create: `docs/sniffers.md` (format reference: index, manifest, ABI, limits, trust model, how to write and submit a sniffer; link to `crates/sniffers/README.md` until the move); modify `docs/README.md` (list the chapter), `AGENTS.md` (layout and "when you touch X" row)
 
-- [ ] **Step 1: Write** `docs/plugins.md` from the spec's Registry format and Trust sections; no new decisions.
+- [ ] **Step 1: Write** `docs/sniffers.md` from the spec's Registry format and Trust sections; no new decisions.
 - [ ] **Step 2: Run** the docs checks (`make docs-fmt-check`, link checker) if the docs overhaul landed. **Commit** `docs: plugin registry format reference (#183)`.
 
 ---
 
 ## Self-review
 
-Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the plugins-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `PluginEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.
+Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the sniffers-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `PluginEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.

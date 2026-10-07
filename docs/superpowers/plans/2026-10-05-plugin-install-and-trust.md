@@ -100,7 +100,7 @@
 ### Task 5: Docs and manual items
 
 **Files:**
-- Modify: `docs/plugins.md` (operator section: adding registries, trust, risk, pinned instances), `docs/06-operations-observability.md` if metrics were added (none planned), `deploy/README.md` (UI flags), `HANDOVER.md`
+- Modify: `docs/sniffers.md` (operator section: adding registries, trust, risk, pinned instances), `docs/06-operations-observability.md` if metrics were added (none planned), `deploy/README.md` (UI flags), `HANDOVER.md`
 
 - [ ] **Step 1: Document** flags, default registry, risk model, and the **maintainer to-do list**: generate the minisign key pair offline, provide `OFFICIAL_PUBKEY`, store the signing secret in the sniffers repo (next plan).
 - [ ] **Step 2: Run** docs checks. **Commit** `docs: installing plugins from a registry (#183)`.

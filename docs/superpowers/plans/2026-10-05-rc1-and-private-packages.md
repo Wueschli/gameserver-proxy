@@ -15,7 +15,7 @@
 
 ## Global Constraints
 
-- **Preconditions (all must hold, check them in Task 1 step 1):** Phases 0 and 1 merged (#187, #190, #171, #188, ABI version, protocol and config versions), the GitHub Actions outage over, `make check` green and `ci.yml` green **on the exact commit** to be tagged, `crates/plugins` still bundled (the images may use them).
+- **Preconditions (all must hold, check them in Task 1 step 1):** Phases 0 and 1 merged (#187, #190, #171, #188, ABI version, protocol and config versions), the GitHub Actions outage over, `make check` green and `ci.yml` green **on the exact commit** to be tagged, `crates/sniffers` still bundled (the images may use them).
 - Tag only from `main`. Versions never reach 1.0.0.
 - Packages stay private for now (maintainer decision); no musl release assets (decision 3).
 - The pre-release must not move `latest` (existing `case "$VERSION" in *-*)` in `release.yml`); verify after the run.

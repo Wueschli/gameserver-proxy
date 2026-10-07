@@ -17,16 +17,16 @@ change ran `plugins` and `tunnel` (it is under `crates/wayhouse-config/`), and t
 same interface: changed files on stdin, `--all`, `<area>=true|false` lines on stdout.
 
 - **Graph.** `cargo metadata --no-deps --format-version 1` for every workspace in the repo
-  (found from the tracked `Cargo.toml` files, shallowest first: root, `crates/plugins`,
+  (found from the tracked `Cargo.toml` files, shallowest first: root, `crates/sniffers`,
   `crates/wayhouse-config/fuzz`). Each package is keyed by its directory, with the directories of
   its path dependencies (all kinds: normal, dev, build). `--no-deps` resolves nothing and
   downloads nothing.
 - **Ownership.** A changed file belongs to the package with the longest directory prefix
   holding it. `crates/wayhouse-ui/web/` (a standalone npm project) belongs to none. A nested
-  workspace's own files (`crates/plugins/Cargo.toml`, `README.md`) belong to all its members.
+  workspace's own files (`crates/sniffers/Cargo.toml`, `README.md`) belong to all its members.
   A workspace's `Cargo.lock` hits only that workspace's members, not dependents elsewhere.
 - **Jobs.** `ROOTS` lists what each Rust job builds or tests — `plugins`: `wayhouse` and every
-  package under `crates/plugins/`; `tunnel`: the five binaries and `wayhouse-fleet-tests`;
+  package under `crates/sniffers/`; `tunnel`: the five binaries and `wayhouse-fleet-tests`;
   `fuzz`: `wayhouse-config-fuzz`. A job runs when a changed package, or any package depending on
   one transitively, is in its roots. Non-Cargo paths stay explicit (`EXTRA`): `ui`'s web dir,
   `deploy`'s paths (unchanged), `Makefile` for `tunnel`, `.config/` (nextest's `ci` profile)
