@@ -31,6 +31,11 @@ pub trait Sniffer: Send + Sync {
     fn name(&self) -> &str;
     /// Inspect the (bounded) first bytes. `None` = not recognised.
     fn sniff(&self, first: &[u8]) -> Option<RouteHint>;
+    /// `true` when this instance runs the previous version of its module
+    /// because the current file failed validation at the last scan.
+    fn is_fallback(&self) -> bool {
+        false
+    }
 }
 
 /// The live set of loaded sniffers, keyed by their configured name. Built once
