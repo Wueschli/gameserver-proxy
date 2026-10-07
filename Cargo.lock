@@ -4448,6 +4448,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayhouse-registry"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "wayhouse-ui"
 version = "0.1.0"
 dependencies = [

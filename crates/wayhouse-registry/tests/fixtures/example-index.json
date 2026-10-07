@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "kind": "sniffer",
+  "name": "wayhouse official sniffers",
+  "sniffers": [
+    {
+      "name": "minecraft",
+      "description": "Minecraft handshake virtual hosts",
+      "license": "MIT OR Apache-2.0",
+      "homepage": "https://github.com/wayhouse-proxy/sniffers/tree/main/sniffers/minecraft",
+      "versions": [
+        {
+          "version": "0.2.0",
+          "abi": "0.1",
+          "min_proxy": "0.1.0",
+          "url": "https://github.com/wayhouse-proxy/sniffers/releases/download/minecraft-v0.2.0/minecraft.wasm",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 24576,
+          "signature_url": "https://github.com/wayhouse-proxy/sniffers/releases/download/minecraft-v0.2.0/minecraft.wasm.minisig",
+          "limits": { "max_memory_bytes": 1048576, "call_timeout_ms": 50 },
+          "config": "optional documentation of the per-module config string"
+        },
+        {
+          "version": "0.1.0",
+          "abi": "0.1",
+          "min_proxy": "0.1.0",
+          "url": "https://github.com/wayhouse-proxy/sniffers/releases/download/minecraft-v0.1.0/minecraft.wasm",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 20480,
+          "limits": { "max_memory_bytes": 1048576, "call_timeout_ms": 50 }
+        }
+      ]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ members = [
     "crates/wayhouse-agent",
     "crates/wayhouse-fleet-tests",
     "crates/wayhouse-http",
+    "crates/wayhouse-registry",
 ]
 
 [workspace.package]
@@ -67,6 +68,8 @@ wat = "1"
 # version wasmtime already pulls in.
 wasmparser = { version = "0.254", default-features = false, features = ["std"] }
 sha2 = "0.10"
+semver = { version = "1", features = ["serde"] }
+toml = "0.8"
 sled = "0.34"
 tempfile = "3"
 wayhouse-http = { path = "crates/wayhouse-http", default-features = false }
