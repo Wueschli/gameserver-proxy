@@ -55,6 +55,7 @@ export function RegistrySection({ onInstalled }: { onInstalled?: (name: string) 
   const [addOpen, setAddOpen] = useState(false);
   const [installing, setInstalling] = useState<RegistrySniffer | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
   const { confirm, dialog } = useConfirm();
 
   const reload = useCallback(async (prefer?: string) => {
@@ -95,19 +96,22 @@ export function RegistrySection({ onInstalled }: { onInstalled?: (name: string) 
   const selected = registries?.find((r) => r.id === selectedId) ?? null;
 
   async function handleRemove() {
-    if (!selected) return;
+    if (!selected || removing) return;
     const ok = await confirm({
       title: `Remove registry ${selected.name}?`,
       description: "Only forgets the registry here. Sniffers already installed stay installed.",
       confirmLabel: "Remove",
     });
     if (!ok) return;
+    setRemoving(true);
     try {
       await removeRegistry(selected.id);
       setNotice(`removed registry ${selected.name}`);
       await reload();
     } catch (err) {
       setNotice(`remove registry failed: ${message(err)}`);
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -146,8 +150,12 @@ export function RegistrySection({ onInstalled }: { onInstalled?: (name: string) 
         </select>
         {selected && <RiskBadge registry={selected} />}
         {selected && (
-          <button onClick={handleRemove} className="ml-auto text-bad hover:underline">
-            remove registry
+          <button
+            onClick={handleRemove}
+            disabled={removing}
+            className="ml-auto text-bad hover:underline disabled:opacity-50"
+          >
+            {removing ? "removing…" : "remove registry"}
           </button>
         )}
       </div>

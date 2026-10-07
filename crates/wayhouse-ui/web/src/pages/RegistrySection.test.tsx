@@ -203,4 +203,17 @@ describe("RegistrySection", () => {
     render(<RegistrySection />);
     expect(await screen.findByText(/timed out/)).toBeInTheDocument();
   });
+
+  it("removing a registry shows it is pending and cannot be started twice", async () => {
+    let finish!: () => void;
+    api.removeRegistry.mockReset().mockImplementation(() => new Promise<void>((r) => (finish = r)));
+    render(<RegistrySection />);
+    await userEvent.click(await screen.findByRole("button", { name: "remove registry" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove" }));
+    const btn = await screen.findByRole("button", { name: "removing…" });
+    expect(btn).toBeDisabled();
+    finish();
+    expect(await screen.findByRole("button", { name: "remove registry" })).toBeEnabled();
+    expect(api.removeRegistry).toHaveBeenCalledTimes(1);
+  });
 });
