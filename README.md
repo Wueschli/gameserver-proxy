@@ -4,7 +4,9 @@
 >
 > This project is under active development and is **definitely not finished yet**.
 >
-> - There are **no releases** and **no published container images**. The version is `0.0.1`.
+> - The first release, `0.1.0`, exists, but the container images on GHCR are **private** for now
+>   (see [Pulling private images](deploy/README.md#pulling-private-images)). The major version
+>   is 0, so breaking changes land in minor versions.
 > - The configuration format, CLI flags, admin/fleet HTTP APIs and on-disk formats
 >   **can change at any time without notice or a migration path**.
 > - Everything below is covered by automated tests, but **none of it has run in
@@ -168,7 +170,7 @@ configuration and fleet-wide operation once you run more than one proxy.
 
 ## Quick start
 
-Until the first release you build from source. You need a Rust toolchain (the repo pins
+You build from source (the container images are private for now, see above). You need a Rust toolchain (the repo pins
 `stable` in `rust-toolchain.toml`) and `protoc`, because the gRPC resolver client is
 generated at build time (`apt install protobuf-compiler` or `brew install protobuf`).
 

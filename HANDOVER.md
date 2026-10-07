@@ -6,7 +6,7 @@ in [`docs/09-technology-choices.md`](docs/09-technology-choices.md). Per-slice
 implementation history lives in `git log` and [`docs/08-roadmap.md`](docs/08-roadmap.md),
 not here.
 
-Last updated: 2026-10-04.
+Last updated: 2026-10-07.
 
 ## Current state
 
@@ -16,6 +16,11 @@ blocks except the two informational security scans, `trivy` and `audit` (2026-10
 owner's call).
 
 ### Resume here
+
+**Releases:** `v0.1.0-rc.1` and `v0.1.0` are published to GHCR (six private images, amd64 + arm64;
+`release.yml` ran end to end, #177 checked: the per-arch digests equal the multi-arch index's).
+Tags stay manual (release-please runs with `skip-github-release`); the steps are in
+[`RELEASING.md`](RELEASING.md). Automating the tag is backlog #210.
 
 The repository is **public** since 2026-10-03 (history scanned, clean), so
 GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,
