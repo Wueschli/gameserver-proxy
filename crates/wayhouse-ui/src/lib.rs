@@ -36,6 +36,7 @@ pub mod fleet_feed;
 pub mod login_limit;
 mod proxy_util;
 pub mod registries;
+pub mod registry_client;
 pub mod role;
 pub mod session;
 pub mod users;
