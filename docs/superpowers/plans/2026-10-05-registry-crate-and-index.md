@@ -41,7 +41,7 @@
   `pub struct Index { pub schema: u32, pub kind: Kind, pub name: String, pub sniffers: Vec<SnifferEntry> }`,
   `pub struct SnifferEntry { pub name: String, pub description: String, pub license: String, pub homepage: Option<String>, pub versions: Vec<VersionEntry> }`,
   `pub struct VersionEntry { pub version: semver::Version, pub abi: String, pub min_proxy: semver::Version, pub url: String, pub sha256: String, pub size: u64, pub signature_url: Option<String>, pub limits: Limits, pub config: Option<String> }`,
-  `pub enum Kind { Sniffer, Plugin }` (serde lowercase; `validate` accepts only `Sniffer` for now, so the plugin wave only relaxes that check),
+  `pub enum Kind { Sniffer, Plugin }` (serde lowercase; `validate` accepts only `Sniffer` for now, the Wave 5 plugin plan adds the `plugins` list and the version-level `capabilities` model, parser, validation and tests, and then relaxes this check),
   `pub struct Limits { pub max_memory_bytes: u64, pub call_timeout_ms: u64 }`,
   `pub fn parse_index(bytes: &[u8]) -> Result<Index, IndexError>` (size cap, JSON parse, `validate`), `impl Index { pub fn validate(&self) -> Result<(), IndexError> }`, `pub enum IndexError` (one variant per rule in Review Focus, `Display` texts name the sniffer and field).
 
