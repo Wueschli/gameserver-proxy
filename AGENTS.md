@@ -29,8 +29,9 @@ the guidance here, not in them.
 > keeps only the ABI crate, `crates/sniffer-abi/`, and pins their releases in `sniffers.lock`
 > for the e2e tests). *Plugins* are
 > integrations with other systems (e.g. the Pelican panel) and will live in
-> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); their design is
-> still open.
+> [`wayhouse-proxy/plugins`](https://github.com/wayhouse-proxy/plugins); design:
+> [plugin system](docs/superpowers/specs/2026-10-07-plugin-system-design.md) and
+> [automation hooks](docs/superpowers/specs/2026-10-07-plugin-automation-hooks-design.md).
 
 A **game-agnostic game server reverse proxy**: one entry point in front of arbitrary
 game servers, forwarding TCP (and later UDP) transparently to backend pools without
