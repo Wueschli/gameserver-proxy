@@ -8,7 +8,7 @@ Date: 2026-10-03. Follow-up row "CI: precise change detection" in `HANDOVER.md`.
 regexes listing crate directories per job. They drift as crates gain dependencies: a crate
 that starts depending on `wayhouse-core` would not run the jobs `wayhouse-core` changes run until
 someone edits the regex. They were also coarser than the graph: a `crates/wayhouse-config/fuzz/`
-change ran `plugins` and `tunnel` (it is under `crates/wayhouse-config/`), and the root
+change ran `sniffers` and `tunnel` (it is under `crates/wayhouse-config/`), and the root
 `Cargo.lock` ran `fuzz`, whose workspace has its own lockfile.
 
 ## Design
@@ -25,12 +25,12 @@ same interface: changed files on stdin, `--all`, `<area>=true|false` lines on st
   holding it. `crates/wayhouse-ui/web/` (a standalone npm project) belongs to none. A nested
   workspace's own files (`crates/sniffers/Cargo.toml`, `README.md`) belong to all its members.
   A workspace's `Cargo.lock` hits only that workspace's members, not dependents elsewhere.
-- **Jobs.** `ROOTS` lists what each Rust job builds or tests — `plugins`: `wayhouse` and every
+- **Jobs.** `ROOTS` lists what each Rust job builds or tests — `sniffers`: `wayhouse` and every
   package under `crates/sniffers/`; `tunnel`: the five binaries and `wayhouse-fleet-tests`;
   `fuzz`: `wayhouse-config-fuzz`. A job runs when a changed package, or any package depending on
   one transitively, is in its roots. Non-Cargo paths stay explicit (`EXTRA`): `ui`'s web dir,
   `deploy`'s paths (unchanged), `Makefile` for `tunnel`, `.config/` (nextest's `ci` profile)
-  for `plugins` and `tunnel`. `release` = `plugins` or `deploy`, as before.
+  for `sniffers` and `tunnel`. `release` = `sniffers` or `deploy`, as before.
 
 ## Fail-open rules (never skip a job that should run)
 

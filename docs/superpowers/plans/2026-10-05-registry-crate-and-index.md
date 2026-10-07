@@ -56,7 +56,7 @@
 
 **Interfaces:**
 - Consumes: `Index`, `VersionEntry`.
-- Produces: `pub struct Environment { pub abi: String, pub proxy_versions: Vec<semver::Version> }` (all proxies the sniffer will be installed on: every one must satisfy `min_proxy`), `pub fn select(entry: &PluginEntry, env: &Environment) -> Result<&VersionEntry, Incompatible>`, `pub enum Incompatible { Abi { newest: String, host: String }, ProxyTooOld { needs: semver::Version, oldest_proxy: semver::Version }, NoVersions }`, `pub fn abi_matches(plugin: &str, host: &str) -> Result<bool, AbiParseError>` (exact match while major is 0, `plugin_minor <= host_minor` for major >= 1).
+- Produces: `pub struct Environment { pub abi: String, pub proxy_versions: Vec<semver::Version> }` (all proxies the sniffer will be installed on: every one must satisfy `min_proxy`), `pub fn select(entry: &SnifferEntry, env: &Environment) -> Result<&VersionEntry, Incompatible>`, `pub enum Incompatible { Abi { newest: String, host: String }, ProxyTooOld { needs: semver::Version, oldest_proxy: semver::Version }, NoVersions }`, `pub fn abi_matches(plugin: &str, host: &str) -> Result<bool, AbiParseError>` (exact match while major is 0, `plugin_minor <= host_minor` for major >= 1).
 
 - [ ] **Step 1: Write failing tests**: `selects_newest_compatible`, `skips_newer_version_with_other_abi`, `reports_abi_when_nothing_matches`, `reports_oldest_proxy_when_min_proxy_too_high`, `abi_zero_major_requires_exact_minor`, `abi_major_1_allows_older_minor`, `abi_rejects_garbage_string`, `prerelease_proxy_counts_as_its_release` (proxy `0.1.0-rc.1` satisfies `min_proxy 0.1.0`: use the stripped pre-release for the comparison and document it).
 - [ ] **Step 2: Run** `cargo test -p wayhouse-registry compat`. Expected: FAIL.
@@ -104,4 +104,4 @@
 
 ## Self-review
 
-Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the sniffers-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `PluginEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.
+Spec coverage: index and manifest formats, ABI and `min_proxy` compatibility, sha256 then minisign verification (optional signature), deterministic generator for the sniffers-repo CI. Network, UI and persistence of external registries are the next plan. Types used by later plans: `Index`, `SnifferEntry`, `VersionEntry`, `Environment`, `select`, `verify_artifact`, `check_module`, `generate`.
