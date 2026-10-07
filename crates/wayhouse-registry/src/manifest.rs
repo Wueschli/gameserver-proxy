@@ -1,6 +1,6 @@
 //! The per-sniffer source manifest (`sniffers/<name>/manifest.toml` in the sniffers repo).
 
-use crate::index::{parse_abi, Limits};
+use crate::index::{parse_abi, valid_name, Limits};
 use serde::Deserialize;
 
 /// What a sniffer author writes. Strict (`deny_unknown_fields`): a misspelt key in
@@ -27,10 +27,15 @@ pub enum ManifestError {
     Toml(String),
     #[error("manifest.toml: abi {0:?} is not of the form major.minor")]
     BadAbi(String),
+    #[error("manifest.toml: name {0:?} must match [A-Za-z0-9_-]+")]
+    BadName(String),
 }
 
 pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
     let m: Manifest = toml::from_str(text).map_err(|e| ManifestError::Toml(e.to_string()))?;
+    if !valid_name(&m.name) {
+        return Err(ManifestError::BadName(m.name));
+    }
     if parse_abi(&m.abi).is_none() {
         return Err(ManifestError::BadAbi(m.abi));
     }
@@ -72,6 +77,18 @@ call_timeout_ms = 50
             parse_manifest(&text),
             Err(ManifestError::BadAbi("v1".into()))
         );
+    }
+
+    #[test]
+    fn manifest_rejects_a_name_that_could_escape_its_directory() {
+        for bad in ["../other", "a/b", "", "has space", "..", "."] {
+            let text = MANIFEST.replace("name = \"minecraft\"", &format!("name = {bad:?}"));
+            assert_eq!(
+                parse_manifest(&text),
+                Err(ManifestError::BadName(bad.into())),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

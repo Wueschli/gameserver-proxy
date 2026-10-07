@@ -83,6 +83,9 @@ pub fn verify_artifact(
 /// anything that is not a core module. Parsed only; no guest code runs.
 pub fn check_module(bytes: &[u8]) -> Result<AbiDecl, VerifyError> {
     let bad = |e: String| VerifyError::Module(e);
+    wasmparser::Validator::new()
+        .validate_all(bytes)
+        .map_err(|e| bad(e.to_string()))?;
     let mut abi: Option<&[u8]> = None;
     for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         match payload.map_err(|e| bad(e.to_string()))? {
@@ -285,6 +288,18 @@ mod tests {
         e.abi = "0.2".into();
         let r = verify_artifact(&e, &m, None, None);
         assert!(matches!(r, Err(VerifyError::Module(msg)) if msg.contains("0.2")));
+    }
+
+    #[test]
+    fn module_with_an_invalid_function_body_is_rejected() {
+        // Parses and carries a valid ABI section, but `i32.add` on an empty stack does
+        // not validate, so the proxy's compiler would refuse it.
+        let bad = wat::parse_str(
+            r#"(module (func (export "f") i32.add drop) (@custom "wayhouse.abi" "\00\00\01\00"))"#,
+        )
+        .unwrap();
+        let r = check_module(&bad);
+        assert!(matches!(r, Err(VerifyError::Module(_))), "{r:?}");
     }
 
     #[test]

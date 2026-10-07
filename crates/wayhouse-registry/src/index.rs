@@ -223,7 +223,7 @@ impl VersionEntry {
 }
 
 /// Same rule as `valid_module_name` in the proxy's `admin.rs`.
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."

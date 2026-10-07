@@ -23,7 +23,7 @@ toml.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
-wasmparser.workspace = true
+wasmparser = { workspace = true, features = ["validate"] }
 minisign-verify.workspace = true
 
 [dev-dependencies]
