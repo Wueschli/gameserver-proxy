@@ -270,7 +270,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         None => None,
     };
 
-    // A configured sniffer plugin dir must load cleanly too (phase 9). The
+    // A configured sniffer dir must load cleanly too (phase 9). The
     // loader (its wasmtime engine + epoch-ticker thread) is kept alive and
     // handed to the reload task so a later `dir` rescan reuses it instead of
     // spawning a fresh ticker thread per reload.

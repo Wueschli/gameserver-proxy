@@ -49,7 +49,7 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
     outputs:
       ui: ${{ steps.f.outputs.ui }}
-      plugins: ${{ steps.f.outputs.plugins }}
+      sniffers: ${{ steps.f.outputs.sniffers }}
       tunnel: ${{ steps.f.outputs.tunnel }}
       deploy: ${{ steps.f.outputs.deploy }}
       fuzz: ${{ steps.f.outputs.fuzz }}
@@ -138,7 +138,7 @@ jobs:
 
   # Static musl build (issue #55): the five binaries must keep compiling for
   # x86_64-unknown-linux-musl, and the transparent-socket options must still be
-  # known to a musl libc. Rides the `release` gate (plugins or deploy paths touched).
+  # known to a musl libc. Rides the `release` gate (sniffers or deploy paths touched).
   musl:
     needs: changes
     if: needs.changes.outputs.release == 'true'
@@ -162,11 +162,11 @@ jobs:
         run: cargo test --locked --target x86_64-unknown-linux-musl -p wayhouse-core --lib -- net
 
   # One release compile shared by the jobs that need release binaries: the
-  # plugins tests restore this job's cache snapshot (same `release` namespace and
+  # sniffers tests restore this job's cache snapshot (same `release` namespace and
   # key, so they reuse the compiled dependencies) and deploy takes the binaries
   # as an artifact. Nightly, deploy ignores the artifact and compiles inside
   # Docker instead, so the self-contained Dockerfile path can't rot.
-  # Pinned to ubuntu-24.04 (glibc 2.39), like plugins and deploy: binaries built on
+  # Pinned to ubuntu-24.04 (glibc 2.39), like sniffers and deploy: binaries built on
   # a newer runner image (ubuntu-latest becomes 26 on 2026-10-19) could need a newer
   # glibc than the Debian 13 distroless runtime (2.41) has, and fail to start; the
   # cache is also only reused between jobs on the same image.
@@ -194,11 +194,11 @@ jobs:
           cp target/release/wayhouse target/release/wayhouse-minimal
       - name: Build the release binaries
         run: cargo auditable build --release --locked -p wayhouse -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui -p wayhouse-agent
-      # Cargo unifies features per invocation, so the plugins job's `-p wayhouse` test
+      # Cargo unifies features per invocation, so the sniffers job's `-p wayhouse` test
       # build (dev-dependencies included) needs different dependency artifacts than
       # the five-binary build above; without this it recompiled ~290 crates even on
       # an exact cache hit. Compile them here so the shared snapshot holds both.
-      - name: Warm the dependency set the plugins tests need
+      - name: Warm the dependency set the sniffers tests need
         run: cargo test -p wayhouse --release --locked --no-run
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -215,7 +215,7 @@ jobs:
 
   # The arm64 counterpart of build-release for the deploy-arm64 job: the x86-64
   # binaries above can't run on arm64, so it compiles its own. Same pins and glibc
-  # reasoning; feeds deploy-arm64 and plugins-arm64.
+  # reasoning; feeds deploy-arm64 and sniffers-arm64.
   build-release-arm64:
     name: build-release (arm64)
     needs: changes
@@ -236,9 +236,9 @@ jobs:
           cp target/release/wayhouse target/release/wayhouse-minimal
       - name: Build the release binaries
         run: cargo auditable build --release --locked -p wayhouse -p wayhouse-controller -p wayhouse-aggregator -p wayhouse-ui -p wayhouse-agent
-      # As in build-release: compile the dependency set the plugins-arm64 tests need
+      # As in build-release: compile the dependency set the sniffers-arm64 tests need
       # so the shared snapshot holds both.
-      - name: Warm the dependency set the plugins tests need
+      - name: Warm the dependency set the sniffers tests need
         run: cargo test -p wayhouse --release --locked --no-run
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -253,10 +253,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  plugins:
-    name: plugins (amd64)
+  sniffers:
+    name: sniffers (amd64)
     needs: [changes, build-release]
-    if: needs.changes.outputs.plugins == 'true'
+    if: needs.changes.outputs.sniffers == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -269,50 +269,50 @@ jobs:
       # the release dependencies are already compiled (nothing new to save).
       - uses: ./.github/actions/cargo-cache
         with: { name: release }
-      # The wasm plugin workspace is only built here, so it gets its own snapshot.
+      # The wasm sniffer workspace is only built here, so it gets its own snapshot.
       - uses: ./.github/actions/cargo-cache
         with:
-          name: plugins-wasm
-          target-dirs: crates/plugins/target
+          name: sniffers-wasm
+          target-dirs: crates/sniffers/target
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
       - name: Native unit tests
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         # Separate workspace => point nextest at the root config for the `ci` profile.
         run: cargo nextest run --profile ci --workspace --config-file ../../.config/nextest.toml
       - name: Build to wasm32-unknown-unknown
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
       - name: Size check (informational)
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm
-      - name: Load the built plugins through the real wayhouse loader (phase 9 slices 5–7)
-        # Runs the #[ignore]d wayhouse tests that need crates/plugins built above:
+      - name: Load the built sniffers through the real wayhouse loader (phase 9 slices 5–7)
+        # Runs the #[ignore]d wayhouse tests that need crates/sniffers built above:
         # the end-to-end artifact test and the WASM-boundary latency bench
         # vs. NFR N1 (release matters for real numbers — see docs/07).
         run: cargo nextest run -p wayhouse --release --profile ci --run-ignored only --no-capture
       - name: Test report
         if: always()
-        run: python3 .github/scripts/test_summary.py --title "plugins" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+        run: python3 .github/scripts/test_summary.py --title "sniffers" crates/sniffers/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: junit-plugins
+          name: junit-sniffers
           path: |
-            crates/plugins/target/nextest/ci/junit.xml
+            crates/sniffers/target/nextest/ci/junit.xml
             target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: ignore
 
-  # The plugins job on arm64: wasmtime generates native code per architecture, so
+  # The sniffers job on arm64: wasmtime generates native code per architecture, so
   # the real-loader tests and the N1 latency bench are worth running there too.
-  # Its own job (not a matrix leg) so the amd64 plugins job never waits on the
+  # Its own job (not a matrix leg) so the amd64 sniffers job never waits on the
   # arm64 build.
-  plugins-arm64:
-    name: plugins (arm64)
+  sniffers-arm64:
+    name: sniffers (arm64)
     needs: [changes, build-release-arm64]
-    if: needs.changes.outputs.plugins == 'true'
+    if: needs.changes.outputs.sniffers == 'true'
     runs-on: ubuntu-24.04-arm   # pinned like build-release-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -325,38 +325,38 @@ jobs:
       # the release dependencies are already compiled (nothing new to save).
       - uses: ./.github/actions/cargo-cache
         with: { name: release-arm64 }
-      # The wasm plugin workspace is only built here, so it gets its own snapshot.
+      # The wasm sniffer workspace is only built here, so it gets its own snapshot.
       - uses: ./.github/actions/cargo-cache
         with:
-          name: plugins-wasm-arm64
-          target-dirs: crates/plugins/target
+          name: sniffers-wasm-arm64
+          target-dirs: crates/sniffers/target
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: nextest
       - name: Native unit tests
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         # Separate workspace => point nextest at the root config for the `ci` profile.
         run: cargo nextest run --profile ci --workspace --config-file ../../.config/nextest.toml
       - name: Build to wasm32-unknown-unknown
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         run: cargo build --release --target wasm32-unknown-unknown -p a2s -p minecraft -p quic -p regex-firstbytes -p wireguard -p openvpn -p raknet -p teamspeak3
       - name: Size check (informational)
-        working-directory: crates/plugins
+        working-directory: crates/sniffers
         run: ls -la target/wasm32-unknown-unknown/release/*.wasm
-      - name: Load the built plugins through the real wayhouse loader (phase 9 slices 5–7)
-        # Runs the #[ignore]d wayhouse tests that need crates/plugins built above:
+      - name: Load the built sniffers through the real wayhouse loader (phase 9 slices 5–7)
+        # Runs the #[ignore]d wayhouse tests that need crates/sniffers built above:
         # the end-to-end artifact test and the WASM-boundary latency bench
         # vs. NFR N1 (release matters for real numbers — see docs/07).
         run: cargo nextest run -p wayhouse --release --profile ci --run-ignored only --no-capture
       - name: Test report
         if: always()
-        run: python3 .github/scripts/test_summary.py --title "plugins (arm64)" crates/plugins/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+        run: python3 .github/scripts/test_summary.py --title "sniffers (arm64)" crates/sniffers/target/nextest/ci/junit.xml target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: junit-plugins-arm64
+          name: junit-sniffers-arm64
           path: |
-            crates/plugins/target/nextest/ci/junit.xml
+            crates/sniffers/target/nextest/ci/junit.xml
             target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: ignore
@@ -817,7 +817,7 @@ jobs:
   # passed, a failed or cancelled one fails the gate.
   ci-ok:
     if: always()
-    needs: [changes, test, musl, build-release, build-release-arm64, plugins, plugins-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs, release-policy]
+    needs: [changes, test, musl, build-release, build-release-arm64, sniffers, sniffers-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs, release-policy]
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
     steps:
       - name: Fail if any job failed or was cancelled

@@ -228,11 +228,11 @@ pub(crate) fn rescan_sniffers(
             Ok(map) => {
                 let n = map.len();
                 sniffers.replace(map);
-                tracing::info!(count = n, dir = %sc.dir, "sniffer plugins rescanned");
+                tracing::info!(count = n, dir = %sc.dir, "sniffers rescanned");
             }
             Err(e) => tracing::error!(
                 error = %e,
-                "sniffer plugin rescan failed; keeping the previous plugin set"
+                "sniffer rescan failed; keeping the previous sniffer set"
             ),
         },
         (None, Some(_)) | (Some(_), None) => tracing::warn!(

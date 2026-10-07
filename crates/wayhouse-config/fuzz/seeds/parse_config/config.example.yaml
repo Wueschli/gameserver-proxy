@@ -98,7 +98,7 @@ listeners:
   # a `length: { min, max }` byte-count window; on TCP the length is only what a
   # single peek returned); `sni` (host from the peeked TLS ClientHello — TCP
   # only, not terminated; `host` patterns: exact, `*.suffix` or `.suffix`).
-  # A `sniffer` matcher also exists but needs a loaded plugin (roadmap Phase 9);
+  # A `sniffer` matcher also exists but needs a loaded sniffer (roadmap Phase 9);
   # nothing is built in, so it is not shown here.
   # `pool` and `routes` are mutually exclusive.
   - name: public-tcp

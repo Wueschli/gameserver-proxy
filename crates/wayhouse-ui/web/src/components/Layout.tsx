@@ -4,7 +4,7 @@ import { logout } from "../api";
 const NAV = [
   { to: "/fleet", label: "Fleet" },
   { to: "/settings", label: "Settings" },
-  { to: "/plugins", label: "Plugins" },
+  { to: "/sniffers", label: "Sniffers" },
   { to: "/config-history", label: "Config history" },
   { to: "/tunnel", label: "Tunnel addresses" },
 ];

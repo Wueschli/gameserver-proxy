@@ -190,9 +190,9 @@ impl Runtime {
         )
     }
 
-    /// Like [`Runtime::start_with_geo`], with a preloaded sniffer plugin
+    /// Like [`Runtime::start_with_geo`], with a preloaded sniffer
     /// registry for listeners with a `sniffer:` route (phase 9). Empty by
-    /// default — no sniffers ship in the binary; the `wayhouse` binary's plugin
+    /// default — no sniffers ship in the binary; the `wayhouse` binary's sniffer
     /// loader builds the registry.
     ///
     /// # Panics

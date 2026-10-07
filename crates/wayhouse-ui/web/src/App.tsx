@@ -5,7 +5,7 @@ import { Login } from "./components/Login";
 import { Layout } from "./components/Layout";
 import { FleetPage } from "./pages/FleetPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { PluginsPage } from "./pages/PluginsPage";
+import { SniffersPage } from "./pages/SniffersPage";
 import { ConfigHistoryPage } from "./pages/ConfigHistoryPage";
 import { TunnelAddressesPage } from "./pages/TunnelAddressesPage";
 
@@ -31,7 +31,7 @@ export function App() {
         <Route index element={<Navigate to="/fleet" replace />} />
         <Route path="/fleet" element={<FleetPage />} />
         <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/plugins" element={<PluginsPage />} />
+        <Route path="/sniffers" element={<SniffersPage />} />
         <Route path="/config-history" element={<ConfigHistoryPage />} />
         <Route path="/tunnel" element={<TunnelAddressesPage />} />
         <Route path="*" element={<Navigate to="/fleet" replace />} />

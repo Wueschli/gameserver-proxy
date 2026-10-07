@@ -30,13 +30,13 @@ import subprocess
 import sys
 from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set
 
-AREAS = ("ui", "plugins", "tunnel", "deploy", "fuzz", "release")
+AREAS = ("ui", "sniffers", "tunnel", "deploy", "fuzz", "release")
 
 # The packages each Rust job builds or tests. A name, or a directory ending in
 # "/" for every package under it.
 ROOTS = {
-    # crates/plugins (wasm) + `cargo nextest -p wayhouse` loading the built plugins.
-    "plugins": ["wayhouse", "crates/plugins/"],
+    # crates/sniffers (wasm) + `cargo nextest -p wayhouse` loading the built sniffers.
+    "sniffers": ["wayhouse", "crates/sniffers/"],
     # make tunnel-e2e-ci: debug-builds the five binaries, runs wayhouse-fleet-tests.
     "tunnel": ["wayhouse", "wayhouse-agent", "wayhouse-controller", "wayhouse-aggregator", "wayhouse-ui", "wayhouse-fleet-tests"],
     # crates/wayhouse-config/fuzz (its own workspace; depends on wayhouse-config).
@@ -55,7 +55,7 @@ DOCS_ONLY = re.compile(r"\.md$|^docs/|^LICENSE-")
 EXTRA = {
     "ui": re.compile(r"^crates/wayhouse-ui/web/"),
     # .config/nextest.toml holds the `ci` profile both jobs run under.
-    "plugins": re.compile(r"^\.config/"),
+    "sniffers": re.compile(r"^\.config/"),
     "tunnel": re.compile(r"^Makefile$|^\.config/"),
     # The UI's npm lockfile is here too: those packages end up in the wayhouse-ui
     # image's bundle, and the deploy job's Trivy scan checks them.
@@ -198,8 +198,8 @@ def areas(files: List[str], g: Graph) -> Dict[str, bool]:
     hit = dependents(changed, g) | locked
     for a in ROOTS:
         out[a] = out.get(a, False) or rustwide or bool(_roots(a, g) & hit)
-    # The shared release build (build-release job) feeds plugins and deploy.
-    out["release"] = out["plugins"] or out["deploy"]
+    # The shared release build (build-release job) feeds sniffers and deploy.
+    out["release"] = out["sniffers"] or out["deploy"]
     return {a: out.get(a, False) for a in AREAS}
 
 

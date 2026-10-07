@@ -4,7 +4,7 @@
 //! because `wayhouse-http` has no `wayhouse-core` dependency.
 
 /// Counter. Labels: `listener`, `result` (`accepted` | `no_route` |
-/// `sniffer_reject` | ...). `sniffer_reject` = a `sniffer` plugin returned a
+/// `sniffer_reject` | ...). `sniffer_reject` = a `sniffer` sniffer returned a
 /// `reject` hint for the connection's first bytes; it is dropped before routing.
 pub const LISTENER_CONNECTIONS: &str = "wayhouse_listener_connections_total";
 
@@ -20,7 +20,7 @@ pub const PACKETS: &str = "wayhouse_packets_total";
 /// Counter. Labels: `listener`, `reason`
 /// (`no_route` | `no_backend` | `upstream_bind` | `upstream_send` |
 /// `outside_prefix` | `draining` | `reply_bind` | `first_packet_gate` |
-/// `sniffer_reject`). `sniffer_reject` = a `sniffer` plugin returned a `reject`
+/// `sniffer_reject`). `sniffer_reject` = a `sniffer` sniffer returned a `reject`
 /// hint for the first datagram; no session opens and no reply is sent.
 pub const DATAGRAMS_DROPPED: &str = "wayhouse_datagrams_dropped_total";
 
@@ -92,12 +92,12 @@ pub const LISTENER_BIND_FAILURES: &str = "wayhouse_listener_bind_failures_total"
 /// Gauge: unix timestamp of the last successfully applied config.
 pub const CONFIG_VERSION: &str = "wayhouse_config_version";
 
-/// Counter. Labels: `name` (the sniffer plugin), `result` (`ok` |
+/// Counter. Labels: `name` (the sniffer), `result` (`ok` |
 /// `unrecognised` | `timeout` | `trap` | `bad_output`). One increment per
 /// `Sniffer::sniff` call through the phase 9 WASM loader (`ok` = recognised,
 /// `unrecognised` = a clean "no match", `timeout` = the epoch-interruption
 /// deadline fired, `trap` = any other WASM trap / instantiation error,
-/// `bad_output` = the plugin returned a result the host couldn't decode).
+/// `bad_output` = the sniffer returned a result the host couldn't decode).
 pub const SNIFFER_CALLS: &str = "wayhouse_sniffer_calls_total";
 
 /// Histogram (seconds). Labels: `name`. Wall-clock time of one `sniff` call

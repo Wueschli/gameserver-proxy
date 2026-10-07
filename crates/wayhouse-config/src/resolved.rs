@@ -231,7 +231,7 @@ pub struct Config {
     /// Path to the MaxMind Country DB, if any listener uses a `geo` filter.
     /// Startup-only.
     pub geo_db: Option<String>,
-    /// Sniffer plugin loader settings (phase 9). `None` ⇒ no plugins load.
+    /// Sniffer sniffer loader settings (phase 9). `None` ⇒ no sniffers load.
     pub sniffers: Option<SniffersConfig>,
     /// Tier-2 regional health fabric identity (phase 13). `None` ⇒ gossip
     /// fully disabled, today's local-only health behaviour.
@@ -302,7 +302,7 @@ pub struct GossipConfig {
 }
 
 /// Resolved `settings.sniffers` (phase 9). The loader itself (`wasmtime`, the
-/// ABI, the plugin crates) lives in the `wayhouse` binary — this is just the
+/// ABI, the sniffer crates) lives in the `wayhouse` binary — this is just the
 /// validated config it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SniffersConfig {
@@ -317,7 +317,7 @@ pub struct SniffersConfig {
 pub struct SnifferModulePin {
     pub name: String,
     pub sha256: String,
-    /// Opaque per-plugin config string (see `RawSnifferModule::config`). `None`
+    /// Opaque per-sniffer config string (see `RawSnifferModule::config`). `None`
     /// ⇒ the module is handed an empty config on each `sniff` call.
     pub config: Option<String>,
 }
@@ -437,7 +437,7 @@ pub struct ListenerConfig {
     /// socket and a client-address-bound `IP_TRANSPARENT` upstream socket per
     /// connection. Needs `CAP_NET_ADMIN`.
     pub transparent: bool,
-    /// The distinct sniffer plugins this listener's routes use, in order of
+    /// The distinct sniffers this listener's routes use, in order of
     /// first appearance (empty if no `sniffer` route). `wayhouse-core` runs them in
     /// that order once per connection / first datagram before routing; the
     /// first one that recognises the bytes wins and its hint is the only one

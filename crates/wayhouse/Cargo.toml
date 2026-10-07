@@ -16,7 +16,7 @@ path = "src/main.rs"
 # turning one off makes a config that needs it fail at startup, never silently
 # run without it.
 default = ["wasm-sniffers", "grpc-resolver", "dns-srv", "gossip", "tunnel"]
-# WASM sniffer plugin loader (`settings.sniffers`); pulls in `wasmtime`.
+# WASM sniffer loader (`settings.sniffers`); pulls in `wasmtime`.
 wasm-sniffers = ["dep:wasmtime", "dep:wasmparser"]
 # `backend_sources[].type: dns_srv`; pulls in `hickory-resolver`.
 dns-srv = ["dep:hickory-resolver"]

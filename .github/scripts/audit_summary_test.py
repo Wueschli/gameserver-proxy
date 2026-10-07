@@ -59,8 +59,8 @@ class Summary(unittest.TestCase):
         self.assertIn("`Cargo.lock`", out)
 
     def test_vulnerabilities_are_tabled_and_escaped(self):
-        rc, out = run({"root": report([VULN]), "crates_plugins": report()})
-        self.assertIn("`crates/plugins/Cargo.lock`", out)
+        rc, out = run({"root": report([VULN]), "crates_sniffers": report()})
+        self.assertIn("`crates/sniffers/Cargo.lock`", out)
         self.assertEqual(rc, 0)
         self.assertIn("1 vulnerabilit", out)
         self.assertIn("[RUSTSEC-2026-0285](https://github.com/rustls/rustls/security/advisories/x)", out)
@@ -78,14 +78,14 @@ class Summary(unittest.TestCase):
         self.assertIn("gone", out)
 
     def test_broken_or_missing_reports_are_notes(self):
-        rc, out = run({"root": "{not json"}, not_audited=["crates/plugins/Cargo.lock"])
+        rc, out = run({"root": "{not json"}, not_audited=["crates/sniffers/Cargo.lock"])
         self.assertEqual(rc, 0)
         self.assertIn("could not read", out)
-        self.assertIn("crates/plugins/Cargo.lock", out)
+        self.assertIn("crates/sniffers/Cargo.lock", out)
 
     def test_annotations(self):
         rc, out = run({"root": report([VULN], unmaintained=[UNMAINTAINED]), "x": report()},
-                      "--annotations", not_audited=["crates/plugins/Cargo.lock"])
+                      "--annotations", not_audited=["crates/sniffers/Cargo.lock"])
         self.assertEqual(rc, 0)
         lines = [l for l in out.splitlines() if l.startswith("::warning")]
         self.assertEqual(len(lines), 2, out)

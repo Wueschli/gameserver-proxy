@@ -1,4 +1,4 @@
-//! Internal API seam for **sniffer plugins** — game- / protocol-specific
+//! Internal API seam for **sniffers** — game- / protocol-specific
 //! first-bytes inspectors.
 //!
 //! A sniffer takes a read-only look at a connection's first bytes (TCP peek /
@@ -7,9 +7,9 @@
 //! route matcher then compares that hint.
 //!
 //! **There are no built-in sniffers.** Game-specific parsing is deliberately
-//! *not* compiled into the proxy: it belongs in separately maintained plugins,
+//! *not* compiled into the proxy: it belongs in separately maintained sniffers,
 //! loaded at runtime by the Phase 9 loader (`wayhouse` binary, `wasmtime` — see
-//! `docs/08` Phase 9). What lives here is the contract plugins implement (the
+//! `docs/08` Phase 9). What lives here is the contract sniffers implement (the
 //! [`Sniffer`] trait), the [`Sniffers`] registry the loader populates, and the
 //! wiring that feeds a hint into routing. A `sniffer:` route never matches on
 //! an empty registry (it logs a warning at listener start).
@@ -24,8 +24,8 @@ use arc_swap::ArcSwap;
 
 use wayhouse_config::RouteHint;
 
-/// A read-only first-bytes inspector. Implemented by loaded plugins. `name` is
-/// `&str`, not `&'static str`: a WASM plugin's name comes from its module file
+/// A read-only first-bytes inspector. Implemented by loaded sniffers. `name` is
+/// `&str`, not `&'static str`: a WASM sniffer's name comes from its module file
 /// name at load time, not a compiled-in constant.
 pub trait Sniffer: Send + Sync {
     fn name(&self) -> &str;
@@ -34,15 +34,15 @@ pub trait Sniffer: Send + Sync {
 }
 
 /// The live set of loaded sniffers, keyed by their configured name. Built once
-/// at startup by the `wayhouse` binary's plugin loader; threaded `Runtime` →
+/// at startup by the `wayhouse` binary's sniffer loader; threaded `Runtime` →
 /// `ListenerManager` → listener workers, the same seam as `Resolvers` /
 /// `Option<Arc<GeoDb>>`. The default (and, until a loader configures one,
 /// only) registry is empty.
 ///
-/// Reads are lock-free (an [`ArcSwap`] over the name→plugin map, mirroring
+/// Reads are lock-free (an [`ArcSwap`] over the name→sniffer map, mirroring
 /// [`crate::route_hint::RouteHints`]): every `Arc<Sniffers>` clone handed to a
 /// listener worker points at the same instance, so [`Sniffers::replace`] (used
-/// by the config-reload plugin rescan, phase 9 slice 4) is visible to every
+/// by the config-reload sniffer rescan, phase 9 slice 4) is visible to every
 /// worker immediately, with no replumbing needed through `Runtime` itself.
 #[derive(Default)]
 pub struct Sniffers {
@@ -65,7 +65,7 @@ impl Sniffers {
     }
 
     /// Atomically replace the whole registry with `map` (phase 9 slice 4: a
-    /// config reload rescans the plugin dir and swaps in the new set — added
+    /// config reload rescans the sniffer dir and swaps in the new set — added
     /// modules appear, removed ones vanish, changed ones are already a fresh
     /// compile since the caller rebuilt `map` from scratch).
     pub fn replace(&self, map: HashMap<String, Arc<dyn Sniffer>>) {
@@ -100,7 +100,7 @@ pub fn sniff_first<'a>(
 }
 
 /// Log a warning for each sniffer name `listener` routes on that resolves to
-/// nothing in `sniffers` — those routes can never match until the plugin is
+/// nothing in `sniffers` — those routes can never match until the sniffer is
 /// loaded.
 pub fn warn_if_missing(listener: &str, names: &[String], sniffers: &Sniffers) {
     for name in names {
@@ -117,7 +117,7 @@ pub fn warn_if_missing(listener: &str, names: &[String], sniffers: &Sniffers) {
 pub(crate) mod tests {
     use super::*;
 
-    /// Minimal stand-in for a real plugin: `b"HOST:<name>\n..."` → that host.
+    /// Minimal stand-in for a real sniffer: `b"HOST:<name>\n..."` → that host.
     pub(crate) struct TestHost;
     impl Sniffer for TestHost {
         fn name(&self) -> &'static str {
