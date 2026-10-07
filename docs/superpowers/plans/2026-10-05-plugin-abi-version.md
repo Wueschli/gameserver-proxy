@@ -40,7 +40,7 @@
 **Interfaces:**
 - Produces: `pub const HOST_ABI: AbiVersion = AbiVersion { major: 0, minor: 1 };`
   `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct AbiVersion { pub major: u16, pub minor: u16 }` with `Display` as `major.minor`.
-  `pub fn read_abi_version(bytes: &[u8]) -> Result<AbiVersion, ModuleError>`; new variants `ModuleError::AbiMissing`, `ModuleError::AbiMalformed(usize)` (payload length), `ModuleError::AbiIncompatible { plugin: AbiVersion, host: AbiVersion }`.
+  `pub fn read_abi_version(bytes: &[u8]) -> Result<AbiVersion, ModuleError>`; new variants `ModuleError::AbiMissing`, `ModuleError::AbiMalformed(usize)` (payload length), `ModuleError::AbiIncompatible { sniffer: AbiVersion, host: AbiVersion }`.
   `validate` calls `read_abi_version` after the size checks and before `Module::new`.
 
 - [ ] **Step 1: Write failing tests** with a helper `fn with_abi(wat_body, payload: &[u8]) -> Vec<u8>` that builds the module via `wat::parse_str` and appends the custom section by hand (`wasm-encoder` is not needed: append `0x00, leb(len), leb(name_len), name, payload`): `abi_reads_0_1`, `abi_missing_is_rejected_with_hint`, `abi_payload_of_3_and_6_bytes_rejected`, `abi_two_sections_rejected`, `abi_other_minor_rejected_while_major_is_0` (sniffer `0.2` and `0.0` against host `0.1`), `abi_other_major_rejected`, `abi_extra_custom_sections_ignored`; update the existing `HOST_SNIFFER_WAT` fixtures helper so every valid fixture carries `0.1` (the earlier #171 tests must keep passing).

@@ -15,7 +15,7 @@ Sandboxing changes (the WASM sandbox stays: no imports, memory cap, call timeout
 
 ## Decisions already made
 
-- **[decided]** All bundled sniffers move to the sniffers repo; main keeps no sniffers, only the ABI crate and the conformance harness. Main's own tests use tiny WAT modules; e2e tests and the images that need real sniffers fetch a pinned sniffers release by tag and sha256 (`plugins.lock`).
+- **[decided]** All bundled sniffers move to the sniffers repo; main keeps no sniffers, only the ABI crate and the conformance harness. Main's own tests use tiny WAT modules; e2e tests and the images that need real sniffers fetch a pinned sniffers release by tag and sha256 (`sniffers.lock`).
 - **[decided]** Signatures: minisign for the official repo, **optional in the first cut** (verified when present). Sigstore deferred.
 - **[decided]** Update discovery is on demand from the UI only (no background polling).
 - **[decided]** Sniffers repo is bootstrapped after v0.1.0. ABI version lands before v0.1.0.
