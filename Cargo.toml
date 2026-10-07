@@ -12,7 +12,7 @@ members = [
     "crates/wayhouse-fleet-tests",
     "crates/wayhouse-http",
     "crates/wayhouse-registry",
-    "crates/sniffer-abi",
+    "crates/wayhouse-sniffer-abi",
 ]
 
 [workspace.package]

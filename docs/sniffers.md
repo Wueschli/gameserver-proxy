@@ -3,7 +3,7 @@
 A **sniffer** is a WASM module that peeks at the first bytes of a connection or
 datagram and returns a routing hint (a hostname or a tag). This page is the format
 reference for authors and registry operators. The ABI itself is documented in
-[`crates/sniffer-abi/README.md`](../crates/sniffer-abi/README.md) and the module doc of
+[`crates/wayhouse-sniffer-abi/README.md`](../crates/wayhouse-sniffer-abi/README.md) and the module doc of
 `crates/wayhouse/src/sniffer_loader.rs`; the design and its reasons are in the
 [registry spec](superpowers/specs/2026-10-05-plugin-registry-design.md).
 
@@ -209,7 +209,7 @@ check, so an outage of the sniffers repository never blocks a PR; it runs when `
 `sniffers.lock` changes and in the nightly run. Community sniffers are tested by the CI of the
 repository that hosts them, not here.
 
-When the ABI changes (`HOST_ABI`, the wire format): update `crates/sniffer-abi`, bump the revision
+When the ABI changes (`HOST_ABI`, the wire format): update `crates/wayhouse-sniffer-abi`, bump the revision
 the sniffers repo pins, release the rebuilt sniffers there (its **Release** workflow), then run
 `python3 .github/scripts/update_sniffers_lock.py` here to pin the new tags and hashes from the
 published `index.json`, and the e2e job is green again. The same command is how a newer official

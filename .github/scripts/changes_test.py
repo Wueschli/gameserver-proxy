@@ -81,7 +81,7 @@ class RealRepo(unittest.TestCase):
     def test_the_sniffer_abi_crate_reaches_the_ui_and_so_the_tunnel_job(self):
         # wayhouse-ui reads its ABI constants; the e2e job fetches released sniffers and
         # builds nothing from it, so only the always-on test job and the tunnel job run.
-        self.assertEqual(self.areas("crates/sniffer-abi/src/lib.rs"), {"tunnel"})
+        self.assertEqual(self.areas("crates/wayhouse-sniffer-abi/src/lib.rs"), {"tunnel"})
 
     def test_the_sniffer_pins_only_run_the_e2e_job(self):
         # No build is involved, so the shared release build does not start.
@@ -173,7 +173,7 @@ class SyntheticGraph(unittest.TestCase):
             "crates/wayhouse-ui": pkg("wayhouse-ui"),
             "crates/wayhouse-fleet-tests": pkg("wayhouse-fleet-tests"),
             "crates/wayhouse-config/fuzz": pkg("wayhouse-config-fuzz", "crates/wayhouse-config"),
-            "crates/sniffer-abi": pkg("wayhouse-sniffer-abi"),
+            "crates/wayhouse-sniffer-abi": pkg("wayhouse-sniffer-abi"),
         }
         packages.update(extra)
         return changes.Graph(packages, {

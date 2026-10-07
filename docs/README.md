@@ -40,7 +40,7 @@ finished. They are kept as a record of why things were built the way they were; 
 
 - [`../deploy/README.md`](../deploy/README.md): reference images, Compose demo and
   Kubernetes manifests.
-- [`../crates/sniffer-abi/README.md`](../crates/sniffer-abi/README.md): the WASM sniffer
+- [`../crates/wayhouse-sniffer-abi/README.md`](../crates/wayhouse-sniffer-abi/README.md): the WASM sniffer
   ABI (guest side); the official sniffers are in
   [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
 - [`sniffers.md`](sniffers.md): sniffer manifest, registry index and verification formats.

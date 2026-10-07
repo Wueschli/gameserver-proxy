@@ -254,7 +254,7 @@ Game-protocol sniffers load into a running proxy from disk, sandboxed, never
 compiled in and never a fork. A `sniffer:` route resolves its name against the
 loaded set. The official sniffers (`a2s`, `minecraft`, `regex_firstbytes`, ...) live in
 [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers); the ABI crate they
-link is [`crates/sniffer-abi/`](../crates/sniffer-abi/README.md).
+link is [`crates/wayhouse-sniffer-abi/`](../crates/wayhouse-sniffer-abi/README.md).
 
 ### Locked decisions
 - **Sandbox: `wasmtime`, core module, no WASI.** A narrow ABI — the guest

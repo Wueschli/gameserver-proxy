@@ -35,7 +35,7 @@ argon2 = "0.6.0"
 wayhouse-registry = { path = "../wayhouse-registry" }
 sha2.workspace = true
 minisign-verify.workspace = true
-wayhouse-sniffer-abi = { path = "../sniffer-abi" }
+wayhouse-sniffer-abi = { path = "../wayhouse-sniffer-abi" }
 semver.workspace = true
 thiserror.workspace = true
 

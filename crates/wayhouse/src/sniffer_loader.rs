@@ -26,7 +26,7 @@
 //! ```
 //!
 //! This encoding is also what the `wayhouse-sniffer-abi` guest helper crate
-//! (`crates/sniffer-abi/`) implements on the write side.
+//! (`crates/wayhouse-sniffer-abi/`) implements on the write side.
 //!
 //! ### Version
 //! A module declares the ABI version it was built for in a custom section named

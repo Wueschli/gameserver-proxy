@@ -94,7 +94,7 @@ state (a pushed `instance` name is not bound to a credential).
   matching.
 - **WASM sniffers** (`crates/wayhouse/src/sniffer_loader.rs`): wasmtime
   with epoch-interruption timeouts and a per-call `StoreLimits` memory cap.
-- **`unsafe`**: only in the sniffer guest crates (`crates/sniffer-abi` and the sniffers in
+- **`unsafe`**: only in the sniffer guest crates (`crates/wayhouse-sniffer-abi` and the sniffers in
   `wayhouse-proxy/sniffers`; the wasm ABI's `alloc` and raw input slices), which run inside
   the wasmtime sandbox. None
   in the host binaries.
