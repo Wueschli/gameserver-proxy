@@ -43,12 +43,17 @@ pub enum ModuleError {
     Empty,
     #[error("the module is {len} bytes, over the {max} byte limit")]
     TooLarge { len: usize, max: usize },
-    #[error("the module has no `wayhouse.plugin-abi` section; link wayhouse-plugin-abi {HOST_ABI}")]
+    #[error(
+        "the module has no `wayhouse.plugin-abi` section; link wayhouse-plugin-abi {HOST_ABI}"
+    )]
     AbiMissing,
     #[error("the `wayhouse.plugin-abi` section is malformed ({0} bytes, or declared twice)")]
     AbiMalformed(usize),
     #[error("the plugin declares ABI {plugin}, this host speaks {host}")]
-    AbiIncompatible { plugin: AbiVersion, host: AbiVersion },
+    AbiIncompatible {
+        plugin: AbiVersion,
+        host: AbiVersion,
+    },
     #[error("the module has no `wayhouse.plugin-caps` section")]
     CapsMissing,
     #[error("the module declares `wayhouse.plugin-caps` more than once")]
