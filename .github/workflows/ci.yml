@@ -12,6 +12,8 @@ on:
   # No paths-ignore here: the ruleset requires `ci-ok`, so a docs-only PR must
   # still start the workflow. The `code` output of `changes` skips the heavy jobs.
   pull_request:
+  # Merge queue: ci-ok must also report on the queue's temporary branch.
+  merge_group:
   workflow_dispatch:   # run everything by hand from the Actions tab
   schedule:
     - cron: "17 3 * * *"   # nightly: every job runs, incl. fuzz and deploy
@@ -98,10 +100,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: ./.github/actions/apt-install
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
@@ -146,10 +149,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc and musl-gcc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
+        uses: ./.github/actions/apt-install
+        with: { packages: "protobuf-compiler musl-tools" }
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -176,10 +181,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: ./.github/actions/apt-install
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: release }
@@ -216,10 +222,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-24.04-arm   # free for public repos; glibc 2.39 like the amd64 runner
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: ./.github/actions/apt-install
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: release-arm64 }
@@ -263,12 +270,13 @@ jobs:
           - { arch: amd64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }   # free for public repos; glibc 2.39 like amd64
     runs-on: ${{ matrix.runner }}   # pinned: see the comment above `jobs:`
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: ./.github/actions/apt-install
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: "sniffers-e2e-${{ matrix.arch }}" }
@@ -350,6 +358,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.tunnel == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 45   # a stuck step must not hold the gate for the 6 h default (#243)
     strategy:
       fail-fast: false
       matrix:
@@ -359,7 +368,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: ./.github/actions/apt-install
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: ./.github/actions/cargo-cache
         with: { name: tunnel }
