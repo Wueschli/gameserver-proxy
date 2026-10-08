@@ -8,11 +8,11 @@
 //!
 //! - name present, [`ListenerConfig`] unchanged → keep running;
 //! - name present, config changed → bind a new group, then stop the old one
-//!   (a UDP group keeps draining its sessions in the background, see
-//!   `ListenerManager::retired`; the reload does not wait for it, and the old
-//!   workers leave the `SO_REUSEPORT` flow hash at once, so every new flow
-//!   reaches the new group. A client of a still-draining session is rehashed to
-//!   the new group and gets a new session there, #186);
+//!   (a UDP worker whose port the new group takes over closes its socket at
+//!   once, so every flow reaches the new group, which opens fresh sessions, #186;
+//!   a UDP group of a removed listener, or on a port nobody takes over, keeps
+//!   draining its sessions in the background, see `ListenerManager::retired`;
+//!   the reload does not wait for it);
 //! - name only in the new config → bind and spawn;
 //! - name only in the running set → stop.
 //!
@@ -101,8 +101,8 @@ pub(crate) type Handoff = Arc<[SocketAddr]>;
 struct Group {
     cfg: ListenerConfig,
     stop: watch::Sender<bool>,
-    /// UDP only: the addresses a replacement group now binds. A draining worker
-    /// whose own address overlaps one must leave the `SO_REUSEPORT` hash (see
+    /// UDP only: the addresses a replacement group now binds. A worker whose own
+    /// address overlaps one closes its socket and ends its sessions (see
     /// `listener_udp::run_udp_listener`). Never set on shutdown or when the
     /// listener is removed, where nothing takes over its flows.
     handoff: watch::Sender<Option<Handoff>>,
@@ -406,6 +406,15 @@ impl ListenerManager {
             g.signal();
             if let Some(binds) = successor {
                 g.hand_off(binds);
+                // The workers on the successor's port close their sockets at
+                // once; wait briefly so the next datagram of a new flow cannot
+                // still hash to a socket that is about to go.
+                for _ in 0..200 {
+                    if g.finished() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
             }
             if g.cfg.protocol == Protocol::Udp && !g.finished() {
                 let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);

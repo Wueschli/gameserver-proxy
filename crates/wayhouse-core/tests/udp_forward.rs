@@ -1145,10 +1145,10 @@ listeners:
     assert!(out.failed.is_empty());
 }
 
-/// #186: a replaced UDP group keeps draining its live sessions, but its sockets
-/// must stop receiving new flows. Otherwise the kernel keeps hashing some new
-/// clients to the draining socket, which refuses them, and a chatty client
-/// holds that window open indefinitely.
+/// #186: when a reload replaces a UDP listener, the old workers must leave the
+/// `SO_REUSEPORT` group. Otherwise the kernel keeps hashing some new clients to
+/// a socket that refuses them, and a chatty client holds that window open
+/// indefinitely. Every first datagram of a fresh client must be answered.
 #[tokio::test]
 async fn new_clients_are_answered_while_a_replaced_udp_group_drains() {
     let backend = echo_backend(1).await;
@@ -1209,22 +1209,33 @@ listeners:
     for _ in 0..32 {
         let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         c.connect(proxy_addr).await.unwrap();
-        let mut answered = false;
-        for _ in 0..4 {
-            if c.send(b"new").await.is_ok()
-                && matches!(
-                    tokio::time::timeout(Duration::from_millis(200), c.recv(&mut buf)).await,
-                    Ok(Ok(_))
-                )
-            {
-                answered = true;
-                break;
-            }
-        }
+        let answered = c.send(b"new").await.is_ok()
+            && matches!(
+                tokio::time::timeout(Duration::from_millis(500), c.recv(&mut buf)).await,
+                Ok(Ok(_))
+            );
         if !answered {
             unanswered += 1;
         }
     }
+    // The chatty client of the replaced group is moved to the new group too.
+    let mut moved = false;
+    for _ in 0..40 {
+        if matches!(
+            tokio::time::timeout(Duration::from_millis(100), old.recv(&mut buf)).await,
+            Ok(Ok(_))
+        ) {
+            moved = true;
+            break;
+        }
+    }
     pinger.abort();
-    assert_eq!(unanswered, 0, "new clients dropped by the draining group");
+    assert_eq!(
+        unanswered, 0,
+        "first datagrams dropped by the replaced group"
+    );
+    assert!(
+        moved,
+        "the client of the replaced group never got an answer again"
+    );
 }
