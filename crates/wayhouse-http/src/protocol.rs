@@ -297,13 +297,17 @@ mod gate_tests {
         (status, ours, String::from_utf8(body.to_vec()).unwrap())
     }
 
+    fn cur() -> String {
+        ProtocolVersion::CURRENT.to_string()
+    }
+
     #[tokio::test]
     async fn layer_rejects_missing_header_with_426() {
         let (s, ours, body) = call(None).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
         assert!(
-            body.contains("predates protocol versioning") && body.contains("(1.0)"),
+            body.contains("predates protocol versioning") && body.contains(&format!("({})", cur())),
             "{body}"
         );
     }
@@ -330,10 +334,13 @@ mod gate_tests {
     async fn layer_rejects_other_major_with_426_and_body() {
         let (s, ours, body) = call(Some("2.0")).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
         assert_eq!(
             body,
-            "wayhouse protocol 2.0 is not compatible with this node (1.0): upgrade the older side"
+            format!(
+                "wayhouse protocol 2.0 is not compatible with this node ({}): upgrade the older side",
+                cur()
+            )
         );
     }
 
@@ -341,13 +348,16 @@ mod gate_tests {
     async fn layer_rejects_garbage_value() {
         let (s, _, body) = call(Some("banana")).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert!(body.contains("banana") && body.contains("(1.0)"), "{body}");
+        assert!(
+            body.contains("banana") && body.contains(&format!("({})", cur())),
+            "{body}"
+        );
     }
 
     #[tokio::test]
     async fn layer_sets_response_header_on_success() {
-        let (_, ours, _) = call(Some("1.0")).await;
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        let (_, ours, _) = call(Some(&cur())).await;
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
     }
 
     #[tokio::test]
@@ -371,6 +381,6 @@ mod gate_tests {
             .text()
             .await
             .unwrap();
-        assert_eq!(body, "1.0");
+        assert_eq!(body, cur());
     }
 }
