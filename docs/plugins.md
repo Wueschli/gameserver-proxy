@@ -6,9 +6,9 @@ and [automation hooks](superpowers/specs/2026-10-07-plugin-automation-hooks-desi
 Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
-controller can store plugin installs behind an admin API (below) and the web UI has a Plugins page on top of it (upload, review and approve capabilities, enable, disable, delete). Nothing runs a plugin
-yet: leader ticks, the replicated (HA) install state, secrets, `http`, `routes`, webhooks,
-events and `backends` are later slices.
+controller can store plugin installs behind an admin API and ticks the enabled ones
+(below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). Not built yet: the HA leader tick with a term-checked commit and replicated
+install state, secrets, `http`, `routes`, webhooks, events and `backends`.
 
 ## Module contract (ABI 0.1)
 
@@ -92,13 +92,33 @@ behind the same admin bearer token as `/config`; `X-Actor` is recorded as `creat
 | `POST /plugins/modules` (raw `.wasm` body, up to 8 MiB)       | Validates ABI and capability sections, keeps the bytes by sha256, returns `{sha256, size, abi, capabilities}` for the operator to read.                                                                                                              |
 | `POST /plugins` `{name, sha256, approved, config?, enabled?}` | Compiles the stored module through the bounded pool with `approved` as the operator-approved set; `422` when the module declares more than `approved` or fails a bound, `503` when the compiler is busy. Records the install and returns it (`201`). |
 | `GET /plugins`, `GET /plugins/{id}`                           | The install records.                                                                                                                                                                                                                                 |
-| `POST /plugins/{id}/enable`, `/disable`                       | Flip `enabled` (nothing consumes it yet).                                                                                                                                                                                                            |
+| `POST /plugins/{id}/enable`, `/disable`                       | Flip `enabled`; a disabled install is not ticked, and enabling it restarts its first-tick wait.                                                                                                                                                      |
+| `GET /plugins/{id}/status`                                    | What the ticks did: `ticks`, `last_tick_unix`, `last_ok`, `last_error`, `consecutive_failures` and the last 100 log lines. In memory only; empty before the first tick.                                                                              |
 | `DELETE /plugins/{id}`                                        | Removes the install; the module blob goes with the last install that uses it.                                                                                                                                                                        |
 
 An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z`, `0-9`, `-`, up
 to 64 characters), the approved capability set bound to the module sha256, and a non-secret
 `config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
 controller's `sled` database; they are not replicated.
+
+## Ticks (standalone controller)
+
+A scan runs once a second. An enabled install whose approved declaration has `on_timer`
+is called every `tick_interval_secs`; the first tick comes one full interval after the
+controller (or the enable) first sees the install, so enabling never runs a plugin inside
+the request. The module is compiled on first use through the bounded pool, `init` runs
+with the install's `config` each time the module is loaded (first tick after a controller
+restart, after disable then enable, and after a failed load) against the state already stored,
+so it must tolerate existing state, and every call runs on the pool: a busy or slow pool
+skips the tick (shown in the status) and never blocks the controller; a skipped tick is retried at the next scan, not a whole interval later. One call per
+install is in flight at a time.
+
+A call returns its state writes; the controller applies them as one batch only if the
+install's state revision is still the one the call read (compare-and-set), then bumps the
+revision. A call that failed (trap, timeout, over a limit) commits nothing, is recorded in
+the status, and the plugin is called again at its next interval. Deleting an install
+removes its state. This is the single-node form of the design's term-checked commit; HA
+controllers answer `501` until the replicated slice.
 
 ## The Plugins page (web UI)
 

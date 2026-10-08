@@ -75,6 +75,15 @@ impl CompilePool {
             .map_err(PoolError::Module)
     }
 
+    /// Run any blocking job (a guest call) on a worker under the pool's timeout:
+    /// `Busy` when the queue is full, `TimedOut` when it does not finish in time.
+    pub fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, PoolError> {
+        self.run(f)
+    }
+
     pub(crate) fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce() -> T + Send + 'static,
@@ -138,6 +147,14 @@ mod tests {
         let m = good_module();
         let approved = crate::inspect(&m).unwrap().caps;
         p.load(m, approved).unwrap();
+    }
+
+    #[test]
+    fn call_runs_a_job_on_a_worker_thread() {
+        let p = pool(1, 1, Duration::from_secs(5));
+        let here = std::thread::current().id();
+        let there = p.call(|| std::thread::current().id()).unwrap();
+        assert_ne!(here, there);
     }
 
     #[test]

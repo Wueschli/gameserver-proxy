@@ -8,9 +8,12 @@
 //! does not replicate anything: HA and slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod runner;
 
 use serde::{Deserialize, Serialize};
-use wayhouse_plugin_host::Capabilities;
+use std::collections::BTreeMap;
+
+use wayhouse_plugin_host::{Capabilities, StateSnapshot};
 
 /// Whether this controller serves the plugin API: `Err` carries the reason it does not.
 /// Plugins are opt-in (`--plugins`) and, until the replicated slice, standalone-only.
@@ -53,10 +56,49 @@ pub enum PluginStoreError {
     BlobMissing,
 }
 
+/// Why a plugin's state could not be committed.
+#[derive(Debug, thiserror::Error)]
+pub enum CommitError {
+    #[error("the plugin's state changed since the call read it")]
+    Stale,
+    #[error("no such install")]
+    NoSuchInstall,
+    #[error(transparent)]
+    Store(#[from] PluginStoreError),
+}
+
+impl From<sled::Error> for CommitError {
+    fn from(e: sled::Error) -> Self {
+        Self::Store(e.into())
+    }
+}
+
+/// State keys are `<install id>\0k:<key>`; the revision is `<install id>\0rev`.
+fn state_prefix(id: &str) -> Vec<u8> {
+    let mut p = id.as_bytes().to_vec();
+    p.push(0);
+    p
+}
+
+fn state_key(id: &str, key: &str) -> Vec<u8> {
+    let mut k = state_prefix(id);
+    k.extend_from_slice(b"k:");
+    k.extend_from_slice(key.as_bytes());
+    k
+}
+
+fn rev_key(id: &str) -> Vec<u8> {
+    let mut k = state_prefix(id);
+    k.extend_from_slice(b"rev");
+    k
+}
+
 #[derive(Clone)]
 pub struct PluginStore {
     installs: sled::Tree,
     blobs: sled::Tree,
+    /// Plugin state: all installs share one tree so a commit is one atomic batch.
+    state: sled::Tree,
     /// Serialises create, set_enabled and delete, so a blob cannot be
     /// garbage-collected between an install's blob check and its write.
     write: std::sync::Arc<std::sync::Mutex<()>>,
@@ -68,6 +110,7 @@ impl PluginStore {
         Ok(Self {
             installs: db.open_tree("plugin_installs")?,
             blobs: db.open_tree("plugin_blobs")?,
+            state: db.open_tree("plugin_state")?,
             write: std::sync::Arc::default(),
         })
     }
@@ -138,6 +181,55 @@ impl PluginStore {
         Ok(Some(record))
     }
 
+    fn read_rev(&self, id: &str) -> Result<u64, PluginStoreError> {
+        Ok(self
+            .state
+            .get(rev_key(id))?
+            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
+            .map_or(0, u64::from_le_bytes))
+    }
+
+    /// An install's state and the revision it was read at (0 and empty when never written).
+    pub fn state(&self, id: &str) -> Result<(u64, StateSnapshot), PluginStoreError> {
+        let rev = self.read_rev(id)?;
+        let mut prefix = state_prefix(id);
+        prefix.extend_from_slice(b"k:");
+        let mut snap = StateSnapshot::new();
+        for item in self.state.scan_prefix(&prefix) {
+            let (k, v) = item?;
+            if let Ok(key) = std::str::from_utf8(&k[prefix.len()..]) {
+                snap.insert(key.to_string(), v.to_vec());
+            }
+        }
+        Ok((rev, snap))
+    }
+
+    /// Apply a call's `state_puts` as one batch if the state is still at `expected_rev`;
+    /// returns the new revision. A stale or unknown-install commit changes nothing.
+    pub fn commit_state(
+        &self,
+        id: &str,
+        expected_rev: u64,
+        puts: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<u64, CommitError> {
+        let _guard = self.lock();
+        if self.get(id)?.is_none() {
+            return Err(CommitError::NoSuchInstall);
+        }
+        if self.read_rev(id)? != expected_rev {
+            return Err(CommitError::Stale);
+        }
+        let next = expected_rev + 1;
+        let mut batch = sled::Batch::default();
+        for (k, v) in puts {
+            batch.insert(state_key(id, k), v.as_slice());
+        }
+        batch.insert(rev_key(id), &next.to_le_bytes());
+        self.state.apply_batch(batch)?;
+        self.state.flush()?;
+        Ok(next)
+    }
+
     /// Remove an install; its blob goes too when no other install references it.
     pub fn delete(&self, id: &str) -> Result<bool, PluginStoreError> {
         let _guard = self.lock();
@@ -145,6 +237,12 @@ impl PluginStore {
             return Ok(false);
         };
         self.installs.remove(id.as_bytes())?;
+        let mut wipe = sled::Batch::default();
+        for item in self.state.scan_prefix(state_prefix(id)) {
+            wipe.remove(item?.0);
+        }
+        self.state.apply_batch(wipe)?;
+        self.state.flush()?;
         if !self.list()?.iter().any(|r| r.sha256 == record.sha256) {
             self.blobs.remove(record.sha256.as_bytes())?;
         }
@@ -241,5 +339,73 @@ mod tests {
         assert!(s.get("b").unwrap().is_none());
         assert!(s.set_enabled("a", true).unwrap().is_none());
         assert!(s.get("a").unwrap().is_none());
+    }
+
+    fn puts(pairs: &[(&str, &[u8])]) -> std::collections::BTreeMap<String, Vec<u8>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn fresh_state_is_empty_at_revision_zero() {
+        let (s, _d) = store();
+        let (rev, snap) = s.state("a").unwrap();
+        assert_eq!(rev, 0);
+        assert!(snap.is_empty());
+    }
+
+    #[test]
+    fn a_commit_at_the_current_revision_applies_and_bumps_it() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&record("a", "sha1", 1)).unwrap();
+        assert_eq!(
+            s.commit_state("a", 0, &puts(&[("n", b"1"), ("m", b"2")]))
+                .unwrap(),
+            1
+        );
+        assert_eq!(s.commit_state("a", 1, &puts(&[("n", b"3")])).unwrap(), 2);
+        let (rev, snap) = s.state("a").unwrap();
+        assert_eq!(rev, 2);
+        assert_eq!(snap, puts(&[("n", b"3"), ("m", b"2")]));
+    }
+
+    #[test]
+    fn a_stale_commit_changes_nothing() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&record("a", "sha1", 1)).unwrap();
+        s.commit_state("a", 0, &puts(&[("n", b"1")])).unwrap();
+        assert!(matches!(
+            s.commit_state("a", 0, &puts(&[("n", b"9")])),
+            Err(CommitError::Stale)
+        ));
+        assert_eq!(s.state("a").unwrap().1, puts(&[("n", b"1")]));
+    }
+
+    #[test]
+    fn committing_for_an_unknown_install_is_refused() {
+        let (s, _d) = store();
+        assert!(matches!(
+            s.commit_state("nope", 0, &puts(&[("n", b"1")])),
+            Err(CommitError::NoSuchInstall)
+        ));
+        assert_eq!(s.state("nope").unwrap().0, 0);
+    }
+
+    #[test]
+    fn deleting_an_install_removes_only_its_state() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&record("a", "sha1", 1)).unwrap();
+        s.create(&record("ab", "sha1", 2)).unwrap();
+        s.commit_state("a", 0, &puts(&[("n", b"1")])).unwrap();
+        s.commit_state("ab", 0, &puts(&[("n", b"2")])).unwrap();
+        assert!(s.delete("a").unwrap());
+        assert_eq!(s.state("a").unwrap().0, 0);
+        assert!(s.state("a").unwrap().1.is_empty());
+        assert_eq!(s.state("ab").unwrap().1, puts(&[("n", b"2")]));
     }
 }

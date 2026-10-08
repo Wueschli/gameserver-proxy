@@ -18,6 +18,7 @@ use wayhouse_plugin_host::{
     inspect, Capabilities, CompilePool, ModuleError, PoolError, MAX_MODULE_BYTES,
 };
 
+use super::runner::Runner;
 use super::{InstallRecord, PluginStore, PluginStoreError};
 
 /// Largest `config` an install may carry, serialized.
@@ -27,6 +28,8 @@ const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub struct PluginsState {
     pub store: PluginStore,
     pub pool: Arc<CompilePool>,
+    /// Source of `/plugins/{id}/status`.
+    pub runner: Arc<Runner>,
     /// Bearer token every `/plugins*` request must present, or `None` to leave it open.
     pub auth_token: Option<Arc<str>>,
 }
@@ -54,6 +57,7 @@ pub fn router(state: PluginsState) -> Router {
         )
         .route("/plugins", post(install).get(list))
         .route("/plugins/{id}", get(get_one).delete(remove))
+        .route("/plugins/{id}/status", get(status))
         .route("/plugins/{id}/enable", post(enable))
         .route("/plugins/{id}/disable", post(disable))
         .route_layer(middleware::from_fn_with_state(
@@ -218,6 +222,17 @@ async fn get_one(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such install"))
 }
 
+/// What the install's ticks have done (empty before the first one).
+async fn status(
+    State(st): State<PluginsState>,
+    Path(id): Path<String>,
+) -> Result<Json<super::runner::PluginStatus>, ApiError> {
+    if st.store.get(&id).map_err(internal)?.is_none() {
+        return Err(err(StatusCode::NOT_FOUND, "no such install"));
+    }
+    Ok(Json(st.runner.status(&id).unwrap_or_default()))
+}
+
 async fn set_enabled(
     st: &PluginsState,
     id: &str,
@@ -287,9 +302,11 @@ mod tests {
         let db = sled::open(dir.path()).unwrap();
         let host = Arc::new(PluginHost::new(Limits::default()).unwrap());
         let pool = Arc::new(CompilePool::new(host, 2, 4, Duration::from_secs(30)).unwrap());
+        let store = PluginStore::open(&db).unwrap();
         (
             PluginsState {
-                store: PluginStore::open(&db).unwrap(),
+                runner: Runner::new(store.clone(), pool.clone()),
+                store,
                 pool,
                 auth_token: token.map(Arc::from),
             },
@@ -348,6 +365,22 @@ mod tests {
         assert_eq!(v["size"], m.len());
         assert_eq!(v["capabilities"]["log"], true);
         assert_eq!(v["capabilities"]["tick_interval_secs"], 30);
+    }
+
+    #[tokio::test]
+    async fn status_is_404_for_an_unknown_install_and_empty_before_the_first_tick() {
+        let (st, _d) = state(None);
+        let app = router(st);
+        let (status, _) = call(&app, "GET", "/plugins/nope/status", Vec::new(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let sha = upload(&app, &module(CAPS)).await;
+        let (_, rec) = call(&app, "POST", "/plugins", install_body(&sha, CAPS), None).await;
+        let uri = format!("/plugins/{}/status", rec["id"].as_str().unwrap());
+        let (status, v) = call(&app, "GET", &uri, Vec::new(), None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["ticks"], 0);
+        assert!(v["last_ok"].is_null());
+        assert_eq!(v["logs"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -460,8 +493,10 @@ mod tests {
         let host = Arc::new(PluginHost::new(Limits::default()).unwrap());
         // A zero timeout times every compile out.
         let pool = Arc::new(CompilePool::new(host, 1, 1, Duration::ZERO).unwrap());
+        let store = PluginStore::open(&db).unwrap();
         let st = PluginsState {
-            store: PluginStore::open(&db).unwrap(),
+            runner: Runner::new(store.clone(), pool.clone()),
+            store,
             pool,
             auth_token: None,
         };

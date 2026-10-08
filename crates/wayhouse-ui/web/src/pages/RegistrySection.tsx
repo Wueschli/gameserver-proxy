@@ -213,7 +213,8 @@ export function RegistrySection({ onInstalled }: { onInstalled?: (name: string) 
       {listing && !listing.min_proxy_checked && (
         <p className="mt-2 text-xs text-ink-faint">
           Compatibility is checked against sniffer ABI {listing.host_abi}. Each sniffer&apos;s minimum proxy version
-          is not checked yet.
+          could not be checked against every proxy: the aggregator is unreachable, no proxy is registered, or one
+          runs a build that reports no version.
         </p>
       )}
 
