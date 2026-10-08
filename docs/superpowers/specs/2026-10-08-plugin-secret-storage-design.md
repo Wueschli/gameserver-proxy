@@ -22,6 +22,7 @@ Consequence worth stating plainly: **the cluster key is as sensitive as every se
 
 - **[decided]** One cluster key, provisioned identically to every controller node out of band. It is never written to the replicated log, a snapshot, the `sled` database or an API response.
 - Source: `--plugin-secret-key-file <path>` (preferred; refused when the file is readable by group or others on Unix) or the environment variable `WAYHOUSE_PLUGIN_SECRET_KEY`. Neither set means the node has **no key**: the plugin secrets API answers `409` ("no secret key configured") and plugins with secret slots are held (below). No default, no generated key: a key the controller invented would not survive a node replacement.
+- Key material must come from a CSPRNG: the operator generates each key with `openssl rand -base64 32` (the same in fish). The key is used as raw AEAD key bytes with no password-based derivation, so a human-chosen or predictable value would let anyone holding a log, snapshot or backup guess it offline. The controller rejects a line that does not decode to exactly 32 bytes; it cannot check entropy, so the docs and the `--help` text say to use a generated key.
 - The key file is a **keyring**: one 32-byte key per line, base64, in order of age; the **last line is the active key** that encrypts new writes, earlier lines only decrypt. A single line is the common case.
 - Each key has an id, the first 8 bytes of `sha256("wayhouse-plugin-secret-key-id" || key)`, hex. The id is stored with each ciphertext and is not secret.
 - Cipher: **XChaCha20-Poly1305** (the `chacha20poly1305` crate, already in `Cargo.lock`), random 192-bit nonce per encryption, so no nonce counter has to be coordinated across nodes. The associated data binds the ciphertext to its place: `install id || 0x00 || slot name || 0x00 || key id`. A ciphertext copied to another slot or install fails authentication.
@@ -56,7 +57,7 @@ Unchanged from the system design, made precise:
 
 - A slot is bound to a list of hosts in the module's embedded capabilities and approved with them. A module update that adds a slot or widens a binding needs re-approval (existing rule).
 - Expansion happens in the `http` host import, in **header values only**, for the exact token `${secret:NAME}` (no partial or computed names; query strings and bodies are not expanded). A token for an unknown, unset or not-approved slot fails the call; it is never sent literally.
-- The check runs against the **connection's** host, per hop, including every redirect hop the `http` import follows: a redirect from a bound host to another approved host re-evaluates the binding, so the second host gets the header without the secret expanded (the call fails instead). Redirects to unapproved hosts are already refused.
+- The check runs against the **connection's** host, per hop, including every redirect hop the `http` import follows: every redirect re-evaluates the binding against the new host. A target that is approved and also bound to the slot may receive the expanded secret; a target that is approved but **not** bound to it fails the call (the secret is never expanded for it, and the header is never sent literally). Redirects to unapproved hosts are already refused.
 
 ## Redaction
 
@@ -123,7 +124,7 @@ Tests the gate requires before slice 4 merges:
 - A follower-received `PUT` produces a log entry holding only ciphertext.
 - A node without the key holds the plugin and the other plugins still run; a leader without the key raises the alert.
 - Rotation: add key, rewrap, retire key, old ciphertexts read before and after; retiring early yields `held`, not a crash.
-- Redaction: a destination that echoes the header gives the guest `[redacted]`; a redirect to a second approved host does not receive the secret.
+- Redaction: a destination that echoes the header gives the guest `[redacted]`; a redirect to an approved host that is not bound to the slot fails the call and never receives the secret.
 - Request bodies of the secrets routes do not appear in logs at `trace` level.
 
 ## Open items (not blocking this review)
