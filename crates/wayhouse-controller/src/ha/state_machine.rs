@@ -2029,7 +2029,7 @@ mod tests {
     async fn two_replicas_applying_the_same_plugin_entries_converge_and_a_snapshot_catches_up() {
         let (mut a, _a) = test_sm();
         let (mut b, _b) = test_sm();
-        let log = vec![
+        let log = [
             WriteRequest::PluginInstall(plugin_record("x")),
             WriteRequest::PluginInstall(plugin_record("y")),
             plugin_state("x", 0, TERM, &[("n", b"1")]),
