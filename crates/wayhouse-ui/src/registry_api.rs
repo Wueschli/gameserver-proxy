@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use wayhouse_registry::{
-    abi_matches, select, verify_artifact, Environment, Index, SnifferEntry, MAX_MODULE_BYTES,
+    abi_matches, check_min_proxy, select, verify_artifact, Environment, Index, SnifferEntry,
+    MAX_MODULE_BYTES,
 };
 
 use crate::api::AppState;
@@ -101,23 +102,79 @@ fn fetch_failure(e: &FetchError) -> Response {
     error(StatusCode::BAD_GATEWAY, format!("registry: {e}"))
 }
 
-/// This release's compatibility environment. The aggregator does not report
-/// proxy versions yet, so `min_proxy` cannot be enforced; the listing says so.
-fn environment() -> Environment {
-    Environment {
-        abi: host_abi(),
-        proxy_versions: Vec::new(),
+/// What a sniffer will be installed into: this release's ABI and the version of
+/// every proxy the aggregator knows.
+struct FleetEnv {
+    env: Environment,
+    /// Every registered proxy reported a version, so `min_proxy` is enforced
+    /// for all of them. False when the aggregator is unreachable, knows no
+    /// proxy, or one runs a build that reports no (or an unreadable) version;
+    /// the versions that are known are still checked.
+    min_proxy_checked: bool,
+}
+
+/// The ABI-only environment, for when the fleet's versions cannot be learned.
+fn unchecked() -> FleetEnv {
+    FleetEnv {
+        env: Environment {
+            abi: host_abi(),
+            proxy_versions: Vec::new(),
+        },
+        min_proxy_checked: false,
     }
 }
 
-fn compatible(entry: &SnifferEntry) -> serde_json::Value {
-    match select(entry, &environment()) {
+/// Read the proxy versions from the aggregator's `/fleet/healthz`. Stale
+/// instances count: the install still fans out to them.
+async fn fleet_env(state: &AppState, actor: Option<String>) -> FleetEnv {
+    let resp = crate::aggregator_proxy::proxy_raw(
+        state,
+        Method::GET,
+        "/fleet/healthz",
+        None,
+        "application/json",
+        actor,
+    )
+    .await;
+    let (parts, body) = resp.into_parts();
+    if parts.status != StatusCode::OK {
+        return unchecked();
+    }
+    let body = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    match serde_json::from_slice::<Vec<HealthEntry>>(&body) {
+        Ok(instances) => fleet_env_from(&instances),
+        Err(_) => unchecked(),
+    }
+}
+
+fn fleet_env_from(instances: &[HealthEntry]) -> FleetEnv {
+    let versions: Vec<_> = instances
+        .iter()
+        .map(|i| semver::Version::parse(&i.version).ok())
+        .collect();
+    FleetEnv {
+        min_proxy_checked: !versions.is_empty() && versions.iter().all(Option::is_some),
+        env: Environment {
+            abi: host_abi(),
+            proxy_versions: versions.into_iter().flatten().collect(),
+        },
+    }
+}
+
+fn compatible(entry: &SnifferEntry, env: &Environment) -> serde_json::Value {
+    match select(entry, env) {
         Ok(v) => json!({ "version": v.version.to_string() }),
         Err(why) => json!({ "reason": why.to_string() }),
     }
 }
 
-async fn list_sniffers(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn list_sniffers(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(id): Path<String>,
+) -> Response {
     let Some(reg) = state.registries.get(&id) else {
         return error(StatusCode::NOT_FOUND, "no such registry");
     };
@@ -125,12 +182,13 @@ async fn list_sniffers(State(state): State<AppState>, Path(id): Path<String>) ->
         Ok(i) => i,
         Err(e) => return fetch_failure(&e),
     };
+    let fleet = fleet_env(&state, actor).await;
     let sniffers: Vec<_> = index
         .sniffers
         .iter()
         .map(|entry| {
             let mut v = serde_json::to_value(entry).expect("index entries serialize");
-            v["compatible"] = compatible(entry);
+            v["compatible"] = compatible(entry, &fleet.env);
             v
         })
         .collect();
@@ -138,7 +196,7 @@ async fn list_sniffers(State(state): State<AppState>, Path(id): Path<String>) ->
         "registry": registry_json(&reg),
         "index_name": index.name,
         "host_abi": host_abi(),
-        "min_proxy_checked": false,
+        "min_proxy_checked": fleet.min_proxy_checked,
         "sniffers": sniffers,
     }))
     .into_response()
@@ -196,7 +254,7 @@ async fn install(
         return error(StatusCode::NOT_FOUND, "no such sniffer in this registry");
     };
 
-    let env = environment();
+    let env = fleet_env(&state, actor.clone()).await.env;
     let version = match &req.version {
         Some(want) => {
             let Some(v) = entry.versions.iter().find(|v| &v.version == want) else {
@@ -210,6 +268,9 @@ async fn install(
                         v.abi, env.abi
                     ),
                 );
+            }
+            if let Err(why) = check_min_proxy(v, &env) {
+                return error(StatusCode::UNPROCESSABLE_ENTITY, why.to_string());
             }
             v
         }
@@ -354,6 +415,9 @@ struct InstalledSniffer {
 #[derive(Deserialize)]
 struct HealthEntry {
     instance: String,
+    /// Empty from an aggregator or proxy build that predates the field.
+    #[serde(default)]
+    version: String,
 }
 
 /// Instances that run one build of one sniffer.
@@ -377,6 +441,7 @@ fn update_from(
     reg: &RegistryRef,
     entry: &SnifferEntry,
     installed: &semver::Version,
+    env: &Environment,
 ) -> Option<Update> {
     let newest = entry
         .versions
@@ -385,14 +450,13 @@ fn update_from(
     if newest.version <= *installed {
         return None;
     }
-    let env = environment();
     let pick = |compatible, version: &semver::Version, reason| Update {
         registry_id: reg.id.clone(),
         version: version.clone(),
         compatible,
         reason,
     };
-    match select(entry, &env) {
+    match select(entry, env) {
         Ok(v) if v.version > *installed => Some(pick(true, &v.version, None)),
         other => {
             let reason = if abi_matches(&newest.abi, &env.abi).unwrap_or(false) {
@@ -475,6 +539,7 @@ async fn check_updates(
         );
     };
     instances.sort_by(|a, b| a.instance.cmp(&b.instance));
+    let fleet = fleet_env_from(&instances);
 
     // One request per instance at once, so a slow proxy delays the check by its
     // own timeout, not the sum of them. Results are merged in `instances` order.
@@ -549,7 +614,7 @@ async fn check_updates(
                     .iter()
                     .filter_map(|(reg, index)| {
                         let entry = index.sniffers.iter().find(|e| e.name == name)?;
-                        update_from(reg, entry, installed)
+                        update_from(reg, entry, installed, &fleet.env)
                     })
                     .max_by(|a, b| (a.compatible, &a.version).cmp(&(b.compatible, &b.version)))
             });
@@ -572,7 +637,7 @@ async fn check_updates(
         .collect();
     Json(json!({
         "host_abi": host_abi(),
-        "min_proxy_checked": false,
+        "min_proxy_checked": fleet.min_proxy_checked,
         "registries": registries,
         "sniffers": rows,
         "instance_errors": instance_errors,
@@ -632,9 +697,17 @@ mod tests {
 
     /// A stand-in aggregator answering the fleet upload with `results`.
     async fn fake_aggregator(results: serde_json::Value) -> (String, Uploads) {
+        fake_aggregator_with_health(results, None).await
+    }
+
+    /// As [`fake_aggregator`], and serving `/fleet/healthz` with `health` when given.
+    async fn fake_aggregator_with_health(
+        results: serde_json::Value,
+        health: Option<serde_json::Value>,
+    ) -> (String, Uploads) {
         let uploads: Uploads = Arc::default();
         let seen = uploads.clone();
-        let app = Router::new().route(
+        let mut app = Router::new().route(
             "/fleet/sniffers",
             post(move |body: Bytes| {
                 let seen = seen.clone();
@@ -645,6 +718,15 @@ mod tests {
                 }
             }),
         );
+        if let Some(health) = health {
+            app = app.route(
+                "/fleet/healthz",
+                get(move || {
+                    let health = health.clone();
+                    async move { Json(health) }
+                }),
+            );
+        }
         (serve(app).await, uploads)
     }
 
@@ -855,6 +937,74 @@ mod tests {
         assert_eq!(body["sniffers"][0]["name"], "demo");
         assert_eq!(body["sniffers"][0]["compatible"]["version"], "0.1.0");
         assert_eq!(body["min_proxy_checked"], false);
+    }
+
+    fn health(versions: &[&str]) -> serde_json::Value {
+        let rows: Vec<_> = versions
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                json!({ "instance": format!("p{i}"), "last_seen_ms_ago": 1, "stale": false, "version": v })
+            })
+            .collect();
+        json!(rows)
+    }
+
+    #[tokio::test]
+    async fn sniffer_listing_enforces_min_proxy_against_the_fleet_versions() {
+        let module = wat::parse_str(MODULE_WAT).unwrap();
+        let base = fake_registry(module, "0.1", None).await;
+        // The demo sniffer needs proxy 0.1.0; one proxy still runs 0.0.9.
+        let (agg, _) =
+            fake_aggregator_with_health(json!([]), Some(health(&["0.1.0", "0.0.9"]))).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Viewer).await;
+        let (_, body) = h
+            .call(
+                "GET",
+                &format!("/api/registries/{}/sniffers", h.registry_id),
+                None,
+            )
+            .await;
+        assert_eq!(body["min_proxy_checked"], true);
+        let reason = body["sniffers"][0]["compatible"]["reason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("0.1.0") && reason.contains("0.0.9"),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sniffer_listing_with_a_proxy_that_reports_no_version_is_not_fully_checked() {
+        let module = wat::parse_str(MODULE_WAT).unwrap();
+        let base = fake_registry(module, "0.1", None).await;
+        let (agg, _) = fake_aggregator_with_health(json!([]), Some(health(&["0.1.0", ""]))).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Viewer).await;
+        let (_, body) = h
+            .call(
+                "GET",
+                &format!("/api/registries/{}/sniffers", h.registry_id),
+                None,
+            )
+            .await;
+        assert_eq!(body["min_proxy_checked"], false);
+        assert_eq!(body["sniffers"][0]["compatible"]["version"], "0.1.0");
+    }
+
+    #[tokio::test]
+    async fn install_refuses_a_version_a_proxy_is_too_old_for_and_uploads_nothing() {
+        let module = wat::parse_str(MODULE_WAT).unwrap();
+        let base = fake_registry(module, "0.1", None).await;
+        let (agg, uploads) = fake_aggregator_with_health(json!([]), Some(health(&["0.0.9"]))).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = h.install().await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains("0.0.9"), "{body}");
+        // Naming the version does not get around the check.
+        let (status, _) = install_version(&h, "0.1.0").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(uploads.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1185,11 +1335,19 @@ mod tests {
 
     /// An aggregator that knows `instances` `(name, sniffer listing)`.
     async fn fake_fleet(instances: serde_json::Value) -> String {
+        fake_fleet_at(instances, None).await
+    }
+
+    /// As [`fake_fleet`], every instance reporting product `version`.
+    async fn fake_fleet_at(instances: serde_json::Value, version: Option<&str>) -> String {
         let health: Vec<_> = instances
             .as_object()
             .unwrap()
             .keys()
-            .map(|k| json!({ "instance": k, "last_seen_ms_ago": 1, "stale": false }))
+            .map(|k| {
+                json!({ "instance": k, "last_seen_ms_ago": 1, "stale": false,
+                        "version": version.unwrap_or("") })
+            })
             .collect();
         let app = Router::new()
             .route(
@@ -1295,6 +1453,26 @@ mod tests {
         assert_eq!(update["compatible"], false);
         assert!(
             update["reason"].as_str().unwrap().contains("ABI"),
+            "{update}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_marks_an_update_a_proxy_is_too_old_for_as_incompatible() {
+        let old = sha_of(b"v1");
+        // Both versions need proxy 0.1.0 (see `registry_with_versions`).
+        let (reg, _) = registry_with_versions(&[
+            ("0.2.0", "0.1", sha_of(b"v2")),
+            ("0.1.0", "0.1", old.clone()),
+        ])
+        .await;
+        let fleet = fake_fleet_at(json!({ "a": listing(&old) }), Some("0.0.9")).await;
+        let (_, body) = check(&checker(&[&reg], &fleet)).await;
+        assert_eq!(body["min_proxy_checked"], true);
+        let update = &body["sniffers"][0]["update"];
+        assert_eq!(update["compatible"], false);
+        assert!(
+            update["reason"].as_str().unwrap().contains("0.0.9"),
             "{update}"
         );
     }

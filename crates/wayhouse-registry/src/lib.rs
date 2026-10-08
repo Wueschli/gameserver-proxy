@@ -6,7 +6,7 @@ pub mod index;
 pub mod manifest;
 pub mod verify;
 
-pub use compat::{abi_matches, select, AbiParseError, Environment, Incompatible};
+pub use compat::{abi_matches, check_min_proxy, select, AbiParseError, Environment, Incompatible};
 pub use generate::{generate, to_json, Artifact, GenerateError, Generated};
 pub use index::{
     parse_index, Index, IndexError, Kind, Limits, SnifferEntry, VersionEntry, INDEX_SCHEMA,

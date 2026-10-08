@@ -64,6 +64,11 @@ Check the fleet view in the UI between steps: an instance more than one minor be
 newest, on another protocol major, or that refused a request for an incompatible protocol
 in the last five minutes is red; one minor behind is yellow.
 
+The fleet view lists only the instances that push to the aggregator, which are the
+proxies. Controllers, the aggregator, the UI and agents do not appear in it. For those,
+read `wayhouse_build_info` on each component's `/metrics` between steps (its `version` and
+`protocol` labels).
+
 ## Controller tiers
 
 Upgrade a tier completely (all its replicas, see below) before moving to its parent.
@@ -71,6 +76,11 @@ Parent-to-child and child-to-parent calls both carry protocol versions, so a chi
 minor older than its parent is sent only baseline fields. A `slave` tier relays writes
 upward through its leader; a tier mid-upgrade keeps relaying as long as the protocol
 major matches.
+
+The baseline-fields rule for a child one minor older is **not covered by an automated
+test** for the tier path (the fleet tests exercise a proxy against a controller, not a
+`slave` tier against its parent); treat the first tier upgrade in your environment as a
+rehearsal.
 
 ## Raft HA inside a tier
 
