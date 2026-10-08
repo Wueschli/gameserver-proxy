@@ -34,7 +34,7 @@ New Raft entries, gated for rolling upgrades like every plugin entry (addendum, 
 
 - `PluginSecretSet { install_id, slot, key_id, nonce, ciphertext, updated_at, actor }`
 - `PluginSecretDelete { install_id, slot, actor }`
-- `PluginSecretRewrap { items: [{install_id, slot, key_id, nonce, ciphertext}] }`: used by rotation, applied atomically.
+- `PluginSecretRewrap { items: [{install_id, slot, from_updated_at, key_id, nonce, ciphertext}] }`: used by rotation, applied atomically. Each item carries the `updated_at` of the ciphertext it was derived from; on apply an item whose slot has a different `updated_at` (a `PUT` or delete landed between the leader's decrypt and the apply) is skipped, never overwritten, and the apply result lists the skipped items so a rerun picks them up.
 
 Install records (#220 slice 3) never contain secret material. The install's approved capabilities already name the slots and their bound hosts.
 
@@ -47,7 +47,7 @@ All routes sit behind the existing admin bearer layer (no new auth scheme) and a
 - `PUT /plugins/{id}/secrets/{slot}`: body `{"value": "..."}`, at most 4 KiB. The slot must be one of the install's **approved** slots (`404` otherwise); an empty value is `400`. Returns `{slot, set: true, key_id, updated_at}`.
 - `DELETE /plugins/{id}/secrets/{slot}`: `204`.
 - `GET /plugins/{id}/secrets`: per slot `{slot, description, bound_hosts, set, key_id, updated_at}`. **There is no endpoint that returns a value, and `GET /plugins/{id}` and the install list never include secret fields.** The UI shows "set / not set" and a replace field.
-- Secret values are accepted only over the admin listener's TLS or a loopback bind; the controller refuses to start `--plugins` with a secret key on a plain-HTTP non-loopback listener unless `--allow-insecure-secrets` is given (loud warning). Request bodies of these routes are never logged: the request-logging layer skips them, and the value type has no `Debug`.
+- Secret values are accepted only over the admin listener's TLS or a loopback bind; the controller refuses to start `--plugins` with a secret key on a plain-HTTP non-loopback listener unless `--allow-insecure-secrets` is given (loud warning). Request bodies of these routes must never be logged: the controller has no request-logging layer today, so this is an implementation requirement (any logging or tracing layer added later skips these routes' bodies), and the value type has no `Debug`.
 - Deleting an install deletes its secrets in the same entry.
 - Every set, delete and rewrap writes an audit log line (`install`, `slot`, `key_id`, `actor`, never the value).
 
@@ -76,13 +76,17 @@ Per node, per install, the status is one of: `active`, `pending` (module blob no
 
 ## A joining node
 
-The key is **not** distributed through the cluster or the peer protocol: that would put the key one authenticated request away from any peer and defeat out-of-band provisioning. A node added with `--ha-join` (or replaced after a disk loss) must be started with the same key source as the others, exactly as it must carry the same `--ha-token` today. Without it the node joins, replicates ciphertext and runs held; supplying the key later and sending `SIGHUP` (or restarting) activates the plugins. `GET /admin/ha/members` shows each node's key ids so a missing key is visible before a failover needs it. Losing every copy of the key loses every secret: the operator re-enters them, and the docs say so next to the backup instructions.
+The key is **not** distributed through the cluster or the peer protocol: that would put the key one authenticated request away from any peer and defeat out-of-band provisioning. A node added with `--ha-join` (or replaced after a disk loss) must be started with the same key source as the others, exactly as it must carry the same `--ha-token` today. Without it the node joins, replicates ciphertext and runs held; supplying the key later and reloading it (see "Reloading the keyring") activates the plugins. `GET /admin/ha/members` shows each node's key ids so a missing key is visible before a failover needs it. Losing every copy of the key loses every secret: the operator re-enters them, and the docs say so next to the backup instructions.
+
+## Reloading the keyring
+
+The controller binary has no `SIGHUP` handler today (only the proxy does), and a signal cannot re-read an environment variable. **[recommended]** The key **file** is polled for changes like the TLS certificate (`wayhouse_http::tls::ReloadingCert`), so adding a key line needs no restart. The environment source is read at start only; a change to it takes a restart. Slice 1 builds the file watcher; a `SIGHUP` handler is not needed.
 
 ## Rotation
 
 Rotation replaces the active key; it is an operator action in three steps and never needs downtime.
 
-1. **Add.** Append a new key line to the keyring on every node and reload (`SIGHUP`). New writes use the new key; old ciphertexts still decrypt with the old line. Nodes that have not yet reloaded can still read the new ciphertext only after they get the new line, so the operator adds the line everywhere before any write; the members view lists key ids per node to confirm.
+1. **Add.** Append a new key line to the keyring on every node and let each node reload it (see "Reloading the keyring"). New writes use the new key; old ciphertexts still decrypt with the old line. Nodes that have not yet reloaded can still read the new ciphertext only after they get the new line, so the operator adds the line everywhere before any write; the members view lists key ids per node to confirm.
 2. **Rewrap.** `POST /admin/plugins/secrets/rewrap` (leader-side): decrypts every secret and proposes one `PluginSecretRewrap` entry that re-encrypts them under the active key. It is idempotent, and refuses to run while any node lacks the active key (it reports which).
 3. **Retire.** Once `GET /plugins/{id}/secrets` shows the new `key_id` everywhere (and the old key is no longer used by any replicated ciphertext), the operator removes the old line from the keyring. Retiring early is safe by construction: a secret still under a removed key just reads as `held: key <id> missing` until the operator re-enters or restores the key.
 
@@ -90,7 +94,7 @@ A leaked key is handled as: rotate the upstream credentials first, then rotate t
 
 ## Log compaction
 
-The Raft log keeps entries until a snapshot lets it purge (`raft_config`, currently the last 1000 entries after each snapshot; `crates/wayhouse-controller/src/ha/mod.rs`), and `sled` does not overwrite freed pages. A superseded or deleted `PluginSecretSet` therefore stays readable as ciphertext in the log, in the `sled` file and in every backup of either.
+The Raft log keeps entries until a snapshot lets it purge (`raft_config`: a snapshot every `SNAPSHOT_AFTER` = 5000 entries, then the last 1000 kept, so without a purge trigger a superseded ciphertext can linger for roughly 6000 entries; `crates/wayhouse-controller/src/ha/mod.rs`), and `sled` does not overwrite freed pages. A superseded or deleted `PluginSecretSet` therefore stays readable as ciphertext in the log, in the `sled` file and in every backup of either.
 
 **This is acceptable because it is ciphertext**, and the design does not rely on erasure for confidentiality. It still limits how long and how widely superseded ciphertext lingers:
 
@@ -124,6 +128,7 @@ Tests the gate requires before slice 4 merges:
 - A follower-received `PUT` produces a log entry holding only ciphertext.
 - A node without the key holds the plugin and the other plugins still run; a leader without the key raises the alert.
 - Rotation: add key, rewrap, retire key, old ciphertexts read before and after; retiring early yields `held`, not a crash.
+- A `PUT` that lands between a rewrap's decrypt and its apply survives: the rewrap skips that slot and reports it.
 - Redaction: a destination that echoes the header gives the guest `[redacted]`; a redirect to an approved host that is not bound to the slot fails the call and never receives the secret.
 - Request bodies of the secrets routes do not appear in logs at `trace` level.
 
