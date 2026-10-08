@@ -1,0 +1,18 @@
+[package]
+name = "wayhouse-plugin-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Guest-side ABI helper for wayhouse plugins (Wave 5)."
+publish = false
+
+# The plugin counterpart of wayhouse-sniffer-abi: no dependencies, builds natively, and
+# is built for wasm32 by plugin authors. The host (wayhouse-plugin-host) reads the
+# ABI_MAJOR / ABI_MINOR constants.
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["lib"]

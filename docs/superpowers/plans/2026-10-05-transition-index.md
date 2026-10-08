@@ -32,7 +32,7 @@ Specs written because none existed: [plugin system design](../specs/2026-10-07-p
 3. **Wave 2:** thread G = #8 once everything above is on main, the runners are healthy, and CI is green on the exact commit to tag. Includes the maintainer-assisted steps (tag push, package visibility, PAT).
 4. **Wave 3 (after v0.1.0):** #9, then #11 Part A and #10 in parallel, then #11 Part B, then #12.
 5. **Wave 4:** #186 (draining UDP worker drops new sessions), then #13.
-6. **Wave 5 (new, 2026-10-07):** plugin system build per the plugin system design; Pelican plugin after #213 is verified.
+6. **Wave 5 (new, 2026-10-07):** plugin system build per the plugin system design; Pelican plugin after #213 is verified. Slice 1 (ABI crate and host runtime): [plugin host foundation](2026-10-08-plugin-host-foundation.md).
 
 About 12 implementation threads in total for Waves 0 to 4 (Wave 5, the plugin build in #220, is planned separately); per the project budget, run at most about 8 code threads per session, so Waves 0 and 1 are one session, Wave 2 plus #9 and #10 the next, the rest after that.
 

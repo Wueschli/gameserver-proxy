@@ -146,6 +146,8 @@ crates/
                               (`cargo test -p wayhouse-fleet-tests`, included in `make check`); phase 14's
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
   wayhouse-sniffer-abi/       wayhouse-sniffer-abi: the guest-side ABI crate the official sniffers (github.com/wayhouse-proxy/sniffers) link; the sniffers themselves are not in this repo
+  wayhouse-plugin-abi/        wayhouse-plugin-abi: the guest-side ABI crate plugins link (version section, `alloc`); see `docs/plugins.md`
+  wayhouse-plugin-host/       wayhouse-plugin-host: loads and runs WASM plugins (module/capability inspection, `PluginHost`, `Plugin::init`/`on_timer`, `log`/`state` imports). Not wired into the controller yet
 ```
 
 Dependency direction: `wayhouse` → `wayhouse-core` → `wayhouse-config` (`wayhouse-bench` → `wayhouse-core`
@@ -284,6 +286,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
 | Registry index / manifest format or the sniffer ABI version rules | `wayhouse-registry` (`index.rs`, `compat.rs`), the golden `tests/golden/index.json`, `docs/sniffers.md`, the registry spec |
 | New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as sniffers (Phase 9), never as core code or a fork. |
 | Sniffer ABI (wire format or `wayhouse.abi` version) | `crates/wayhouse-sniffer-abi`, `HOST_ABI` in `sniffer_loader.rs`, the rev pinned in the sniffers repo's `Cargo.toml`, rebuilt sniffer releases, then `sniffers.lock` (`docs/sniffers.md`) |
+| Plugin ABI (imports, exports, capability format or `wayhouse.plugin-abi` version) | `crates/wayhouse-plugin-abi` constants, `HOST_ABI` in `wayhouse-plugin-host`, `docs/plugins.md`, the automation hooks spec |
 | New optional `wayhouse` cargo feature | `crates/wayhouse/Cargo.toml` `[features]` (on by default), a `*_disabled.rs` stub that fails startup with a message naming the feature when the config needs it, a `--no-default-features` test, the AGENTS.md command table |
 | Finished a roadmap item | status legend in `docs/08-roadmap.md`, `README.md` status block, `HANDOVER.md` |
 | New per-connection task or hop | `HANDOVER.md` "latency ledger" note |
