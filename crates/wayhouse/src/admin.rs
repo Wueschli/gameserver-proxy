@@ -1713,7 +1713,8 @@ mod tests {
         let refused = get(Some("2.0")).await.unwrap();
         assert_eq!(refused.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
         let body = refused.text().await.unwrap();
-        assert!(body.contains("2.0") && body.contains("(1.0)"), "{body}");
+        let current = format!("({})", wayhouse_http::protocol::ProtocolVersion::CURRENT);
+        assert!(body.contains("2.0") && body.contains(&current), "{body}");
         // Liveness is never gated.
         let health = http
             .get(format!("{base}/healthz"))
