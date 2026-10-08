@@ -78,6 +78,10 @@ pub struct Effects {
     pub state_puts: BTreeMap<String, Vec<u8>>,
     pub logs: Vec<LogLine>,
     pub logs_dropped: usize,
+    /// The call used the `log` import.
+    pub used_log: bool,
+    /// The call used `state_get` or `state_put`.
+    pub used_state: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +105,8 @@ struct CallState {
     state_ops: usize,
     logs: Vec<LogLine>,
     logs_dropped: usize,
+    used_log: bool,
+    used_state: bool,
     denied: Option<&'static str>,
 }
 
@@ -121,6 +127,10 @@ pub struct PluginHost {
 impl PluginHost {
     /// Build the engine and spawn its epoch-ticker thread.
     pub fn new(limits: Limits) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !limits.call_timeout.is_zero(),
+            "the plugin call timeout must not be zero"
+        );
         let mut cfg = Config::new();
         cfg.epoch_interruption(true);
         let engine =
@@ -280,6 +290,8 @@ impl Plugin {
             state_ops: 0,
             logs: Vec::new(),
             logs_dropped: 0,
+            used_log: false,
+            used_state: false,
             denied: None,
         };
         let mut store = Store::new(&self.engine, state);
@@ -312,6 +324,8 @@ impl Plugin {
             state_puts: st.puts,
             logs: st.logs,
             logs_dropped: st.logs_dropped,
+            used_log: st.used_log,
+            used_state: st.used_state,
         })
     }
 }
@@ -363,6 +377,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 }
                 let raw = read_guest(&mut caller, ptr, len)?;
                 let st = caller.data_mut();
+                st.used_log = true;
                 if st.logs.len() >= st.run.max_log_lines {
                     st.logs_dropped += 1;
                     return Ok(());
@@ -399,6 +414,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 if caller.data().caps.state.is_none() {
                     return Err(deny(&mut caller, "state"));
                 }
+                caller.data_mut().used_state = true;
                 let key = read_guest(&mut caller, kptr, klen)?;
                 let Ok(key) = String::from_utf8(key) else {
                     return Ok(-1);
@@ -428,6 +444,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 let Some(cap) = caller.data().caps.state else {
                     return Err(deny(&mut caller, "state"));
                 };
+                caller.data_mut().used_state = true;
                 let key = read_guest(&mut caller, kptr, klen)?;
                 let value = read_guest(&mut caller, vptr, vlen)?;
                 let Ok(key) = String::from_utf8(key) else {

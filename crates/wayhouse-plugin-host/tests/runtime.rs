@@ -394,3 +394,38 @@ fn init_fails_when_alloc_returns_zero() {
         Err(CallError::Trap(_))
     ));
 }
+
+#[test]
+fn effects_report_which_capabilities_were_used() {
+    let m = guest(
+        TIMER_LOG_STATE,
+        r#"(func (export "init") (param i32 i32))
+           (func (export "on_timer")
+             (call $log (i32.const 2) (i32.const 0) (i32.const 5)))"#,
+    );
+    let fx = host()
+        .load(&m, &approved(&m))
+        .unwrap()
+        .on_timer(&StateSnapshot::new())
+        .unwrap();
+    assert!(fx.used_log && !fx.used_state);
+}
+
+#[test]
+fn a_zero_call_timeout_is_rejected() {
+    let r = PluginHost::new(Limits {
+        call_timeout: Duration::ZERO,
+        ..Limits::default()
+    });
+    assert!(r.is_err());
+}
+
+#[test]
+fn a_declared_state_cap_over_the_host_ceiling_is_rejected() {
+    let m = guest(
+        r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"state":{"max_bytes":2097152}}"#,
+        r#"(func (export "init") (param i32 i32))
+           (func (export "on_timer"))"#,
+    );
+    assert!(matches!(inspect(&m), Err(ModuleError::CapsInvalid(_))));
+}
