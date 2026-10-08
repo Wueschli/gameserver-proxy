@@ -67,7 +67,7 @@ memory sizes, globals, imports, exports and total code bytes (`Bounds`, set thro
 `Limits::bounds`). `CompilePool` runs `PluginHost::load` on a fixed set of worker threads
 behind a bounded queue: a full queue answers `Busy` at once and a slow compile answers
 `TimedOut` (the compile itself cannot be interrupted, so it keeps its worker until done).
-The controller must load modules through the pool, never on its main loop.
+The controller must load modules through the pool, never on its main loop. The workspace sets `panic = "abort"` for the release profile, so a panic in a compile worker (for example a wasmtime bug) ends the process rather than silently shrinking the pool; the bounds exist to keep hostile input away from that path.
 
 A declared `state.max_bytes` above 1 MiB is rejected, and `PluginHost::new` refuses a zero
 `call_timeout`.

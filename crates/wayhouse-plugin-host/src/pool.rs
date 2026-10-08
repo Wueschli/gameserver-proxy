@@ -79,6 +79,14 @@ impl CompilePool {
         &self,
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, PoolError> {
+        self.run_with_timeout(f, self.timeout)
+    }
+
+    pub(crate) fn run_with_timeout<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+        timeout: Duration,
+    ) -> Result<T, PoolError> {
         let (tx, rx) = mpsc::channel();
         let job: Job = Box::new(move || {
             let _ = tx.send(f());
@@ -89,7 +97,7 @@ impl CompilePool {
                 return Err(PoolError::Busy)
             }
         }
-        match rx.recv_timeout(self.timeout) {
+        match rx.recv_timeout(timeout) {
             Ok(v) => Ok(v),
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 Err(PoolError::TimedOut)
@@ -142,39 +150,49 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_full_queue_answers_busy_at_once() {
-        let p = Arc::new(pool(1, 1, Duration::from_millis(100)));
-        let (gate_tx, gate_rx) = mpsc::channel::<()>();
-        let gate_rx = Arc::new(Mutex::new(gate_rx));
-        // Occupy the worker and the one queue slot with jobs that wait on the gate.
-        let mut waiters = Vec::new();
-        for _ in 0..2 {
-            let (p, g) = (p.clone(), gate_rx.clone());
-            waiters.push(std::thread::spawn(move || {
-                let _ = p.run(move || {
-                    let _ = g.lock().unwrap().recv();
-                });
-            }));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-        let started = std::time::Instant::now();
-        assert!(matches!(p.run(|| ()), Err(PoolError::Busy)));
-        assert!(started.elapsed() < Duration::from_millis(50));
-        drop(gate_tx);
-        for w in waiters {
-            w.join().unwrap();
+    /// A job that reports it has started, then blocks until the gate is dropped.
+    fn gated_job(
+        started: mpsc::Sender<()>,
+        gate: mpsc::Receiver<()>,
+    ) -> impl FnOnce() + Send + 'static {
+        move || {
+            let _ = started.send(());
+            let _ = gate.recv();
         }
     }
 
     #[test]
+    fn a_full_queue_answers_busy_at_once() {
+        let p = Arc::new(pool(1, 1, Duration::from_secs(30)));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        // The worker is running a job that blocks on the gate.
+        let blocked = {
+            let p = p.clone();
+            std::thread::spawn(move || p.run(gated_job(started_tx, gate_rx)))
+        };
+        started_rx.recv().unwrap();
+        // The one queue slot is taken by a job the busy worker cannot reach.
+        p.sender.try_send(Box::new(|| ())).unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(p.run(|| ()), Err(PoolError::Busy)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(gate_tx);
+        blocked.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn a_slow_job_times_out_and_the_pool_stays_usable() {
-        let p = pool(1, 1, Duration::from_millis(50));
-        assert!(matches!(
-            p.run(|| std::thread::sleep(Duration::from_millis(300))),
-            Err(PoolError::TimedOut)
-        ));
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(p.run(|| 7).is_ok());
+        let p = pool(1, 1, Duration::from_secs(30));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        // Blocks until released, so the short timeout always fires first.
+        let timed_out =
+            p.run_with_timeout(gated_job(started_tx, gate_rx), Duration::from_millis(100));
+        assert!(matches!(timed_out, Err(PoolError::TimedOut)));
+        started_rx.recv().unwrap();
+        drop(gate_tx);
+        // The worker finishes the abandoned job and serves the next one.
+        assert_eq!(p.run(|| 7).unwrap(), 7);
     }
 }
