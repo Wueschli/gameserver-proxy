@@ -204,6 +204,19 @@ describe("PluginsPage install", () => {
     expect(within(dlg).queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
   });
 
+  it("still reports an install whose dialog was closed meanwhile, without disturbing a reopened dialog", async () => {
+    let finish!: (v: unknown) => void;
+    api.installPlugin.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const dlg = await upload();
+    await userEvent.click(within(dlg).getByRole("checkbox", { name: /I approve/i }));
+    await userEvent.click(within(dlg).getByRole("button", { name: "Install" }));
+    await userEvent.click(within(dlg).getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Upload plugin" }));
+    await act(async () => finish(install({ name: "demo" })));
+    expect(await screen.findByText("installed demo")).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Inspect module" })).toBeEnabled();
+  });
+
   it("shows an upload error from the controller", async () => {
     api.uploadPluginModule.mockRejectedValue(new ApiError(400, "not a plugin module"));
     render(<PluginsPage />);

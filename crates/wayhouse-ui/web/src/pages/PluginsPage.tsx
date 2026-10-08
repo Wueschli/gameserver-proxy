@@ -301,17 +301,19 @@ function UploadDialog({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!module || !approved) return;
+    const mine = session.current;
     setBusy(true);
     setError(null);
     try {
       // Exactly the set the module declared: approval is bound to what was shown.
       await installPlugin({ name, sha256: module.sha256, approved: module.capabilities, enabled });
       onInstalled(name);
-      close(false);
+      // The install happened either way; only touch the dialog if it is still this session's.
+      if (mine === session.current) close(false);
     } catch (err) {
-      setError(errorText(err));
+      if (mine === session.current) setError(errorText(err));
     } finally {
-      setBusy(false);
+      if (mine === session.current) setBusy(false);
     }
   }
 
