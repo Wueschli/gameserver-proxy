@@ -16,6 +16,9 @@ publish = false
 # turns defaults off: every fleet binary that serves HTTP asks for `server`, and
 # wayhouse-agent, a client only, doesn't build axum/rustls-server through here.
 default = ["server"]
+# Lets `WAYHOUSE_TEST_PROTOCOL_MAJOR`/`_MINOR` override the announced protocol
+# version. Only `wayhouse-fleet-tests` builds with it; no image does.
+test-protocol-override = []
 server = ["dep:axum", "dep:tokio", "dep:tokio-rustls", "dep:arc-swap", "dep:tracing", "dep:clap", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [lints]

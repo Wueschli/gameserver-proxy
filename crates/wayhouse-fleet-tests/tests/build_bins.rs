@@ -22,7 +22,9 @@ const PKGS: [&str; 6] = [
 fn the_tunnel_build_is_a_no_op_on_a_built_tree() -> Result<()> {
     // Warm up as a shell would run it: none of cargo's per-test variables.
     let mut warm = Command::new("cargo");
-    warm.arg("build").args(PKGS);
+    warm.arg("build")
+        .args(PKGS)
+        .args(wayhouse_fleet_tests::PROTOCOL_OVERRIDE_FEATURE);
     for (k, _) in std::env::vars() {
         if k.starts_with("CARGO_PKG_")
             || k.starts_with("CARGO_MANIFEST_")

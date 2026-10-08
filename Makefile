@@ -94,14 +94,14 @@ tunnel-ns-check:
 ## namespaces (TUNNEL_BACKEND=kernel|userspace, default kernel); see
 ## docs/superpowers/specs/2026-10-01-tunnel-e2e-design.md
 tunnel-e2e: tunnel-ns-check
-	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller
+	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller --features wayhouse-http/test-protocol-override
 	cargo test -p wayhouse-fleet-tests --test tunnel --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo test -p wayhouse-fleet-tests --test tunnel -- --ignored --test-threads=1 --nocapture'
 
 ## tunnel-e2e-ci: tunnel-e2e under cargo-nextest, writing a JUnit report for the CI run
 ## summary (needs cargo-nextest; `make tunnel-e2e` stays on plain cargo test)
 tunnel-e2e-ci: tunnel-ns-check
-	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller
+	cargo build -p wayhouse -p wayhouse-agent -p wayhouse-controller --features wayhouse-http/test-protocol-override
 	cargo nextest run -p wayhouse-fleet-tests --test tunnel --profile ci --run-ignored only --no-run
 	$(TUNNEL_NS) sh -c 'mount -t tmpfs tmpfs /run && mkdir -p /run/wireguard && exec cargo nextest run -p wayhouse-fleet-tests --test tunnel --profile ci --run-ignored only -j1 --no-capture'
 

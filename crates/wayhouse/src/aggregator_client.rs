@@ -158,7 +158,7 @@ fn build_payload(instance: &str, admin_url: &str, handle: &RuntimeHandle) -> Ing
         sessions: SessionCounts { tcp, udp },
         group: snapshot.group.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        protocol: wayhouse_http::protocol::ProtocolVersion::CURRENT.to_string(),
+        protocol: wayhouse_http::protocol::ProtocolVersion::current().to_string(),
         protocol_mismatches: wayhouse_http::protocol::mismatches_total(),
     }
 }

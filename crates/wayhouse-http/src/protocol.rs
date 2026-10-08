@@ -22,7 +22,7 @@ pub const HEADER: &str = "x-wayhouse-protocol";
 /// Incompatible wire changes bump this (even while the product is 0.x).
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Additive wire changes bump this.
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 
 /// Counter, label `route_group` (`controller`, `aggregator`, `raft`): requests
 /// refused because the caller's protocol major differs or the header is garbage.
@@ -38,6 +38,7 @@ pub fn mismatches_total() -> u64 {
     MISMATCHES.load(Ordering::Relaxed)
 }
 
+#[cfg(any(feature = "server", test))]
 fn note_mismatch() {
     MISMATCHES.fetch_add(1, Ordering::Relaxed);
 }
@@ -55,6 +56,29 @@ impl ProtocolVersion {
         major: PROTOCOL_MAJOR,
         minor: PROTOCOL_MINOR,
     };
+
+    /// What this process announces and gates on: [`ProtocolVersion::CURRENT`],
+    /// except that a build with the `test-protocol-override` cargo feature (the
+    /// fleet tests; never a release image, `deploy/lint.sh` checks) lets
+    /// `WAYHOUSE_TEST_PROTOCOL_MAJOR` / `WAYHOUSE_TEST_PROTOCOL_MINOR` stand in
+    /// for it, to play an older or incompatible peer.
+    pub fn current() -> Self {
+        #[cfg(feature = "test-protocol-override")]
+        {
+            let env = |name: &str, default: u16| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default)
+            };
+            return Self {
+                major: env("WAYHOUSE_TEST_PROTOCOL_MAJOR", Self::CURRENT.major),
+                minor: env("WAYHOUSE_TEST_PROTOCOL_MINOR", Self::CURRENT.minor),
+            };
+        }
+        #[cfg(not(feature = "test-protocol-override"))]
+        Self::CURRENT
+    }
 
     /// Same major: the only thing a node refuses on.
     pub fn compatible(&self, other: &Self) -> bool {
@@ -156,7 +180,7 @@ mod server_side {
         mut req: Request,
         next: Next,
     ) -> Response {
-        let ours = ProtocolVersion::CURRENT;
+        let ours = ProtocolVersion::current();
         let mut peer = None;
         let raw = req.headers().get(HEADER);
         if raw.is_some() || group.strict {
@@ -187,7 +211,7 @@ mod server_side {
     }
 
     fn with_version(mut resp: Response) -> Response {
-        let v = HeaderValue::from_str(&ProtocolVersion::CURRENT.to_string())
+        let v = HeaderValue::from_str(&ProtocolVersion::current().to_string())
             .expect("digits and a dot are a valid header value");
         resp.headers_mut().insert(HEADER, v);
         resp

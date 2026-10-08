@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use axum::extract::{OriginalUri, Path, Query, State};
+use axum::Extension;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -38,6 +39,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::Instrument;
+use wayhouse_http::peers::receiver_supports;
+use wayhouse_http::protocol::PeerProtocol;
 
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, unix_secs, AddressBook, ClaimError, Rejection, Role};
@@ -475,11 +478,37 @@ pub fn router<R: Registration>(state: RegistryState<R>, base: &str) -> Router {
 }
 
 #[derive(Serialize)]
-struct SubmitResponse {
+pub(crate) struct SubmitResponse {
     revision: u64,
     tunnel_address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     tunnel_network: Option<String>,
+    /// Features this controller supports, for a caller that speaks protocol
+    /// minor [`CAPABILITIES_SINCE`] or later. Absent for an older caller, which
+    /// is the baseline the gating rule promises it (#185). A later change that
+    /// adds an optional field lists its name here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<&'static [&'static str]>,
+}
+
+/// The protocol minor that introduced [`SubmitResponse::capabilities`].
+const CAPABILITIES_SINCE: u16 = 1;
+
+impl SubmitResponse {
+    pub(crate) fn new(
+        revision: u64,
+        tunnel_address: String,
+        tunnel_network: Option<String>,
+        caller: &PeerProtocol,
+    ) -> Self {
+        Self {
+            revision,
+            tunnel_address,
+            tunnel_network,
+            capabilities: receiver_supports(caller, CAPABILITIES_SINCE)
+                .then_some(&["protocol-gating"]),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -510,6 +539,7 @@ fn not_registered(noun: &str, name: &str) -> Response {
 async fn register<R: Registration>(
     State(state): State<RegistryState<R>>,
     OriginalUri(uri): OriginalUri,
+    Extension(caller): Extension<PeerProtocol>,
     headers: axum::http::HeaderMap,
     body: String,
 ) -> Response {
@@ -529,6 +559,7 @@ async fn register<R: Registration>(
             uri.path(),
             body,
             &ForwardHeaders::from_headers(&headers),
+            &caller,
         )
         .await;
     }
@@ -575,11 +606,12 @@ async fn register<R: Registration>(
             );
             (
                 StatusCode::OK,
-                Json(SubmitResponse {
+                Json(SubmitResponse::new(
                     revision,
-                    tunnel_address: assignment.address.to_string(),
-                    tunnel_network: state.book.network().map(|n| n.to_string()),
-                }),
+                    assignment.address.to_string(),
+                    state.book.network().map(|n| n.to_string()),
+                    &caller,
+                )),
             )
                 .into_response()
         }

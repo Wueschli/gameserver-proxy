@@ -21,6 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use reqwest::Method;
+use wayhouse_http::protocol::PeerProtocol;
 
 use crate::addresses::api::claim_error_response;
 use crate::addresses::{expand_backends, is_stale, ClaimError, Network, Rejection};
@@ -145,14 +146,20 @@ fn unexpected(registry: &str, resp: WriteResponse) -> Response {
         .into_response()
 }
 
-fn submitted(revision: u64, address: IpAddr, network: Option<Network>) -> Response {
+fn submitted(
+    revision: u64,
+    address: IpAddr,
+    network: Option<Network>,
+    caller: &PeerProtocol,
+) -> Response {
     (
         StatusCode::OK,
-        Json(SubmitResponse {
+        Json(SubmitResponse::new(
             revision,
-            tunnel_address: address.to_string(),
-            tunnel_network: network.map(|n| n.to_string()),
-        }),
+            address.to_string(),
+            network.map(|n| n.to_string()),
+            caller,
+        )),
     )
         .into_response()
 }
@@ -166,6 +173,7 @@ pub(super) async fn register<R: Registration>(
     path: &str,
     body: String,
     headers: &ForwardHeaders,
+    caller: &PeerProtocol,
 ) -> Response {
     let words = wording(R::ROLE);
     let recorded = match recorded_network(ha) {
@@ -188,7 +196,7 @@ pub(super) async fn register<R: Registration>(
             if is_stale(&assignment, now, TOUCH_AFTER) {
                 spawn_touch::<R>(ha, reg.name().to_owned(), now, path, body, headers);
             }
-            return submitted(revision, assignment.address, recorded);
+            return submitted(revision, assignment.address, recorded, caller);
         }
     }
 
@@ -200,7 +208,7 @@ pub(super) async fn register<R: Registration>(
     propose_write(&ha.handle, req, path, body, headers, |resp| match resp {
         WriteResponse::Registered { revision, address } => {
             tracing::info!(revision, name = %name, %address, "registered a {}", words.kind);
-            submitted(revision, address, recorded)
+            submitted(revision, address, recorded, caller)
         }
         WriteResponse::Rejected(r) => claim_error_response(&ClaimError::Rejected(r)),
         other => unexpected(words.log, other),

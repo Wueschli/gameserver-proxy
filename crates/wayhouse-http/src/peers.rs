@@ -22,7 +22,7 @@ pub fn receiver_supports(ext: &PeerProtocol, minor: u16) -> bool {
 }
 
 fn supports(v: ProtocolVersion, minor: u16) -> bool {
-    v.major == ProtocolVersion::CURRENT.major && v.minor >= minor
+    v.major == ProtocolVersion::current().major && v.minor >= minor
 }
 
 /// Last protocol version each peer (keyed by whatever string the caller uses,

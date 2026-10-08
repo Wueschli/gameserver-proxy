@@ -104,6 +104,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    async fn registered_with_header(header: &str) -> serde_json::Value {
+        let (state, _book, _dir) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::post("/proxy-peers")
+                    .header(wayhouse_http::protocol::HEADER, header)
+                    .body(Body::from(reg_body("edge-1", "203.0.113.9:51820")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_caller_one_minor_behind_gets_only_the_baseline_fields() {
+        let v = registered_with_header("1.0").await;
+        assert!(v.get("revision").is_some() && v.get("tunnel_address").is_some());
+        assert!(v.get("capabilities").is_none(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_current_caller_is_told_the_controllers_capabilities() {
+        let v = registered_with_header("1.1").await;
+        assert_eq!(v["capabilities"], serde_json::json!(["protocol-gating"]));
+    }
+
     #[tokio::test]
     async fn an_invalid_registration_is_rejected_before_touching_the_store() {
         let (state, _book, _dir) = test_state();

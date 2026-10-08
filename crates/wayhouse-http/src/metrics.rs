@@ -26,7 +26,7 @@ pub use crate::COMMIT;
 /// own recorder and calls this directly; the fleet binaries go through
 /// [`install`].
 pub fn set_build_info(component: &'static str, version: &'static str) {
-    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version, "commit" => COMMIT, "protocol" => crate::protocol::ProtocolVersion::CURRENT.to_string())
+    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version, "commit" => COMMIT, "protocol" => crate::protocol::ProtocolVersion::current().to_string())
         .set(1.0);
 }
 
