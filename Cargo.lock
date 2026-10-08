@@ -4593,6 +4593,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayhouse-plugin-abi"
+version = "0.1.0"
+
+[[package]]
+name = "wayhouse-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tracing",
+ "wasmparser 0.254.2",
+ "wasmtime",
+ "wat",
+ "wayhouse-plugin-abi",
+]
+
+[[package]]
 name = "wayhouse-registry"
 version = "0.1.0"
 dependencies = [
