@@ -71,10 +71,10 @@ impl ProtocolVersion {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(default)
             };
-            return Self {
+            Self {
                 major: env("WAYHOUSE_TEST_PROTOCOL_MAJOR", Self::CURRENT.major),
                 minor: env("WAYHOUSE_TEST_PROTOCOL_MINOR", Self::CURRENT.minor),
-            };
+            }
         }
         #[cfg(not(feature = "test-protocol-override"))]
         Self::CURRENT
