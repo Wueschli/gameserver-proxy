@@ -86,8 +86,8 @@ def check(doc: str, consts: dict):
 
 
 def main(root: Path) -> int:
-    consts = parse_constants({k: (root / p).read_text() for k, p in SOURCES.items()})
-    errors, warnings = check((root / "docs/upgrading.md").read_text(), consts)
+    consts = parse_constants({k: (root / p).read_text(encoding="utf-8") for k, p in SOURCES.items()})
+    errors, warnings = check((root / "docs/upgrading.md").read_text(encoding="utf-8"), consts)
     for w in warnings:
         print(f"warning: {w}")
     for e in errors:

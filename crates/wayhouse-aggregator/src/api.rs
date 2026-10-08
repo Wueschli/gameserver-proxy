@@ -317,6 +317,7 @@ fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
                 version: &s.payload.version,
                 protocol: &s.payload.protocol,
                 mismatch_rose_ms_ago: s.mismatch_rose_at_ms.map(|t| now.saturating_sub(t)),
+                fresh: now.saturating_sub(s.received_at_ms) <= STALE_AFTER_MS,
             })
             .collect::<Vec<_>>(),
     );

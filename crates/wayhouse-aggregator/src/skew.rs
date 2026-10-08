@@ -54,13 +54,22 @@ pub struct Reported<'a> {
     pub protocol: &'a str,
     /// Milliseconds since the mismatch counter last rose, `None` if it never did.
     pub mismatch_rose_ms_ago: Option<u64>,
+    /// Still pushing. A stale instance is classified but never sets the
+    /// "newest" baseline, so a removed or rolled-back node cannot leave the
+    /// rest of the fleet red.
+    pub fresh: bool,
 }
 
 /// The skew of every entry of `fleet`, in order.
 pub fn classify(fleet: &[Reported<'_>]) -> Vec<Skew> {
-    let newest = fleet.iter().filter_map(|r| product(r.version)).max();
+    let newest = fleet
+        .iter()
+        .filter(|r| r.fresh)
+        .filter_map(|r| product(r.version))
+        .max();
     let newest_protocol = fleet
         .iter()
+        .filter(|r| r.fresh)
         .filter_map(|r| protocol_major(r.protocol))
         .max();
     fleet
@@ -93,7 +102,16 @@ mod tests {
             version,
             protocol,
             mismatch_rose_ms_ago: None,
+            fresh: true,
         }
+    }
+
+    #[test]
+    fn a_stale_newer_instance_does_not_set_the_baseline() {
+        let mut gone = r("0.4.0", "2.0");
+        gone.fresh = false;
+        let f = [gone, r("0.2.0", "1.0"), r("0.2.0", "1.0")];
+        assert_eq!(classify(&f)[1..], [Skew::None, Skew::None]);
     }
 
     #[test]

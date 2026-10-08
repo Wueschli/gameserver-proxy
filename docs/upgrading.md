@@ -14,8 +14,10 @@ this page is the operator's view of what is built. Releases and tags are in
 - **Protocol major** must match. A node that receives another major (or an unreadable
   `X-Wayhouse-Protocol` header) answers `426` and counts it in
   `wayhouse_protocol_mismatch_total`. A breaking wire change bumps the major and, to keep
-  the window honest, ships with a compatibility shim for the previous major for one
-  product minor (no second major exists yet, so no shim exists yet).
+  the window honest, must ship with a gate that also admits the previous major for one
+  product minor and routes those requests to a compatibility shim; every other major
+  still gets `426`. Today the gate admits only the current major and no shim exists,
+  because no second major exists yet.
 - **Protocol minors are additive.** A sender only uses a newer optional field or route
   with a peer that has said it understands it: every request carries the caller's
   version and every response the server's, and a peer whose version is not known yet

@@ -88,8 +88,11 @@ class ParseConstantsTest(unittest.TestCase):
         )
 
     def test_a_missing_constant_is_an_error(self):
-        with self.assertRaises(ValueError):
-            parse_constants({"protocol": "", "config": "", "store": "", "abi": "", "cargo": ""})
+        with self.assertRaises(ValueError) as ctx:
+            parse_constants(
+                {"protocol": "", "config": "", "store": "", "abi": "", "cargo": '[workspace.package]\nversion = "0.2.0"\n'}
+            )
+        self.assertIn("PROTOCOL_MAJOR", str(ctx.exception))
 
 
 if __name__ == "__main__":
