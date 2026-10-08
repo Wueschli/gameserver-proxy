@@ -56,6 +56,30 @@ pub enum PluginStoreError {
     BlobMissing,
 }
 
+/// What applying a replicated install did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    Applied,
+    /// A different install already has this id.
+    Exists,
+}
+
+/// One install's state in a snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSnap {
+    pub id: String,
+    pub rev: u64,
+    pub entries: BTreeMap<String, Vec<u8>>,
+}
+
+/// Everything replicated about plugins, for an HA snapshot. Module blobs are not part
+/// of it: they are content-addressed and fetched from a peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSnapshot {
+    pub installs: Vec<InstallRecord>,
+    pub state: Vec<StateSnap>,
+}
+
 /// Why a plugin's state could not be committed.
 #[derive(Debug, thiserror::Error)]
 pub enum CommitError {
@@ -228,6 +252,65 @@ impl PluginStore {
         self.state.apply_batch(batch)?;
         self.state.flush()?;
         Ok(next)
+    }
+
+    /// Apply a replicated `PluginInstall`: no blob check (the module travels out of
+    /// band), and the same record delivered again counts as applied.
+    pub fn apply_install(&self, record: &InstallRecord) -> Result<ApplyOutcome, PluginStoreError> {
+        let _guard = self.lock();
+        match self.get(&record.id)? {
+            Some(existing) if existing == *record => Ok(ApplyOutcome::Applied),
+            Some(_) => Ok(ApplyOutcome::Exists),
+            None => {
+                self.write_record(record)?;
+                Ok(ApplyOutcome::Applied)
+            }
+        }
+    }
+
+    /// Every install and every install's state, in a stable order.
+    pub fn snapshot(&self) -> Result<PluginSnapshot, PluginStoreError> {
+        let _guard = self.lock();
+        let installs = self.list()?;
+        let mut state = Vec::new();
+        for r in &installs {
+            let (rev, entries) = self.state(&r.id)?;
+            if rev > 0 || !entries.is_empty() {
+                state.push(StateSnap {
+                    id: r.id.clone(),
+                    rev,
+                    entries,
+                });
+            }
+        }
+        Ok(PluginSnapshot { installs, state })
+    }
+
+    /// Make the installs and state exactly `snap` (blobs untouched).
+    pub fn replace(&self, snap: &PluginSnapshot) -> Result<(), PluginStoreError> {
+        let _guard = self.lock();
+        let mut installs = sled::Batch::default();
+        for item in self.installs.iter() {
+            installs.remove(item?.0);
+        }
+        for r in &snap.installs {
+            installs.insert(r.id.as_bytes(), serde_json::to_vec(r)?);
+        }
+        self.installs.apply_batch(installs)?;
+        let mut state = sled::Batch::default();
+        for item in self.state.iter() {
+            state.remove(item?.0);
+        }
+        for st in &snap.state {
+            for (k, v) in &st.entries {
+                state.insert(state_key(&st.id, k), v.as_slice());
+            }
+            state.insert(rev_key(&st.id), &st.rev.to_le_bytes());
+        }
+        self.state.apply_batch(state)?;
+        self.installs.flush()?;
+        self.state.flush()?;
+        Ok(())
     }
 
     /// Remove an install; its blob goes too when no other install references it.
@@ -407,5 +490,58 @@ mod tests {
         assert_eq!(s.state("a").unwrap().0, 0);
         assert!(s.state("a").unwrap().1.is_empty());
         assert_eq!(s.state("ab").unwrap().1, puts(&[("n", b"2")]));
+    }
+
+    #[test]
+    fn apply_install_needs_no_blob_and_is_idempotent() {
+        let (s, _d) = store();
+        assert_eq!(
+            s.apply_install(&record("a", "sha1", 1)).unwrap(),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(s.get("a").unwrap().unwrap(), record("a", "sha1", 1));
+        // The same entry delivered again after a crash is harmless.
+        assert_eq!(
+            s.apply_install(&record("a", "sha1", 1)).unwrap(),
+            ApplyOutcome::Applied
+        );
+        // A different record under the same id is refused, not overwritten.
+        assert_eq!(
+            s.apply_install(&record("a", "sha2", 9)).unwrap(),
+            ApplyOutcome::Exists
+        );
+        assert_eq!(s.get("a").unwrap().unwrap(), record("a", "sha1", 1));
+    }
+
+    #[test]
+    fn a_snapshot_reproduces_installs_state_and_revisions() {
+        let (src, _d1) = store();
+        src.apply_install(&record("a", "sha1", 1)).unwrap();
+        src.apply_install(&record("b", "sha1", 2)).unwrap();
+        src.commit_state("a", 0, &puts(&[("n", b"1")])).unwrap();
+        src.commit_state("a", 1, &puts(&[("m", b"2")])).unwrap();
+        let snap = src.snapshot().unwrap();
+
+        let (dst, _d2) = store();
+        dst.apply_install(&record("old", "sha9", 5)).unwrap();
+        dst.commit_state("old", 0, &puts(&[("x", b"1")])).unwrap();
+        dst.replace(&snap).unwrap();
+        assert_eq!(dst.snapshot().unwrap(), snap);
+        assert!(dst.get("old").unwrap().is_none());
+        assert_eq!(
+            dst.state("old").unwrap().0,
+            0,
+            "state outside the snapshot is gone"
+        );
+        assert_eq!(dst.state("a").unwrap(), src.state("a").unwrap());
+        assert_eq!(dst.state("a").unwrap().0, 2);
+    }
+
+    #[test]
+    fn replacing_from_a_snapshot_leaves_blobs_alone() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.replace(&PluginSnapshot::default()).unwrap();
+        assert_eq!(s.get_blob("sha1").unwrap().unwrap(), b"abc");
     }
 }
