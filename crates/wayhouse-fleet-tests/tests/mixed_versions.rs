@@ -53,13 +53,19 @@ async fn register(base: &str, name: &str, protocol: &str) -> Result<(u16, Option
 async fn proxy_one_minor_behind_registers_and_gets_baseline_fields() -> Result<()> {
     let (_ctl, _dir, base) = controller().await?;
     let current = ProtocolVersion::CURRENT;
-    assert!(current.minor >= 1, "this test plays a peer one minor behind");
+    assert!(
+        current.minor >= 1,
+        "this test plays a peer one minor behind"
+    );
     let older = format!("{}.{}", current.major, current.minor - 1);
 
     let (status, ours, body) = register(&base, "old-proxy", &older).await?;
     assert_eq!(status, 200, "{body}");
     assert_eq!(ours.as_deref(), Some(current.to_string().as_str()));
-    assert!(body.get("tunnel_address").is_some(), "baseline fields stay: {body}");
+    assert!(
+        body.get("tunnel_address").is_some(),
+        "baseline fields stay: {body}"
+    );
     let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
     keys.sort();
     assert_eq!(
@@ -81,7 +87,10 @@ async fn other_major_peer_is_refused_with_readable_message_and_counter() -> Resu
 
     let (status, ours, body) = register(&base, "future-proxy", &other).await?;
     assert_eq!(status, 426);
-    assert_eq!(ours.as_deref(), Some(ProtocolVersion::CURRENT.to_string().as_str()));
+    assert_eq!(
+        ours.as_deref(),
+        Some(ProtocolVersion::CURRENT.to_string().as_str())
+    );
     let text = body.as_str().unwrap_or_default();
     assert!(
         text.contains(&other) && text.contains("upgrade the older side"),

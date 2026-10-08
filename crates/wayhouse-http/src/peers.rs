@@ -85,7 +85,10 @@ mod tests {
     fn unknown_peer_does_not_support_new_minor() {
         let p = PeerVersions::new();
         assert!(!p.peer_supports("a", 1));
-        assert!(!p.peer_supports("a", 0), "unknown means baseline, not even minor 0");
+        assert!(
+            !p.peer_supports("a", 0),
+            "unknown means baseline, not even minor 0"
+        );
     }
 
     #[test]
@@ -105,7 +108,10 @@ mod tests {
         p.record("a", v(1, 3));
         assert!(p.peer_supports("a", 3));
         p.record("a", v(1, 1));
-        assert!(!p.peer_supports("a", 3), "a downgraded peer gets the baseline again");
+        assert!(
+            !p.peer_supports("a", 3),
+            "a downgraded peer gets the baseline again"
+        );
     }
 
     #[test]

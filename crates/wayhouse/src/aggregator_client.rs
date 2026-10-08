@@ -202,6 +202,9 @@ listeners:
         assert_eq!(payload.sessions.udp, 0);
         assert_eq!(payload.group.as_deref(), Some("eu/frankfurt"));
         assert_eq!(payload.version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(payload.protocol, wayhouse_http::protocol::ProtocolVersion::CURRENT.to_string());
+        assert_eq!(
+            payload.protocol,
+            wayhouse_http::protocol::ProtocolVersion::CURRENT.to_string()
+        );
     }
 }

@@ -90,7 +90,8 @@ fn build_bins(packages: &[&str]) -> Result<()> {
 /// and `_MINOR` (`tests/mixed_versions.rs` plays an older peer with them). Every
 /// build of those binaries must pass the same flag, or a build without it would
 /// replace them mid-run; `make tunnel-e2e` does too.
-pub const PROTOCOL_OVERRIDE_FEATURE: [&str; 2] = ["--features", "wayhouse-http/test-protocol-override"];
+pub const PROTOCOL_OVERRIDE_FEATURE: [&str; 2] =
+    ["--features", "wayhouse-http/test-protocol-override"];
 
 /// A `cargo build` that is a no-op on a tree already built from a shell.
 /// `cargo test` sets `CARGO_PKG_*`, `CARGO_MANIFEST_*` and `CARGO_CRATE_NAME`

@@ -112,7 +112,10 @@ impl IngestStore {
     /// whatever was there before.
     pub fn ingest(&self, payload: IngestPayload) {
         let now = unix_ms();
-        let mut instances = self.instances.write().unwrap_or_else(PoisonError::into_inner);
+        let mut instances = self
+            .instances
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         let prev = instances.get(&payload.instance);
         let mismatch_rose_at_ms = match prev {
             Some(p) if payload.protocol_mismatches > p.payload.protocol_mismatches => Some(now),
@@ -193,7 +196,11 @@ mod tests {
         let json = r#"{"instance":"a","admin_url":"http://127.0.0.1:0","pools":[]}"#;
         let payload: IngestPayload = serde_json::from_str(json).unwrap();
         assert_eq!(
-            (payload.version.as_str(), payload.protocol.as_str(), payload.protocol_mismatches),
+            (
+                payload.version.as_str(),
+                payload.protocol.as_str(),
+                payload.protocol_mismatches
+            ),
             ("", "", 0)
         );
     }

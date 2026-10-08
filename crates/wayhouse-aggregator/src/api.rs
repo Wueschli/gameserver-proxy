@@ -46,8 +46,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::ingest::{IngestPayload, IngestStore, PoolSummary, SessionCounts};
-use crate::trust::AdminUrlPolicy;
 use crate::skew::{classify, Reported, Skew};
+use crate::trust::AdminUrlPolicy;
 use crate::util::unix_ms;
 
 /// How long since an instance's last push before `/fleet/healthz` calls it
@@ -597,11 +597,21 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|i| (i["instance"].as_str().unwrap(), i["skew"].as_str().unwrap(), i["version"].as_str().unwrap()))
+            .map(|i| {
+                (
+                    i["instance"].as_str().unwrap(),
+                    i["skew"].as_str().unwrap(),
+                    i["version"].as_str().unwrap(),
+                )
+            })
             .collect();
         assert_eq!(
             skew,
-            [("a", "none", "0.4.0"), ("b", "within-window", "0.3.2"), ("c", "outside-window", "0.1.0")]
+            [
+                ("a", "none", "0.4.0"),
+                ("b", "within-window", "0.3.2"),
+                ("c", "outside-window", "0.1.0")
+            ]
         );
     }
 

@@ -30,9 +30,9 @@ pub const LONG_VERSION: &str = env!("WAYHOUSE_LONG_VERSION");
 
 #[cfg(feature = "server")]
 pub mod metrics;
+pub mod peers;
 #[cfg(feature = "server")]
 pub mod policy;
-pub mod peers;
 pub mod protocol;
 pub mod sse;
 #[cfg(feature = "server")]

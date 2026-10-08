@@ -59,11 +59,16 @@ pub struct Reported<'a> {
 /// The skew of every entry of `fleet`, in order.
 pub fn classify(fleet: &[Reported<'_>]) -> Vec<Skew> {
     let newest = fleet.iter().filter_map(|r| product(r.version)).max();
-    let newest_protocol = fleet.iter().filter_map(|r| protocol_major(r.protocol)).max();
+    let newest_protocol = fleet
+        .iter()
+        .filter_map(|r| protocol_major(r.protocol))
+        .max();
     fleet
         .iter()
         .map(|r| {
-            if r.mismatch_rose_ms_ago.is_some_and(|ago| ago < RECENT_MISMATCH_MS) {
+            if r.mismatch_rose_ms_ago
+                .is_some_and(|ago| ago < RECENT_MISMATCH_MS)
+            {
                 return Skew::OutsideWindow;
             }
             if protocol_major(r.protocol).is_some_and(|p| Some(p) != newest_protocol) {
@@ -84,7 +89,11 @@ mod tests {
     use super::*;
 
     fn r<'a>(version: &'a str, protocol: &'a str) -> Reported<'a> {
-        Reported { version, protocol, mismatch_rose_ms_ago: None }
+        Reported {
+            version,
+            protocol,
+            mismatch_rose_ms_ago: None,
+        }
     }
 
     #[test]
@@ -127,7 +136,10 @@ mod tests {
     fn a_recent_mismatch_is_red_even_on_the_same_version() {
         let mut bad = r("0.2.0", "1.0");
         bad.mismatch_rose_ms_ago = Some(RECENT_MISMATCH_MS - 1);
-        assert_eq!(classify(&[r("0.2.0", "1.0"), bad]), [Skew::None, Skew::OutsideWindow]);
+        assert_eq!(
+            classify(&[r("0.2.0", "1.0"), bad]),
+            [Skew::None, Skew::OutsideWindow]
+        );
     }
 
     #[test]
