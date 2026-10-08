@@ -36,7 +36,7 @@ updates", "Update to X", "roll back" and a `fallback active` badge; see [`docs/s
 
 **Plugin host (Wave 5, slice 1):** `wayhouse-plugin-abi` and `wayhouse-plugin-host` load a plugin, enforce its embedded
 capabilities and limits, and run `init` and `on_timer` with the `log` and `state` imports; see [`docs/plugins.md`](docs/plugins.md)
-and the [plan](docs/superpowers/plans/2026-10-08-plugin-host-foundation.md). Not yet: controller wiring (install records, ticks on the
+and the [plan](docs/superpowers/plans/2026-10-08-plugin-host-foundation.md). Slice 2 added compile bounds, the bounded `CompilePool` (#265) and the `wayhouse-plugin-check` conformance binary (#266); see the [plan](docs/superpowers/plans/2026-10-08-plugin-compile-bounds-and-check.md). Not yet: controller wiring (install records, ticks on the
 leader, term-checked commit), `http` (needs #235), `routes` (#236), webhooks and events (#237), `backends`, the UI, registry `kind = plugin`.
 
 The repository is **public** since 2026-10-03 (history scanned, clean), so

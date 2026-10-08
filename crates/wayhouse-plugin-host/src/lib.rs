@@ -2,6 +2,7 @@
 
 pub mod bounds;
 pub mod caps;
+pub mod conformance;
 pub mod module;
 pub mod pool;
 pub mod runtime;

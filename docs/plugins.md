@@ -57,3 +57,25 @@ Every call runs in a fresh `Store` with a memory cap, an epoch deadline
 8 MiB. A call returns its `Effects` (state writes, log lines) and applies nothing itself:
 the caller commits them as one entry, which is how the controller will tag them with the
 leader term (automation hooks spec, "Commit rule").
+
+## Compile bounds and the compile pool
+
+Before a module is compiled, `bounds::check` walks it with `wasmparser` and rejects
+structure out of proportion to a real plugin (`ModuleError::TooComplex`, naming the
+bound): functions, types, locals per function, block nesting depth, declared table and
+memory sizes, globals, imports, exports and total code bytes (`Bounds`, set through
+`Limits::bounds`). `CompilePool` runs `PluginHost::load` on a fixed set of worker threads
+behind a bounded queue: a full queue answers `Busy` at once and a slow compile answers
+`TimedOut` (the compile itself cannot be interrupted, so it keeps its worker until done).
+The controller must load modules through the pool, never on its main loop.
+
+A declared `state.max_bytes` above 1 MiB is rejected, and `PluginHost::new` refuses a zero
+`call_timeout`.
+
+## Checking a built plugin
+
+`wayhouse-plugin-check <module.wasm>` (crate `wayhouse-plugin-host`) loads the module with
+its own declaration as the approved set, calls `init` and, if declared, `on_timer` once,
+and prints what the host saw, including which capabilities were used. It exits 1 when the
+host would reject the module, a call fails, or the plugin used a capability it did not
+declare. Plugin repo CI is meant to run it on every build.
