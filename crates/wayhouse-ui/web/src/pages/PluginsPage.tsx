@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ApiError,
   deletePlugin,
@@ -76,6 +76,14 @@ export function PluginsPage() {
   }, []);
 
   async function toggle(p: PluginInstall) {
+    if (p.enabled) {
+      const ok = await confirm({
+        title: `Disable ${p.name}?`,
+        description: "The plugin stops running until you enable it again.",
+        confirmLabel: "Disable",
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await setPluginEnabled(p.id, !p.enabled);
@@ -230,7 +238,12 @@ function UploadDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Bumped on every close so a slow inspection of a cancelled upload cannot land later.
+  const session = useRef(0);
+
   function reset() {
+    session.current += 1;
+    setBusy(false);
     setFile(null);
     setModule(null);
     setName("");
@@ -250,15 +263,18 @@ function UploadDialog({
       setError("choose a .wasm file");
       return;
     }
+    const mine = session.current;
     setBusy(true);
     setError(null);
     try {
-      setModule(await uploadPluginModule(await file.arrayBuffer()));
+      const inspected = await uploadPluginModule(await file.arrayBuffer());
+      if (mine !== session.current) return;
+      setModule(inspected);
       setName(suggestName(file.name));
     } catch (err) {
-      setError(errorText(err));
+      if (mine === session.current) setError(errorText(err));
     } finally {
-      setBusy(false);
+      if (mine === session.current) setBusy(false);
     }
   }
 

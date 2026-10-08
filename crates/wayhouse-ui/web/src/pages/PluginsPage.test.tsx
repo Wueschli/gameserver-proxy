@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
@@ -85,10 +85,19 @@ describe("PluginsPage enable, disable and delete", () => {
     api.listPlugins.mockResolvedValueOnce([install()]).mockResolvedValue([install({ enabled: false })]);
     render(<PluginsPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Disable pelican-sync" }));
+    expect(api.setPluginEnabled).not.toHaveBeenCalled();
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Disable" }));
     expect(api.setPluginEnabled).toHaveBeenCalledWith("0123456789abcdef", false);
 
     await userEvent.click(await screen.findByRole("button", { name: "Enable pelican-sync" }));
     expect(api.setPluginEnabled).toHaveBeenLastCalledWith("0123456789abcdef", true);
+  });
+
+  it("does not disable when the confirmation is cancelled", async () => {
+    render(<PluginsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Disable pelican-sync" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(api.setPluginEnabled).not.toHaveBeenCalled();
   });
 
   it("asks before deleting and only then deletes", async () => {
@@ -105,6 +114,7 @@ describe("PluginsPage enable, disable and delete", () => {
     api.setPluginEnabled.mockRejectedValue(new ApiError(404, "no such install"));
     render(<PluginsPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Disable pelican-sync" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Disable" }));
     expect(await screen.findByText(/no such install/)).toBeInTheDocument();
   });
 });
@@ -151,6 +161,23 @@ describe("PluginsPage install", () => {
     await userEvent.click(within(dlg).getByRole("button", { name: "Install" }));
     expect(await screen.findByText(/capability not approved: log/)).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("ignores the answer to an upload that was cancelled", async () => {
+    let finish!: (m: unknown) => void;
+    api.uploadPluginModule.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(<PluginsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Upload plugin" }));
+    let dlg = screen.getByRole("dialog");
+    await userEvent.upload(within(dlg).getByLabelText(/\.wasm file/), wasm());
+    await userEvent.click(within(dlg).getByRole("button", { name: "Inspect module" }));
+    await userEvent.click(within(dlg).getByRole("button", { name: "Cancel" }));
+    await act(async () => finish({ sha256: SHA, size: 2048, abi: "0.1", capabilities: CAPS }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Upload plugin" }));
+    dlg = screen.getByRole("dialog");
+    expect(within(dlg).getByRole("button", { name: "Inspect module" })).toBeInTheDocument();
+    expect(within(dlg).queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
   });
 
   it("shows an upload error from the controller", async () => {
