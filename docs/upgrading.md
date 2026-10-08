@@ -101,9 +101,12 @@ A proxy upgrade relies on draining:
    balancer bring it back.
 
 A config reload that replaces a UDP listener no longer drops new flows while the old
-group drains (#186): the old workers leave the kernel's `SO_REUSEPORT` hash at once, keep
-answering their live sessions, and a client of such a session gets a new session in the
-replacement group on its next datagram.
+group drains (#186), but it ends that listener's live sessions: the old workers close
+their sockets at once, and each client opens a fresh session in the replacement group on
+its next datagram (possibly from a new upstream source port). Plan a reload that changes
+a UDP listener like a short blip for its players. A listener that is removed, or whose
+bind address changed, still drains as described above. See
+[A config reload that replaces a UDP listener](06-operations-observability.md).
 
 ## Agents
 
