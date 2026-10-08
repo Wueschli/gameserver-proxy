@@ -4518,6 +4518,7 @@ dependencies = [
  "axum",
  "clap",
  "openraft",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
@@ -4530,8 +4531,10 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "wat",
  "wayhouse-config",
  "wayhouse-http",
+ "wayhouse-plugin-host",
 ]
 
 [[package]]

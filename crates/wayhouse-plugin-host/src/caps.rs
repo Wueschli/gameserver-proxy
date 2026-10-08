@@ -4,7 +4,7 @@
 //! declaration naming a capability this host does not know an install-time error rather
 //! than a silently ignored (and therefore unreviewed) request.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::module::ModuleError;
 
@@ -15,7 +15,7 @@ pub const MIN_TICK_INTERVAL_SECS: u64 = 10;
 pub const MAX_STATE_BYTES: usize = 1024 * 1024;
 
 /// What a plugin asks for, and what the operator approves against its sha256.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     /// Triggers the host may deliver. An undeclared trigger is never delivered.
@@ -34,7 +34,7 @@ pub struct Capabilities {
 }
 
 /// The triggers a plugin declares.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Triggers {
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct Triggers {
 }
 
 /// Limits of the `state` capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateCap {
     /// Cap on the sum of key and value bytes the plugin's state may hold.

@@ -151,6 +151,13 @@ struct Args {
     #[arg(long)]
     ca_file: Option<PathBuf>,
 
+    /// Serve the plugin API (`/plugins`): upload, approve and manage WASM plugin
+    /// installs (docs/plugins.md). Off by default. Standalone controllers only for
+    /// now: with `--ha-peers` or `--role slave` the routes answer `501`. Installs are
+    /// stored but nothing runs a plugin yet.
+    #[arg(long)]
+    plugins: bool,
+
     #[command(flatten)]
     tls: wayhouse_http::tls::TlsArgs,
 }
@@ -535,6 +542,33 @@ async fn main() -> anyhow::Result<()> {
         ))
         .merge(wayhouse_controller::addresses::api::router(addresses_state))
         .merge(wayhouse_controller::adopt::router(adopt_state));
+    app = app.merge(
+        match wayhouse_controller::plugins::availability(
+            args.plugins,
+            ha_enabled,
+            args.role == Role::Slave,
+        ) {
+            Ok(()) => {
+                let host = Arc::new(wayhouse_plugin_host::PluginHost::new(
+                    wayhouse_plugin_host::Limits::default(),
+                )?);
+                let pool = Arc::new(wayhouse_plugin_host::CompilePool::new(
+                    host,
+                    2,
+                    8,
+                    Duration::from_secs(30),
+                )?);
+                wayhouse_controller::plugins::api::router(
+                    wayhouse_controller::plugins::api::PluginsState {
+                        store: wayhouse_controller::plugins::PluginStore::open(state.store.db())?,
+                        pool,
+                        auth_token: admin_token.clone(),
+                    },
+                )
+            }
+            Err(reason) => wayhouse_controller::plugins::api::disabled_router(reason),
+        },
+    );
     if let Some((handle, _)) = ha_handle {
         app = app
             .merge(ha::members::router(handle.clone(), admin_token))

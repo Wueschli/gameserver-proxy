@@ -5,9 +5,10 @@ the operator approved (design: [plugin system](superpowers/specs/2026-10-07-plug
 and [automation hooks](superpowers/specs/2026-10-07-plugin-automation-hooks-design.md)).
 Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 
-**Status.** The host runtime is built (`crates/wayhouse-plugin-host`); it is not wired into
-the controller yet, so nothing runs a plugin today. The controller host, the install API,
-secrets, `http`, `routes`, webhooks, events and `backends` are later slices.
+**Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
+controller can store plugin installs behind an admin API (below). Nothing runs a plugin
+yet: leader ticks, the replicated (HA) install state, secrets, `http`, `routes`, webhooks,
+events and `backends` are later slices.
 
 ## Module contract (ABI 0.1)
 
@@ -79,3 +80,22 @@ its own declaration as the approved set, calls `init` and, if declared, `on_time
 and prints what the host saw, including which capabilities were used. It exits 1 when the
 host would reject the module, a call fails, or the plugin used a capability it did not
 declare. Plugin repo CI is meant to run it on every build.
+
+## Installing a plugin (controller API)
+
+Start a standalone controller with `--plugins` (off by default). With `--ha-peers`, with
+`--role slave`, or without the flag, `/plugins` answers `501` with the reason. The routes sit
+behind the same admin bearer token as `/config`; `X-Actor` is recorded as `created_by`.
+
+| Request                                                       | What it does                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /plugins/modules` (raw `.wasm` body, up to 8 MiB)       | Validates ABI and capability sections, keeps the bytes by sha256, returns `{sha256, size, abi, capabilities}` for the operator to read.                                                                                                              |
+| `POST /plugins` `{name, sha256, approved, config?, enabled?}` | Compiles the stored module through the bounded pool with `approved` as the operator-approved set; `422` when the module declares more than `approved` or fails a bound, `503` when the compiler is busy. Records the install and returns it (`201`). |
+| `GET /plugins`, `GET /plugins/{id}`                           | The install records.                                                                                                                                                                                                                                 |
+| `POST /plugins/{id}/enable`, `/disable`                       | Flip `enabled` (nothing consumes it yet).                                                                                                                                                                                                            |
+| `DELETE /plugins/{id}`                                        | Removes the install; the module blob goes with the last install that uses it.                                                                                                                                                                        |
+
+An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z`, `0-9`, `-`, up
+to 64 characters), the approved capability set bound to the module sha256, and a non-secret
+`config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
+controller's `sled` database; they are not replicated.
