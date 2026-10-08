@@ -167,6 +167,7 @@ pub async fn run_udp_listener(
     worker_id: usize,
     socket: std::net::UdpSocket,
     shutdown: &mut watch::Receiver<bool>,
+    handoff: &mut watch::Receiver<Option<crate::listeners::Handoff>>,
 ) -> Result<(), ListenerError> {
     let mode = udp_mode(&cfg);
     let sock = Arc::new(UdpSocket::from_std(socket)?);
@@ -198,6 +199,9 @@ pub async fn run_udp_listener(
     // keeps pumping existing sessions until they idle out, then returns. The
     // grace period is enforced by the caller aborting the task.
     let mut draining = false;
+    // Set once the socket has left the `SO_REUSEPORT` hash (or the hand-off
+    // channel closed), so the branch below fires at most once.
+    let mut handed_off = false;
 
     loop {
         if draining && sessions.is_empty() && pending.is_empty() {
@@ -212,6 +216,35 @@ pub async fn run_udp_listener(
                         listener = %cfg.name, worker = worker_id,
                         sessions = sessions.len(), "udp listener draining"
                     );
+                }
+            }
+            changed = handoff.changed(), if !handed_off => {
+                handed_off = true;
+                let successor = handoff.borrow_and_update().clone();
+                let takes_over = changed.is_ok()
+                    && successor.is_some_and(|binds| {
+                        binds.iter().any(|b| crate::listeners::overlaps(cfg.bind, *b))
+                    });
+                if takes_over {
+                    // A replacement group owns this port now and the kernel
+                    // hashes every flow to it once this socket is closed. The
+                    // sessions here could only answer a client whose datagrams
+                    // now reach the new group (which opens a fresh session for
+                    // it), so end them with the socket instead of draining
+                    // forever behind a chatty backend. Closing the socket (it
+                    // drops on return, with the sessions' reply pumps) is the
+                    // only way to leave the `SO_REUSEPORT` hash: a connected
+                    // wildcard socket would change its source address.
+                    let ended = sessions.len();
+                    if ended > 0 {
+                        metrics::gauge!(m::ACTIVE_UDP_SESSIONS, "listener" => cfg.name.clone())
+                            .decrement(ended as f64);
+                    }
+                    tracing::info!(
+                        listener = %cfg.name, worker = worker_id, sessions = ended,
+                        "udp listener replaced: socket closed, its sessions end and re-open on the new group"
+                    );
+                    return Ok(());
                 }
             }
             _ = wheel_tick.tick() => {

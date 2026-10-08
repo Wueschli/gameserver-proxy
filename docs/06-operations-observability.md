@@ -259,6 +259,12 @@ For a **proxy instance** restart:
    sessions until they idle out); once all have finished — or the grace period
    expires — the process exits. New datagrams to a draining UDP listener are
    dropped (`wayhouse_datagrams_dropped_total{reason="draining"}`).
+   A **config reload** that replaces a UDP listener behaves differently: the old
+   workers close their sockets at once and their sessions end, so the kernel hashes
+   every flow to the replacement group, which opens a fresh session (under the new
+   config) on the client's next datagram. Nothing is dropped as `draining`, and a
+   chatty client cannot hold a drain open. A listener that is removed, or whose bind
+   address changed, still drains as described above.
 
 ## Multi-instance operations (HA)
 
