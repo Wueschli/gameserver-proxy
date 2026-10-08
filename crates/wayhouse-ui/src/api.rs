@@ -732,6 +732,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_operator_cannot_install_or_upload_a_plugin() {
+        let app = router(users_state());
+        let resp = login_as(&app, "bob", "bob-pass").await; // bob is Operator
+        let cookie = cookie_header_from(&set_cookie_value(&resp));
+        for (method, path) in [
+            ("POST", "/api/plugins"),
+            ("POST", "/api/plugins/modules"),
+            ("POST", "/api/plugins/abc/enable"),
+            ("DELETE", "/api/plugins/abc"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::COOKIE, cookie.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_viewer_cannot_reach_an_operator_route_but_can_reach_a_viewer_one() {
         let mut users = HashMap::new();
         users.insert(

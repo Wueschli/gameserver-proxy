@@ -7,7 +7,7 @@ Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
 controller can store plugin installs behind an admin API and ticks the enabled ones
-(below). Not built yet: the HA leader tick with a term-checked commit and replicated
+(below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). Not built yet: the HA leader tick with a term-checked commit and replicated
 install state, secrets, `http`, `routes`, webhooks, events and `backends`.
 
 ## Module contract (ABI 0.1)
@@ -119,3 +119,7 @@ revision. A call that failed (trap, timeout, over a limit) commits nothing, is r
 the status, and the plugin is called again at its next interval. Deleting an install
 removes its state. This is the single-node form of the design's term-checked commit; HA
 controllers answer `501` until the replicated slice.
+
+## The Plugins page (web UI)
+
+`wayhouse-ui` proxies the controller's `/plugins` API (`/api/plugins*`, needs `--controller-url`). Listing is viewer-level; upload, install, enable, disable and delete need the admin role. The page lists installs with their approved capabilities in plain words. "Upload plugin" sends the module (up to 8 MiB) to the controller, shows what it declares and installs it only after the operator ticks the approval box; the UI approves exactly the declared set, never an edited one. A controller that does not serve plugins (off, HA, slave) shows its reason instead of a list. Not in the page yet: registry install, secrets, config editing.

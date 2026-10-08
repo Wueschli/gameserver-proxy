@@ -19,7 +19,7 @@
 //! `actor` field), the durable half of this release's audit trail.
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -37,6 +37,7 @@ pub fn viewer_router() -> Router<AppState> {
         .route("/api/config/revisions/{revision}", get(get_revision))
         .route("/api/config/revisions/{revision}/diff", get(diff_revision))
         .route("/api/tunnel/addresses", get(tunnel_addresses))
+        .route("/api/plugins", get(list_plugins))
 }
 
 /// Config-changing writes — `Role::Admin`.
@@ -47,6 +48,103 @@ pub fn admin_router() -> Router<AppState> {
         .route("/api/config/promote/{revision}", post(promote))
         .route("/api/tunnel/origins/{name}", delete(release_origin))
         .route("/api/tunnel/proxies/{name}", delete(release_proxy))
+        .route(
+            "/api/plugins/modules",
+            post(upload_plugin_module).layer(DefaultBodyLimit::max(
+                wayhouse_http::MAX_SNIFFER_MODULE_BYTES,
+            )),
+        )
+        .route("/api/plugins", post(install_plugin))
+        .route("/api/plugins/{id}", delete(delete_plugin))
+        .route("/api/plugins/{id}/enable", post(enable_plugin))
+        .route("/api/plugins/{id}/disable", post(disable_plugin))
+}
+
+async fn list_plugins(State(state): State<AppState>) -> Response {
+    proxy(&state, Method::GET, "/plugins".to_string(), None, None).await
+}
+
+/// The module bytes go through untouched; the controller inspects and stores them.
+async fn upload_plugin_module(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    body: Bytes,
+) -> Response {
+    proxy(
+        &state,
+        Method::POST,
+        "/plugins/modules".to_string(),
+        Some(body),
+        actor,
+    )
+    .await
+}
+
+/// The controller's `Json` extractor insists on the content type, so it is forwarded.
+async fn install_plugin(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    body: Bytes,
+) -> Response {
+    proxy_typed(
+        &state,
+        Method::POST,
+        "/plugins".to_string(),
+        Some(body),
+        Some("application/json"),
+        actor,
+    )
+    .await
+}
+
+async fn enable_plugin(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(id): Path<String>,
+) -> Response {
+    plugin_action(&state, Method::POST, &id, "/enable", actor).await
+}
+
+async fn disable_plugin(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(id): Path<String>,
+) -> Response {
+    plugin_action(&state, Method::POST, &id, "/disable", actor).await
+}
+
+async fn delete_plugin(
+    State(state): State<AppState>,
+    Extension(Actor(actor)): Extension<Actor>,
+    Path(id): Path<String>,
+) -> Response {
+    plugin_action(&state, Method::DELETE, &id, "", actor).await
+}
+
+async fn plugin_action(
+    state: &AppState,
+    method: Method,
+    id: &str,
+    suffix: &str,
+    actor: Option<String>,
+) -> Response {
+    let Some(segment) = path_segment(id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid plugin id".into(),
+            }),
+        )
+            .into_response();
+    };
+    proxy(
+        state,
+        method,
+        format!("/plugins/{segment}{suffix}"),
+        None,
+        actor,
+    )
+    .await
 }
 
 async fn get_config(State(state): State<AppState>) -> Response {
@@ -160,17 +258,11 @@ async fn release_proxy(
 }
 
 /// `Path` has already percent-decoded `name`; re-encode it so it stays one
-/// path segment, and refuse the dot segments a URL normalizer would resolve
-/// away from the registry route.
-async fn release(state: &AppState, base: &str, name: &str, actor: Option<String>) -> Response {
+/// path segment. `None` for the dot segments a URL normalizer would resolve
+/// away from the route they are meant for.
+fn path_segment(name: &str) -> Option<String> {
     if name == "." || name == ".." {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid registration name".into(),
-            }),
-        )
-            .into_response();
+        return None;
     }
     let mut segment = String::with_capacity(name.len());
     for b in name.bytes() {
@@ -180,6 +272,19 @@ async fn release(state: &AppState, base: &str, name: &str, actor: Option<String>
             segment.push_str(&format!("%{b:02X}"));
         }
     }
+    Some(segment)
+}
+
+async fn release(state: &AppState, base: &str, name: &str, actor: Option<String>) -> Response {
+    let Some(segment) = path_segment(name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid registration name".into(),
+            }),
+        )
+            .into_response();
+    };
     proxy(
         state,
         Method::DELETE,
@@ -206,6 +311,18 @@ async fn proxy(
     body: Option<Bytes>,
     actor: Option<String>,
 ) -> Response {
+    proxy_typed(state, method, path_suffix, body, None, actor).await
+}
+
+/// [`proxy`] with a content type for the forwarded body.
+async fn proxy_typed(
+    state: &AppState,
+    method: Method,
+    path_suffix: String,
+    body: Option<Bytes>,
+    content_type: Option<&str>,
+    actor: Option<String>,
+) -> Response {
     let Some(controller) = &state.controller else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -224,8 +341,11 @@ async fn proxy(
     if let Some(actor) = actor {
         req = req.header("X-Actor", actor);
     }
+    if let Some(ct) = content_type {
+        req = req.header(axum::http::header::CONTENT_TYPE, ct);
+    }
     if let Some(body) = body {
-        req = req.body(body); // raw YAML text — no content-type forced
+        req = req.body(body); // raw YAML text by default — no content-type forced
     }
 
     match req.send().await {
@@ -515,5 +635,187 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Option<String>, Vec<u8>)>>>;
+
+    /// A controller stand-in that records (method, path, content-type, body) of every call
+    /// and answers `status` with a small JSON body.
+    async fn recording_controller(status: StatusCode) -> (String, Seen) {
+        let seen = Seen::default();
+        let log = seen.clone();
+        let mock = Router::new().fallback(move |req: axum::http::Request<Body>| {
+            let log = log.clone();
+            async move {
+                let (parts, body) = req.into_parts();
+                let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                let ct = parts
+                    .headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                log.lock().unwrap().push((
+                    parts.method.to_string(),
+                    parts.uri.path().to_string(),
+                    ct,
+                    body.to_vec(),
+                ));
+                (
+                    status,
+                    [("content-type", "application/json")],
+                    r#"{"ok":true}"#,
+                )
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test]
+    async fn plugin_list_and_actions_hit_the_right_controller_paths() {
+        let (url, seen) = recording_controller(StatusCode::OK).await;
+        let app = app_with_controller(url, None);
+        for (method, path) in [
+            ("GET", "/api/plugins"),
+            ("POST", "/api/plugins/0123abcd/enable"),
+            ("POST", "/api/plugins/0123abcd/disable"),
+            ("DELETE", "/api/plugins/0123abcd"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {path}");
+        }
+        let paths: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, p, _, _)| format!("{m} {}", p))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "GET /plugins",
+                "POST /plugins/0123abcd/enable",
+                "POST /plugins/0123abcd/disable",
+                "DELETE /plugins/0123abcd"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_install_keeps_its_json_content_type_and_body() {
+        let (url, seen) = recording_controller(StatusCode::CREATED).await;
+        let app = app_with_controller(url, None);
+        let body = r#"{"name":"demo","sha256":"ab"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].1, "/plugins");
+        assert_eq!(seen[0].2.as_deref(), Some("application/json"));
+        assert_eq!(seen[0].3, body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn plugin_module_upload_forwards_raw_bytes_up_to_the_module_cap() {
+        let (url, seen) = recording_controller(StatusCode::CREATED).await;
+        let app = app_with_controller(url, None);
+        let module = vec![7u8; 3 * 1024 * 1024];
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/plugins/modules")
+                    .body(Body::from(module.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(seen.lock().unwrap()[0].3, module);
+
+        let too_big = vec![0u8; wayhouse_http::MAX_SNIFFER_MODULE_BYTES + 1];
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/modules")
+                    .body(Body::from(too_big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "the oversized body must not be forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_501_from_the_controller_passes_through() {
+        let (url, _) = recording_controller(StatusCode::NOT_IMPLEMENTED).await;
+        let app = app_with_controller(url, None);
+        let resp = app
+            .oneshot(Request::get("/api/plugins").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn plugin_id_cannot_steer_the_proxy_to_another_controller_path() {
+        let (url, seen) = recording_controller(StatusCode::OK).await;
+        let app = app_with_controller(url, None);
+        for id in ["..", "%2E%2E", "..%2Fconfig", "a%2Fb", "a%3Fb"] {
+            for (method, suffix) in [("DELETE", ""), ("POST", "/enable")] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(format!("/api/plugins/{id}{suffix}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    resp.status() == StatusCode::BAD_REQUEST
+                        || resp.status() == StatusCode::OK
+                        || resp.status() == StatusCode::NOT_FOUND,
+                    "{id}: {}",
+                    resp.status()
+                );
+            }
+        }
+        for (_, path, _, _) in seen.lock().unwrap().iter() {
+            assert!(path.starts_with("/plugins/"), "escaped to {path}");
+            // The id stays one segment: an encoded slash is not a path separator.
+            let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+            assert!(segments.len() <= 3, "extra segments in {path}");
+            assert!(
+                segments.iter().all(|seg| *seg != ".."),
+                "dot segment in {path}"
+            );
+        }
     }
 }

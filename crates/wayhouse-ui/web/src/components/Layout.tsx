@@ -5,6 +5,7 @@ const NAV = [
   { to: "/fleet", label: "Fleet" },
   { to: "/settings", label: "Settings" },
   { to: "/sniffers", label: "Sniffers" },
+  { to: "/plugins", label: "Plugins" },
   { to: "/config-history", label: "Config history" },
   { to: "/tunnel", label: "Tunnel addresses" },
 ];

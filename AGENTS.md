@@ -126,7 +126,7 @@ crates/
     api.rs                  POST /ui/login|logout, GET /ui/session; merges aggregator_proxy/controller_proxy/ws into the session-gated route group
     auth.rs                 session-cookie gate (`require_session`) — distinct from the controller's/aggregator's bearer-token gates; the browser never holds a bearer token
     aggregator_proxy.rs     proxies fleet reads + phase-9 operational verbs to wayhouse-aggregator (`--aggregator-url`/`--aggregator-token`)
-    controller_proxy.rs     proxies wayhouse-controller's config API (submit, revisions, diff, rollback) its `GET /tunnel/addresses`, and the registry `DELETE`s that release an address, to wayhouse-controller (`--controller-url`/`--controller-token`)
+    controller_proxy.rs     proxies wayhouse-controller's config API (submit, revisions, diff, rollback) its `GET /tunnel/addresses`, the registry `DELETE`s that release an address, and the `/plugins` install API (list, upload, install, enable, disable, delete), to wayhouse-controller (`--controller-url`/`--controller-token`)
     proxy_util.rs           shared `forwardable_headers` — both proxies forward the upstream response's headers, not just status+body
     fleet_feed.rs           single shared subscription to the aggregator's `/fleet/subscribe` SSE feed, fanned out via a broadcast channel
     ws.rs                   GET /ws/fleet — the browser's live-updates WebSocket, fed by fleet_feed
