@@ -35,6 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
@@ -98,7 +99,12 @@ struct Bound {
 /// The addresses a replacement group binds (see `Group::handoff`).
 pub(crate) type Handoff = Arc<[SocketAddr]>;
 
+/// Source of [`Group::id`].
+static NEXT_GROUP_ID: AtomicU64 = AtomicU64::new(1);
+
 struct Group {
+    /// Identifies this group while `reconcile` waits on it in `retired`.
+    id: u64,
     cfg: ListenerConfig,
     stop: watch::Sender<bool>,
     /// UDP only: the addresses a replacement group now binds. A worker whose own
@@ -107,6 +113,8 @@ struct Group {
     /// listener is removed, where nothing takes over its flows.
     handoff: watch::Sender<Option<Handoff>>,
     tasks: Vec<JoinHandle<()>>,
+    /// The address each of `tasks` serves, index for index.
+    task_binds: Vec<SocketAddr>,
 }
 
 impl Group {
@@ -132,12 +140,27 @@ impl Group {
         self.tasks.iter().all(JoinHandle::is_finished)
     }
 
+    /// True once every worker whose address overlaps one of `binds` has
+    /// returned. Workers on other addresses keep their port and drain on.
+    fn overlapping_finished(&self, binds: &[SocketAddr]) -> bool {
+        self.tasks
+            .iter()
+            .zip(&self.task_binds)
+            .filter(|(_, own)| binds.iter().any(|b| overlaps(**own, *b)))
+            .all(|(t, _)| t.is_finished())
+    }
+
     fn abort(&self) {
         for t in &self.tasks {
             t.abort();
         }
     }
 }
+
+/// How often `reconcile` checks whether a stopped group's workers returned, and
+/// how many checks it gives a UDP hand-off before moving on (about 1 s).
+const HANDOFF_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+const HANDOFF_POLLS: u32 = 200;
 
 pub struct ListenerManager {
     snapshot: Arc<ArcSwap<Snapshot>>,
@@ -149,10 +172,12 @@ pub struct ListenerManager {
     sniffers: Arc<Sniffers>,
     workers: usize,
     groups: Mutex<HashMap<String, Group>>,
-    /// Replaced UDP groups still draining their sessions. A UDP worker only
-    /// returns once every session idled out, which a chatty client can delay
-    /// indefinitely, so `reconcile` must not await them; they are reaped here
-    /// and awaited by [`ListenerManager::stop_all`].
+    /// Stopped groups. `reconcile` parks every group it stops here before its
+    /// first await, so [`ListenerManager::stop_all`] always sees them and a
+    /// cancelled reload strands none. A replaced UDP group still draining its
+    /// sessions stays: a UDP worker only returns once every session idled out,
+    /// which a chatty client can delay indefinitely, so `reconcile` must not
+    /// await it. Finished groups are reaped.
     retired: Mutex<Vec<Group>>,
 }
 
@@ -242,7 +267,9 @@ impl ListenerManager {
         let limiter = Arc::new(RateLimiter::new(cfg.rate_limit.as_ref()));
         let src_limiter = SourceLimiter::new(cfg.per_source.as_ref());
         let mut tasks = Vec::with_capacity(sockets.len());
+        let mut task_binds = Vec::with_capacity(sockets.len());
         for (bind, worker_id, socket) in sockets {
+            task_binds.push(bind);
             // Every clone below carries `lc.bind` overridden to the one address
             // this task actually serves, so `run_tcp_listener` /
             // `run_udp_listener` need no change — route/filter/pool selection
@@ -309,10 +336,12 @@ impl ListenerManager {
             }));
         }
         Group {
+            id: NEXT_GROUP_ID.fetch_add(1, Ordering::Relaxed),
             cfg,
             stop: stop_tx,
             handoff: handoff_tx,
             tasks,
+            task_binds,
         }
     }
 
@@ -396,33 +425,55 @@ impl ListenerManager {
             (stopped, failed)
         };
 
-        // Phase 2 (lock released): stop the old groups. A TCP accept task
-        // returns at once, so wait for it. A UDP worker keeps serving its live
-        // sessions until they idle out, so hand it to `retired` instead of
-        // holding the reload (and everything queued behind it) on it.
+        // Phase 2: stop the old groups. Signal every one before awaiting any,
+        // and park them all in `retired` first, so a `stop_all` racing this
+        // reload (or a cancelled reload future) still finds, signals and joins
+        // them instead of losing them with a local.
         let n_stopped = stopped.len();
-        for (g, successor) in stopped {
-            tracing::info!(listener = %g.cfg.name, bind = %g.cfg.bind, "stopping listener");
-            g.signal();
-            if let Some(binds) = successor {
-                g.hand_off(binds);
-                // The workers on the successor's port close their sockets at
-                // once; wait briefly so the next datagram of a new flow cannot
-                // still hash to a socket that is about to go.
-                for _ in 0..200 {
-                    if g.finished() {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let mut waiting = Vec::with_capacity(n_stopped);
+        {
+            let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+            retired.retain(|r| !r.finished());
+            for (g, successor) in stopped {
+                tracing::info!(listener = %g.cfg.name, bind = %g.cfg.bind, "stopping listener");
+                g.signal();
+                if let Some(binds) = &successor {
+                    g.hand_off(binds.clone());
                 }
-            }
-            if g.cfg.protocol == Protocol::Udp && !g.finished() {
-                let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
-                retired.retain(|r| !r.finished());
+                waiting.push((g.id, g.cfg.protocol, successor));
                 retired.push(g);
-            } else {
-                g.join().await;
             }
+        }
+        // A TCP accept task returns at once, so wait for it. A UDP worker the
+        // successor takes over closes its socket at once; wait briefly so the
+        // next datagram of a new flow cannot still hash to a socket that is
+        // about to go. Other UDP workers keep serving their live sessions until
+        // they idle out and stay in `retired`, so a chatty client cannot hold
+        // the reload (and everything queued behind it) on them.
+        let mut ticks = 0;
+        loop {
+            {
+                let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+                waiting.retain(|(id, protocol, successor)| {
+                    // Gone from `retired`: `stop_all` took it.
+                    let Some(g) = retired.iter().find(|r| r.id == *id) else {
+                        return false;
+                    };
+                    match (protocol, successor) {
+                        (Protocol::Tcp, _) => !g.finished(),
+                        (Protocol::Udp, Some(binds)) => {
+                            ticks < HANDOFF_POLLS && !g.overlapping_finished(binds)
+                        }
+                        (Protocol::Udp, None) => false,
+                    }
+                });
+                retired.retain(|r| !r.finished());
+            }
+            if waiting.is_empty() {
+                break;
+            }
+            ticks += 1;
+            tokio::time::sleep(HANDOFF_POLL).await;
         }
         let running = self
             .groups

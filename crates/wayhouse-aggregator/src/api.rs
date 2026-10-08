@@ -265,6 +265,9 @@ struct FleetHealth {
     /// promise the instance is actually down (it could just be a slow
     /// aggregator link).
     stale: bool,
+    /// Product version the instance runs; empty from a build that predates
+    /// the field. The UI backend enforces a sniffer's `min_proxy` against it.
+    version: String,
 }
 
 /// `GET /fleet/healthz` — every known instance's push recency. This is
@@ -283,6 +286,7 @@ async fn fleet_healthz(State(state): State<AppState>) -> Response {
                 instance: s.payload.instance,
                 last_seen_ms_ago: age,
                 stale: age > STALE_AFTER_MS,
+                version: s.payload.version,
             }
         })
         .collect();
@@ -670,6 +674,29 @@ mod tests {
         };
         assert_eq!(by_instance("stale-1")["stale"], true);
         assert_eq!(by_instance("fresh-1")["stale"], false);
+    }
+
+    #[tokio::test]
+    async fn fleet_healthz_reports_each_instances_version() {
+        let state = test_state();
+        let mut payload = full_payload("p1");
+        payload.version = "0.3.1".into();
+        state.store.insert_state(InstanceState {
+            payload,
+            received_at_ms: unix_ms(),
+            mismatch_rose_at_ms: None,
+        });
+        let resp = router(state)
+            .oneshot(
+                Request::get("/fleet/healthz")
+                    .header(wayhouse_http::protocol::HEADER, "1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list = body_json(resp).await;
+        assert_eq!(list[0]["version"], "0.3.1");
     }
 
     #[tokio::test]

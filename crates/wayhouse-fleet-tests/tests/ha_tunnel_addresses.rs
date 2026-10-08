@@ -388,7 +388,17 @@ impl Cluster {
             .send()
             .await?;
         let status = r.status();
-        ensure!(status.is_success(), "{path}: {status} {}", r.text().await?);
+        if !status.is_success() {
+            // A 500 here is a controller bug (#257): the nodes' own output
+            // is the only place its cause shows.
+            let logs: String = self
+                .procs
+                .iter()
+                .flatten()
+                .map(|p| format!("--- {} ---\n{}\n", p.name(), p.log()))
+                .collect();
+            return Err(anyhow!("{path}: {status} {}\n{logs}", r.text().await?));
+        }
         Ok(())
     }
 

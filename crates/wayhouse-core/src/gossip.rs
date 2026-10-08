@@ -44,8 +44,14 @@ type HmacSha256 = Hmac<Sha256>;
 const HMAC_TAG_LEN: usize = 32;
 /// Bytes of sender timestamp in front of every datagram's payload.
 const TIMESTAMP_LEN: usize = 8;
-/// Bytes `tag` adds around a foca packet: timestamp, version byte, HMAC tag.
-const FRAME_OVERHEAD: usize = TIMESTAMP_LEN + 1 + HMAC_TAG_LEN;
+/// Bytes `tag` adds around a foca packet: timestamp, magic byte, version byte,
+/// HMAC tag.
+const FRAME_OVERHEAD: usize = TIMESTAMP_LEN + 2 + HMAC_TAG_LEN;
+/// Marks a datagram as a versioned gossip frame. It sits in front of the version
+/// byte so that a frame from before versioning (which passes the HMAC too) cannot
+/// be mistaken for one: its first payload byte would have to equal this and the
+/// next one the version. Fixed for ever; change the version instead.
+const GOSSIP_MAGIC: u8 = 0xA7;
 /// The gossip wire version, the second field of every datagram. Bump it on an
 /// incompatible gossip format change; it is independent of the HTTP protocol major
 /// (`wayhouse_http::protocol`, #185). A datagram carrying another value is dropped
@@ -59,6 +65,12 @@ const MAX_DATAGRAM_AGE: std::time::Duration = std::time::Duration::from_secs(30)
 /// One instance's asserted health for one backend, gossiped as a
 /// last-writer-wins register (`Invalidates` below): a newer `changed_at`
 /// from the same `origin` about the same `addr` replaces the old one.
+///
+/// `changed_at` is wall-clock milliseconds since the Unix epoch, made strictly
+/// increasing per process, so it keeps growing across a restart of the origin
+/// (a per-process uptime counter restarted at zero and its votes were dropped
+/// until it passed the pre-restart value, #170). Versions are only ever compared
+/// for one origin, never across origins.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct BackendHealthRegister {
     addr: SocketAddr,
@@ -70,12 +82,13 @@ struct BackendHealthRegister {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct BackendHealthKey {
     addr: SocketAddr,
+    origin: SocketAddr,
     changed_at: u64,
 }
 
 impl Invalidates for BackendHealthKey {
     fn invalidates(&self, other: &Self) -> bool {
-        self.addr == other.addr && self.changed_at > other.changed_at
+        self.addr == other.addr && self.origin == other.origin && self.changed_at > other.changed_at
     }
 }
 
@@ -101,6 +114,7 @@ impl foca::BroadcastHandler<SocketAddr> for BroadcastMerger {
         let reg: BackendHealthRegister = postcard::from_bytes(data)?;
         let key = BackendHealthKey {
             addr: reg.addr,
+            origin: reg.origin,
             changed_at: reg.changed_at,
         };
         let mut domain = self.domain.lock().unwrap_or_else(PoisonError::into_inner);
@@ -251,6 +265,7 @@ pub async fn run(
     );
     let mut runtime = AccumulatingRuntime::new();
     let mut warned_version = false;
+    let mut last_version = 0u64;
     let mut timers: BinaryHeap<Reverse<TimerEntry>> = BinaryHeap::new();
     let mut recv_buf = vec![0u8; max_packet + FRAME_OVERHEAD];
 
@@ -294,6 +309,10 @@ pub async fn run(
                         Err(Reject::Stale) => {
                             metrics::counter!(m::GOSSIP_STALE_REJECTED_TOTAL).increment(1);
                         }
+                        Err(Reject::Format) => {
+                            tracing::debug!(%from, "gossip: dropping a datagram without the gossip frame marker (a pre-versioning peer)");
+                            metrics::counter!(m::GOSSIP_VERSION_REJECTED_TOTAL).increment(1);
+                        }
                         Err(Reject::Version(theirs)) => {
                             // One warning, then debug: a peer on another version
                             // sends every second and the counter carries the rate.
@@ -312,10 +331,11 @@ pub async fn run(
                 }
             }
             Some((addr, up)) = inbox.0.recv() => {
+                let changed_at = next_version(&mut last_version, wall_ms());
                 let reg = BackendHealthRegister {
                     addr,
                     up,
-                    changed_at: crate::util::mono_ms(),
+                    changed_at,
                     origin: identity,
                 };
                 // `add_broadcast` itself runs `data` through
@@ -411,17 +431,27 @@ fn wall_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Frames `payload` as `timestamp (u64 BE ms) || version (u8) || payload ||
-/// HMAC(timestamp || version || payload)`. The timestamp sits inside the MAC so
+/// The next register version: the wall clock, but never at or below the last one
+/// this process issued (two publishes in one millisecond, or a clock stepped
+/// back, must still order).
+fn next_version(last: &mut u64, now_ms: u64) -> u64 {
+    *last = now_ms.max(last.saturating_add(1));
+    *last
+}
+
+/// Frames `payload` as `timestamp (u64 BE ms) || magic (u8) || version (u8) ||
+/// payload || HMAC(everything before it)`. The timestamp sits inside the MAC so
 /// an on-path attacker can neither replay a captured datagram after
-/// [`MAX_DATAGRAM_AGE`] nor refresh it; the version byte is inside it too.
+/// [`MAX_DATAGRAM_AGE`] nor refresh it; the magic and version bytes are inside
+/// it too.
 fn tag(psk: &str, payload: &[u8], now_ms: u64) -> Vec<u8> {
     tag_with_version(psk, GOSSIP_VERSION, payload, now_ms)
 }
 
 fn tag_with_version(psk: &str, version: u8, payload: &[u8], now_ms: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(TIMESTAMP_LEN + 1 + payload.len() + HMAC_TAG_LEN);
+    let mut out = Vec::with_capacity(FRAME_OVERHEAD + payload.len());
     out.extend_from_slice(&now_ms.to_be_bytes());
+    out.push(GOSSIP_MAGIC);
     out.push(version);
     out.extend_from_slice(payload);
     let mut mac = <HmacSha256 as Mac>::new_from_slice(psk.as_bytes())
@@ -442,6 +472,9 @@ enum Reject {
     /// Authentic and fresh, but built by a node speaking another gossip
     /// version (an upgrade in progress): not decoded.
     Version(u8),
+    /// Authentic and fresh, but not a versioned gossip frame at all (no magic
+    /// byte): built before versioning existed.
+    Format,
 }
 
 fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8], now_ms: u64) -> Result<&'a [u8], Reject> {
@@ -457,6 +490,10 @@ fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8], now_ms: u64) -> Result<&'
     if now_ms.abs_diff(sent_ms) > MAX_DATAGRAM_AGE.as_millis() as u64 {
         return Err(Reject::Stale);
     }
+    let (&magic, rest) = rest.split_first().expect("length checked above");
+    if magic != GOSSIP_MAGIC {
+        return Err(Reject::Format);
+    }
     let (&version, payload) = rest.split_first().expect("length checked above");
     if version != GOSSIP_VERSION {
         return Err(Reject::Version(version));
@@ -467,6 +504,7 @@ fn verify_and_strip<'a>(psk: &str, datagram: &'a [u8], now_ms: u64) -> Result<&'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foca::BroadcastHandler;
 
     const NOW: u64 = 1_700_000_000_000;
 
@@ -479,8 +517,9 @@ mod tests {
     #[test]
     fn frame_round_trips_with_version_byte() {
         let tagged = tag("secret", b"hello", NOW);
-        assert_eq!(tagged[TIMESTAMP_LEN], GOSSIP_VERSION);
-        assert_eq!(tagged.len(), TIMESTAMP_LEN + 1 + 5 + HMAC_TAG_LEN);
+        assert_eq!(tagged[TIMESTAMP_LEN], GOSSIP_MAGIC);
+        assert_eq!(tagged[TIMESTAMP_LEN + 1], GOSSIP_VERSION);
+        assert_eq!(tagged.len(), TIMESTAMP_LEN + 2 + 5 + HMAC_TAG_LEN);
         assert_eq!(verify_and_strip("secret", &tagged, NOW), Ok(&b"hello"[..]));
     }
 
@@ -505,10 +544,109 @@ mod tests {
         );
     }
 
+    /// A frame from before versioning: `timestamp || payload || HMAC`. Its first
+    /// payload byte is chosen to equal the old version byte `1`, which used to
+    /// make it decode one byte shifted (#203).
+    #[test]
+    fn a_pre_versioning_frame_is_dropped_by_its_missing_magic() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&NOW.to_be_bytes());
+        out.extend_from_slice(&[1, 2, 3, 4, 5]);
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"secret").unwrap();
+        mac.update(&out);
+        out.extend_from_slice(&mac.finalize().into_bytes());
+        assert_eq!(verify_and_strip("secret", &out, NOW), Err(Reject::Format));
+    }
+
+    #[test]
+    fn versions_stay_strictly_increasing_within_a_millisecond_and_a_clock_step_back() {
+        let mut last = 0;
+        assert_eq!(next_version(&mut last, 1_000), 1_000);
+        assert_eq!(next_version(&mut last, 1_000), 1_001);
+        assert_eq!(next_version(&mut last, 900), 1_002);
+        assert_eq!(next_version(&mut last, 2_000), 2_000);
+    }
+
+    fn merger() -> (BroadcastMerger, DomainMap) {
+        let domain = DomainMap::default();
+        (
+            BroadcastMerger {
+                domain: domain.clone(),
+            },
+            domain,
+        )
+    }
+
+    fn votes(domain: &DomainMap, addr: SocketAddr) -> (usize, usize) {
+        let domain = domain.lock().unwrap();
+        domain.get(&addr).map_or((0, 0), |m| {
+            (
+                m.values().filter(|r| !r.up).count(),
+                m.values().filter(|r| r.up).count(),
+            )
+        })
+    }
+
+    fn receive(m: &mut BroadcastMerger, r: BackendHealthRegister) -> Option<BackendHealthKey> {
+        m.receive_item(&postcard::to_allocvec(&r).unwrap(), None)
+            .unwrap()
+    }
+
+    /// #170: an origin that restarts publishes with a version that is above
+    /// everything it published before, so its votes replace the pre-restart ones.
+    #[test]
+    fn a_restarted_origin_replaces_its_pre_restart_vote() {
+        let (mut m, domain) = merger();
+        let addr: SocketAddr = "10.0.0.1:1".parse().unwrap();
+        let origin: SocketAddr = "10.0.0.2:1".parse().unwrap();
+        let mut last = 0;
+        let before = next_version(&mut last, NOW);
+        assert!(receive(
+            &mut m,
+            BackendHealthRegister {
+                addr,
+                up: false,
+                changed_at: before,
+                origin
+            }
+        )
+        .is_some());
+        assert_eq!(votes(&domain, addr), (1, 0));
+        // The restart: a fresh counter, a clock minutes later.
+        let mut last = 0;
+        let after = next_version(&mut last, NOW + 300_000);
+        assert!(receive(
+            &mut m,
+            BackendHealthRegister {
+                addr,
+                up: true,
+                changed_at: after,
+                origin
+            }
+        )
+        .is_some());
+        assert_eq!(votes(&domain, addr), (0, 1));
+    }
+
+    #[test]
+    fn a_newer_register_from_one_origin_does_not_invalidate_another_origins() {
+        let addr: SocketAddr = "10.0.0.1:1".parse().unwrap();
+        let a: SocketAddr = "10.0.0.2:1".parse().unwrap();
+        let b: SocketAddr = "10.0.0.3:1".parse().unwrap();
+        let key = |origin, changed_at| BackendHealthKey {
+            addr,
+            origin,
+            changed_at,
+        };
+        assert!(!key(a, 20).invalidates(&key(b, 10)));
+        assert!(key(a, 20).invalidates(&key(a, 10)));
+        assert!(!key(a, 10).invalidates(&key(a, 10)));
+    }
+
     #[test]
     fn a_forged_version_without_the_key_is_an_auth_failure() {
         let mut tagged = tag("secret", b"hello", NOW);
-        tagged[TIMESTAMP_LEN] = 9;
+        tagged[TIMESTAMP_LEN + 1] = 9;
         assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
     }
 
@@ -526,7 +664,7 @@ mod tests {
     #[test]
     fn tampered_payload_is_rejected() {
         let mut tagged = tag("secret", b"hello", NOW);
-        tagged[TIMESTAMP_LEN + 1] ^= 0xff;
+        tagged[TIMESTAMP_LEN + 2] ^= 0xff;
         assert_eq!(verify_and_strip("secret", &tagged, NOW), Err(Reject::Auth));
     }
 

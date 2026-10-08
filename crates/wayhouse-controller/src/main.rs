@@ -154,7 +154,7 @@ struct Args {
     /// Serve the plugin API (`/plugins`): upload, approve and manage WASM plugin
     /// installs (docs/plugins.md). Off by default. Standalone controllers only for
     /// now: with `--ha-peers` or `--role slave` the routes answer `501`. Installs are
-    /// stored but nothing runs a plugin yet.
+    /// stored and enabled plugins that declared a timer are ticked.
     #[arg(long)]
     plugins: bool,
 
@@ -558,10 +558,16 @@ async fn main() -> anyhow::Result<()> {
                     8,
                     Duration::from_secs(30),
                 )?);
+                let store = wayhouse_controller::plugins::PluginStore::open(state.store.db())?;
+                let runner =
+                    wayhouse_controller::plugins::runner::Runner::new(store.clone(), pool.clone());
+                // Detached on purpose: it runs for the life of the process.
+                drop(runner.clone().spawn());
                 wayhouse_controller::plugins::api::router(
                     wayhouse_controller::plugins::api::PluginsState {
-                        store: wayhouse_controller::plugins::PluginStore::open(state.store.db())?,
+                        store,
                         pool,
+                        runner,
                         auth_token: admin_token.clone(),
                     },
                 )

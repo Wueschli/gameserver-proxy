@@ -1219,17 +1219,24 @@ listeners:
         }
     }
     // The chatty client of the replaced group is moved to the new group too.
+    // Stop the pinger and drain what is queued (heartbeat replies from before
+    // the swap), so only the answer to a distinct payload counts.
+    pinger.abort();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while old.try_recv(&mut buf).is_ok() {}
     let mut moved = false;
     for _ in 0..40 {
-        if matches!(
-            tokio::time::timeout(Duration::from_millis(100), old.recv(&mut buf)).await,
-            Ok(Ok(_))
-        ) {
-            moved = true;
-            break;
+        if old.send(b"moved").await.is_ok() {
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(100), old.recv(&mut buf)).await
+            {
+                if buf[..n] == [&[1u8][..], b"moved"].concat()[..] {
+                    moved = true;
+                    break;
+                }
+            }
         }
     }
-    pinger.abort();
     assert_eq!(
         unanswered, 0,
         "first datagrams dropped by the replaced group"

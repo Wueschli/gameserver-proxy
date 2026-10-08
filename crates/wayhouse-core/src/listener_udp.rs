@@ -121,6 +121,17 @@ struct Session {
     reply_task: JoinHandle<()>,
 }
 
+impl Session {
+    /// Abort the reply pump and wait until it is gone. The pump holds a clone
+    /// of the upstream and listener sockets, so a plain drop (which only
+    /// aborts) can leave the listener's `SO_REUSEPORT` socket open a moment
+    /// after the worker returned.
+    async fn stop(mut self) {
+        self.reply_task.abort();
+        let _ = (&mut self.reply_task).await;
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.reply_task.abort();
@@ -244,6 +255,11 @@ pub async fn run_udp_listener(
                         listener = %cfg.name, worker = worker_id, sessions = ended,
                         "udp listener replaced: socket closed, its sessions end and re-open on the new group"
                     );
+                    // Wait for the pumps to drop their socket clones, so the
+                    // port is free of this worker when the reload moves on.
+                    for (_, session) in sessions.drain() {
+                        session.stop().await;
+                    }
                     return Ok(());
                 }
             }

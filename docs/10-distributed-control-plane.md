@@ -1004,7 +1004,7 @@ this is what is built.
 | Surface | Carrier | Rule |
 |---|---|---|
 | Component HTTP/JSON, SSE and raft routes (controller `/proxy-peers`, `/peers`, `/config/subscribe`, `/intent*`, `/tunnel/addresses`, `/raft/*`; aggregator `POST /ingest`; proxy admin API, leniently) | `X-Wayhouse-Protocol: <major>.<minor>` (`wayhouse_http::protocol`) | clients send it on every request (`wayhouse_http::builder()`); a server answers `426` to another major or an unparsable value, with `wayhouse protocol <peer> is not compatible with this node (<ours>): upgrade the older side`, and echoes its own version on every response. A request with **no** header is refused too (a caller that predates versioning, per #192); the aggregator's fan-out reaches the proxy admin API through the same check, but those routes are also called by hand, so there a missing header is accepted and only another major is refused (`route_group="proxy"`; the fan-out result shows the `426` text). Checked on connect: an open SSE stream is never torn down mid-stream. |
-| Gossip (UDP) | one version byte after the timestamp, inside the HMAC | a datagram with a valid MAC and another version is dropped before decoding and counted (`wayhouse_gossip_version_rejected_total`) |
+| Gossip (UDP) | a magic byte then a version byte after the timestamp, inside the HMAC | a datagram with a valid MAC and another version is dropped before decoding and counted (`wayhouse_gossip_version_rejected_total`) |
 | Config document | `schema_version` | see [05](05-configuration.md) "Schema version" |
 | Controller store | `meta/format` in each sled database | a higher value is refused at open, naming the path |
 

@@ -45,6 +45,27 @@ pub fn abi_matches(sniffer: &str, host: &str) -> Result<bool, AbiParseError> {
     })
 }
 
+/// The oldest proxy of `env`, a pre-release counting as its release for this
+/// comparison (`0.1.0-rc.1` is `0.1.0`). `None` when no proxy version is known.
+fn oldest_proxy(env: &Environment) -> Option<semver::Version> {
+    env.proxy_versions
+        .iter()
+        .min()
+        .map(|p| semver::Version::new(p.major, p.minor, p.patch))
+}
+
+/// Whether every known proxy of `env` is new enough for `version`'s `min_proxy`.
+/// With no proxy version known the check passes (unknown, not incompatible).
+pub fn check_min_proxy(version: &VersionEntry, env: &Environment) -> Result<(), Incompatible> {
+    match oldest_proxy(env) {
+        Some(p) if version.min_proxy > p => Err(Incompatible::ProxyTooOld {
+            needs: version.min_proxy.clone(),
+            oldest_proxy: p,
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// The newest version satisfying both the ABI and every proxy's `min_proxy`.
 pub fn select<'a>(
     entry: &'a SnifferEntry,
@@ -53,12 +74,7 @@ pub fn select<'a>(
     if entry.versions.is_empty() {
         return Err(Incompatible::NoVersions);
     }
-    // A pre-release proxy (`0.1.0-rc.1`) counts as its release for this comparison.
-    let oldest_proxy = env
-        .proxy_versions
-        .iter()
-        .min()
-        .map(|p| semver::Version::new(p.major, p.minor, p.patch));
+    let oldest_proxy = oldest_proxy(env);
     let mut abi_ok: Vec<&VersionEntry> = Vec::new();
     for v in &entry.versions {
         // An unparseable abi string cannot match; the index validator rejects it earlier.
