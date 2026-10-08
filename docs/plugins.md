@@ -107,8 +107,10 @@ A scan runs once a second. An enabled install whose approved declaration has `on
 is called every `tick_interval_secs`; the first tick comes one full interval after the
 controller (or the enable) first sees the install, so enabling never runs a plugin inside
 the request. The module is compiled on first use through the bounded pool, `init` runs
-once with the install's `config`, and every call runs on the pool: a busy or slow pool
-skips the tick (shown in the status) and never blocks the controller. One call per
+with the install's `config` each time the module is loaded (first tick after a controller
+restart, after disable then enable, and after a failed load) against the state already stored,
+so it must tolerate existing state, and every call runs on the pool: a busy or slow pool
+skips the tick (shown in the status) and never blocks the controller; a skipped tick is retried at the next scan, not a whole interval later. One call per
 install is in flight at a time.
 
 A call returns its state writes; the controller applies them as one batch only if the

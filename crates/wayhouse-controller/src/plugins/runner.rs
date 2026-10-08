@@ -81,8 +81,12 @@ fn unix_now() -> u64 {
 /// The outcome of the load and the call, before it is committed.
 enum Outcome {
     Effects(u64, Effects),
+    /// The pool had no room: nothing ran, and the tick is retried at the next scan.
+    Busy,
     Failed(String),
 }
+
+const BUSY: &str = "the plugin worker pool is busy; tick skipped and retried";
 
 impl Runner {
     pub fn new(store: PluginStore, pool: Arc<CompilePool>) -> Arc<Self> {
@@ -146,20 +150,29 @@ impl Runner {
                     .or_insert_with(|| now + interval);
                 if now >= at {
                     sched.next_due.insert(rec.id.clone(), now + interval);
-                    due.push(rec.clone());
+                    due.push((rec.clone(), now));
                 }
             }
         }
         let mut tasks = tokio::task::JoinSet::new();
-        for rec in due {
+        for (rec, at) in due {
             let this = self.clone();
-            tasks.spawn(async move { this.tick(rec).await });
+            tasks.spawn(async move { this.tick(rec, at).await });
         }
         while tasks.join_next().await.is_some() {}
     }
 
-    async fn tick(self: Arc<Self>, rec: InstallRecord) {
+    async fn tick(self: Arc<Self>, rec: InstallRecord, at: Instant) {
         let outcome = self.call(&rec).await;
+        if matches!(outcome, Outcome::Busy) {
+            // Retry at the next scan instead of waiting a whole interval, so the
+            // installs that lose the race for pool room do not lose it every round.
+            self.schedule
+                .lock()
+                .await
+                .next_due
+                .insert(rec.id.clone(), at);
+        }
         self.finish(&rec.id, outcome);
     }
 
@@ -177,7 +190,8 @@ impl Runner {
             Some(p) => p,
             None => match self.load_and_init(rec).await {
                 Ok(p) => p,
-                Err(why) => return Outcome::Failed(why),
+                Err(Fail::Busy) => return Outcome::Busy,
+                Err(Fail::Other(why)) => return Outcome::Failed(why),
             },
         };
         let (rev, snapshot) = match self.store.state(&rec.id) {
@@ -190,34 +204,41 @@ impl Runner {
                 .await;
         match flatten(result) {
             Ok(fx) => Outcome::Effects(rev, fx),
-            Err(why) => Outcome::Failed(why),
+            Err(Fail::Busy) => Outcome::Busy,
+            Err(Fail::Other(why)) => Outcome::Failed(why),
         }
     }
 
-    async fn load_and_init(&self, rec: &InstallRecord) -> Result<Arc<Plugin>, String> {
+    async fn load_and_init(&self, rec: &InstallRecord) -> Result<Arc<Plugin>, Fail> {
         let bytes = self
             .store
             .get_blob(&rec.sha256)
-            .map_err(|e| e.to_string())?
-            .ok_or("the module is no longer stored")?;
+            .map_err(|e| Fail::other(e.to_string()))?
+            .ok_or_else(|| Fail::other("the module is no longer stored"))?;
         let pool = self.pool.clone();
         let approved = rec.approved.clone();
         let loaded = tokio::task::spawn_blocking(move || pool.load(bytes, approved))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Fail::other(e.to_string()))?;
         let plugin = Arc::new(loaded.map_err(|e| match e {
-            PoolError::Busy => "the plugin worker pool is busy; tick skipped".to_string(),
-            e => e.to_string(),
+            PoolError::Busy => Fail::Busy,
+            e => Fail::other(e.to_string()),
         })?);
-        let (rev, snapshot) = self.store.state(&rec.id).map_err(|e| e.to_string())?;
-        let config = serde_json::to_vec(&rec.config).map_err(|e| e.to_string())?;
+        let (rev, snapshot) = self
+            .store
+            .state(&rec.id)
+            .map_err(|e| Fail::other(e.to_string()))?;
+        let config = serde_json::to_vec(&rec.config).map_err(|e| Fail::other(e.to_string()))?;
         let (p, pool) = (plugin.clone(), self.pool.clone());
         let fx = flatten(
             tokio::task::spawn_blocking(move || pool.call(move || p.init(&config, &snapshot)))
                 .await,
         )
-        .map_err(|e| format!("init failed: {e}"))?;
-        self.commit(&rec.id, rev, &fx)?;
+        .map_err(|e| match e {
+            Fail::Busy => Fail::Busy,
+            Fail::Other(e) => Fail::other(format!("init failed: {e}")),
+        })?;
+        self.commit(&rec.id, rev, &fx).map_err(Fail::Other)?;
         self.record_logs(&rec.id, &fx);
         self.schedule.lock().await.loaded.insert(
             rec.id.clone(),
@@ -260,6 +281,7 @@ impl Runner {
                 self.record_logs(id, &fx);
                 self.commit(id, rev, &fx)
             }
+            Outcome::Busy => Err(BUSY.to_string()),
             Outcome::Failed(why) => Err(why),
         };
         let mut all = self.lock_status();
@@ -282,15 +304,27 @@ impl Runner {
     }
 }
 
+/// Why a load or call did not produce effects.
+enum Fail {
+    Busy,
+    Other(String),
+}
+
+impl Fail {
+    fn other(why: impl Into<String>) -> Self {
+        Self::Other(why.into())
+    }
+}
+
 fn flatten(
     joined: Result<Result<Result<Effects, CallError>, PoolError>, tokio::task::JoinError>,
-) -> Result<Effects, String> {
+) -> Result<Effects, Fail> {
     match joined {
         Ok(Ok(Ok(fx))) => Ok(fx),
-        Ok(Ok(Err(e))) => Err(e.to_string()),
-        Ok(Err(PoolError::Busy)) => Err("the plugin worker pool is busy; tick skipped".to_string()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(e) => Err(e.to_string()),
+        Ok(Ok(Err(e))) => Err(Fail::other(e.to_string())),
+        Ok(Err(PoolError::Busy)) => Err(Fail::Busy),
+        Ok(Err(e)) => Err(Fail::other(e.to_string())),
+        Err(e) => Err(Fail::other(e.to_string())),
     }
 }
 
@@ -533,5 +567,26 @@ mod tests {
         assert_eq!(counter_value(&store, "a"), None);
         release_tx.send(()).unwrap();
         hold.join().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn installs_that_lose_the_race_for_pool_room_run_at_the_next_scan() {
+        // More installs due together than one worker and one queue slot can take.
+        let (r, store, _d) = fixture(1, 1);
+        let ids = ["a", "b", "c", "d", "e", "f"];
+        for id in ids {
+            install(&store, id, &counter());
+        }
+        let t0 = Instant::now();
+        r.run_due(t0).await;
+        let mut rounds = 0;
+        while ids.iter().any(|id| counter_value(&store, id).is_none()) {
+            rounds += 1;
+            assert!(rounds <= 40, "an install is starved");
+            r.run_due(secs(t0, 30 + rounds)).await;
+        }
+        // All of them ticked well before a second interval (30 s) elapsed.
+        assert!(rounds < 30, "{rounds} rounds");
+        assert!(ids.iter().all(|id| counter_value(&store, id) == Some(1)));
     }
 }
