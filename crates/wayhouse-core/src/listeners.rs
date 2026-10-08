@@ -9,7 +9,10 @@
 //! - name present, [`ListenerConfig`] unchanged → keep running;
 //! - name present, config changed → bind a new group, then stop the old one
 //!   (a UDP group keeps draining its sessions in the background, see
-//!   `ListenerManager::retired`; the reload does not wait for it);
+//!   `ListenerManager::retired`; the reload does not wait for it, and the old
+//!   workers leave the `SO_REUSEPORT` flow hash at once, so every new flow
+//!   reaches the new group. A client of a still-draining session is rehashed to
+//!   the new group and gets a new session there, #186);
 //! - name only in the new config → bind and spawn;
 //! - name only in the running set → stop.
 //!
@@ -74,7 +77,7 @@ pub struct Reconciled {
 /// True if binding `a` would collide with a socket bound to `b`: same port and
 /// the same IP, or either side a wildcard of the same family (`0.0.0.0:80`
 /// versus `127.0.0.1:80`).
-fn overlaps(a: SocketAddr, b: SocketAddr) -> bool {
+pub(crate) fn overlaps(a: SocketAddr, b: SocketAddr) -> bool {
     a.port() == b.port()
         && (a.ip() == b.ip()
             || (a.is_ipv4() == b.is_ipv4() && (a.ip().is_unspecified() || b.ip().is_unspecified())))
@@ -92,9 +95,17 @@ struct Bound {
     sockets: Vec<(SocketAddr, usize, Socket)>,
 }
 
+/// The addresses a replacement group binds (see `Group::handoff`).
+pub(crate) type Handoff = Arc<[SocketAddr]>;
+
 struct Group {
     cfg: ListenerConfig,
     stop: watch::Sender<bool>,
+    /// UDP only: the addresses a replacement group now binds. A draining worker
+    /// whose own address overlaps one must leave the `SO_REUSEPORT` hash (see
+    /// `listener_udp::run_udp_listener`). Never set on shutdown or when the
+    /// listener is removed, where nothing takes over its flows.
+    handoff: watch::Sender<Option<Handoff>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -109,6 +120,12 @@ impl Group {
         for t in self.tasks {
             let _ = t.await;
         }
+    }
+
+    /// A replacement group is bound on `new_binds`: workers sharing one of
+    /// those addresses stop receiving new flows.
+    fn hand_off(&self, new_binds: Handoff) {
+        let _ = self.handoff.send(Some(new_binds));
     }
 
     fn finished(&self) -> bool {
@@ -218,6 +235,7 @@ impl ListenerManager {
     fn spawn_group(&self, bound: Bound) -> Group {
         let Bound { cfg, sockets } = bound;
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (handoff_tx, handoff_rx) = watch::channel(None);
         // One limiter per listener (shared across every port's workers, not
         // per-port — a port-range bind is still one logical listener), rebuilt
         // on every respawn so it tracks the live `ListenerConfig`.
@@ -241,6 +259,7 @@ impl ListenerManager {
             let mut lc = cfg.clone();
             lc.bind = bind;
             let mut sd = stop_rx.clone();
+            let mut handoff = handoff_rx.clone();
             tasks.push(tokio::spawn(async move {
                 let res = match socket {
                     Socket::Tcp(sock) => {
@@ -276,6 +295,7 @@ impl ListenerManager {
                             worker_id,
                             sock,
                             &mut sd,
+                            &mut handoff,
                         )
                         .await
                     }
@@ -291,6 +311,7 @@ impl ListenerManager {
         Group {
             cfg,
             stop: stop_tx,
+            handoff: handoff_tx,
             tasks,
         }
     }
@@ -316,7 +337,7 @@ impl ListenerManager {
     /// [`Reconciled::failed`] and leaves its previous group, if any, running.
     pub async fn reconcile(&self, snap: &Snapshot) -> Reconciled {
         // Phase 1 (lock held, no await): bind, then swap groups.
-        let (stopped, failed): (Vec<Group>, Vec<BindError>) = {
+        let (stopped, failed): (Vec<(Group, Option<Handoff>)>, Vec<BindError>) = {
             let mut groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
             let wanted: HashMap<&str, &ListenerConfig> = snap
                 .listeners
@@ -352,7 +373,19 @@ impl ListenerManager {
                 })
                 .cloned()
                 .collect();
-            let stopped: Vec<Group> = stale.iter().filter_map(|n| groups.remove(n)).collect();
+            // A stopped group is replaced when a new group of the same name
+            // takes over; its draining workers then leave the reuseport hash.
+            let stopped: Vec<(Group, Option<Handoff>)> = stale
+                .iter()
+                .filter_map(|n| groups.remove(n))
+                .map(|g| {
+                    let successor = new_groups
+                        .iter()
+                        .find(|b| b.cfg.name == g.cfg.name)
+                        .map(|b| b.cfg.binds().collect::<Vec<_>>().into());
+                    (g, successor)
+                })
+                .collect();
             for b in new_groups {
                 tracing::info!(
                     listener = %b.cfg.name, bind = %b.cfg.bind, protocol = ?b.cfg.protocol,
@@ -368,9 +401,12 @@ impl ListenerManager {
         // sessions until they idle out, so hand it to `retired` instead of
         // holding the reload (and everything queued behind it) on it.
         let n_stopped = stopped.len();
-        for g in stopped {
+        for (g, successor) in stopped {
             tracing::info!(listener = %g.cfg.name, bind = %g.cfg.bind, "stopping listener");
             g.signal();
+            if let Some(binds) = successor {
+                g.hand_off(binds);
+            }
             if g.cfg.protocol == Protocol::Udp && !g.finished() {
                 let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
                 retired.retain(|r| !r.finished());

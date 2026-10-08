@@ -137,6 +137,29 @@ struct Pending {
     limit_guard: LimitGuard,
 }
 
+/// Take `sock` out of the kernel's `SO_REUSEPORT` flow hash without closing it.
+///
+/// Connecting a UDP socket makes the kernel deliver only datagrams from that one
+/// peer to it, so no new flow hashes here any more and a replacement group on
+/// the same port receives them. The socket stays open: the draining sessions
+/// keep answering their clients through it (`send_to` still takes an explicit
+/// destination on a connected socket). The peer is the socket's own address
+/// (loopback for a wildcard bind), which nothing outside this host can send from.
+/// A client of a session that is still draining is rehashed to the replacement
+/// group on its next datagram and gets a new session there.
+fn leave_reuseport_hash(sock: &UdpSocket) -> std::io::Result<()> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mut peer = sock.local_addr()?;
+    if peer.ip().is_unspecified() {
+        peer.set_ip(match peer.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        });
+    }
+    // `connect` on UDP only records the peer; it is synchronous in the kernel.
+    socket2::SockRef::from(sock).connect(&peer.into())
+}
+
 /// The per-datagram destination mechanism a listener's socket needs; the
 /// socket itself is bound by `ListenerManager` with this mode.
 pub(crate) fn udp_mode(cfg: &ListenerConfig) -> UdpMode {
@@ -167,6 +190,7 @@ pub async fn run_udp_listener(
     worker_id: usize,
     socket: std::net::UdpSocket,
     shutdown: &mut watch::Receiver<bool>,
+    handoff: &mut watch::Receiver<Option<crate::listeners::Handoff>>,
 ) -> Result<(), ListenerError> {
     let mode = udp_mode(&cfg);
     let sock = Arc::new(UdpSocket::from_std(socket)?);
@@ -198,6 +222,9 @@ pub async fn run_udp_listener(
     // keeps pumping existing sessions until they idle out, then returns. The
     // grace period is enforced by the caller aborting the task.
     let mut draining = false;
+    // Set once the socket has left the `SO_REUSEPORT` hash (or the hand-off
+    // channel closed), so the branch below fires at most once.
+    let mut handed_off = false;
 
     loop {
         if draining && sessions.is_empty() && pending.is_empty() {
@@ -212,6 +239,30 @@ pub async fn run_udp_listener(
                         listener = %cfg.name, worker = worker_id,
                         sessions = sessions.len(), "udp listener draining"
                     );
+                }
+            }
+            changed = handoff.changed(), if !handed_off => {
+                handed_off = true;
+                let successor = handoff.borrow_and_update().clone();
+                let takes_over = changed.is_ok()
+                    && successor.is_some_and(|binds| {
+                        binds.iter().any(|b| crate::listeners::overlaps(cfg.bind, *b))
+                    });
+                if takes_over {
+                    // A replacement group owns this port now: draining only
+                    // finishes the sessions that already exist.
+                    draining = true;
+                    match leave_reuseport_hash(&sock) {
+                        Ok(()) => tracing::info!(
+                            listener = %cfg.name, worker = worker_id,
+                            sessions = sessions.len(),
+                            "udp listener handed its port to the replacement group"
+                        ),
+                        Err(e) => tracing::warn!(
+                            listener = %cfg.name, worker = worker_id, error = %e,
+                            "cannot leave the reuseport group; new flows hashed here are dropped until the drain ends"
+                        ),
+                    }
                 }
             }
             _ = wheel_tick.tick() => {

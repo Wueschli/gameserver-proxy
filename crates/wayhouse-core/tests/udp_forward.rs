@@ -1144,3 +1144,87 @@ listeners:
     assert_eq!(out.stopped, 1);
     assert!(out.failed.is_empty());
 }
+
+/// #186: a replaced UDP group keeps draining its live sessions, but its sockets
+/// must stop receiving new flows. Otherwise the kernel keeps hashing some new
+/// clients to the draining socket, which refuses them, and a chatty client
+/// holds that window open indefinitely.
+#[tokio::test]
+async fn new_clients_are_answered_while_a_replaced_udp_group_drains() {
+    let backend = echo_backend(1).await;
+    let proxy_addr = free_udp_addr();
+    let yaml = |extra: &str| {
+        format!(
+            r#"
+pools:
+  - name: p
+    targets: ["{backend}"]
+    health_check:
+      type: none
+listeners:
+  - name: l
+    bind: "{proxy_addr}"
+    protocol: udp
+    pool: p
+{extra}"#
+        )
+    };
+    let cfg1 = parse_str(&yaml("")).unwrap();
+    let runtime = Runtime::start(Snapshot::from_config(&cfg1), std::sync::Arc::default(), 1);
+    let handle = runtime.handle();
+
+    // A client with a live session that keeps the old group draining.
+    let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    old.connect(proxy_addr).await.unwrap();
+    let mut buf = [0u8; 64];
+    first_reply(&old, b"hb", &mut buf).await;
+    let old = std::sync::Arc::new(old);
+    let pinger = {
+        let old = old.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = old.send(b"hb").await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    };
+
+    let cfg2 = parse_str(&yaml(
+        "    rate_limit:\n      per_ip: { rate: 1000, burst: 1000 }\n",
+    ))
+    .unwrap();
+    handle.store(Snapshot::build_with_overlay(
+        &cfg2,
+        Some(&handle.current()),
+        handle.backend_overlay(),
+    ));
+    let out = tokio::time::timeout(Duration::from_secs(5), handle.reconcile_listeners())
+        .await
+        .expect("reconcile must return while a UDP session is live");
+    assert_eq!(out.stopped, 1);
+
+    // Each fresh client has its own 4-tuple, so about half of them hash to the
+    // draining socket while it is still in the SO_REUSEPORT group.
+    let mut unanswered = 0;
+    for _ in 0..32 {
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        c.connect(proxy_addr).await.unwrap();
+        let mut answered = false;
+        for _ in 0..4 {
+            if c.send(b"new").await.is_ok()
+                && matches!(
+                    tokio::time::timeout(Duration::from_millis(200), c.recv(&mut buf)).await,
+                    Ok(Ok(_))
+                )
+            {
+                answered = true;
+                break;
+            }
+        }
+        if !answered {
+            unanswered += 1;
+        }
+    }
+    pinger.abort();
+    assert_eq!(unanswered, 0, "new clients dropped by the draining group");
+}
