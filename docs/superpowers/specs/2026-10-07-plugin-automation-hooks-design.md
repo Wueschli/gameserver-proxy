@@ -82,7 +82,7 @@ The existing intent ops (`BackendAdd`, `BackendRemove`, `BackendPatch` in `crate
 
 **[decided] direction, details to review.** Secrets are encrypted at rest with **one cluster key, provisioned identically to every node out of band** (file path or environment). The key is never written to the replicated log or snapshots, which hold only ciphertext, so any node can decrypt what the leader wrote. A secret is never returned by an API, logged, or passed to the guest; the host expands it into the request, and only for the host the slot is bound to (#221).
 
-This stays a **hard gate**: before any plugin that uses secrets ships, a security review must decide key rotation, how a node joining the cluster gets the key, what happens when a node lacks it (the plugin is held, not run without its secret), and log compaction so a superseded ciphertext does not linger in old segments. Tracked as its own issue.
+This stays a **hard gate**: no plugin that uses secrets ships before the design is implemented and its tests pass. The review is done in the [plugin secret storage design](2026-10-08-plugin-secret-storage-design.md) (#235): key rotation, how a joining node gets the key, a node without the key (the plugin is held, not run without its secret), log compaction and redaction.
 
 ## Pelican (#213)
 
