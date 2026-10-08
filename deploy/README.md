@@ -43,12 +43,13 @@ a manifest list for `linux/amd64` and `linux/arm64`; `docker pull` picks the hos
 per-architecture images stay available as `:<version>-amd64` and `:<version>-arm64`. There
 is no emulation and no cross-compiling: each architecture builds natively, so the Dockerfile
 is architecture-neutral (the base images are pinned by index digest, which covers both).
-CI has an arm64 leg of each of `build-release`, `sniffers`, `deploy` and `trivy` (jobs `*-arm64`).
+CI has an arm64 leg of each of `build-release`, `deploy` and `trivy` (jobs `*-arm64`), and the
+sniffers e2e job (`sniffers e2e (arm64)`) runs on an arm64 runner too.
 
 `BIN_SOURCE=prebuilt` (default `builder`) skips the in-Docker compile and copies
 binaries you built yourself from `deploy/prebuilt/` (`wayhouse`, `wayhouse-minimal`, `wayhouse-controller`,
-`wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`). CI uses it to share one release build
-with the sniffers tests; they must be built against a glibc no newer than the
+`wayhouse-aggregator`, `wayhouse-ui`, `wayhouse-agent`). CI uses it so the `deploy` job reuses the
+`build-release` binaries; they must be built against a glibc no newer than the
 runtime's (2.41). The nightly CI run uses the default, self-contained path.
 
 ## Pulling private images
@@ -93,6 +94,19 @@ same and runs `smoke.sh` against it.
 
 `wayhouse` uses host networking (docs/12's default for an edge process), so the
 controller and aggregator are also published on the host's loopback.
+
+## Sniffer registries (UI flags)
+
+The UI's "Install from a registry" flow (see [`docs/sniffers.md`](../docs/sniffers.md)) takes two flags
+on `wayhouse-ui`:
+
+- `--registries-file <path>` keeps the registry list across restarts (JSON, mode 0600). Without it the
+  list lives in memory only and **is lost on restart**; in a container, point it at a mounted volume.
+- `--no-default-registry` hides the official registry.
+
+The UI host needs **direct outbound HTTPS** to each registry: the registry client ignores
+`HTTPS_PROXY`/`HTTP_PROXY`, because a forward proxy would resolve the destination itself and bypass the
+check that refuses private addresses.
 
 ## Tunnel (phase 14)
 

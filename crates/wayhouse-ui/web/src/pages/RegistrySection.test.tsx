@@ -132,6 +132,13 @@ describe("RegistrySection", () => {
     expect(api.installFromRegistry).not.toHaveBeenCalled();
   });
 
+  it("does not suggest a listed signature protects the install", async () => {
+    render(<RegistrySection />);
+    const dlg = await openInstall();
+    expect(dlg).toHaveTextContent("listed, not verified");
+    expect(dlg).not.toHaveTextContent("listed in the registry");
+  });
+
   it("an external install dialog shows the risk text and needs it confirmed", async () => {
     render(<RegistrySection />);
     await userEvent.selectOptions(await screen.findByLabelText("Registry"), EXTERNAL.id);

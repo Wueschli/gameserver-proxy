@@ -30,6 +30,7 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
   async function check() {
     setChecking(true);
     setError(null);
+    setResult(null);
     try {
       setResult(await checkUpdates());
     } catch (err) {
@@ -83,7 +84,11 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
           version={pending.version}
           verb="Update"
           onClose={() => setPending(null)}
-          onInstalled={(name) => onChanged(`updated ${name}`)}
+          onInstalled={(name) => {
+            // The list was true before the update; do not offer it again.
+            setResult(null);
+            onChanged(`updated ${name}`);
+          }}
         />
       )}
     </section>
@@ -134,7 +139,7 @@ function Results({
                   </td>
                   <td className="px-4 py-2 text-ink-muted">{row.instances.join(", ")}</td>
                   <td className="px-4 py-2">
-                    <UpdateCell row={row} onUpdate={onUpdate} busy={busy} />
+                    <UpdateCell row={row} onUpdate={onUpdate} busy={busy} registryDown={down.length > 0} />
                   </td>
                 </tr>
               ))}
@@ -156,15 +161,24 @@ function UpdateCell({
   row,
   onUpdate,
   busy,
+  registryDown,
 }: {
   row: UpdateCheckRow;
   onUpdate: (row: UpdateCheckRow) => void;
   busy: boolean;
+  registryDown: boolean;
 }) {
   if (!row.known) {
     return <span className="text-ink-faint">not in any registry, so no update is offered</span>;
   }
-  if (!row.update) return <Badge tone="good">up to date</Badge>;
+  if (!row.update) {
+    // An unreachable registry might hold a newer version, so "up to date" would be a guess.
+    return registryDown ? (
+      <span className="text-ink-muted">no update found in reachable registries</span>
+    ) : (
+      <Badge tone="good">up to date</Badge>
+    );
+  }
   if (!row.update.compatible) {
     return (
       <span className="text-warn">

@@ -918,6 +918,96 @@ mod tests {
         assert_eq!(uploads.lock().unwrap().as_slice(), [module]);
     }
 
+    /// A registry serving `demo` in several versions `(version, abi, module)`;
+    /// each artifact lives at `/demo-<version>.wasm`.
+    async fn fake_registry_versions(versions: &[(&str, &str, Vec<u8>)]) -> String {
+        let list: Vec<_> = versions
+            .iter()
+            .map(|(v, abi, module)| {
+                json!({
+                    "version": v, "abi": abi, "min_proxy": "0.1.0",
+                    "url": format!("https://registry.test/demo-{v}.wasm"),
+                    "sha256": format!("{:x}", Sha256::digest(module)), "size": module.len(),
+                    "limits": { "max_memory_bytes": 1048576, "call_timeout_ms": 50 }
+                })
+            })
+            .collect();
+        let index = json!({
+            "schema": 1, "kind": "sniffer", "name": "test registry",
+            "sniffers": [{ "name": "demo", "description": "d", "license": "MIT", "versions": list }]
+        })
+        .to_string();
+        let mut app = Router::new().route("/index.json", get(move || async move { index }));
+        for (v, _, module) in versions {
+            let module = module.clone();
+            app = app.route(
+                &format!("/demo-{v}.wasm"),
+                get(move || async move { module }),
+            );
+        }
+        serve(app).await
+    }
+
+    /// A module distinguishable from the others by a custom section named `tag`.
+    fn tagged_module(tag: &str) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module (memory 1) (func (export "f")) (@custom "wayhouse.abi" "\00\00\01\00") (@custom "{tag}" ""))"#
+        ))
+        .unwrap()
+    }
+
+    async fn install_version(h: &Harness, version: &str) -> (StatusCode, serde_json::Value) {
+        h.call(
+            "POST",
+            &format!("/api/registries/{}/install", h.registry_id),
+            Some(json!({ "name": "demo", "version": version })),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn install_with_a_version_installs_that_one_even_when_a_newer_exists() {
+        let (old, new) = (tagged_module("old"), tagged_module("new"));
+        let base =
+            fake_registry_versions(&[("0.2.0", "0.1", new.clone()), ("0.1.0", "0.1", old.clone())])
+                .await;
+        let (agg, uploads) = fake_aggregator(ok_results()).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = install_version(&h, "0.1.0").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["version"], "0.1.0");
+        assert_eq!(uploads.lock().unwrap().as_slice(), [old]);
+        // Without a version the newest compatible one is installed.
+        let (status, body) = h.install().await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["version"], "0.2.0");
+    }
+
+    #[tokio::test]
+    async fn install_with_an_unknown_version_is_404_and_uploads_nothing() {
+        let base = fake_registry_versions(&[("0.1.0", "0.1", tagged_module("old"))]).await;
+        let (agg, uploads) = fake_aggregator(ok_results()).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = install_version(&h, "9.9.9").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(uploads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn install_with_a_version_of_another_abi_is_422_and_uploads_nothing() {
+        let base = fake_registry_versions(&[
+            ("0.2.0", "0.9", tagged_module("new")),
+            ("0.1.0", "0.1", tagged_module("old")),
+        ])
+        .await;
+        let (agg, uploads) = fake_aggregator(ok_results()).await;
+        let h = harness(&base, &agg, false, crate::role::Role::Operator).await;
+        let (status, body) = install_version(&h, "0.2.0").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("ABI"));
+        assert!(uploads.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn install_refuses_a_sha_mismatch_and_uploads_nothing() {
         let module = wat::parse_str(MODULE_WAT).unwrap();
