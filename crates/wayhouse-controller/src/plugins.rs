@@ -49,12 +49,17 @@ pub enum PluginStoreError {
     Sled(#[from] sled::Error),
     #[error("plugin store record is corrupt: {0}")]
     Corrupt(#[from] serde_json::Error),
+    #[error("the module for this install is no longer stored")]
+    BlobMissing,
 }
 
 #[derive(Clone)]
 pub struct PluginStore {
     installs: sled::Tree,
     blobs: sled::Tree,
+    /// Serialises create, set_enabled and delete, so a blob cannot be
+    /// garbage-collected between an install's blob check and its write.
+    write: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl PluginStore {
@@ -63,6 +68,7 @@ impl PluginStore {
         Ok(Self {
             installs: db.open_tree("plugin_installs")?,
             blobs: db.open_tree("plugin_blobs")?,
+            write: std::sync::Arc::default(),
         })
     }
 
@@ -77,11 +83,27 @@ impl PluginStore {
         Ok(self.blobs.get(sha256.as_bytes())?.map(|v| v.to_vec()))
     }
 
-    pub fn create(&self, record: &InstallRecord) -> Result<(), PluginStoreError> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write_record(&self, record: &InstallRecord) -> Result<(), PluginStoreError> {
         self.installs
             .insert(record.id.as_bytes(), serde_json::to_vec(record)?)?;
         self.installs.flush()?;
         Ok(())
+    }
+
+    /// Store a new install; fails with `BlobMissing` when its module is gone
+    /// (for instance deleted with the last other install while this one compiled).
+    pub fn create(&self, record: &InstallRecord) -> Result<(), PluginStoreError> {
+        let _guard = self.lock();
+        if !self.blobs.contains_key(record.sha256.as_bytes())? {
+            return Err(PluginStoreError::BlobMissing);
+        }
+        self.write_record(record)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<InstallRecord>, PluginStoreError> {
@@ -107,16 +129,18 @@ impl PluginStore {
         id: &str,
         enabled: bool,
     ) -> Result<Option<InstallRecord>, PluginStoreError> {
+        let _guard = self.lock();
         let Some(mut record) = self.get(id)? else {
             return Ok(None);
         };
         record.enabled = enabled;
-        self.create(&record)?;
+        self.write_record(&record)?;
         Ok(Some(record))
     }
 
     /// Remove an install; its blob goes too when no other install references it.
     pub fn delete(&self, id: &str) -> Result<bool, PluginStoreError> {
+        let _guard = self.lock();
         let Some(record) = self.get(id)? else {
             return Ok(false);
         };
@@ -171,6 +195,7 @@ mod tests {
     #[test]
     fn create_get_list_round_trip() {
         let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
         s.create(&record("b", "sha1", 2)).unwrap();
         s.create(&record("a", "sha1", 1)).unwrap();
         assert_eq!(s.get("a").unwrap().unwrap(), record("a", "sha1", 1));
@@ -182,6 +207,7 @@ mod tests {
     #[test]
     fn set_enabled_updates_the_record() {
         let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
         s.create(&record("a", "sha1", 1)).unwrap();
         assert!(!s.set_enabled("a", false).unwrap().unwrap().enabled);
         assert!(!s.get("a").unwrap().unwrap().enabled);
@@ -200,5 +226,20 @@ mod tests {
         assert!(s.delete("b").unwrap());
         assert!(s.get_blob("sha1").unwrap().is_none());
         assert!(!s.delete("b").unwrap());
+    }
+
+    #[test]
+    fn create_after_the_last_delete_reports_the_missing_blob() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&record("a", "sha1", 1)).unwrap();
+        assert!(s.delete("a").unwrap());
+        assert!(matches!(
+            s.create(&record("b", "sha1", 2)),
+            Err(PluginStoreError::BlobMissing)
+        ));
+        assert!(s.get("b").unwrap().is_none());
+        assert!(s.set_enabled("a", true).unwrap().is_none());
+        assert!(s.get("a").unwrap().is_none());
     }
 }

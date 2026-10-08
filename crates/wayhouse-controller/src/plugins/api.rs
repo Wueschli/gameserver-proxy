@@ -193,7 +193,13 @@ async fn install(
             .map_or(0, |d| d.as_secs()),
         created_by: actor(&headers),
     };
-    st.store.create(&record).map_err(internal)?;
+    st.store.create(&record).map_err(|e| match e {
+        PluginStoreError::BlobMissing => err(
+            StatusCode::CONFLICT,
+            "the module was removed while installing; upload it again",
+        ),
+        e => internal(e),
+    })?;
     Ok((StatusCode::CREATED, Json(record)))
 }
 
