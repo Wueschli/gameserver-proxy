@@ -38,6 +38,12 @@ struct IngestPayload {
     /// routing/forwarding.
     #[serde(skip_serializing_if = "Option::is_none")]
     group: Option<String>,
+    /// Product version and wire protocol, so the fleet view can flag skew (#185).
+    version: String,
+    protocol: String,
+    /// Requests refused for an incompatible protocol so far; the aggregator
+    /// notes when it rises.
+    protocol_mismatches: u64,
 }
 
 #[derive(Serialize)]
@@ -151,6 +157,9 @@ fn build_payload(instance: &str, admin_url: &str, handle: &RuntimeHandle) -> Ing
         pools,
         sessions: SessionCounts { tcp, udp },
         group: snapshot.group.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol: wayhouse_http::protocol::ProtocolVersion::CURRENT.to_string(),
+        protocol_mismatches: wayhouse_http::protocol::mismatches_total(),
     }
 }
 
@@ -192,5 +201,7 @@ listeners:
         assert_eq!(payload.sessions.tcp, 0);
         assert_eq!(payload.sessions.udp, 0);
         assert_eq!(payload.group.as_deref(), Some("eu/frankfurt"));
+        assert_eq!(payload.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload.protocol, wayhouse_http::protocol::ProtocolVersion::CURRENT.to_string());
     }
 }

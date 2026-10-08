@@ -545,6 +545,9 @@ mod tests {
             }],
             sessions: SessionCounts::default(),
             group: None,
+            version: String::new(),
+            protocol: String::new(),
+            protocol_mismatches: 0,
         }
     }
 

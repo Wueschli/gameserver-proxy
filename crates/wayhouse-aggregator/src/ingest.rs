@@ -41,6 +41,18 @@ pub struct IngestPayload {
     /// label for the admin GUI's fleet tree.
     #[serde(default)]
     pub group: Option<String>,
+    /// Product version (`CARGO_PKG_VERSION`) this instance runs; empty from a
+    /// build that predates the field. Display and skew only.
+    #[serde(default)]
+    pub version: String,
+    /// Component wire protocol `major.minor` it speaks (`wayhouse-http`); empty
+    /// from a build that predates the field.
+    #[serde(default)]
+    pub protocol: String,
+    /// Requests it has refused for an incompatible protocol since it started;
+    /// the store notes when this rises (see [`InstanceState::mismatch_rose_at_ms`]).
+    #[serde(default)]
+    pub protocol_mismatches: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -77,6 +89,9 @@ pub struct SessionCounts {
 pub struct InstanceState {
     pub payload: IngestPayload,
     pub received_at_ms: u64,
+    /// When `protocol_mismatches` last went up between two pushes (aggregator
+    /// clock), for the "red only after a recent increase" skew rule.
+    pub mismatch_rose_at_ms: Option<u64>,
 }
 
 /// The whole store: latest-write-wins per `instance`. No history, no
@@ -96,14 +111,20 @@ impl IngestStore {
     /// Records `payload` as the latest state for its `instance`, overwriting
     /// whatever was there before.
     pub fn ingest(&self, payload: IngestPayload) {
+        let now = unix_ms();
+        let mut instances = self.instances.write().unwrap_or_else(PoisonError::into_inner);
+        let prev = instances.get(&payload.instance);
+        let mismatch_rose_at_ms = match prev {
+            Some(p) if payload.protocol_mismatches > p.payload.protocol_mismatches => Some(now),
+            Some(p) => p.mismatch_rose_at_ms,
+            None => None,
+        };
         let state = InstanceState {
             payload,
-            received_at_ms: unix_ms(),
+            received_at_ms: now,
+            mismatch_rose_at_ms,
         };
-        self.instances
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(state.payload.instance.clone(), state);
+        instances.insert(state.payload.instance.clone(), state);
     }
 
     /// One instance's latest state, if it has ever pushed.
@@ -154,6 +175,9 @@ mod tests {
             pools: vec![],
             sessions: SessionCounts::default(),
             group: None,
+            version: String::new(),
+            protocol: String::new(),
+            protocol_mismatches: 0,
         }
     }
 
@@ -162,6 +186,34 @@ mod tests {
         let json = r#"{"instance":"a","admin_url":"http://127.0.0.1:0","pools":[]}"#;
         let payload: IngestPayload = serde_json::from_str(json).unwrap();
         assert!(payload.group.is_none());
+    }
+
+    #[test]
+    fn a_payload_without_version_fields_still_deserializes() {
+        let json = r#"{"instance":"a","admin_url":"http://127.0.0.1:0","pools":[]}"#;
+        let payload: IngestPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            (payload.version.as_str(), payload.protocol.as_str(), payload.protocol_mismatches),
+            ("", "", 0)
+        );
+    }
+
+    #[test]
+    fn the_store_notes_when_the_mismatch_counter_rises() {
+        let store = IngestStore::new();
+        let mut p = payload("a");
+        store.ingest(p.clone());
+        assert_eq!(store.get("a").unwrap().mismatch_rose_at_ms, None);
+        p.protocol_mismatches = 2;
+        store.ingest(p.clone());
+        let rose = store.get("a").unwrap().mismatch_rose_at_ms;
+        assert!(rose.is_some(), "a rise is noted");
+        store.ingest(p);
+        assert_eq!(
+            store.get("a").unwrap().mismatch_rose_at_ms,
+            rose,
+            "a flat counter keeps the earlier timestamp"
+        );
     }
 
     #[test]
