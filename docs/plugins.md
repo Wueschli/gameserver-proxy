@@ -119,3 +119,16 @@ revision. A call that failed (trap, timeout, over a limit) commits nothing, is r
 the status, and the plugin is called again at its next interval. Deleting an install
 removes its state. This is the single-node form of the design's term-checked commit; HA
 controllers answer `501` until the replicated slice.
+
+## High availability (in progress)
+
+The HA state machine already applies plugin entries, so every replica of a tier holds the
+same installs and the same per-install state, in the log and in snapshots (module blobs
+are not in either). The entries are an install (refused if the id exists), enable or
+disable, delete (state goes with it), and one state commit per plugin call, which applies
+only if the install's state revision is still the one the call read and the entry was
+appended in the term the leader proposed it in. Nothing reaches this yet: an HA
+controller answers `501` on `/plugins` until the next slices serve the API through the
+leader, run the tick runner on the leader only, and replicate module bytes between
+controllers. A cluster that uses plugins must run one build on all replicas; the
+rolling-upgrade gating of new entry types follows the component versioning work.
