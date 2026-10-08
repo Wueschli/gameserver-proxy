@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Header name carrying `<major>.<minor>`.
 pub const HEADER: &str = "x-wayhouse-protocol";
@@ -26,6 +27,20 @@ pub const PROTOCOL_MINOR: u16 = 0;
 /// Counter, label `route_group` (`controller`, `aggregator`, `raft`): requests
 /// refused because the caller's protocol major differs or the header is garbage.
 pub const PROTOCOL_MISMATCH_TOTAL: &str = "wayhouse_protocol_mismatch_total";
+
+static MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Requests this process has refused for an incompatible protocol, all route
+/// groups together. A plain counter (not read back from the metrics recorder)
+/// so `wayhouse` can report it to the aggregator, which flags a node red while
+/// it keeps rising (#185).
+pub fn mismatches_total() -> u64 {
+    MISMATCHES.load(Ordering::Relaxed)
+}
+
+fn note_mismatch() {
+    MISMATCHES.fetch_add(1, Ordering::Relaxed);
+}
 
 /// `major.minor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,7 +109,7 @@ mod server_side {
     use axum::response::{IntoResponse, Response};
     use axum::Router;
 
-    use super::{PeerProtocol, ProtocolVersion, HEADER, PROTOCOL_MISMATCH_TOTAL};
+    use super::{note_mismatch, PeerProtocol, ProtocolVersion, HEADER, PROTOCOL_MISMATCH_TOTAL};
 
     #[derive(Clone, Copy)]
     struct Gate {
@@ -159,6 +174,7 @@ mod server_side {
                         "refusing a request with an incompatible wayhouse protocol: upgrade the older side"
                     );
                     metrics::counter!(PROTOCOL_MISMATCH_TOTAL, "route_group" => group).increment(1);
+                    note_mismatch();
                     let body = format!(
                         "wayhouse protocol {peer_txt} is not compatible with this node ({ours}): upgrade the older side"
                     );
@@ -200,6 +216,14 @@ mod tests {
         let a = ProtocolVersion { major: 1, minor: 0 };
         assert!(a.compatible(&ProtocolVersion { major: 1, minor: 7 }));
         assert!(!a.compatible(&ProtocolVersion { major: 2, minor: 0 }));
+    }
+
+    #[test]
+    fn noting_a_mismatch_raises_the_count() {
+        let before = mismatches_total();
+        note_mismatch();
+        // Other tests refuse requests concurrently, so only a lower bound holds.
+        assert!(mismatches_total() > before);
     }
 
     #[test]
