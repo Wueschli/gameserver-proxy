@@ -46,6 +46,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::ingest::{IngestPayload, IngestStore, PoolSummary, SessionCounts};
+use crate::skew::{classify, Reported, Skew};
 use crate::trust::AdminUrlPolicy;
 use crate::util::unix_ms;
 
@@ -297,6 +298,10 @@ struct FleetInstanceView {
     sessions: SessionCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     group: Option<String>,
+    version: String,
+    protocol: String,
+    /// Against the newest version in the fleet (see [`crate::skew`]).
+    skew: Skew,
 }
 
 /// The merged view `/fleet/subscribe` sends — everything the three plain
@@ -304,10 +309,22 @@ struct FleetInstanceView {
 /// doesn't need three separate subscriptions.
 fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
     let now = unix_ms();
-    store
-        .snapshot()
+    let states = store.snapshot();
+    let skews = classify(
+        &states
+            .iter()
+            .map(|s| Reported {
+                version: &s.payload.version,
+                protocol: &s.payload.protocol,
+                mismatch_rose_ms_ago: s.mismatch_rose_at_ms.map(|t| now.saturating_sub(t)),
+                fresh: now.saturating_sub(s.received_at_ms) <= STALE_AFTER_MS,
+            })
+            .collect::<Vec<_>>(),
+    );
+    states
         .into_iter()
-        .map(|s| {
+        .zip(skews)
+        .map(|(s, skew)| {
             let age = now.saturating_sub(s.received_at_ms);
             FleetInstanceView {
                 instance: s.payload.instance,
@@ -316,6 +333,9 @@ fn fleet_view(store: &IngestStore) -> Vec<FleetInstanceView> {
                 pools: s.payload.pools,
                 sessions: s.payload.sessions,
                 group: s.payload.group,
+                version: s.payload.version,
+                protocol: s.payload.protocol,
+                skew,
             }
         })
         .collect()
@@ -400,6 +420,9 @@ mod tests {
             pools: vec![],
             sessions: SessionCounts { tcp: 3, udp: 7 },
             group: None,
+            version: String::new(),
+            protocol: String::new(),
+            protocol_mismatches: 0,
         })
         .unwrap()
     }
@@ -511,6 +534,9 @@ mod tests {
             }],
             sessions: SessionCounts { tcp: 5, udp: 10 },
             group: None,
+            version: String::new(),
+            protocol: String::new(),
+            protocol_mismatches: 0,
         }
     }
 
@@ -558,6 +584,38 @@ mod tests {
         assert_eq!(list[0]["udp"], 10);
     }
 
+    #[test]
+    fn fleet_view_marks_within_and_outside_window() {
+        let store = IngestStore::new();
+        for (name, version) in [("a", "0.4.0"), ("b", "0.3.2"), ("c", "0.1.0")] {
+            let mut p = full_payload(name);
+            p.version = version.into();
+            p.protocol = "1.0".into();
+            store.ingest(p);
+        }
+        let view = serde_json::to_value(fleet_view(&store)).unwrap();
+        let skew: Vec<_> = view
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["instance"].as_str().unwrap(),
+                    i["skew"].as_str().unwrap(),
+                    i["version"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            skew,
+            [
+                ("a", "none", "0.4.0"),
+                ("b", "within-window", "0.3.2"),
+                ("c", "outside-window", "0.1.0")
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn fleet_pools_and_sessions_are_empty_lists_before_any_push() {
         let app = router(test_state());
@@ -583,10 +641,12 @@ mod tests {
         state.store.insert_state(InstanceState {
             payload: full_payload("stale-1"),
             received_at_ms: unix_ms().saturating_sub(STALE_AFTER_MS + 5_000),
+            mismatch_rose_at_ms: None,
         });
         state.store.insert_state(InstanceState {
             payload: full_payload("fresh-1"),
             received_at_ms: unix_ms(),
+            mismatch_rose_at_ms: None,
         });
         let app = router(state);
 
@@ -744,6 +804,9 @@ mod tests {
                     pools: vec![],
                     sessions: SessionCounts::default(),
                     group: None,
+                    version: String::new(),
+                    protocol: String::new(),
+                    protocol_mismatches: 0,
                 })
                 .unwrap(),
             ))

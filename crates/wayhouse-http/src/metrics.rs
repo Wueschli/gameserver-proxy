@@ -13,7 +13,8 @@ use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandl
 
 use crate::server::{require_bearer, BearerAuth};
 
-/// Gauge, always `1`. Labels: `component` (the binary), `version`, `commit`.
+/// Gauge, always `1`. Labels: `component` (the binary), `version`, `commit`,
+/// `protocol` (the wire protocol `major.minor`).
 /// The same label set on `wayhouse` and every fleet binary, so one query covers a
 /// whole deployment. Set by [`install`] / [`set_build_info`], so a scrape of a
 /// freshly started binary is never empty.
@@ -25,7 +26,7 @@ pub use crate::COMMIT;
 /// own recorder and calls this directly; the fleet binaries go through
 /// [`install`].
 pub fn set_build_info(component: &'static str, version: &'static str) {
-    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version, "commit" => COMMIT)
+    metrics::gauge!(BUILD_INFO, "component" => component, "version" => version, "commit" => COMMIT, "protocol" => crate::protocol::ProtocolVersion::current().to_string())
         .set(1.0);
 }
 
@@ -78,14 +79,15 @@ mod tests {
     }
 
     #[test]
-    fn build_info_carries_component_version_and_commit() {
+    fn build_info_has_protocol_label() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || set_build_info("wayhouse-x", "1.2.3"));
         let body = handle.render();
         assert!(
             body.contains(&format!(
-                "wayhouse_build_info{{component=\"wayhouse-x\",version=\"1.2.3\",commit=\"{COMMIT}\"}} 1"
+                "wayhouse_build_info{{component=\"wayhouse-x\",version=\"1.2.3\",commit=\"{COMMIT}\",protocol=\"{}\"}} 1",
+                crate::protocol::ProtocolVersion::CURRENT
             )),
             "{body}"
         );

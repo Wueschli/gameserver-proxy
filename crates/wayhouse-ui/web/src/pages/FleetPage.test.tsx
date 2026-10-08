@@ -19,6 +19,9 @@ const instances: FleetInstanceView[] = [
     last_seen_ms_ago: 1200,
     stale: false,
     sessions: { tcp: 3, udp: 4 },
+    version: "0.3.0",
+    protocol: "1.1",
+    skew: "none",
     pools: [
       {
         name: "lobby",
@@ -28,14 +31,59 @@ const instances: FleetInstanceView[] = [
     ],
   },
 ];
+const skewed: FleetInstanceView[] = [
+  ...instances,
+  {
+    instance: "ams-1",
+    last_seen_ms_ago: 800,
+    stale: false,
+    sessions: { tcp: 0, udp: 0 },
+    version: "0.2.4",
+    protocol: "1.0",
+    skew: "within-window",
+    pools: [],
+  },
+  {
+    instance: "old-1",
+    last_seen_ms_ago: 900,
+    stale: false,
+    sessions: { tcp: 0, udp: 0 },
+    version: "0.1.0",
+    protocol: "1.0",
+    skew: "outside-window",
+    pools: [],
+  },
+];
+const shown = vi.hoisted(() => ({ skewed: false }));
 vi.mock("../useFleetSocket", () => ({
-  useFleetSocket: () => ({ instances, connected: true }),
+  useFleetSocket: () => ({
+    instances: shown.skewed ? skewed : instances,
+    connected: true,
+  }),
 }));
 
 import { FleetPage } from "./FleetPage";
 
 beforeEach(() => {
+  shown.skewed = false;
   Object.values(api).forEach((m) => m.mockReset().mockResolvedValue("ok"));
+});
+
+describe("FleetPage component versions", () => {
+  it("shows the version and protocol of every instance", () => {
+    shown.skewed = true;
+    render(<FleetPage />);
+    expect(screen.getByText("v0.3.0 · protocol 1.1")).toBeInTheDocument();
+    expect(screen.getByText("v0.2.4 · protocol 1.0")).toBeInTheDocument();
+  });
+
+  it("flags skew: yellow within the window, red outside it, nothing without skew", () => {
+    shown.skewed = true;
+    render(<FleetPage />);
+    expect(screen.getByText("older, in window")).toBeInTheDocument();
+    expect(screen.getByText("outside window")).toBeInTheDocument();
+    expect(screen.getAllByText(/in window|outside window/)).toHaveLength(2);
+  });
 });
 
 describe("FleetPage destructive actions ask first", () => {

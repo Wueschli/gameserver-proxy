@@ -30,6 +30,7 @@ pub const LONG_VERSION: &str = env!("WAYHOUSE_LONG_VERSION");
 
 #[cfg(feature = "server")]
 pub mod metrics;
+pub mod peers;
 #[cfg(feature = "server")]
 pub mod policy;
 pub mod protocol;
@@ -94,7 +95,7 @@ pub fn builder_with(extra: &[Certificate]) -> ClientBuilder {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::HeaderName::from_static(protocol::HEADER),
-        reqwest::header::HeaderValue::from_str(&protocol::ProtocolVersion::CURRENT.to_string())
+        reqwest::header::HeaderValue::from_str(&protocol::ProtocolVersion::current().to_string())
             .expect("digits and a dot are a valid header value"),
     );
     extra.iter().cloned().fold(

@@ -86,6 +86,13 @@ fn build_bins(packages: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// The debug binaries the fleet tests spawn honour `WAYHOUSE_TEST_PROTOCOL_MAJOR`
+/// and `_MINOR` (`tests/mixed_versions.rs` plays an older peer with them). Every
+/// build of those binaries must pass the same flag, or a build without it would
+/// replace them mid-run; `make tunnel-e2e` does too.
+pub const PROTOCOL_OVERRIDE_FEATURE: [&str; 2] =
+    ["--features", "wayhouse-http/test-protocol-override"];
+
 /// A `cargo build` that is a no-op on a tree already built from a shell.
 /// `cargo test` sets `CARGO_PKG_*`, `CARGO_MANIFEST_*` and `CARGO_CRATE_NAME`
 /// for the test binary; inherited by this nested cargo they differ from the
@@ -95,6 +102,7 @@ fn build_command(packages: &[&str]) -> std::process::Command {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("build")
         .args(packages.iter().flat_map(|p| ["-p", p]))
+        .args(PROTOCOL_OVERRIDE_FEATURE)
         .current_dir(workspace_root());
     for (key, _) in std::env::vars_os() {
         let Some(key) = key.to_str() else { continue };

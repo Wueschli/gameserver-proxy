@@ -763,6 +763,10 @@ jobs:
         run: |
           python3 .github/scripts/check_version_policy_test.py
           python3 .github/scripts/check_version_policy.py
+      - name: The upgrading version table matches the code
+        run: |
+          python3 .github/scripts/check_upgrading_doc_test.py
+          python3 .github/scripts/check_upgrading_doc.py
 
   # The one check the `protect-main` ruleset requires. Always runs (also on
   # docs-only PRs, where every other job is skipped); skipped jobs count as

@@ -108,6 +108,9 @@ mod tests {
             }],
             sessions: SessionCounts { tcp: 1, udp: 0 },
             group: None,
+            version: String::new(),
+            protocol: String::new(),
+            protocol_mismatches: 0,
         }
     }
 

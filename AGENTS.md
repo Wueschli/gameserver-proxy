@@ -277,9 +277,9 @@ client from `crates/wayhouse/proto/resolver.proto`.
 |--------|-------------|
 | Config schema | `wayhouse-config` raw+resolved types, `validate()`, `config.example.yaml`, `docs/05` |
 | New metric | `metrics_defs.rs`, `docs/06` |
-| Wire format of a component protocol (HTTP/JSON, SSE, raft RPC, gossip frame) | breaking change: bump `PROTOCOL_MAJOR` (additive: `PROTOCOL_MINOR`) in `wayhouse-http/src/protocol.rs`; a new component-facing route goes behind `wayhouse_http::protocol::gate`; `docs/10` "Versioning"; the N / N-1 window is in `docs/superpowers/specs/2026-10-05-component-versioning-design.md` |
+| Wire format of a component protocol (HTTP/JSON, SSE, raft RPC, gossip frame) | breaking change: bump `PROTOCOL_MAJOR` (additive: `PROTOCOL_MINOR`) in `wayhouse-http/src/protocol.rs`; a new component-facing route goes behind `wayhouse_http::protocol::gate`; `docs/10` "Versioning"; add or update the newest row of the version table in `docs/upgrading.md` (checked by `.github/scripts/check_upgrading_doc.py`); the N / N-1 window is in `docs/superpowers/specs/2026-10-05-component-versioning-design.md` |
 | Config field (even optional) | bump `CONFIG_SCHEMA_VERSION` and add the dotted path to `FIELD_SINCE` in `wayhouse-config/src/version.rs` (`docs/05` "Schema version") |
-| Controller store layout | bump `STORE_FORMAT` in `wayhouse-controller/src/store.rs` and migrate older formats in `Store::open` |
+| Controller store layout | bump `STORE_FORMAT` in `wayhouse-controller/src/store.rs`, migrate older formats in `Store::open`, and add the row to `docs/upgrading.md` |
 | New routing matcher / balancer | `docs/03`, `config.example.yaml`, tests |
 | Registry index / manifest format or the sniffer ABI version rules | `wayhouse-registry` (`index.rs`, `compat.rs`), the golden `tests/golden/index.json`, `docs/sniffers.md`, the registry spec |
 | New / changed sniffer seam | `wayhouse_core::sniff`, `docs/03`, `docs/08` (Phase 9). NB: no game sniffers are compiled in — they load as sniffers (Phase 9), never as core code or a fork. |

@@ -43,6 +43,8 @@ finished. They are kept as a record of why things were built the way they were; 
 - [`../crates/wayhouse-sniffer-abi/README.md`](../crates/wayhouse-sniffer-abi/README.md): the WASM sniffer
   ABI (guest side); the official sniffers are in
   [`wayhouse-proxy/sniffers`](https://github.com/wayhouse-proxy/sniffers).
+- [`upgrading.md`](upgrading.md): upgrading a fleet one component at a time: compatibility
+  window, version table, order of operations, rollback.
 - [`sniffers.md`](sniffers.md): sniffer manifest, registry index and verification formats.
 - [`../crates/wayhouse-bench/README.md`](../crates/wayhouse-bench/README.md): the latency / load
   harness.

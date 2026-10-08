@@ -4580,6 +4580,7 @@ dependencies = [
  "arc-swap",
  "axum",
  "clap",
+ "http",
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",

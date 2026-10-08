@@ -17,6 +17,9 @@ background: [`docs/12-deployment.md`](../docs/12-deployment.md).
 | `smoke.sh`        | the HTTP smoke test CI runs against the compose demo                                                                                 |
 | `k8s/`            | plain manifests (namespace, secrets example, controller, aggregator, ui, wayhouse RBAC, wayhouse DaemonSet)                          |
 
+To move a running deployment to a newer image set one component at a time, follow
+[`docs/upgrading.md`](../docs/upgrading.md).
+
 ## Build
 
 ```sh

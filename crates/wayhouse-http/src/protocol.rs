@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Header name carrying `<major>.<minor>`.
 pub const HEADER: &str = "x-wayhouse-protocol";
@@ -21,11 +22,26 @@ pub const HEADER: &str = "x-wayhouse-protocol";
 /// Incompatible wire changes bump this (even while the product is 0.x).
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Additive wire changes bump this.
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 
 /// Counter, label `route_group` (`controller`, `aggregator`, `raft`): requests
 /// refused because the caller's protocol major differs or the header is garbage.
 pub const PROTOCOL_MISMATCH_TOTAL: &str = "wayhouse_protocol_mismatch_total";
+
+static MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Requests this process has refused for an incompatible protocol, all route
+/// groups together. A plain counter (not read back from the metrics recorder)
+/// so `wayhouse` can report it to the aggregator, which flags a node red while
+/// it keeps rising (#185).
+pub fn mismatches_total() -> u64 {
+    MISMATCHES.load(Ordering::Relaxed)
+}
+
+#[cfg(any(feature = "server", test))]
+fn note_mismatch() {
+    MISMATCHES.fetch_add(1, Ordering::Relaxed);
+}
 
 /// `major.minor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,6 +56,29 @@ impl ProtocolVersion {
         major: PROTOCOL_MAJOR,
         minor: PROTOCOL_MINOR,
     };
+
+    /// What this process announces and gates on: [`ProtocolVersion::CURRENT`],
+    /// except that a build with the `test-protocol-override` cargo feature (the
+    /// fleet tests; never a release image, `deploy/lint.sh` checks) lets
+    /// `WAYHOUSE_TEST_PROTOCOL_MAJOR` / `WAYHOUSE_TEST_PROTOCOL_MINOR` stand in
+    /// for it, to play an older or incompatible peer.
+    pub fn current() -> Self {
+        #[cfg(feature = "test-protocol-override")]
+        {
+            let env = |name: &str, default: u16| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default)
+            };
+            Self {
+                major: env("WAYHOUSE_TEST_PROTOCOL_MAJOR", Self::CURRENT.major),
+                minor: env("WAYHOUSE_TEST_PROTOCOL_MINOR", Self::CURRENT.minor),
+            }
+        }
+        #[cfg(not(feature = "test-protocol-override"))]
+        Self::CURRENT
+    }
 
     /// Same major: the only thing a node refuses on.
     pub fn compatible(&self, other: &Self) -> bool {
@@ -94,7 +133,7 @@ mod server_side {
     use axum::response::{IntoResponse, Response};
     use axum::Router;
 
-    use super::{PeerProtocol, ProtocolVersion, HEADER, PROTOCOL_MISMATCH_TOTAL};
+    use super::{note_mismatch, PeerProtocol, ProtocolVersion, HEADER, PROTOCOL_MISMATCH_TOTAL};
 
     #[derive(Clone, Copy)]
     struct Gate {
@@ -141,7 +180,7 @@ mod server_side {
         mut req: Request,
         next: Next,
     ) -> Response {
-        let ours = ProtocolVersion::CURRENT;
+        let ours = ProtocolVersion::current();
         let mut peer = None;
         let raw = req.headers().get(HEADER);
         if raw.is_some() || group.strict {
@@ -159,6 +198,7 @@ mod server_side {
                         "refusing a request with an incompatible wayhouse protocol: upgrade the older side"
                     );
                     metrics::counter!(PROTOCOL_MISMATCH_TOTAL, "route_group" => group).increment(1);
+                    note_mismatch();
                     let body = format!(
                         "wayhouse protocol {peer_txt} is not compatible with this node ({ours}): upgrade the older side"
                     );
@@ -171,7 +211,7 @@ mod server_side {
     }
 
     fn with_version(mut resp: Response) -> Response {
-        let v = HeaderValue::from_str(&ProtocolVersion::CURRENT.to_string())
+        let v = HeaderValue::from_str(&ProtocolVersion::current().to_string())
             .expect("digits and a dot are a valid header value");
         resp.headers_mut().insert(HEADER, v);
         resp
@@ -200,6 +240,14 @@ mod tests {
         let a = ProtocolVersion { major: 1, minor: 0 };
         assert!(a.compatible(&ProtocolVersion { major: 1, minor: 7 }));
         assert!(!a.compatible(&ProtocolVersion { major: 2, minor: 0 }));
+    }
+
+    #[test]
+    fn noting_a_mismatch_raises_the_count() {
+        let before = mismatches_total();
+        note_mismatch();
+        // Other tests refuse requests concurrently, so only a lower bound holds.
+        assert!(mismatches_total() > before);
     }
 
     #[test]
@@ -249,13 +297,17 @@ mod gate_tests {
         (status, ours, String::from_utf8(body.to_vec()).unwrap())
     }
 
+    fn cur() -> String {
+        ProtocolVersion::CURRENT.to_string()
+    }
+
     #[tokio::test]
     async fn layer_rejects_missing_header_with_426() {
         let (s, ours, body) = call(None).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
         assert!(
-            body.contains("predates protocol versioning") && body.contains("(1.0)"),
+            body.contains("predates protocol versioning") && body.contains(&format!("({})", cur())),
             "{body}"
         );
     }
@@ -282,10 +334,13 @@ mod gate_tests {
     async fn layer_rejects_other_major_with_426_and_body() {
         let (s, ours, body) = call(Some("2.0")).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
         assert_eq!(
             body,
-            "wayhouse protocol 2.0 is not compatible with this node (1.0): upgrade the older side"
+            format!(
+                "wayhouse protocol 2.0 is not compatible with this node ({}): upgrade the older side",
+                cur()
+            )
         );
     }
 
@@ -293,13 +348,16 @@ mod gate_tests {
     async fn layer_rejects_garbage_value() {
         let (s, _, body) = call(Some("banana")).await;
         assert_eq!(s, StatusCode::UPGRADE_REQUIRED);
-        assert!(body.contains("banana") && body.contains("(1.0)"), "{body}");
+        assert!(
+            body.contains("banana") && body.contains(&format!("({})", cur())),
+            "{body}"
+        );
     }
 
     #[tokio::test]
     async fn layer_sets_response_header_on_success() {
-        let (_, ours, _) = call(Some("1.0")).await;
-        assert_eq!(ours.as_deref(), Some("1.0"));
+        let (_, ours, _) = call(Some(&cur())).await;
+        assert_eq!(ours.as_deref(), Some(cur().as_str()));
     }
 
     #[tokio::test]
@@ -323,6 +381,6 @@ mod gate_tests {
             .text()
             .await
             .unwrap();
-        assert_eq!(body, "1.0");
+        assert_eq!(body, cur());
     }
 }

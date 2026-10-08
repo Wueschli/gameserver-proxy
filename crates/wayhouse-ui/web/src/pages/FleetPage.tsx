@@ -199,6 +199,17 @@ function InstanceBlock({
                     {inst.instance}
                 </span>
                 {inst.stale && <Badge tone="neutral">stale</Badge>}
+                {inst.version && (
+                    <span className="font-mono text-xs text-ink-muted">
+                        {`v${inst.version} · protocol ${inst.protocol || "?"}`}
+                    </span>
+                )}
+                {inst.skew === "within-window" && (
+                    <Badge tone="warn">older, in window</Badge>
+                )}
+                {inst.skew === "outside-window" && (
+                    <Badge tone="bad">outside window</Badge>
+                )}
                 {unhealthy > 0 ? (
                     <Badge tone="bad">{unhealthy} unhealthy</Badge>
                 ) : (
