@@ -292,10 +292,10 @@ fn an_undeclared_timer_is_never_called() {
 }
 
 #[test]
-fn a_huge_initial_table_is_rejected_at_load() {
+fn a_table_over_the_runtime_cap_is_rejected_at_load() {
     let m = guest(
         TIMER_LOG_STATE,
-        r#"(table 100000000 funcref)
+        r#"(table 50000 funcref)
            (func (export "init") (param i32 i32))
            (func (export "on_timer"))"#,
     );

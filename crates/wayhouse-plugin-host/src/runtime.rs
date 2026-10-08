@@ -37,6 +37,8 @@ pub struct Limits {
     pub max_memory_bytes: usize,
     /// Elements a guest table may hold, at instantiation and when it grows.
     pub max_table_elements: usize,
+    /// Structural limits checked before compiling.
+    pub bounds: crate::bounds::Bounds,
     /// Log lines kept per call; further lines are counted in [`Effects::logs_dropped`].
     pub max_log_lines: usize,
     /// `state_put` calls accepted per call; further puts return `-1`.
@@ -49,6 +51,7 @@ impl Default for Limits {
             call_timeout: Duration::from_secs(5),
             max_memory_bytes: 64 * 1024 * 1024,
             max_table_elements: 10_000,
+            bounds: crate::bounds::Bounds::default(),
             max_log_lines: 64,
             max_state_ops: 256,
         }
@@ -152,6 +155,7 @@ impl PluginHost {
     pub fn load(&self, bytes: &[u8], approved: &Capabilities) -> Result<Plugin, ModuleError> {
         let info = inspect(bytes)?;
         info.caps.check_within(approved)?;
+        crate::bounds::check(bytes, &self.limits.bounds)?;
         let module =
             Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
         for i in module.imports() {
