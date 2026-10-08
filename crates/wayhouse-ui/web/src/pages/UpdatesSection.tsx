@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError, checkUpdates, listRegistrySniffers } from "../api";
 import type { RegistrySniffer, RegistryRef, UpdateCheck, UpdateCheckRow } from "../types";
 import { Badge } from "../components/ui/Badge";
@@ -26,17 +26,21 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [opening, setOpening] = useState(false);
+  // Which check may still publish its answer: an install or a newer check supersedes the rest.
+  const latestCheck = useRef(0);
 
   async function check() {
+    const mine = ++latestCheck.current;
     setChecking(true);
     setError(null);
     setResult(null);
     try {
-      setResult(await checkUpdates());
+      const res = await checkUpdates();
+      if (mine === latestCheck.current) setResult(res);
     } catch (err) {
-      setError(message(err));
+      if (mine === latestCheck.current) setError(message(err));
     } finally {
-      setChecking(false);
+      if (mine === latestCheck.current) setChecking(false);
     }
   }
 
@@ -85,7 +89,9 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
           verb="Update"
           onClose={() => setPending(null)}
           onInstalled={(name) => {
-            // The list was true before the update; do not offer it again.
+            // The list was true before the update; do not offer it again, and drop a check still in flight.
+            latestCheck.current++;
+            setChecking(false);
             setResult(null);
             onChanged(`updated ${name}`);
           }}

@@ -685,7 +685,11 @@ async fn upload_sniffer(
                     let cur_sha = format!("{:x}", Sha256::digest(&cur));
                     cur_sha != new_sha
                         && (pins.is_empty()
-                            || pins.iter().any(|p| p.name == name && p.sha256 == cur_sha))
+                            // The loader judges a name by its first pin.
+                            || pins
+                                .iter()
+                                .find(|p| p.name == name)
+                                .is_some_and(|p| p.sha256 == cur_sha))
                         && validator(&cur).is_ok()
                 });
                 if keep_current {
@@ -742,18 +746,27 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
         let r = std::fs::remove_file(&path);
         // The kept previous version goes too, also when the current file was
         // already gone (an orphan would resurface under a later install).
-        let prev_removed = match std::fs::remove_file(prev_path(dir, &name)) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => {
-                s.runtime.request_reload();
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "removed {name}.wasm but not its previous version: {e}; retry the delete\n"
-                    ),
-                )
-                    .into_response();
+        // A current file that failed to go for another reason keeps its `.prev`.
+        let current_gone = r
+            .as_ref()
+            .err()
+            .is_none_or(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let prev_removed = if !current_gone {
+            false
+        } else {
+            match std::fs::remove_file(prev_path(dir, &name)) {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    s.runtime.request_reload();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "removed {name}.wasm but not its previous version: {e}; retry the delete\n"
+                        ),
+                    )
+                        .into_response();
+                }
             }
         };
         match r {
@@ -1609,15 +1622,17 @@ mod tests {
             assert_eq!(dir_names(&dir), ["demo.wasm"], "v1 matches no pin");
         }
 
+        /// The loader judges a name by its first pin, so a later duplicate
+        /// pin must not make an upload keep a module the loader would reject.
         #[tokio::test]
-        async fn pinned_upload_keeps_a_current_module_a_pin_matches() {
-            let dir = scratch("pin-keep-pinned");
+        async fn pinned_upload_judges_the_current_module_by_the_first_pin_of_the_name() {
+            let dir = scratch("pin-keep-duplicate");
             let (v1, v2) = (module_padded_to(1 << 20), module_padded_to(2 << 20));
             std::fs::write(dir.join("demo.wasm"), &v1).unwrap();
             let pins = Arc::new(Mutex::new(vec![pin("demo", &v2), pin("demo", &v1)]));
             let (base, _rt) = spawn(&dir, pins).await;
             assert!(post(&base, "demo", v2).await.status().is_success());
-            assert_eq!(len_of(&dir, ".demo.wasm.prev"), 1 << 20);
+            assert_eq!(dir_names(&dir), ["demo.wasm"], "v1 is not the first pin");
         }
 
         /// #248: a failed upload leaves no `.keep` / `.tmp` file behind.
@@ -1633,6 +1648,24 @@ mod tests {
             assert_eq!(r.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(dir_names(&dir), [".demo.wasm.prev", "demo.wasm"]);
             assert_eq!(len_of(&dir, "demo.wasm"), 1 << 20, "current untouched");
+        }
+
+        /// A current file that cannot be removed leaves `.prev` alone, so the
+        /// failed delete loses nothing.
+        #[tokio::test]
+        async fn failed_delete_keeps_prev() {
+            let dir = scratch("delete-fails");
+            // A directory where the module belongs makes `remove_file` fail.
+            std::fs::create_dir(dir.join("demo.wasm")).unwrap();
+            std::fs::write(dir.join(".demo.wasm.prev"), module()).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = reqwest::Client::new()
+                .delete(format!("{base}/admin/sniffers/demo"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(dir.join(".demo.wasm.prev").is_file());
         }
 
         /// #249: deleting a module whose current file is already gone still

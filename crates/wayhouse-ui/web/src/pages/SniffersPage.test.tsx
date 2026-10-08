@@ -261,6 +261,37 @@ describe("SniffersPage updates and rollback", () => {
     expect(within(updates).queryByRole("button", { name: "Update to 0.2.0" })).toBeNull();
   });
 
+  it("ignores a check that was still running when an update installed", async () => {
+    api.checkUpdates.mockResolvedValueOnce(checked([row()]));
+    let finish: (c: ReturnType<typeof checked>) => void = () => {};
+    api.checkUpdates.mockImplementationOnce(() => new Promise((r) => (finish = r)));
+    api.listRegistries.mockResolvedValue({ registries: [OFFICIAL], persistent: true });
+    let listed: (l: ReturnType<typeof installable>) => void = () => {};
+    api.listRegistrySniffers.mockImplementation(() => new Promise((r) => (listed = r)));
+    api.installFromRegistry.mockResolvedValue({
+      sniffer: "demo",
+      version: "0.2.0",
+      signed: false,
+      risk: "official",
+      sha256: "ee".repeat(32),
+      results: [{ instance: "fra-1", ok: true, pinned: false, error: null, status: 200 }],
+      pinned_instances: [],
+    });
+    render(<SniffersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    const updates = await screen.findByRole("region", { name: "Updates" });
+    // The update's dialog is still loading when a second check starts; the update lands before it answers.
+    await userEvent.click(within(updates).getByRole("button", { name: "Update to 0.2.0" }));
+    await userEvent.click(within(updates).getByRole("button", { name: "Check for updates" }));
+    listed(installable());
+    const dlg = await screen.findByRole("dialog");
+    await userEvent.click(within(dlg).getByRole("button", { name: /on every instance/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Close" }));
+    finish(checked([row()]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(within(updates).queryByRole("button", { name: "Update to 0.2.0" })).toBeNull();
+  });
+
   it("does not claim a rollback when no instance rolled back", async () => {
     api.listInstanceSniffers.mockResolvedValue([
       { name: "kept", sha256: "ab".repeat(32), size_bytes: 1, loaded: true, has_previous: true, fallback: false },
