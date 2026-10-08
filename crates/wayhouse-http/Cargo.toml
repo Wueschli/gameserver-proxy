@@ -43,6 +43,7 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+http = "1"
 
 # The TLS tests need the (default) `server` feature; skip them without it.
 [[test]]
