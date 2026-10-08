@@ -1,0 +1,27 @@
+name: apt-install
+description: >
+  Install apt packages with a bounded retry. A plain `apt-get update && install`
+  can hang forever on a stalled Ubuntu mirror (issue #243) and then holds the
+  whole job until the 6 h default timeout; here each attempt is capped and
+  retried a few times, so a stuck mirror fails fast or recovers.
+inputs:
+  packages:
+    description: space-separated package names
+    default: protobuf-compiler
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        for attempt in 1 2 3; do
+          if sudo timeout 180 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update \
+             && sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends $PACKAGES; then
+            exit 0
+          fi
+          echo "apt attempt $attempt failed; retrying" >&2
+          sleep $((attempt * 5))
+        done
+        echo "apt install of '$PACKAGES' failed after 3 attempts" >&2
+        exit 1
