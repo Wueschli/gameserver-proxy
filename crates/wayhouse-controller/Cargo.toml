@@ -20,6 +20,7 @@ workspace = true
 [dependencies]
 wayhouse-http = { workspace = true, features = ["server"] }
 wayhouse-config = { path = "../wayhouse-config" }
+wayhouse-plugin-host = { path = "../wayhouse-plugin-host" }
 
 sled.workspace = true
 thiserror.workspace = true
@@ -36,7 +37,9 @@ similar.workspace = true
 reqwest.workspace = true
 openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 async-trait.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wat.workspace = true
 tower = "0.5"

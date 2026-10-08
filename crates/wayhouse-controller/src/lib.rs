@@ -31,6 +31,7 @@ pub mod intent;
 pub mod lease;
 pub mod parent_client;
 pub mod peers;
+pub mod plugins;
 pub mod proxy_peers;
 pub mod registry;
 pub mod relay;
