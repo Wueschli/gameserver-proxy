@@ -6,7 +6,7 @@ and [automation hooks](superpowers/specs/2026-10-07-plugin-automation-hooks-desi
 Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
-controller can store plugin installs behind an admin API (below). Nothing runs a plugin
+controller can store plugin installs behind an admin API (below) and the web UI has a Plugins page on top of it (upload, review and approve capabilities, enable, disable, delete). Nothing runs a plugin
 yet: leader ticks, the replicated (HA) install state, secrets, `http`, `routes`, webhooks,
 events and `backends` are later slices.
 
@@ -99,3 +99,7 @@ An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z
 to 64 characters), the approved capability set bound to the module sha256, and a non-secret
 `config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
 controller's `sled` database; they are not replicated.
+
+## The Plugins page (web UI)
+
+`wayhouse-ui` proxies the controller's `/plugins` API (`/api/plugins*`, needs `--controller-url`). Listing is viewer-level; upload, install, enable, disable and delete need the admin role. The page lists installs with their approved capabilities in plain words. "Upload plugin" sends the module (up to 8 MiB) to the controller, shows what it declares and installs it only after the operator ticks the approval box; the UI approves exactly the declared set, never an edited one. A controller that does not serve plugins (off, HA, slave) shows its reason instead of a list. Not in the page yet: registry install, secrets, config editing.

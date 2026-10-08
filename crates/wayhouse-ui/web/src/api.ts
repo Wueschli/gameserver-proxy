@@ -6,6 +6,9 @@
 import type {
   FanoutResponse,
   InstallResponse,
+  PluginInstall,
+  PluginModule,
+  PluginCapabilities,
   RegistryList,
   RegistryRef,
   RegistrySniffers,
@@ -207,6 +210,44 @@ export function rollbackSniffer(name: string): Promise<FanoutResponse> {
 /** On demand only: refetches every registry and asks each proxy what it runs. */
 export function checkUpdates(): Promise<UpdateCheck> {
   return requestJson("/api/registries/updates/check", { method: "POST" });
+}
+
+// --- plugins (proxied to wayhouse-controller) ---
+
+export function listPlugins(): Promise<PluginInstall[]> {
+  return requestJson("/api/plugins");
+}
+
+/** Stores the module on the controller and returns what it declares; nothing is installed yet. */
+export function uploadPluginModule(bytes: ArrayBuffer): Promise<PluginModule> {
+  return requestJson("/api/plugins/modules", {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: bytes,
+  });
+}
+
+export function installPlugin(req: {
+  name: string;
+  sha256: string;
+  approved: PluginCapabilities;
+  enabled: boolean;
+}): Promise<PluginInstall> {
+  return requestJson("/api/plugins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export function setPluginEnabled(id: string, enabled: boolean): Promise<PluginInstall> {
+  return requestJson(`/api/plugins/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+}
+
+export function deletePlugin(id: string): Promise<void> {
+  return requestJson(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 // --- config (proxied to wayhouse-controller) ---
