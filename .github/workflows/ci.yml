@@ -45,6 +45,7 @@ jobs:
   # workflow edit, a failed diff or a failed `cargo metadata` run everything.
   changes:
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 10   # a stuck step must not hold the gate for the 6 h default (#254)
     env:
       # The runner image's preinstalled stable cargo is enough for `cargo
       # metadata --no-deps`; skip rust-toolchain.toml's component installs.
@@ -307,6 +308,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     defaults:
       run:
         working-directory: crates/wayhouse-ui/web
@@ -345,9 +347,11 @@ jobs:
       - name: Install Playwright browser
         if: steps.pw-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+        timeout-minutes: 10   # apt can hang without a timeout (#243, #254)
       - name: Install Playwright system deps (browser cached)
         if: steps.pw-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
+        timeout-minutes: 10   # apt can hang without a timeout (#243, #254)
       - name: Browser e2e (Playwright)
         run: npm run test:e2e
 
@@ -400,6 +404,7 @@ jobs:
     needs: [changes, build-release]
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-24.04   # pinned: see the build-release comment (glibc)
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     env:
       # Push/PR: images copy the shared release build (fast). Nightly: compile
       # inside Docker, exercising the self-contained builder stage.
@@ -444,6 +449,7 @@ jobs:
     needs: [changes, build-release-arm64]
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-24.04-arm   # pinned like build-release-arm64
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     env:
       BIN_SOURCE: ${{ github.event_name == 'schedule' && 'builder' || 'prebuilt' }}
     steps:
@@ -482,6 +488,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 15   # a stuck step must not hold the gate for the 6 h default (#254)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
@@ -526,6 +533,7 @@ jobs:
     # Also when deploy failed later on (e.g. the smoke test): the images exist.
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     permissions:
       contents: read
       security-events: write   # the SARIF upload
@@ -616,6 +624,7 @@ jobs:
     # Also when deploy failed later on (e.g. the smoke test): the images exist.
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' }}
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     permissions:
       contents: read
       security-events: write   # the SARIF upload
@@ -701,6 +710,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 30   # a stuck step must not hold the gate for the 6 h default (#254)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
@@ -734,6 +744,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 10   # a stuck step must not hold the gate for the 6 h default (#254)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Prettier check
@@ -760,6 +771,7 @@ jobs:
     if: always()
     needs: [changes, test, musl, build-release, build-release-arm64, ui, tunnel, deploy, deploy-arm64, audit, trivy, trivy-arm64, fuzz, docs, release-policy]
     runs-on: ubuntu-24.04   # pinned: see the comment above `jobs:`
+    timeout-minutes: 5   # a stuck step must not hold the gate for the 6 h default (#254)
     steps:
       - name: Fail if any job failed or was cancelled
         env:
