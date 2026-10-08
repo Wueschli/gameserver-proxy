@@ -13,6 +13,8 @@ import { Button, Input } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 
+const MAX_MODULE_BYTES = 8 * 1024 * 1024;
+
 function ago(unixSecs: number): string {
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
   if (secs < 60) return "just now";
@@ -33,8 +35,22 @@ export function describeCapabilities(caps: PluginCapabilities): string[] {
   if (caps.triggers.on_timer) out.push(`Runs every ${caps.tick_interval_secs} s`);
   if (caps.log) out.push("Writes log lines");
   if (caps.state) out.push(`Keeps up to ${bytes(caps.state.max_bytes)} of state`);
+  // The whole declared object is what gets approved, so anything this page cannot
+  // describe must still be shown rather than approved unseen.
+  for (const key of unknownCapabilityKeys(caps)) out.push(`Also asks for: ${key}`);
   if (out.length === 0) out.push("Asks for nothing");
   return out;
+}
+
+const KNOWN_KEYS = new Set(["triggers", "tick_interval_secs", "log", "state"]);
+
+/** Top-level keys (and trigger names) of a declared set that this page has no wording for. */
+export function unknownCapabilityKeys(caps: PluginCapabilities): string[] {
+  const unknown = Object.keys(caps).filter((k) => !KNOWN_KEYS.has(k));
+  for (const t of Object.keys(caps.triggers ?? {})) {
+    if (t !== "on_timer") unknown.push(`triggers.${t}`);
+  }
+  return unknown;
 }
 
 function CapabilityList({ caps }: { caps: PluginCapabilities }) {
@@ -264,6 +280,10 @@ function UploadDialog({
       return;
     }
     const mine = session.current;
+    if (file.size > MAX_MODULE_BYTES) {
+      setError(`the file is ${bytes(file.size)}; modules are limited to 8 MiB`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -332,9 +352,11 @@ function UploadDialog({
         <div>
           <p className="mb-1 text-sm font-medium text-ink">This plugin asks to:</p>
           <CapabilityList caps={module.capabilities} />
-          <p className="mt-2 text-sm text-ink-muted">
-            It cannot make network requests, read secrets or change routes.
-          </p>
+          {unknownCapabilityKeys(module.capabilities).length === 0 && (
+            <p className="mt-2 text-sm text-ink-muted">
+              It cannot make network requests, read secrets or change routes.
+            </p>
+          )}
         </div>
         <label className="flex flex-col gap-1 text-sm text-ink-muted">
           Name

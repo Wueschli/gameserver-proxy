@@ -163,6 +163,30 @@ describe("PluginsPage install", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it("lists capabilities it has no wording for and drops the 'cannot' sentence", async () => {
+    api.uploadPluginModule.mockResolvedValue({
+      sha256: SHA,
+      size: 2048,
+      abi: "0.1",
+      capabilities: { ...CAPS, http: { hosts: ["panel.example"] } },
+    });
+    const dlg = await upload();
+    expect(dlg).toHaveTextContent("Also asks for: http");
+    expect(dlg).not.toHaveTextContent(/cannot make network requests/i);
+  });
+
+  it("refuses a file over 8 MiB without uploading it", async () => {
+    render(<PluginsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Upload plugin" }));
+    const dlg = screen.getByRole("dialog");
+    const big = new File([new Uint8Array(1)], "big.wasm");
+    Object.defineProperty(big, "size", { value: 8 * 1024 * 1024 + 1 });
+    await userEvent.upload(within(dlg).getByLabelText(/\.wasm file/), big);
+    await userEvent.click(within(dlg).getByRole("button", { name: "Inspect module" }));
+    expect(await screen.findByText(/limited to 8 MiB/)).toBeInTheDocument();
+    expect(api.uploadPluginModule).not.toHaveBeenCalled();
+  });
+
   it("ignores the answer to an upload that was cancelled", async () => {
     let finish!: (m: unknown) => void;
     api.uploadPluginModule.mockReturnValue(new Promise((resolve) => (finish = resolve)));
