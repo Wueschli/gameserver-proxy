@@ -42,10 +42,18 @@ declared. The only imports allowed are these, in the `wayhouse` namespace:
 A call that uses a capability it did not declare traps that call (`CallError::CapabilityDenied`)
 and leaves the host running.
 
+## Approval
+
+`PluginHost::load(bytes, approved)` takes the capabilities the operator approved for the
+module's sha256. A module whose own declaration asks for more (a new trigger, `log`,
+`state`, or a bigger state cap) fails with `CapsNotApproved`, so a module cannot grant
+itself anything. It then runs with its own declaration, which is never wider than the
+approved set.
+
 ## Limits
 
 Every call runs in a fresh `Store` with a memory cap, an epoch deadline
-(`Limits::call_timeout`) and the log and state-write limits above. Modules are capped at
+(`Limits::call_timeout`), a table-element cap (`Limits::max_table_elements`, checked at instantiation and on growth) and the log and state-write limits above. Modules are capped at
 8 MiB. A call returns its `Effects` (state writes, log lines) and applies nothing itself:
 the caller commits them as one entry, which is how the controller will tag them with the
 leader term (automation hooks spec, "Commit rule").

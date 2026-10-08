@@ -15,6 +15,7 @@ use wasmtime::{
     StoreLimits, StoreLimitsBuilder, Trap, ValType,
 };
 
+use crate::caps::Capabilities;
 use crate::module::{inspect, ModuleError, ModuleInfo};
 
 /// Epoch ticks a call may span before it traps. The ticker runs at
@@ -34,6 +35,8 @@ pub type StateSnapshot = BTreeMap<String, Vec<u8>>;
 pub struct Limits {
     pub call_timeout: Duration,
     pub max_memory_bytes: usize,
+    /// Elements a guest table may hold, at instantiation and when it grows.
+    pub max_table_elements: usize,
     /// Log lines kept per call; further lines are counted in [`Effects::logs_dropped`].
     pub max_log_lines: usize,
     /// `state_put` calls accepted per call; further puts return `-1`.
@@ -45,6 +48,7 @@ impl Default for Limits {
         Self {
             call_timeout: Duration::from_secs(5),
             max_memory_bytes: 64 * 1024 * 1024,
+            max_table_elements: 10_000,
             max_log_lines: 64,
             max_state_ops: 256,
         }
@@ -140,8 +144,14 @@ impl PluginHost {
 
     /// Validate and compile `bytes`: size, ABI, capabilities, imports, exports, and a
     /// trial instantiation under the call limits. No plugin entry point is called.
-    pub fn load(&self, bytes: &[u8]) -> Result<Plugin, ModuleError> {
+    ///
+    /// `approved` is what the operator approved for this module's sha256. The module's
+    /// own declaration must be within it, otherwise loading fails: a module cannot grant
+    /// itself capabilities. The plugin then runs with its declaration, which is never
+    /// wider than `approved`.
+    pub fn load(&self, bytes: &[u8], approved: &Capabilities) -> Result<Plugin, ModuleError> {
         let info = inspect(bytes)?;
+        info.caps.check_within(approved)?;
         let module =
             Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
         for i in module.imports() {
@@ -225,6 +235,9 @@ impl Plugin {
                 let alloc = inst.get_typed_func::<i32, i32>(&mut *store, "alloc")?;
                 let len = i32::try_from(config.len())?;
                 let ptr = alloc.call(&mut *store, len)?;
+                if ptr == 0 {
+                    wasmtime::bail!("alloc returned 0 for a {len} byte config");
+                }
                 memory.write(&mut *store, ptr as u32 as usize, config)?;
                 (ptr, len)
             };
@@ -251,6 +264,7 @@ impl Plugin {
                 .memory_size(self.limits.max_memory_bytes)
                 .instances(1)
                 .memories(1)
+                .table_elements(self.limits.max_table_elements)
                 .tables(4)
                 .trap_on_grow_failure(true)
                 .build(),

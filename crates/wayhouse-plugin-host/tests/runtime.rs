@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use wayhouse_plugin_host::{CallError, Limits, LogLevel, ModuleError, PluginHost, StateSnapshot};
+use wayhouse_plugin_host::{
+    inspect, CallError, Capabilities, Limits, LogLevel, ModuleError, PluginHost, StateSnapshot,
+};
 
 const ABI: &str = "\\00\\00\\01\\00";
 const TIMER_LOG_STATE: &str =
@@ -36,6 +38,10 @@ fn guest(caps: &str, funcs: &str) -> Vec<u8> {
     wat::parse_str(src).unwrap()
 }
 
+fn approved(module: &[u8]) -> Capabilities {
+    inspect(module).unwrap().caps
+}
+
 fn host() -> PluginHost {
     PluginHost::new(Limits::default()).unwrap()
 }
@@ -49,7 +55,7 @@ fn on_timer_logs_and_writes_state() {
              (call $log (i32.const 2) (i32.const 0) (i32.const 5))
              (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 2))))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let fx = plugin.on_timer(&StateSnapshot::new()).unwrap();
     assert_eq!(fx.logs.len(), 1);
     assert_eq!(fx.logs[0].level, LogLevel::Info);
@@ -65,7 +71,7 @@ fn init_receives_its_config() {
              (drop (call $put (i32.const 16) (i32.const 1) (local.get 0) (local.get 1))))
            (func (export "on_timer"))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let fx = plugin.init(b"{\"a\":1}", &StateSnapshot::new()).unwrap();
     assert_eq!(fx.state_puts["k"], b"{\"a\":1}");
 }
@@ -81,7 +87,7 @@ const READ_K_INTO_R: &str = r#"
 #[test]
 fn state_get_sees_the_snapshot() {
     let m = guest(TIMER_LOG_STATE, &READ_K_INTO_R.replace("PRE", ""));
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let mut snap = StateSnapshot::new();
     snap.insert("k".into(), b"abc".to_vec());
     let fx = plugin.on_timer(&snap).unwrap();
@@ -92,7 +98,7 @@ fn state_get_sees_the_snapshot() {
 fn state_get_sees_the_calls_own_writes_first() {
     let pre = "(drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 2)))";
     let m = guest(TIMER_LOG_STATE, &READ_K_INTO_R.replace("PRE", pre));
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let mut snap = StateSnapshot::new();
     snap.insert("k".into(), b"abc".to_vec());
     let fx = plugin.on_timer(&snap).unwrap();
@@ -111,7 +117,7 @@ fn state_get_with_a_small_buffer_reports_the_length_and_writes_nothing() {
                (then unreachable))
              (if (i32.ne (i32.load8_u (i32.const 100)) (i32.const 0)) (then unreachable)))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let mut snap = StateSnapshot::new();
     snap.insert("k".into(), b"abc".to_vec());
     plugin.on_timer(&snap).unwrap();
@@ -128,7 +134,7 @@ fn state_put_over_the_cap_returns_minus_one() {
                          (i32.const -1))
                (then unreachable)))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     let fx = plugin.on_timer(&StateSnapshot::new()).unwrap();
     assert!(fx.state_puts.is_empty());
 }
@@ -141,7 +147,7 @@ fn state_without_the_capability_is_denied() {
            (func (export "on_timer")
              (drop (call $put (i32.const 16) (i32.const 1) (i32.const 32) (i32.const 2))))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::CapabilityDenied("state"))
@@ -155,7 +161,7 @@ fn log_without_the_capability_is_denied() {
         r#"(func (export "init") (param i32 i32))
            (func (export "on_timer") (call $log (i32.const 2) (i32.const 0) (i32.const 5)))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::CapabilityDenied("log"))
@@ -169,7 +175,7 @@ fn an_out_of_bounds_pointer_traps_the_call_and_the_host_survives() {
         r#"(func (export "init") (param i32 i32))
            (func (export "on_timer") (call $log (i32.const 2) (i32.const 70000) (i32.const 10)))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::Trap(_))
@@ -193,7 +199,7 @@ fn an_endless_loop_times_out() {
         ..Limits::default()
     })
     .unwrap();
-    let plugin = host.load(&m).unwrap();
+    let plugin = host.load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::Timeout)
@@ -212,7 +218,7 @@ fn memory_growth_past_the_cap_traps() {
         ..Limits::default()
     })
     .unwrap();
-    let plugin = host.load(&m).unwrap();
+    let plugin = host.load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::Trap(_))
@@ -235,7 +241,7 @@ fn log_lines_beyond_the_limit_are_dropped_and_counted() {
     })
     .unwrap();
     let fx = host
-        .load(&m)
+        .load(&m, &approved(&m))
         .unwrap()
         .on_timer(&StateSnapshot::new())
         .unwrap();
@@ -257,7 +263,7 @@ fn an_import_outside_the_abi_is_rejected_at_load() {
     );
     let m = wat::parse_str(src).unwrap();
     assert!(matches!(
-        host().load(&m),
+        host().load(&m, &approved(&m)),
         Err(ModuleError::UnexpectedImport(_))
     ));
 }
@@ -266,7 +272,7 @@ fn an_import_outside_the_abi_is_rejected_at_load() {
 fn a_declared_timer_without_the_export_is_rejected_at_load() {
     let m = guest(TIMER_LOG_STATE, r#"(func (export "init") (param i32 i32))"#);
     assert!(matches!(
-        host().load(&m),
+        host().load(&m, &approved(&m)),
         Err(ModuleError::MissingExport("on_timer"))
     ));
 }
@@ -278,9 +284,113 @@ fn an_undeclared_timer_is_never_called() {
         r#"(func (export "init") (param i32 i32))
            (func (export "on_timer") (call $log (i32.const 2) (i32.const 0) (i32.const 5)))"#,
     );
-    let plugin = host().load(&m).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
     assert!(matches!(
         plugin.on_timer(&StateSnapshot::new()),
         Err(CallError::CapabilityDenied("on_timer"))
+    ));
+}
+
+#[test]
+fn a_huge_initial_table_is_rejected_at_load() {
+    let m = guest(
+        TIMER_LOG_STATE,
+        r#"(table 100000000 funcref)
+           (func (export "init") (param i32 i32))
+           (func (export "on_timer"))"#,
+    );
+    assert!(matches!(
+        host().load(&m, &approved(&m)),
+        Err(ModuleError::Instantiate(_))
+    ));
+}
+
+#[test]
+fn table_growth_past_the_cap_traps_quickly() {
+    let m = guest(
+        TIMER_LOG_STATE,
+        r#"(table 1 funcref)
+           (func (export "init") (param i32 i32))
+           (func (export "on_timer")
+             (drop (table.grow (ref.null func) (i32.const 1000000000))))"#,
+    );
+    let plugin = host().load(&m, &approved(&m)).unwrap();
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        plugin.on_timer(&StateSnapshot::new()),
+        Err(CallError::Trap(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn a_module_cannot_grant_itself_capabilities() {
+    let m = guest(
+        TIMER_LOG_STATE,
+        r#"(func (export "init") (param i32 i32))
+           (func (export "on_timer"))"#,
+    );
+    let mut approved = approved(&m);
+    approved.log = false;
+    assert!(matches!(
+        host().load(&m, &approved),
+        Err(ModuleError::CapsNotApproved(_))
+    ));
+    let mut approved = self::approved(&m);
+    approved.state = None;
+    assert!(matches!(
+        host().load(&m, &approved),
+        Err(ModuleError::CapsNotApproved(_))
+    ));
+    let mut approved = self::approved(&m);
+    approved.triggers.on_timer = false;
+    assert!(matches!(
+        host().load(&m, &approved),
+        Err(ModuleError::CapsNotApproved(_))
+    ));
+    let mut approved = self::approved(&m);
+    approved.state.as_mut().unwrap().max_bytes = 8;
+    assert!(matches!(
+        host().load(&m, &approved),
+        Err(ModuleError::CapsNotApproved(_))
+    ));
+}
+
+#[test]
+fn a_module_asking_for_less_than_approved_runs_with_its_own_smaller_set() {
+    let m = guest(
+        r#"{"triggers":{"on_timer":true},"tick_interval_secs":30}"#,
+        r#"(func (export "init") (param i32 i32))
+           (func (export "on_timer") (call $log (i32.const 2) (i32.const 0) (i32.const 5)))"#,
+    );
+    let wide = inspect(&guest(
+        TIMER_LOG_STATE,
+        r#"(func (export "init") (param i32 i32))
+           (func (export "on_timer"))"#,
+    ))
+    .unwrap()
+    .caps;
+    let plugin = host().load(&m, &wide).unwrap();
+    assert!(matches!(
+        plugin.on_timer(&StateSnapshot::new()),
+        Err(CallError::CapabilityDenied("log"))
+    ));
+}
+
+#[test]
+fn init_fails_when_alloc_returns_zero() {
+    let src = format!(
+        r#"(module
+  (@custom "wayhouse.plugin-abi" "{ABI}")
+  (@custom "wayhouse.plugin-caps" "{{\"log\":true}}")
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 0))
+  (func (export "init") (param i32 i32)))"#
+    );
+    let m = wat::parse_str(src).unwrap();
+    let plugin = host().load(&m, &approved(&m)).unwrap();
+    assert!(matches!(
+        plugin.init(b"{}", &StateSnapshot::new()),
+        Err(CallError::Trap(_))
     ));
 }

@@ -11,5 +11,8 @@ publish = false
 # is built for wasm32 by plugin authors. The host (wayhouse-plugin-host) reads the
 # ABI_MAJOR / ABI_MINOR constants.
 
+[lints]
+workspace = true
+
 [lib]
 crate-type = ["lib"]

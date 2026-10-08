@@ -60,6 +60,8 @@ pub enum ModuleError {
     CapsDuplicate,
     #[error("invalid capability declaration: {0}")]
     CapsInvalid(String),
+    #[error("the module asks for {0}, which the operator has not approved")]
+    CapsNotApproved(String),
     #[error("`on_timer` is declared without a `tick_interval_secs`")]
     UndeclaredTickInterval,
     #[error("`tick_interval_secs` is {0}, below the 10 second minimum")]

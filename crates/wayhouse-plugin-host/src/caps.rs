@@ -47,6 +47,28 @@ pub struct StateCap {
 }
 
 impl Capabilities {
+    /// Whether everything this declaration asks for is within `approved`. A module that
+    /// asks for more than the operator approved (a new trigger, `log`, `state`, or a
+    /// bigger state cap) needs a new approval before it can load.
+    pub fn check_within(&self, approved: &Capabilities) -> Result<(), ModuleError> {
+        let over = |what: &str| Err(ModuleError::CapsNotApproved(what.to_string()));
+        if self.triggers.on_timer && !approved.triggers.on_timer {
+            return over("trigger on_timer");
+        }
+        if self.log && !approved.log {
+            return over("log");
+        }
+        match (self.state, approved.state) {
+            (None, _) => {}
+            (Some(_), None) => return over("state"),
+            (Some(want), Some(ok)) if want.max_bytes > ok.max_bytes => {
+                return over("a larger state cap");
+            }
+            (Some(_), Some(_)) => {}
+        }
+        Ok(())
+    }
+
     /// Parse and validate the section payload.
     pub fn parse(bytes: &[u8]) -> Result<Self, ModuleError> {
         let caps: Self =
