@@ -32,8 +32,7 @@ repo bootstrap and move, the official minisign key (`OFFICIAL_PUBKEY` is `None`,
 `POST /admin/sniffers/{name}/rollback` (fleet: `/fleet/sniffers/{name}/rollback`) swaps it back, the loader
 falls back to it when the current file fails validation, and the Sniffers page has an on-demand "Check for
 updates", "Update to X", "roll back" and a `fallback active` badge; see [`docs/sniffers.md`](docs/sniffers.md)
-"Updates and rollback". Follow-up: #246 (a pinned proxy can keep an unpinned current module as `.prev`; harmless,
-it is never loaded).
+"Updates and rollback".
 
 The repository is **public** since 2026-10-03 (history scanned, clean), so
 GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,
@@ -514,7 +513,7 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   official sniffers pinned in `sniffers.lock`: the ABI check, the `.wasm` artifact round-trip and
   the WASM-boundary N1 latency bench.
 - `wasmtime` is a normal `cargo` dep — it does **not** need the
-  `wasm32-unknown-unknown` rustc target; that target is only needed to *build*
+  `wasm32-unknown-unknown` rustc target; only the sniffers repo needs it, to *build*
   the sniffer crates. Loader tests assemble WASM from inline WAT via the `wat`
   crate (including the trap, timeout, memory-cap and ABI-version conformance cases).
 
@@ -561,19 +560,14 @@ CI runs Rust tests under `cargo nextest` (each test in its own process) — see
   not listed in the JUnit XML. **Nextest runs every test in its own process** — anything that
   assumed one shared process breaks (found: the tunnel lab's in-process namespace counter,
   fixed by probing for a free index in `Lab::add_ns`).
-  `build-release` also runs `cargo test -p wayhouse --release --no-run`: cargo unifies features per
-  invocation, so the sniffers job's `-p wayhouse` test build needs different dependency artifacts
-  than the five-binary build, and it recompiled 293 crates even on an exact cache hit until
-  the snapshot held both.
   **Shared release stage:** a `build-release` job compiles the five release binaries once
-  (cache namespace `release`); `sniffers` restores that snapshot (same key => exact hit) and
-  `deploy` downloads the binaries as an artifact and builds the images with
+  (cache namespace `release`); `deploy` downloads the binaries as an artifact and builds the images with
   `BIN_SOURCE=prebuilt` (`deploy/Dockerfile`). Nightly `deploy` uses the self-contained
   in-Docker build instead, so that path can't rot. These three jobs are pinned to
   `ubuntu-24.04` (glibc 2.39): `ubuntu-latest` becomes Ubuntu 26 on 2026-10-19 and binaries
   built there might need a newer glibc than the distroless runtime's 2.41. (Since
   2026-10-02 every other job is pinned to `ubuntu-24.04` too.) `changes.py`
-  emits a `release` flag (= sniffers or deploy). Debug jobs (`test`, `tunnel`) deliberately
+  emits a `release` flag (= the packages the sniffers e2e job covers, or deploy). Debug jobs (`test`, `tunnel`) deliberately
   do *not* share a build: tests hardcode `target/debug/<bin>` and `ensure_built()` runs
   cargo (mtime freshness would rebuild a downloaded artifact anyway), and with the rolling
   cache each only recompiles ~35 crates (~1 min).

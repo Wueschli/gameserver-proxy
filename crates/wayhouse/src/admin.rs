@@ -675,21 +675,35 @@ async fn upload_sniffer(
             std::fs::write(&tmp, &body).and_then(|()| {
                 // Keep the module being replaced when it is itself a loadable
                 // module (a rejected one must not displace the known-good
-                // previous) and not the same build, via a hard link so
+                // previous), not the same build, and, on a pinned instance,
+                // one a pin for this name matches (anything else could never
+                // be rolled back to, so it would only occupy the slot), via a hard link so
                 // `<name>.wasm` is never missing: link the current file to a
                 // temp name, rename that over `.prev`, then rename the new
                 // file over the current one.
                 let keep_current = std::fs::read(&path).is_ok_and(|cur| {
-                    format!("{:x}", Sha256::digest(&cur)) != new_sha && validator(&cur).is_ok()
+                    let cur_sha = format!("{:x}", Sha256::digest(&cur));
+                    cur_sha != new_sha
+                        && (pins.is_empty()
+                            // The loader judges a name by its first pin.
+                            || pins
+                                .iter()
+                                .find(|p| p.name == name)
+                                .is_some_and(|p| p.sha256 == cur_sha))
+                        && validator(&cur).is_ok()
                 });
                 if keep_current {
                     let keep = dir.join(format!(
                         ".{name}.{}.keep",
                         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     ));
-                    std::fs::hard_link(&path, &keep)
-                        .or_else(|_| std::fs::copy(&path, &keep).map(|_| ()))?;
-                    std::fs::rename(&keep, &prev)?;
+                    let kept = std::fs::hard_link(&path, &keep)
+                        .or_else(|_| std::fs::copy(&path, &keep).map(|_| ()))
+                        .and_then(|()| std::fs::rename(&keep, &prev));
+                    if let Err(e) = kept {
+                        let _ = std::fs::remove_file(&keep);
+                        return Err(e);
+                    }
                 }
                 std::fs::rename(&tmp, &path)
             })
@@ -730,9 +744,20 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = std::fs::remove_file(&path);
-        if r.is_ok() {
+        // The kept previous version goes too, also when the current file was
+        // already gone (an orphan would resurface under a later install).
+        // A current file that failed to go for another reason keeps its `.prev`.
+        let current_gone = r
+            .as_ref()
+            .err()
+            .is_none_or(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let prev_removed = if !current_gone {
+            false
+        } else {
             match std::fs::remove_file(prev_path(dir, &name)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
                     s.runtime.request_reload();
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -742,10 +767,12 @@ async fn delete_sniffer(State(s): State<AdminState>, Path(name): Path<String>) -
                     )
                         .into_response();
                 }
-                _ => {}
             }
+        };
+        match r {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && prev_removed => Ok(()),
+            r => r,
         }
-        r
     };
     match removed {
         Ok(()) => {
@@ -818,9 +845,13 @@ async fn rollback_sniffer(State(s): State<AdminState>, Path(name): Path<String>)
         match r {
             Err(_) if tmp.exists() && !prev.exists() => {
                 // Only the last rename failed: retry it. If it lands the swap
-                // is complete (report success); otherwise the former current
-                // stays staged under its temp name.
-                std::fs::rename(&tmp, &prev)
+                // is complete (report success); otherwise the staged former
+                // current is dropped rather than left behind.
+                let r = std::fs::rename(&tmp, &prev);
+                if r.is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                r
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
@@ -1338,7 +1369,12 @@ mod tests {
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
+            assert!(
+                names
+                    .iter()
+                    .all(|n| n == "same.wasm" || n == ".same.wasm.prev"),
+                "no leftovers: {names:?}"
+            );
             assert!(names.contains(&"same.wasm".to_string()), "{names:?}");
             let len = std::fs::metadata(dir.join("same.wasm")).unwrap().len();
             assert!(len == 1 << 20 || len == 2 << 20, "whole file, got {len}");
@@ -1560,6 +1596,97 @@ mod tests {
             let r = post(&base, "b", module()).await;
             assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
             assert!(!dir.join("b.wasm").exists());
+        }
+
+        fn dir_names(dir: &std::path::Path) -> Vec<String> {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        /// #246: a pinned instance keeps the replaced module as `.prev` only
+        /// when it matches a pin for that name, because only such a file can
+        /// ever be rolled back to.
+        #[tokio::test]
+        async fn pinned_upload_does_not_keep_a_current_module_no_pin_matches() {
+            let dir = scratch("pin-keep-unpinned");
+            let (v1, v2) = (module_padded_to(1 << 20), module_padded_to(2 << 20));
+            std::fs::write(dir.join("demo.wasm"), &v1).unwrap();
+            let pins = Arc::new(Mutex::new(vec![pin("demo", &v2)]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            assert!(post(&base, "demo", v2).await.status().is_success());
+            assert_eq!(len_of(&dir, "demo.wasm"), 2 << 20);
+            assert_eq!(dir_names(&dir), ["demo.wasm"], "v1 matches no pin");
+        }
+
+        /// The loader judges a name by its first pin, so a later duplicate
+        /// pin must not make an upload keep a module the loader would reject.
+        #[tokio::test]
+        async fn pinned_upload_judges_the_current_module_by_the_first_pin_of_the_name() {
+            let dir = scratch("pin-keep-duplicate");
+            let (v1, v2) = (module_padded_to(1 << 20), module_padded_to(2 << 20));
+            std::fs::write(dir.join("demo.wasm"), &v1).unwrap();
+            let pins = Arc::new(Mutex::new(vec![pin("demo", &v2), pin("demo", &v1)]));
+            let (base, _rt) = spawn(&dir, pins).await;
+            assert!(post(&base, "demo", v2).await.status().is_success());
+            assert_eq!(dir_names(&dir), ["demo.wasm"], "v1 is not the first pin");
+        }
+
+        /// #248: a failed upload leaves no `.keep` / `.tmp` file behind.
+        #[tokio::test]
+        async fn failed_upload_leaves_no_temp_files() {
+            let dir = scratch("upload-fails");
+            std::fs::write(dir.join("demo.wasm"), module_padded_to(1 << 20)).unwrap();
+            // A directory where `.prev` belongs makes the rename onto it fail
+            // after the current file was linked to its `.keep` name.
+            std::fs::create_dir(dir.join(".demo.wasm.prev")).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = post(&base, "demo", module_padded_to(2 << 20)).await;
+            assert_eq!(r.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(dir_names(&dir), [".demo.wasm.prev", "demo.wasm"]);
+            assert_eq!(len_of(&dir, "demo.wasm"), 1 << 20, "current untouched");
+        }
+
+        /// A current file that cannot be removed leaves `.prev` alone, so the
+        /// failed delete loses nothing.
+        #[tokio::test]
+        async fn failed_delete_keeps_prev() {
+            let dir = scratch("delete-fails");
+            // A directory where the module belongs makes `remove_file` fail.
+            std::fs::create_dir(dir.join("demo.wasm")).unwrap();
+            std::fs::write(dir.join(".demo.wasm.prev"), module()).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let r = reqwest::Client::new()
+                .delete(format!("{base}/admin/sniffers/demo"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(dir.join(".demo.wasm.prev").is_file());
+        }
+
+        /// #249: deleting a module whose current file is already gone still
+        /// removes its orphaned `.prev`.
+        #[tokio::test]
+        async fn delete_removes_an_orphaned_prev() {
+            let dir = scratch("delete-orphan");
+            std::fs::write(dir.join(".demo.wasm.prev"), module()).unwrap();
+            let (base, _rt) = spawn(&dir, no_pins()).await;
+            let del = |name: &'static str| {
+                reqwest::Client::new()
+                    .delete(format!("{base}/admin/sniffers/{name}"))
+                    .send()
+            };
+            assert!(del("demo").await.unwrap().status().is_success());
+            assert!(dir_is_empty(&dir));
+            assert_eq!(
+                del("demo").await.unwrap().status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "neither file existed"
+            );
         }
     }
 

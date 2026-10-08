@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError, checkUpdates, listRegistrySniffers } from "../api";
 import type { RegistrySniffer, RegistryRef, UpdateCheck, UpdateCheckRow } from "../types";
 import { Badge } from "../components/ui/Badge";
@@ -26,16 +26,21 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [opening, setOpening] = useState(false);
+  // Which check may still publish its answer: an install or a newer check supersedes the rest.
+  const latestCheck = useRef(0);
 
   async function check() {
+    const mine = ++latestCheck.current;
     setChecking(true);
     setError(null);
+    setResult(null);
     try {
-      setResult(await checkUpdates());
+      const res = await checkUpdates();
+      if (mine === latestCheck.current) setResult(res);
     } catch (err) {
-      setError(message(err));
+      if (mine === latestCheck.current) setError(message(err));
     } finally {
-      setChecking(false);
+      if (mine === latestCheck.current) setChecking(false);
     }
   }
 
@@ -83,7 +88,13 @@ export function UpdatesSection({ onChanged }: { onChanged: (notice: string) => v
           version={pending.version}
           verb="Update"
           onClose={() => setPending(null)}
-          onInstalled={(name) => onChanged(`updated ${name}`)}
+          onInstalled={(name) => {
+            // The list was true before the update; do not offer it again, and drop a check still in flight.
+            latestCheck.current++;
+            setChecking(false);
+            setResult(null);
+            onChanged(`updated ${name}`);
+          }}
         />
       )}
     </section>
@@ -134,7 +145,7 @@ function Results({
                   </td>
                   <td className="px-4 py-2 text-ink-muted">{row.instances.join(", ")}</td>
                   <td className="px-4 py-2">
-                    <UpdateCell row={row} onUpdate={onUpdate} busy={busy} />
+                    <UpdateCell row={row} onUpdate={onUpdate} busy={busy} registryDown={down.length > 0} />
                   </td>
                 </tr>
               ))}
@@ -156,15 +167,24 @@ function UpdateCell({
   row,
   onUpdate,
   busy,
+  registryDown,
 }: {
   row: UpdateCheckRow;
   onUpdate: (row: UpdateCheckRow) => void;
   busy: boolean;
+  registryDown: boolean;
 }) {
   if (!row.known) {
     return <span className="text-ink-faint">not in any registry, so no update is offered</span>;
   }
-  if (!row.update) return <Badge tone="good">up to date</Badge>;
+  if (!row.update) {
+    // An unreachable registry might hold a newer version, so "up to date" would be a guess.
+    return registryDown ? (
+      <span className="text-ink-muted">no update found in reachable registries</span>
+    ) : (
+      <Badge tone="good">up to date</Badge>
+    );
+  }
   if (!row.update.compatible) {
     return (
       <span className="text-warn">

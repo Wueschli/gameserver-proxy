@@ -302,7 +302,7 @@ function VersionDetails({ version }: { version: RegistryVersion }) {
       <dt className="text-ink-faint">Time limit</dt>
       <dd className="text-ink">{version.limits.call_timeout_ms} ms per call</dd>
       <dt className="text-ink-faint">Signature</dt>
-      <dd className="text-ink">{version.signature_url ? "listed in the registry" : "none listed"}</dd>
+      <dd className="text-ink">{version.signature_url ? "listed, not verified" : "none listed"}</dd>
       {version.config && (
         <>
           <dt className="text-ink-faint">Config</dt>
