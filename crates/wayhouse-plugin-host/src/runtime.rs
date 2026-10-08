@@ -37,6 +37,8 @@ pub struct Limits {
     pub max_memory_bytes: usize,
     /// Elements a guest table may hold, at instantiation and when it grows.
     pub max_table_elements: usize,
+    /// Structural limits checked before compiling.
+    pub bounds: crate::bounds::Bounds,
     /// Log lines kept per call; further lines are counted in [`Effects::logs_dropped`].
     pub max_log_lines: usize,
     /// `state_put` calls accepted per call; further puts return `-1`.
@@ -49,6 +51,7 @@ impl Default for Limits {
             call_timeout: Duration::from_secs(5),
             max_memory_bytes: 64 * 1024 * 1024,
             max_table_elements: 10_000,
+            bounds: crate::bounds::Bounds::default(),
             max_log_lines: 64,
             max_state_ops: 256,
         }
@@ -75,6 +78,10 @@ pub struct Effects {
     pub state_puts: BTreeMap<String, Vec<u8>>,
     pub logs: Vec<LogLine>,
     pub logs_dropped: usize,
+    /// The call used the `log` import.
+    pub used_log: bool,
+    /// The call used `state_get` or `state_put`.
+    pub used_state: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +105,8 @@ struct CallState {
     state_ops: usize,
     logs: Vec<LogLine>,
     logs_dropped: usize,
+    used_log: bool,
+    used_state: bool,
     denied: Option<&'static str>,
 }
 
@@ -118,6 +127,10 @@ pub struct PluginHost {
 impl PluginHost {
     /// Build the engine and spawn its epoch-ticker thread.
     pub fn new(limits: Limits) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !limits.call_timeout.is_zero(),
+            "the plugin call timeout must not be zero"
+        );
         let mut cfg = Config::new();
         cfg.epoch_interruption(true);
         let engine =
@@ -152,6 +165,7 @@ impl PluginHost {
     pub fn load(&self, bytes: &[u8], approved: &Capabilities) -> Result<Plugin, ModuleError> {
         let info = inspect(bytes)?;
         info.caps.check_within(approved)?;
+        crate::bounds::check(bytes, &self.limits.bounds)?;
         let module =
             Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
         for i in module.imports() {
@@ -276,6 +290,8 @@ impl Plugin {
             state_ops: 0,
             logs: Vec::new(),
             logs_dropped: 0,
+            used_log: false,
+            used_state: false,
             denied: None,
         };
         let mut store = Store::new(&self.engine, state);
@@ -308,6 +324,8 @@ impl Plugin {
             state_puts: st.puts,
             logs: st.logs,
             logs_dropped: st.logs_dropped,
+            used_log: st.used_log,
+            used_state: st.used_state,
         })
     }
 }
@@ -359,6 +377,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 }
                 let raw = read_guest(&mut caller, ptr, len)?;
                 let st = caller.data_mut();
+                st.used_log = true;
                 if st.logs.len() >= st.run.max_log_lines {
                     st.logs_dropped += 1;
                     return Ok(());
@@ -395,6 +414,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 if caller.data().caps.state.is_none() {
                     return Err(deny(&mut caller, "state"));
                 }
+                caller.data_mut().used_state = true;
                 let key = read_guest(&mut caller, kptr, klen)?;
                 let Ok(key) = String::from_utf8(key) else {
                     return Ok(-1);
@@ -424,6 +444,7 @@ fn linker(engine: &Engine) -> Linker<CallState> {
                 let Some(cap) = caller.data().caps.state else {
                     return Err(deny(&mut caller, "state"));
                 };
+                caller.data_mut().used_state = true;
                 let key = read_guest(&mut caller, kptr, klen)?;
                 let value = read_guest(&mut caller, vptr, vlen)?;
                 let Ok(key) = String::from_utf8(key) else {

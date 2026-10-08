@@ -11,6 +11,9 @@ use crate::module::ModuleError;
 /// The shortest timer interval the host accepts (spec: minimum 10 s).
 pub const MIN_TICK_INTERVAL_SECS: u64 = 10;
 
+/// Host ceiling on a declared `state.max_bytes` (1 MiB).
+pub const MAX_STATE_BYTES: usize = 1024 * 1024;
+
 /// What a plugin asks for, and what the operator approves against its sha256.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +82,14 @@ impl Capabilities {
             }
             if caps.tick_interval_secs < MIN_TICK_INTERVAL_SECS {
                 return Err(ModuleError::TickIntervalTooShort(caps.tick_interval_secs));
+            }
+        }
+        if let Some(state) = caps.state {
+            if state.max_bytes > MAX_STATE_BYTES {
+                return Err(ModuleError::CapsInvalid(format!(
+                    "state.max_bytes is {}, above the host ceiling of {MAX_STATE_BYTES}",
+                    state.max_bytes
+                )));
             }
         }
         Ok(caps)
