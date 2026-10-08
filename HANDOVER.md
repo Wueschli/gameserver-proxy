@@ -34,6 +34,11 @@ falls back to it when the current file fails validation, and the Sniffers page h
 updates", "Update to X", "roll back" and a `fallback active` badge; see [`docs/sniffers.md`](docs/sniffers.md)
 "Updates and rollback".
 
+**Plugin host (Wave 5, slice 1):** `wayhouse-plugin-abi` and `wayhouse-plugin-host` load a plugin, enforce its embedded
+capabilities and limits, and run `init` and `on_timer` with the `log` and `state` imports; see [`docs/plugins.md`](docs/plugins.md)
+and the [plan](docs/superpowers/plans/2026-10-08-plugin-host-foundation.md). Not yet: controller wiring (install records, ticks on the
+leader, term-checked commit), `http` (needs #235), `routes` (#236), webhooks and events (#237), `backends`, the UI, registry `kind = plugin`.
+
 The repository is **public** since 2026-10-03 (history scanned, clean), so
 GitHub-hosted Actions minutes are free. The nightly CI run (`schedule` in `ci.yml`,
 03:17 UTC) is on again; it exercises the nightly-only paths (the in-Docker
