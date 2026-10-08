@@ -124,7 +124,7 @@
   datagrams dropped because their sender timestamp is more than 30 s from this
   node's clock (a replay, or an instance with a skewed clock; keep NTP running).
 - `wayhouse_gossip_version_rejected_total` (counter, no labels, #185) — authentic,
-  fresh gossip datagrams dropped because their version byte is not this build's
+  fresh gossip datagrams dropped because their magic or version byte is not this build's
   gossip version: a peer on an incompatible release. Dropped before decoding; the
   first one per process is logged as a warning.
 - `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"|"proxy"}`
