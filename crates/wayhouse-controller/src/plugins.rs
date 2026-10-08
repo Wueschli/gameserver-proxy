@@ -8,6 +8,7 @@
 //! does not replicate anything: HA and slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod runner;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
