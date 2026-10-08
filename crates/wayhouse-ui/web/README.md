@@ -80,7 +80,7 @@ runs Vite's dev server with hot reload, proxying `/ui`, `/api`, `/ws`, and
   history/diff/rollback — phase 10's "full management" GUI level.
 
 Client-side routing uses `react-router` (`/fleet`, `/settings`, `/sniffers`,
-`/config-history`, `/tunnel`), so each page has its own URL and works with the
+`/plugins`, `/config-history`, `/tunnel`), so each page has its own URL and works with the
 browser back button.
 
 ## Browser e2e (Playwright)

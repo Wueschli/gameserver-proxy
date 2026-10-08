@@ -178,3 +178,31 @@ export interface UpdateCheck {
   sniffers: UpdateCheckRow[];
   instance_errors: { instance: string; status: number; detail: string }[];
 }
+
+// --- plugins (proxied to wayhouse-controller's /plugins, slice 3) ---
+
+export interface PluginCapabilities {
+  triggers: { on_timer: boolean };
+  tick_interval_secs: number;
+  log: boolean;
+  state: { max_bytes: number } | null;
+}
+
+export interface PluginModule {
+  sha256: string;
+  size: number;
+  abi: string;
+  capabilities: PluginCapabilities;
+}
+
+export interface PluginInstall {
+  id: string;
+  name: string;
+  sha256: string;
+  size: number;
+  approved: PluginCapabilities;
+  config: unknown;
+  enabled: boolean;
+  created_at: number;
+  created_by: string | null;
+}
