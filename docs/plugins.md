@@ -123,3 +123,16 @@ controllers answer `501` until the replicated slice.
 ## The Plugins page (web UI)
 
 `wayhouse-ui` proxies the controller's `/plugins` API (`/api/plugins*`, needs `--controller-url`). Listing is viewer-level; upload, install, enable, disable and delete need the admin role. The page lists installs with their approved capabilities in plain words. "Upload plugin" sends the module (up to 8 MiB) to the controller, shows what it declares and installs it only after the operator ticks the approval box; the UI approves exactly the declared set, never an edited one. A controller that does not serve plugins (off, HA, slave) shows its reason instead of a list. Not in the page yet: registry install, secrets, config editing.
+
+## High availability (in progress)
+
+The HA state machine already applies plugin entries, so every replica of a tier holds the
+same installs and the same per-install state, in the log and in snapshots (module blobs
+are not in either). The entries are an install (refused if the id exists), enable or
+disable, delete (state goes with it), and one state commit per plugin call, which applies
+only if the install's state revision is still the one the call read and the entry was
+appended in the term the leader proposed it in. Nothing reaches this yet: an HA
+controller answers `501` on `/plugins` until the next slices serve the API through the
+leader, run the tick runner on the leader only, and replicate module bytes between
+controllers. A cluster that uses plugins must run one build on all replicas; the
+rolling-upgrade gating of new entry types follows the component versioning work.

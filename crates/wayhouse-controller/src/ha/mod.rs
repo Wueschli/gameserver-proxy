@@ -177,6 +177,40 @@ pub enum WriteRequest {
     /// The pre-HA registrations of one node, adopted once as the cluster's
     /// initial registry state (see [`import`]).
     Import(Box<import::ImportContent>),
+    /// Stores a plugin install (the module bytes are not in the log: they
+    /// are fetched out of band). Refused if the id exists.
+    PluginInstall(crate::plugins::InstallRecord),
+    PluginSetEnabled {
+        id: String,
+        enabled: bool,
+    },
+    /// Removes an install and its state.
+    PluginDelete {
+        id: String,
+    },
+    /// One plugin call's `state_put`s, committed as one entry: applied only
+    /// if the install's state revision is still `expected_rev` (the one the
+    /// call read) and the entry was appended in `term` (the proposing
+    /// leader's term), so a deposed leader's late result is dropped.
+    PluginState {
+        id: String,
+        expected_rev: u64,
+        term: u64,
+        puts: std::collections::BTreeMap<String, Vec<u8>>,
+    },
+}
+
+/// Why a plugin entry changed nothing. Deterministic: every replica gives the
+/// same answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginReject {
+    /// An install with that id already exists.
+    Exists,
+    NoSuchInstall,
+    /// The state revision moved since the call read it.
+    Stale,
+    /// The entry was not appended in the term the call was proposed in.
+    WrongTerm,
 }
 
 /// What applying one entry did — the HTTP layer maps it back to the status
@@ -212,6 +246,10 @@ pub enum WriteResponse {
     /// `SetTunnelNetwork` was applied: the network is recorded (now, or by
     /// an earlier entry — it is recorded once).
     Recorded,
+    /// A plugin entry was applied.
+    PluginApplied,
+    /// A plugin entry changed nothing, deterministically.
+    PluginRejected(PluginReject),
 }
 
 openraft::declare_raft_types!(

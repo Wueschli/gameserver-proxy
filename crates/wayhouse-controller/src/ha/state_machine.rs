@@ -39,11 +39,12 @@ use sled::transaction::{ConflictableTransactionError, TransactionError};
 use super::apply_registry;
 use super::cluster_state::{ClusterSnapshot, ClusterState};
 use super::import;
-use super::{NodeId, TypeConfig, WriteRequest, WriteResponse};
+use super::{NodeId, PluginReject, TypeConfig, WriteRequest, WriteResponse};
 use crate::addresses::{AddressBook, BookSnapshot, Network, Rejection, Role};
 use crate::api::{AppState, Stage};
 use crate::intent::api::IntentState;
 use crate::peers::api::PeersState;
+use crate::plugins::{ApplyOutcome, CommitError, PluginSnapshot, PluginStore};
 use crate::proxy_peers::api::ProxyPeersState;
 use crate::registry::RegistrySnapshot;
 use crate::store::SiblingWrite;
@@ -91,6 +92,10 @@ pub struct SnapshotContent {
     pub proxy_peers: RegistrySnapshot,
     pub book: BookSnapshot,
     pub cluster: ClusterSnapshot,
+    /// Plugin installs and state (not module blobs). A snapshot from a build
+    /// without plugins has none, which installs as no plugins.
+    #[serde(default)]
+    pub plugins: PluginSnapshot,
 }
 
 /// Parses a received snapshot. One in an older format (a section missing)
@@ -138,6 +143,8 @@ pub struct StateMachineStore {
     book: Arc<AddressBook>,
     /// The replicated network registry entries are applied against.
     cluster: Arc<ClusterState>,
+    /// Replicated plugin installs and state, applied on every replica.
+    plugins: PluginStore,
     /// `Some((node id, data dir))` to warn about unimported pre-HA data.
     pre_ha_notice: Option<(NodeId, std::path::PathBuf)>,
     meta: sled::Tree,
@@ -159,6 +166,7 @@ impl StateMachineStore {
             proxy_peers: registries.proxy_peers,
             book: registries.book,
             cluster: Arc::new(ClusterState::open(db)?),
+            plugins: PluginStore::open(db)?,
             pre_ha_notice: None,
             meta: db.open_tree("raft_sm_meta")?,
             snapshots: db.open_tree("raft_snapshot")?,
@@ -191,6 +199,11 @@ impl StateMachineStore {
                 );
             }
         }
+    }
+
+    /// The replicated plugin installs and state.
+    pub fn plugins(&self) -> &PluginStore {
+        &self.plugins
     }
 
     /// The replicated cluster state (the recorded tunnel network).
@@ -296,6 +309,10 @@ impl StateMachineStore {
                     .cluster
                     .snapshot()
                     .map_err(|e| StorageIOError::read_state_machine(&e))?,
+                plugins: self
+                    .plugins
+                    .snapshot()
+                    .map_err(|e| StorageIOError::read_state_machine(&e))?,
             },
             meta: self.read_meta()?,
         })
@@ -381,6 +398,9 @@ impl StateMachineStore {
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
         self.cluster
             .replace(&content.cluster)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.plugins
+            .replace(&content.plugins)
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
 
         // Wake live subscribers so they re-read from the replaced store.
@@ -486,6 +506,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
             meta.last_applied_log = Some(entry.log_id);
 
             let index = entry.log_id.index;
+            let entry_term = entry.log_id.leader_id.term;
             let response = match entry.payload {
                 EntryPayload::Blank => WriteResponse::Revision(None),
                 EntryPayload::Normal(req) => {
@@ -629,6 +650,62 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                         )?,
                         WriteRequest::SetTunnelNetwork(network) => {
                             self.set_tunnel_network(network, index)?
+                        }
+                        WriteRequest::PluginInstall(record) => {
+                            match self
+                                .plugins
+                                .apply_install(&record)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?
+                            {
+                                ApplyOutcome::Applied => WriteResponse::PluginApplied,
+                                ApplyOutcome::Exists => {
+                                    WriteResponse::PluginRejected(PluginReject::Exists)
+                                }
+                            }
+                        }
+                        WriteRequest::PluginSetEnabled { id, enabled } => {
+                            match self
+                                .plugins
+                                .set_enabled(&id, enabled)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?
+                            {
+                                Some(_) => WriteResponse::PluginApplied,
+                                None => WriteResponse::PluginRejected(PluginReject::NoSuchInstall),
+                            }
+                        }
+                        WriteRequest::PluginDelete { id } => {
+                            if self
+                                .plugins
+                                .delete(&id)
+                                .map_err(|e| StorageIOError::write_state_machine(&e))?
+                            {
+                                WriteResponse::PluginApplied
+                            } else {
+                                WriteResponse::PluginRejected(PluginReject::NoSuchInstall)
+                            }
+                        }
+                        WriteRequest::PluginState {
+                            id,
+                            expected_rev,
+                            term,
+                            puts,
+                        } => {
+                            if entry_term != term {
+                                WriteResponse::PluginRejected(PluginReject::WrongTerm)
+                            } else {
+                                match self.plugins.commit_state(&id, expected_rev, &puts) {
+                                    Ok(_) => WriteResponse::PluginApplied,
+                                    Err(CommitError::Stale) => {
+                                        WriteResponse::PluginRejected(PluginReject::Stale)
+                                    }
+                                    Err(CommitError::NoSuchInstall) => {
+                                        WriteResponse::PluginRejected(PluginReject::NoSuchInstall)
+                                    }
+                                    Err(CommitError::Store(e)) => {
+                                        return Err(StorageIOError::write_state_machine(&e).into())
+                                    }
+                                }
+                            }
                         }
                         WriteRequest::Import(content) => {
                             let response = import::apply_import(
@@ -1797,5 +1874,210 @@ mod tests {
             on_follower,
             WriteResponse::Registered { revision: 5, .. }
         ));
+    }
+
+    // ---- plugin entries ----
+
+    fn plugin_record(id: &str) -> crate::plugins::InstallRecord {
+        crate::plugins::InstallRecord {
+            id: id.into(),
+            name: "demo".into(),
+            sha256: "sha1".into(),
+            size: 3,
+            approved: wayhouse_plugin_host::Capabilities::parse(br#"{"log":true}"#).unwrap(),
+            config: serde_json::json!({}),
+            enabled: true,
+            created_at: 1,
+            created_by: None,
+        }
+    }
+
+    fn plugin_state(
+        id: &str,
+        expected_rev: u64,
+        term: u64,
+        pairs: &[(&str, &[u8])],
+    ) -> WriteRequest {
+        WriteRequest::PluginState {
+            id: id.into(),
+            expected_rev,
+            term,
+            puts: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+                .collect(),
+        }
+    }
+
+    /// Entries are appended by the leader of term 1 in these tests.
+    const TERM: u64 = 1;
+
+    #[tokio::test]
+    async fn plugin_entries_install_commit_state_toggle_and_delete() {
+        let (mut sm, _d) = test_sm();
+        let applied = WriteResponse::PluginApplied;
+        assert_eq!(
+            apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record("a"))).await,
+            applied
+        );
+        assert_eq!(
+            apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await,
+            applied
+        );
+        assert_eq!(
+            apply_one(&mut sm, 3, plugin_state("a", 1, TERM, &[("n", b"2")])).await,
+            applied
+        );
+        let (rev, state) = sm.plugins().state("a").unwrap();
+        assert_eq!((rev, state["n"].clone()), (2, b"2".to_vec()));
+        assert_eq!(
+            apply_one(
+                &mut sm,
+                4,
+                WriteRequest::PluginSetEnabled {
+                    id: "a".into(),
+                    enabled: false
+                }
+            )
+            .await,
+            applied
+        );
+        assert!(!sm.plugins().get("a").unwrap().unwrap().enabled);
+        assert_eq!(
+            apply_one(&mut sm, 5, WriteRequest::PluginDelete { id: "a".into() }).await,
+            applied
+        );
+        assert!(sm.plugins().get("a").unwrap().is_none());
+        assert_eq!(
+            sm.plugins().state("a").unwrap().0,
+            0,
+            "delete removes state"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_entries_that_cannot_apply_are_rejections_not_errors() {
+        let (mut sm, _d) = test_sm();
+        let rejected = |r| WriteResponse::PluginRejected(r);
+        apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record("a"))).await;
+        // Same id again.
+        assert_eq!(
+            apply_one(&mut sm, 2, {
+                let mut other = plugin_record("a");
+                other.name = "other".into();
+                WriteRequest::PluginInstall(other)
+            })
+            .await,
+            rejected(PluginReject::Exists)
+        );
+        assert_eq!(sm.plugins().get("a").unwrap().unwrap().name, "demo");
+        // Stale revision.
+        apply_one(&mut sm, 3, plugin_state("a", 0, TERM, &[("n", b"1")])).await;
+        assert_eq!(
+            apply_one(&mut sm, 4, plugin_state("a", 0, TERM, &[("n", b"9")])).await,
+            rejected(PluginReject::Stale)
+        );
+        // Tagged with another term than the one the entry was appended in.
+        assert_eq!(
+            apply_one(&mut sm, 5, plugin_state("a", 1, TERM + 1, &[("n", b"9")])).await,
+            rejected(PluginReject::WrongTerm)
+        );
+        assert_eq!(sm.plugins().state("a").unwrap().1["n"], b"1");
+        // Unknown installs.
+        assert_eq!(
+            apply_one(&mut sm, 6, plugin_state("nope", 0, TERM, &[("n", b"1")])).await,
+            rejected(PluginReject::NoSuchInstall)
+        );
+        assert_eq!(
+            apply_one(
+                &mut sm,
+                7,
+                WriteRequest::PluginSetEnabled {
+                    id: "nope".into(),
+                    enabled: true
+                }
+            )
+            .await,
+            rejected(PluginReject::NoSuchInstall)
+        );
+        assert_eq!(
+            apply_one(&mut sm, 8, WriteRequest::PluginDelete { id: "nope".into() }).await,
+            rejected(PluginReject::NoSuchInstall)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_plugin_entry_after_a_crash_changes_nothing() {
+        let (mut sm, _d) = test_sm();
+        let install = || WriteRequest::PluginInstall(plugin_record("a"));
+        apply_one(&mut sm, 1, install()).await;
+        apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await;
+        // openraft re-delivers entries the lost `last_applied_log` did not cover.
+        assert_eq!(
+            apply_one(&mut sm, 1, install()).await,
+            WriteResponse::PluginApplied
+        );
+        assert_eq!(
+            apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await,
+            WriteResponse::PluginRejected(PluginReject::Stale)
+        );
+        let (rev, state) = sm.plugins().state("a").unwrap();
+        assert_eq!((rev, state["n"].clone()), (1, b"1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn two_replicas_applying_the_same_plugin_entries_converge_and_a_snapshot_catches_up() {
+        let (mut a, _a) = test_sm();
+        let (mut b, _b) = test_sm();
+        let log = [
+            WriteRequest::PluginInstall(plugin_record("x")),
+            WriteRequest::PluginInstall(plugin_record("y")),
+            plugin_state("x", 0, TERM, &[("n", b"1")]),
+            plugin_state("x", 1, TERM, &[("n", b"2"), ("m", b"3")]),
+            plugin_state("x", 0, TERM, &[("n", b"stale")]),
+            WriteRequest::PluginSetEnabled {
+                id: "y".into(),
+                enabled: false,
+            },
+            WriteRequest::PluginDelete { id: "nope".into() },
+        ];
+        for (i, req) in log.iter().enumerate() {
+            let index = i as u64 + 1;
+            let on_a = apply_one(&mut a, index, req.clone()).await;
+            let on_b = apply_one(&mut b, index, req.clone()).await;
+            assert_eq!(on_a, on_b, "entry {index}");
+        }
+        assert_eq!(
+            a.plugins().snapshot().unwrap(),
+            b.plugins().snapshot().unwrap()
+        );
+
+        // A lagging replica with its own leftovers catches up by snapshot.
+        let snapshot = a
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let (mut c, _c) = test_sm();
+        apply_one(&mut c, 1, WriteRequest::PluginInstall(plugin_record("old"))).await;
+        c.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+        assert_eq!(
+            c.plugins().snapshot().unwrap(),
+            a.plugins().snapshot().unwrap()
+        );
+        assert!(c.plugins().get("old").unwrap().is_none());
+        assert_eq!(c.plugins().state("x").unwrap().0, 2);
+    }
+
+    #[test]
+    fn a_snapshot_without_a_plugins_section_decodes_as_no_plugins() {
+        let (sm, _d) = test_sm();
+        let mut json = serde_json::to_value(&sm.copy().unwrap().content).unwrap();
+        json.as_object_mut().unwrap().remove("plugins");
+        let content = decode_snapshot(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(content.plugins, PluginSnapshot::default());
     }
 }

@@ -112,6 +112,7 @@ crates/
     ha/cluster_state.rs     the cluster's recorded tunnel network + `initialized` marker (replicated; registry entries apply against it, never a node's flag)
     ha/apply_registry.rs    applying `Register*`/`Release`/`Touch` entries into the registries and the address book, crash-idempotent per database
     ha/init.rs              leader-side initialization: asks every voter what pre-HA data it holds (`choose_source`), proposes `SetTunnelNetwork` or `Import`; `--ha-import-source`
+    ha/state_machine.rs     also applies the replicated plugin entries (`PluginInstall`/`PluginSetEnabled`/`PluginDelete`/`PluginState`, the last compare-and-set on state revision and entry term) into `plugins::PluginStore`; snapshots carry installs and state, not module blobs
     ha/import.rs            pre-HA data on upgrade: set-aside (`*.pre-ha`), `ImportContent`, `GET /raft/pre-ha`, the once-only `Import` apply
     ha/members.rs           `/admin/ha/members` (list, add, remove, re-address) with the `/raft/whoami` identity check; `--ha-join` nodes are added here
   wayhouse-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no wayhouse-core/wayhouse-config dependency, stays decoupled from the data-plane crates
