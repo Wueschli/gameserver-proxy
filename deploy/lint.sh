@@ -46,8 +46,8 @@ errs << "deploy-smoke must use its own project (-p wayhouse-smoke)" unless plan.
 errs << "deploy-smoke must dump logs on any failure" unless plan.include?(" logs")
 errs << "deploy-smoke runs `up` as its own recipe line: a failed up skips logs + down" if plan.lines.any? { |l| l =~ /\Adocker compose.* up / && !l.include?("|| rc=") }
 
-# Release images must not honour WAYHOUSE_TEST_PROTOCOL_* (the fleet tests'
-# `test-protocol-override` cargo feature): nothing that builds or ships an image may enable it.
+# Release images must not honour WAYHOUSE_TEST_PROTOCOL_* (the cargo feature of the fleet tests,
+# `test-protocol-override`): nothing that builds or ships an image may enable it.
 %w[deploy/Dockerfile deploy/build-images.sh .github/workflows/release.yml .github/workflows/ci.yml].each do |f|
   errs << "#{f} enables test-protocol-override, which lets a release image fake its protocol version" if File.exist?(f) && File.read(f).include?("test-protocol-override")
 end
