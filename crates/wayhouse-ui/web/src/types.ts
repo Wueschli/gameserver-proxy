@@ -29,6 +29,12 @@ export interface FleetInstanceView {
   sessions: SessionCounts;
   /** Self-reported fleet organization path, e.g. "eu/frankfurt/cluster-a". */
   group?: string | null;
+  /** Product version the instance runs; empty from a build that predates it. */
+  version?: string;
+  /** Component wire protocol `major.minor`; empty from an older build. */
+  protocol?: string;
+  /** Against the newest version in the fleet (the aggregator computes it). */
+  skew?: "none" | "within-window" | "outside-window";
 }
 
 export interface FanoutInstanceResult {
