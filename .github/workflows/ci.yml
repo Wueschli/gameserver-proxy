@@ -751,6 +751,10 @@ jobs:
         run: make docs-fmt-check
       - name: Relative links and anchors resolve
         run: make docs-links
+      - name: The upgrading version table matches the code
+        run: |
+          python3 .github/scripts/check_upgrading_doc_test.py
+          python3 .github/scripts/check_upgrading_doc.py
 
   # The version policy (RELEASING.md): 0.x only, and Cargo.lock agrees with
   # Cargo.toml. Milliseconds, so no `changes` filter; it also guards release PRs.

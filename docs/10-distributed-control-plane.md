@@ -1018,9 +1018,13 @@ one (new optional field or route) bumps `PROTOCOL_MINOR`. Protocol numbers are
 independent of the product version. A refused request counts into
 `wayhouse_protocol_mismatch_total{route_group="controller"|"aggregator"|"raft"|"proxy"}`.
 
-Not covered: the raft log and snapshot storage beyond the store marker, the
-WireGuard tunnel itself, and any version negotiation (that is the upgrade work,
-phase B of #185).
+Peers remember the protocol version each other answered with and gate newer optional
+fields on it (`wayhouse_http::peers`); the fleet view flags version skew. The operator
+runbook, the compatibility window and a table of versions per release are in
+[upgrading.md](upgrading.md).
+
+Not covered: the raft log and snapshot storage beyond the store marker, and the
+WireGuard tunnel itself.
 
 ---
 
