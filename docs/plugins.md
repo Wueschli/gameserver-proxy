@@ -19,7 +19,12 @@ A second custom section, `wayhouse.plugin-caps`, holds the capabilities as JSON.
 without running the module and approvals are recorded against the module's sha256:
 
 ```json
-{"triggers": {"on_timer": true}, "tick_interval_secs": 30, "log": true, "state": {"max_bytes": 65536}}
+{
+    "triggers": { "on_timer": true },
+    "tick_interval_secs": 30,
+    "log": true,
+    "state": { "max_bytes": 65536 }
+}
 ```
 
 Unknown fields are an error. `tick_interval_secs` is required with `on_timer` and at
@@ -28,11 +33,11 @@ least 10.
 Exports: `memory`, `alloc(i32) -> i32`, `init(config_ptr, config_len)`, and `on_timer()` when
 declared. The only imports allowed are these, in the `wayhouse` namespace:
 
-| Import | Capability | Behaviour |
-|--------|------------|-----------|
-| `log(level, ptr, len)` | `log` | levels 0 error, 1 warn, 2 info, else debug; lines over 1024 bytes are cut; lines past the per-call limit are dropped and counted |
-| `state_get(kptr, klen, out_ptr, out_cap) -> i32` | `state` | value length, or -1 when absent; nothing is written when the value is longer than `out_cap` |
-| `state_put(kptr, klen, vptr, vlen) -> i32` | `state` | 0, or -1 when over `state.max_bytes`, the key is over 256 bytes or not UTF-8, or the per-call write limit is hit |
+| Import                                           | Capability | Behaviour                                                                                                                        |
+| ------------------------------------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `log(level, ptr, len)`                           | `log`      | levels 0 error, 1 warn, 2 info, else debug; lines over 1024 bytes are cut; lines past the per-call limit are dropped and counted |
+| `state_get(kptr, klen, out_ptr, out_cap) -> i32` | `state`    | value length, or -1 when absent; nothing is written when the value is longer than `out_cap`                                      |
+| `state_put(kptr, klen, vptr, vlen) -> i32`       | `state`    | 0, or -1 when over `state.max_bytes`, the key is over 256 bytes or not UTF-8, or the per-call write limit is hit                 |
 
 A call that uses a capability it did not declare traps that call (`CallError::CapabilityDenied`)
 and leaves the host running.
