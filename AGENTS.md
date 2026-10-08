@@ -147,7 +147,7 @@ crates/
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
   wayhouse-sniffer-abi/       wayhouse-sniffer-abi: the guest-side ABI crate the official sniffers (github.com/wayhouse-proxy/sniffers) link; the sniffers themselves are not in this repo
   wayhouse-plugin-abi/        wayhouse-plugin-abi: the guest-side ABI crate plugins link (version section, `alloc`); see `docs/plugins.md`
-  wayhouse-plugin-host/       wayhouse-plugin-host: loads and runs WASM plugins (module/capability inspection, `PluginHost`, `Plugin::init`/`on_timer`, `log`/`state` imports, `bounds`, `CompilePool`, the `wayhouse-plugin-check` conformance binary). Not wired into the controller yet
+  wayhouse-plugin-host/       wayhouse-plugin-host: loads and runs WASM plugins (module/capability inspection, `PluginHost`, `Plugin::init`/`on_timer`, `log`/`state` imports, `bounds`, `CompilePool`, the `wayhouse-plugin-check` conformance binary). The controller serves install records over `/plugins` (opt-in `--plugins`, standalone only, `crates/wayhouse-controller/src/plugins*`); nothing runs a plugin yet
 ```
 
 Dependency direction: `wayhouse` → `wayhouse-core` → `wayhouse-config` (`wayhouse-bench` → `wayhouse-core`

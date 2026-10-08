@@ -12,6 +12,20 @@ pub mod api;
 use serde::{Deserialize, Serialize};
 use wayhouse_plugin_host::Capabilities;
 
+/// Whether this controller serves the plugin API: `Err` carries the reason it does not.
+/// Plugins are opt-in (`--plugins`) and, until the replicated slice, standalone-only.
+pub fn availability(enabled: bool, ha: bool, slave: bool) -> Result<(), &'static str> {
+    if !enabled {
+        Err("plugins are off; start the controller with --plugins")
+    } else if ha {
+        Err("plugins are not supported with --ha-peers yet")
+    } else if slave {
+        Err("plugins run on the root tier only, not with --role slave")
+    } else {
+        Ok(())
+    }
+}
+
 /// What the operator approved for one installed module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallRecord {
@@ -138,6 +152,20 @@ mod tests {
             created_at: at,
             created_by: Some("leandro".into()),
         }
+    }
+
+    #[test]
+    fn plugins_are_served_only_when_enabled_standalone() {
+        assert!(availability(true, false, false).is_ok());
+        assert!(availability(false, false, false)
+            .unwrap_err()
+            .contains("--plugins"));
+        assert!(availability(true, true, false)
+            .unwrap_err()
+            .contains("--ha-peers"));
+        assert!(availability(true, false, true)
+            .unwrap_err()
+            .contains("slave"));
     }
 
     #[test]
