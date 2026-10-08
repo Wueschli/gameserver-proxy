@@ -34,7 +34,7 @@ New Raft entries, gated for rolling upgrades like every plugin entry (addendum, 
 
 - `PluginSecretSet { install_id, slot, key_id, nonce, ciphertext, updated_at, actor }`
 - `PluginSecretDelete { install_id, slot, actor }`
-- `PluginSecretRewrap { items: [{install_id, slot, from_updated_at, key_id, nonce, ciphertext}] }`: used by rotation, applied atomically. Each item carries the `updated_at` of the ciphertext it was derived from; on apply an item whose slot has a different `updated_at` (a `PUT` or delete landed between the leader's decrypt and the apply) is skipped, never overwritten, and the apply result lists the skipped items so a rerun picks them up.
+- `PluginSecretRewrap { items: [{install_id, slot, from_nonce, key_id, nonce, ciphertext}] }`: used by rotation, applied atomically. Each item carries the `nonce` of the ciphertext it was derived from (not `updated_at`, which a same-second `PUT` would leave equal); on apply an item whose slot holds a different nonce (a `PUT` or delete landed between the leader's decrypt and the apply) is skipped, never overwritten, and the apply result lists the skipped items so a rerun picks them up.
 
 Install records (#220 slice 3) never contain secret material. The install's approved capabilities already name the slots and their bound hosts.
 
