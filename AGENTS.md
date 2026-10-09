@@ -225,7 +225,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
 7. **Crate boundaries:** `wayhouse-config` depends only on `serde` + `serde_norway` +
-   `thiserror` + `base64` (WireGuard key validation).
+   `thiserror` + `base64` (WireGuard key validation) + `sha2` (plugin route pool names).
    `wayhouse-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `wayhouse`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `wayhouse-core`, the HTTP/gRPC clients in `wayhouse`.

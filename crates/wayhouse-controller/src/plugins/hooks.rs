@@ -450,13 +450,15 @@ async fn forward(ha: &HaHandle, id: &str, request: &WebhookRequest) -> Response 
     };
     let status = resp.status();
     if status.is_success() {
-        return match resp.json::<ForwardedReply>().await {
-            Ok(r) => reply_response(WebhookResponse {
+        return match resp.json::<ForwardedReply>().await.ok().and_then(|r| {
+            STANDARD.decode(&r.body).ok().map(|body| WebhookResponse {
                 status: r.status,
                 headers: r.headers,
-                body: STANDARD.decode(r.body).unwrap_or_default(),
-            }),
-            Err(_) => json_error(
+                body,
+            })
+        }) {
+            Some(r) => reply_response(r),
+            None => json_error(
                 StatusCode::BAD_GATEWAY,
                 "the leader's answer was not understood",
             ),
