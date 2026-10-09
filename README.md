@@ -251,6 +251,8 @@ Issues and ideas are welcome. To build, test and open a pull request, read
 [`RELEASING.md`](RELEASING.md). Participation is covered by the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
+For security problems, do not open a public issue; follow [`SECURITY.md`](SECURITY.md).
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
