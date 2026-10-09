@@ -83,3 +83,7 @@ CI runs are slow (about 10 minutes warm), so batch your pushes.
 
 See [`RELEASING.md`](RELEASING.md#branching-models) for how releases are cut and when to move to
 a release branch.
+
+## Code of conduct
+
+Be kind and constructive. The [Code of Conduct](CODE_OF_CONDUCT.md) applies to issues, pull requests and every other project space.
