@@ -649,6 +649,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Detached on purpose: they run for the life of the process.
                 drop(runner.clone().spawn());
+                drop(wayhouse_controller::plugins::events::spawn(
+                    runner.clone(),
+                    store.clone(),
+                    state.updates.subscribe(),
+                ));
                 if let Some(addr) = args.plugin_webhook_listen {
                     let hooks = wayhouse_controller::plugins::hooks::router(
                         wayhouse_controller::plugins::hooks::HookState::new(

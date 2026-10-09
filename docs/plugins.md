@@ -184,6 +184,23 @@ the Raft leader over the peer channel (`/raft/plugin-hook/{id}`, peer token, pro
 only over `https` peers: with plain-HTTP peers it answers `503` rather than send the body in clear
 text. Run the webhook listener on every node you want to take requests, or point the sender at one.
 
+## Events
+
+A plugin that declares `"triggers": {"on_event": ["config_revision", "plugin_changed"]}` (and
+`on_timer`, which stays required) gets `on_event(kind, payload)` calls:
+
+| Kind              | Payload                                                                        | When                                          |
+| ----------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `config_revision` | `{"revision": N}`                                                              | the controller accepted a new config revision |
+| `plugin_changed`  | `{"id": "...", "change": "installed" \| "enabled" \| "disabled" \| "deleted"}` | an install was added, toggled or removed      |
+
+Events are **hints, not a log.** They use the same bounded hook queue as webhooks (at most 4
+waiting per install), so a slow plugin loses events instead of building a backlog; the loss is
+counted as `hooks_dropped` in the status. A restart, a failover (only the Raft leader delivers) or
+a lagging feed also loses some. The list of kinds only grows. A plugin that must not miss a change
+reconciles from the controller's state on its timer and treats an event as a reason to do it
+sooner. A backend-health event is not built yet.
+
 ## Approval
 
 `PluginHost::load(bytes, approved)` takes the capabilities the operator approved for the

@@ -1217,6 +1217,63 @@ mod tests {
         assert!(r.run_hook(HID, Hook::Webhook(request())).await.is_ok());
     }
 
+    const EVENTED: &str = r#"{"triggers":{"on_timer":true,"on_event":["config_revision"]},"tick_interval_secs":30,"log":true,"state":{"max_bytes":64}}"#;
+
+    #[tokio::test]
+    async fn events_reach_only_installs_that_approved_the_kind() {
+        let (r, store, _d) = fixture(1, 4);
+        let module = guest(
+            EVENTED,
+            r#"(func (export "init") (param i32 i32))
+               (func (export "on_timer"))
+               (func (export "on_event") (param i32 i32 i32 i32)
+                 (drop (call $get (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1)))
+                 (i32.store8 (i32.const 100)
+                   (i32.add (i32.load8_u (i32.const 100)) (i32.const 1)))
+                 (drop (call $put (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1))))"#,
+        );
+        install(&store, "a", &counter());
+        let sha = "b".repeat(64);
+        store.put_blob(&sha, &module).unwrap();
+        store
+            .create(&InstallRecord {
+                id: HID.into(),
+                name: "evt".into(),
+                sha256: sha,
+                size: module.len(),
+                approved: inspect(&module).unwrap().caps,
+                config: serde_json::json!({}),
+                enabled: true,
+                created_at: 2,
+                created_by: None,
+                webhook: None,
+            })
+            .unwrap();
+        crate::plugins::events::deliver(
+            &r,
+            &store,
+            "config_revision",
+            &serde_json::json!({ "revision": 4 }),
+        );
+        crate::plugins::events::deliver(&r, &store, "plugin_changed", &serde_json::json!({}));
+        for _ in 0..200 {
+            if counter_value(&store, HID).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            counter_value(&store, HID),
+            Some(1),
+            "once, for the kind it approved"
+        );
+        assert_eq!(
+            counter_value(&store, "a"),
+            None,
+            "the timer-only install gets none"
+        );
+    }
+
     #[tokio::test]
     async fn a_plugin_that_declares_routes_has_them_committed_once() {
         let (r, store, _d) = fixture(1, 4);

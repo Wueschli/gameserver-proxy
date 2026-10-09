@@ -50,3 +50,9 @@ Decisions made while building (the spec left the entry shape and the merge open)
 - **Runs only on the leader.** A follower authenticates then forwards over `/raft/plugin-hook` and refuses (503) when the leader's address is plain `http`. `PLUGIN_SUPPORT` is now 3 so a webhook can only be enabled when every member knows the new entry.
 - **Answer after commit.** The guest's response is returned only once its state writes are committed; a commit failure is 503 retry.
 - **Deferred.** Webhook management in the web UI; per-install rate limit configuration.
+
+## Part 3c: events (#237, second half)
+
+- **Two kinds**: `config_revision` (from the config store's update channel) and `plugin_changed` (a diff of the install list each time the store changes). The kind list only grows.
+- **Hints through the hook queue.** Each delivery is its own task through `run_hook(Hook::Event)`: the same cap of 4, drops counted, leader only. Reconcile-on-timer is the documented contract.
+- **Deferred.** Backend-health events (the controller has no backend-health feed to subscribe to yet).

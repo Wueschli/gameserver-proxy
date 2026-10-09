@@ -10,6 +10,7 @@
 //! crash-idempotent per Raft index. Slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod events;
 pub mod hooks;
 pub mod net;
 pub mod peer;
