@@ -10,7 +10,6 @@
 //! between calls (rebinding) cannot reach a private address; the address it returns is the
 //! one connected to. An IP literal is checked up front, since a literal skips DNS.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -67,14 +66,15 @@ pub fn permitted(resolved: Vec<SocketAddr>, private_ok: bool) -> Vec<SocketAddr>
 
 /// Resolves names the way the OS does and drops what the host may not connect to.
 struct GuardedResolver {
-    /// Hosts approved for private destinations.
-    private_ok: HashSet<String>,
+    /// Whether this client's connections may go to private destinations. The choice is made
+    /// per hop (by the approved `host:port`) by using one client of each kind.
+    private_ok: bool,
 }
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_ascii_lowercase();
-        let private_ok = self.private_ok.contains(&host);
+        let private_ok = self.private_ok;
         Box::pin(async move {
             let found: Vec<SocketAddr> =
                 tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
@@ -91,22 +91,32 @@ impl Resolve for GuardedResolver {
 
 /// Sends one hop on the controller's runtime.
 pub struct ReqwestTransport {
-    client: reqwest::Client,
+    /// Reaches public addresses only.
+    public: reqwest::Client,
+    /// Used only for a hop whose approved `host:port` allows private addresses.
+    private: reqwest::Client,
     runtime: Handle,
 }
 
+fn client(private_ok: bool) -> Result<reqwest::Client, reqwest::Error> {
+    wayhouse_http::builder()
+        // The fleet's protocol header is for fleet peers, not for a third party.
+        .default_headers(reqwest::header::HeaderMap::new())
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(GuardedResolver { private_ok }))
+        .build()
+}
+
 impl ReqwestTransport {
-    /// `private_ok`: the hosts the plugin's approval allows to resolve privately.
-    pub fn new(private_ok: HashSet<String>, runtime: Handle) -> Result<Self, reqwest::Error> {
-        let client = wayhouse_http::builder()
-            // The fleet's protocol header is for fleet peers, not for a third party.
-            .default_headers(reqwest::header::HeaderMap::new())
-            .https_only(true)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(GuardedResolver { private_ok }))
-            .build()?;
-        Ok(Self { client, runtime })
+    /// Two clients, so the approval of one `host:port` never widens another's.
+    pub fn new(runtime: Handle) -> Result<Self, reqwest::Error> {
+        Ok(Self {
+            public: client(false)?,
+            private: client(true)?,
+            runtime,
+        })
     }
 
     async fn send_async(&self, hop: &Hop) -> Result<WireResponse, String> {
@@ -136,8 +146,12 @@ impl ReqwestTransport {
             value.set_sensitive(true);
             headers.append(name, value);
         }
-        let mut resp = self
-            .client
+        let client = if hop.allow_private {
+            &self.private
+        } else {
+            &self.public
+        };
+        let mut resp = client
             .request(method, hop.url.clone())
             .headers(headers)
             .body(hop.body.clone())
@@ -217,13 +231,7 @@ pub fn engine_for(
     let Some(cap) = rec.approved.http.clone() else {
         return Ok(None);
     };
-    let private_ok = cap
-        .hosts
-        .iter()
-        .filter(|h| h.allow_private)
-        .map(|h| h.host.clone())
-        .collect();
-    let transport = ReqwestTransport::new(private_ok, runtime).map_err(|e| e.to_string())?;
+    let transport = ReqwestTransport::new(runtime).map_err(|e| e.to_string())?;
     let secrets = InstallSecrets {
         id: rec.id.clone(),
         store: store.clone(),
@@ -307,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_address_literal_in_a_private_range_is_refused_without_connecting() {
-        let t = ReqwestTransport::new(HashSet::new(), Handle::current()).unwrap();
+        let t = ReqwestTransport::new(Handle::current()).unwrap();
         for url in [
             "https://127.0.0.1:1/",
             "https://10.0.0.5/",
@@ -321,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_approved_private_literal_gets_as_far_as_connecting() {
-        let t = ReqwestTransport::new(HashSet::new(), Handle::current()).unwrap();
+        let t = ReqwestTransport::new(Handle::current()).unwrap();
         let e = t
             .send_async(&hop("https://127.0.0.1:1/", true))
             .await
@@ -332,17 +340,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_that_resolves_only_to_loopback_is_refused_unless_approved() {
-        let strict = ReqwestTransport::new(HashSet::new(), Handle::current()).unwrap();
-        let e = strict
+        // One transport serves both hops: the hop's own approval picks the client, so the
+        // same name approved private on one port is still refused on another.
+        let t = ReqwestTransport::new(Handle::current()).unwrap();
+        let e = t
             .send_async(&hop("https://localhost:1/", false))
             .await
             .err()
             .unwrap();
         assert!(e.contains("may not reach"), "{e}");
-        let lax =
-            ReqwestTransport::new(HashSet::from(["localhost".to_string()]), Handle::current())
-                .unwrap();
-        let e = lax
+        let e = t
             .send_async(&hop("https://localhost:1/", true))
             .await
             .err()
@@ -352,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_http_never_leaves_the_transport() {
-        let t = ReqwestTransport::new(HashSet::new(), Handle::current()).unwrap();
+        let t = ReqwestTransport::new(Handle::current()).unwrap();
         assert!(t.send_async(&hop("http://8.8.8.8/", false)).await.is_err());
     }
 }
