@@ -11,6 +11,13 @@
 //! A call returns its [`Effects`]; the runner commits the state writes as one batch that is
 //! compare-and-set on the install's state revision, then records the outcome in memory
 //! (last result and the last [`MAX_LOG_LINES`] log lines; not replicated, lost on restart).
+//!
+//! Under HA ([`Runner::new_ha`]) only the Raft leader ticks. A node that is not the leader
+//! drops its schedule and loaded plugins, so when it wins an election every install starts
+//! over with one full interval of grace (the entries of earlier terms are applied by
+//! then, and a plugin never fires the moment a node takes over). A commit is one
+//! `PluginState` entry tagged with the term the leader read the state in, so the state
+//! machine drops the late result of a deposed leader instead of applying it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,7 +26,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use wayhouse_plugin_host::{CallError, CompilePool, Effects, LogLevel, Plugin, PoolError};
 
-use super::{CommitError, InstallRecord, PluginStore};
+use super::{validate_puts, CommitError, InstallRecord, PluginStore};
+use crate::ha::{HaHandle, PluginReject, WriteRequest, WriteResponse};
 
 /// Log lines kept per install.
 pub const MAX_LOG_LINES: usize = 100;
@@ -54,6 +62,8 @@ struct Loaded {
 struct Schedule {
     loaded: HashMap<String, Loaded>,
     next_due: HashMap<String, Instant>,
+    /// The term this node has been ticking in as leader (HA); a change resets the schedule.
+    led_term: Option<u64>,
 }
 
 pub struct Runner {
@@ -61,6 +71,8 @@ pub struct Runner {
     pool: Arc<CompilePool>,
     schedule: tokio::sync::Mutex<Schedule>,
     status: Mutex<HashMap<String, PluginStatus>>,
+    /// `Some` under HA: ticks run only while this node leads, and state commits go through Raft.
+    ha: Option<Arc<HaHandle>>,
 }
 
 fn level_name(level: LogLevel) -> &'static str {
@@ -90,12 +102,32 @@ const BUSY: &str = "the plugin worker pool is busy; tick skipped and retried";
 
 impl Runner {
     pub fn new(store: PluginStore, pool: Arc<CompilePool>) -> Arc<Self> {
+        Self::build(store, pool, None)
+    }
+
+    /// A runner for an HA controller: `store` is the state machine's.
+    pub fn new_ha(store: PluginStore, pool: Arc<CompilePool>, ha: Arc<HaHandle>) -> Arc<Self> {
+        Self::build(store, pool, Some(ha))
+    }
+
+    fn build(store: PluginStore, pool: Arc<CompilePool>, ha: Option<Arc<HaHandle>>) -> Arc<Self> {
         Arc::new(Self {
             store,
             pool,
             schedule: tokio::sync::Mutex::new(Schedule::default()),
             status: Mutex::new(HashMap::new()),
+            ha,
         })
+    }
+
+    /// Where this node ticks. Standalone: `Some(None)`. HA leader: `Some(Some(term))`.
+    /// HA follower: `None`.
+    fn lead(&self) -> Option<Option<u64>> {
+        let Some(ha) = &self.ha else {
+            return Some(None);
+        };
+        let metrics = ha.raft.metrics().borrow().clone();
+        (metrics.current_leader == Some(ha.node_id)).then_some(Some(metrics.current_term))
     }
 
     /// Scan once a second until the task is dropped.
@@ -121,6 +153,12 @@ impl Runner {
 
     /// One scheduling pass at `now`: start every due tick and wait for them all.
     pub async fn run_due(self: &Arc<Self>, now: Instant) {
+        let Some(term) = self.lead() else {
+            // Not the leader: forget everything, so a later election starts clean.
+            *self.schedule.lock().await = Schedule::default();
+            self.lock_status().clear();
+            return;
+        };
         let installs = match self.store.list() {
             Ok(i) => i,
             Err(e) => {
@@ -131,6 +169,12 @@ impl Runner {
         let mut due = Vec::new();
         {
             let mut sched = self.schedule.lock().await;
+            if sched.led_term != term {
+                *sched = Schedule {
+                    led_term: term,
+                    ..Schedule::default()
+                };
+            }
             let live = |r: &&InstallRecord| r.enabled && r.approved.triggers.on_timer;
             let ids: Vec<&str> = installs
                 .iter()
@@ -157,13 +201,13 @@ impl Runner {
         let mut tasks = tokio::task::JoinSet::new();
         for (rec, at) in due {
             let this = self.clone();
-            tasks.spawn(async move { this.tick(rec, at).await });
+            tasks.spawn(async move { this.tick(rec, at, term).await });
         }
         while tasks.join_next().await.is_some() {}
     }
 
-    async fn tick(self: Arc<Self>, rec: InstallRecord, at: Instant) {
-        let outcome = self.call(&rec).await;
+    async fn tick(self: Arc<Self>, rec: InstallRecord, at: Instant, term: Option<u64>) {
+        let outcome = self.call(&rec, term).await;
         if matches!(outcome, Outcome::Busy) {
             // Retry at the next scan instead of waiting a whole interval, so the
             // installs that lose the race for pool room do not lose it every round.
@@ -173,11 +217,11 @@ impl Runner {
                 .next_due
                 .insert(rec.id.clone(), at);
         }
-        self.finish(&rec.id, outcome);
+        self.finish(&rec.id, outcome, term).await;
     }
 
     /// Load (and `init`) if needed, then run `on_timer`, all on the pool.
-    async fn call(&self, rec: &InstallRecord) -> Outcome {
+    async fn call(&self, rec: &InstallRecord, term: Option<u64>) -> Outcome {
         let cached = {
             let sched = self.schedule.lock().await;
             sched
@@ -188,7 +232,7 @@ impl Runner {
         };
         let plugin = match cached {
             Some(p) => p,
-            None => match self.load_and_init(rec).await {
+            None => match self.load_and_init(rec, term).await {
                 Ok(p) => p,
                 Err(Fail::Busy) => return Outcome::Busy,
                 Err(Fail::Other(why)) => return Outcome::Failed(why),
@@ -209,12 +253,23 @@ impl Runner {
         }
     }
 
-    async fn load_and_init(&self, rec: &InstallRecord) -> Result<Arc<Plugin>, Fail> {
+    async fn load_and_init(
+        &self,
+        rec: &InstallRecord,
+        term: Option<u64>,
+    ) -> Result<Arc<Plugin>, Fail> {
         let bytes = self
             .store
             .get_blob(&rec.sha256)
             .map_err(|e| Fail::other(e.to_string()))?
-            .ok_or_else(|| Fail::other("the module is no longer stored"))?;
+            .ok_or_else(|| {
+                Fail::other(if self.ha.is_some() {
+                    // Blobs are not replicated yet: only the node that took the upload has them.
+                    "this node does not hold the module bytes (module replication is not built yet)"
+                } else {
+                    "the module is no longer stored"
+                })
+            })?;
         let pool = self.pool.clone();
         let approved = rec.approved.clone();
         let loaded = tokio::task::spawn_blocking(move || pool.load(bytes, approved))
@@ -238,7 +293,9 @@ impl Runner {
             Fail::Busy => Fail::Busy,
             Fail::Other(e) => Fail::other(format!("init failed: {e}")),
         })?;
-        self.commit(&rec.id, rev, &fx).map_err(Fail::Other)?;
+        self.commit(&rec.id, rev, &fx, term)
+            .await
+            .map_err(Fail::Other)?;
         self.record_logs(&rec.id, &fx);
         self.schedule.lock().await.loaded.insert(
             rec.id.clone(),
@@ -250,16 +307,47 @@ impl Runner {
         Ok(plugin)
     }
 
-    fn commit(&self, id: &str, rev: u64, fx: &Effects) -> Result<(), String> {
+    /// Commit a call's state writes: locally, or under HA as one `PluginState` entry
+    /// tagged with `term`.
+    async fn commit(
+        &self,
+        id: &str,
+        rev: u64,
+        fx: &Effects,
+        term: Option<u64>,
+    ) -> Result<(), String> {
         if fx.state_puts.is_empty() {
             return Ok(());
         }
-        match self.store.commit_state(id, rev, &fx.state_puts) {
-            Ok(_) => Ok(()),
-            Err(CommitError::Stale) => {
-                Err("the state changed during the call; its writes were dropped".to_string())
-            }
-            Err(e) => Err(e.to_string()),
+        let stale = || "the state changed during the call; its writes were dropped".to_string();
+        let (Some(ha), Some(term)) = (&self.ha, term) else {
+            return match self.store.commit_state(id, rev, &fx.state_puts) {
+                Ok(_) => Ok(()),
+                Err(CommitError::Stale) => Err(stale()),
+                Err(e) => Err(e.to_string()),
+            };
+        };
+        validate_puts(&fx.state_puts)?;
+        let entry = WriteRequest::PluginState {
+            id: id.to_string(),
+            expected_rev: rev,
+            term,
+            puts: fx.state_puts.clone(),
+        };
+        match ha.raft.client_write(entry).await {
+            Ok(done) => match done.data {
+                WriteResponse::PluginApplied(_) => Ok(()),
+                WriteResponse::PluginRejected(PluginReject::Stale) => Err(stale()),
+                WriteResponse::PluginRejected(PluginReject::WrongTerm) => Err(
+                    "this node stopped leading during the call; its writes were dropped"
+                        .to_string(),
+                ),
+                WriteResponse::PluginRejected(PluginReject::NoSuchInstall) => {
+                    Err("the install was removed during the call".to_string())
+                }
+                other => Err(format!("the state machine refused the commit: {other:?}")),
+            },
+            Err(e) => Err(format!("could not commit the state through raft: {e}")),
         }
     }
 
@@ -275,11 +363,11 @@ impl Runner {
     }
 
     /// Commit a finished call's effects and record the result.
-    fn finish(&self, id: &str, outcome: Outcome) {
+    async fn finish(&self, id: &str, outcome: Outcome, term: Option<u64>) {
         let result = match outcome {
             Outcome::Effects(rev, fx) => {
                 self.record_logs(id, &fx);
-                self.commit(id, rev, &fx)
+                self.commit(id, rev, &fx, term).await
             }
             Outcome::Busy => Err(BUSY.to_string()),
             Outcome::Failed(why) => Err(why),
@@ -536,7 +624,7 @@ mod tests {
             state_puts: BTreeMap::from([("n".to_string(), vec![9])]),
             ..Effects::default()
         };
-        r.finish("a", Outcome::Effects(0, fx));
+        r.finish("a", Outcome::Effects(0, fx), None).await;
         assert_eq!(counter_value(&store, "a"), Some(7));
         let st = r.status("a").unwrap();
         assert_eq!(st.last_ok, Some(false));
@@ -588,5 +676,117 @@ mod tests {
         // All of them ticked well before a second interval (30 s) elapsed.
         assert!(rounds < 30, "{rounds} rounds");
         assert!(ids.iter().all(|id| counter_value(&store, id) == Some(1)));
+    }
+
+    // ---- under HA (a single-node Raft group that leads itself) ----
+
+    async fn ha_fixture() -> (Arc<Runner>, PluginStore, Arc<HaHandle>, tempfile::TempDir) {
+        let (handle, _cluster, store, dir) =
+            crate::ha::test_support::single_node_with_plugins(1, "127.0.0.1:1").await;
+        let host = Arc::new(PluginHost::new(Limits::default()).unwrap());
+        let pool = Arc::new(CompilePool::new(host, 1, 4, Duration::from_secs(10)).unwrap());
+        (
+            Runner::new_ha(store.clone(), pool, handle.clone()),
+            store,
+            handle,
+            dir,
+        )
+    }
+
+    async fn ha_install(store: &PluginStore, handle: &HaHandle, id: &str, module: &[u8]) {
+        let sha = format!("{:0>64}", id);
+        store.put_blob(&sha, module).unwrap();
+        let record = InstallRecord {
+            id: id.into(),
+            name: "demo".into(),
+            sha256: sha,
+            size: module.len(),
+            approved: inspect(module).unwrap().caps,
+            config: serde_json::json!({}),
+            enabled: true,
+            created_at: 1,
+            created_by: None,
+        };
+        let done = handle
+            .raft
+            .client_write(WriteRequest::PluginInstall(record))
+            .await
+            .unwrap();
+        assert_eq!(done.data, WriteResponse::PluginApplied(None));
+    }
+
+    const HA_ID: &str = "00000000000000a1";
+
+    #[tokio::test]
+    async fn the_ha_leader_ticks_after_the_grace_period_and_commits_through_raft() {
+        let (r, store, handle, _d) = ha_fixture().await;
+        ha_install(&store, &handle, HA_ID, &counter()).await;
+        let t0 = Instant::now();
+        r.run_due(t0).await;
+        assert_eq!(
+            counter_value(&store, HA_ID),
+            None,
+            "a full interval of grace"
+        );
+        r.run_due(secs(t0, 30)).await;
+        assert_eq!(counter_value(&store, HA_ID), Some(1));
+        assert_eq!(
+            store.state(HA_ID).unwrap().0,
+            1,
+            "committed as a raft entry"
+        );
+        r.run_due(secs(t0, 60)).await;
+        assert_eq!(counter_value(&store, HA_ID), Some(2));
+        let st = r.status(HA_ID).unwrap();
+        assert_eq!((st.ticks, st.last_ok), (2, Some(true)));
+    }
+
+    #[tokio::test]
+    async fn a_commit_tagged_with_another_term_is_dropped_by_the_state_machine() {
+        let (r, store, handle, _d) = ha_fixture().await;
+        ha_install(&store, &handle, HA_ID, &counter()).await;
+        let fx = Effects {
+            state_puts: BTreeMap::from([("n".to_string(), vec![9])]),
+            ..Effects::default()
+        };
+        let leading = handle.raft.metrics().borrow().current_term;
+        // A deposed leader's late result: its term is not the one the entry lands in.
+        let again = Effects {
+            state_puts: fx.state_puts.clone(),
+            ..Effects::default()
+        };
+        r.finish(HA_ID, Outcome::Effects(0, fx), Some(leading + 1))
+            .await;
+        assert_eq!(counter_value(&store, HA_ID), None);
+        let st = r.status(HA_ID).unwrap();
+        assert_eq!(st.last_ok, Some(false));
+        assert!(st.last_error.unwrap().contains("stopped leading"));
+        // The same result in the current term lands.
+        r.finish(HA_ID, Outcome::Effects(0, again), Some(leading))
+            .await;
+        assert_eq!(counter_value(&store, HA_ID), Some(9));
+    }
+
+    #[tokio::test]
+    async fn oversized_state_writes_are_refused_before_they_reach_the_log() {
+        let (r, store, handle, _d) = ha_fixture().await;
+        ha_install(&store, &handle, HA_ID, &counter()).await;
+        let fx = Effects {
+            state_puts: BTreeMap::from([(
+                "n".to_string(),
+                vec![0; wayhouse_plugin_host::MAX_STATE_BYTES + 1],
+            )]),
+            ..Effects::default()
+        };
+        let term = handle.raft.metrics().borrow().current_term;
+        let before = handle.raft.metrics().borrow().last_log_index;
+        r.finish(HA_ID, Outcome::Effects(0, fx), Some(term)).await;
+        assert!(r
+            .status(HA_ID)
+            .unwrap()
+            .last_error
+            .unwrap()
+            .contains("over"));
+        assert_eq!(handle.raft.metrics().borrow().last_log_index, before);
     }
 }

@@ -31,3 +31,6 @@ nix = { workspace = true, features = ["sched"] }
 [lib]
 test = false
 doctest = false
+
+[dev-dependencies]
+wat.workspace = true

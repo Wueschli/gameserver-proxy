@@ -152,9 +152,10 @@ struct Args {
     ca_file: Option<PathBuf>,
 
     /// Serve the plugin API (`/plugins`): upload, approve and manage WASM plugin
-    /// installs (docs/plugins.md). Off by default. Standalone controllers only for
-    /// now: with `--ha-peers` or `--role slave` the routes answer `501`. Installs are
-    /// stored and enabled plugins that declared a timer are ticked.
+    /// installs (docs/plugins.md). Off by default. With `--role slave` the routes answer
+    /// `501`. Installs are stored and enabled plugins that declared a timer are ticked;
+    /// under `--ha-peers` installs and state are replicated and only the Raft leader
+    /// ticks. Module bytes are not replicated yet.
     #[arg(long)]
     plugins: bool,
 
@@ -343,7 +344,11 @@ async fn main() -> anyhow::Result<()> {
     // module doc. `None` (no `--ha-peers`, the default `replicas: 1` shape)
     // leaves every write on the exact same direct-to-`Store` path phase
     // 10+11 shipped.
-    let ha_handle: Option<(Arc<HaHandle>, Arc<ha::cluster_state::ClusterState>)> = if !ha_enabled {
+    let ha_handle: Option<(
+        Arc<HaHandle>,
+        Arc<ha::cluster_state::ClusterState>,
+        wayhouse_controller::plugins::PluginStore,
+    )> = if !ha_enabled {
         None
     } else {
         let node_id = args.ha_node_id.expect("checked above");
@@ -380,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
         );
 
         let cluster = state_machine.cluster().clone();
+        let plugin_store = state_machine.plugins().clone();
         let network = ha::network::Network::new(ha_token.clone());
         let raft_config = Arc::new(
             ha::raft_config(args.ha_snapshot_after)
@@ -432,12 +438,12 @@ async fn main() -> anyhow::Result<()> {
         } else {
             tracing::info!(node_id, peers = ?peers.keys().collect::<Vec<_>>(), "intra-tier HA enabled");
         }
-        Some((handle, cluster))
+        Some((handle, cluster, plugin_store))
     };
 
     // Under HA the registries propose through Raft instead of writing: the
     // state machine's own copies (handed to it above) stay the writers.
-    if let Some((handle, cluster)) = &ha_handle {
+    if let Some((handle, cluster, _)) = &ha_handle {
         let registry_ha = wayhouse_controller::registry::RegistryHa {
             handle: handle.clone(),
             cluster: cluster.clone(),
@@ -453,7 +459,7 @@ async fn main() -> anyhow::Result<()> {
             import_policy,
         ));
     }
-    let leader_handle = ha_handle.as_ref().map(|(h, _)| h.clone());
+    let leader_handle = ha_handle.as_ref().map(|(h, _, _)| h.clone());
     let lease_leader = leader_handle.clone();
     tokio::spawn(wayhouse_controller::lease::lease_loop(
         book.clone(),
@@ -554,9 +560,26 @@ async fn main() -> anyhow::Result<()> {
                     8,
                     Duration::from_secs(30),
                 )?);
-                let store = wayhouse_controller::plugins::PluginStore::open(state.store.db())?;
-                let runner =
-                    wayhouse_controller::plugins::runner::Runner::new(store.clone(), pool.clone());
+                // Under HA the state machine's store is the one every replica applies
+                // into; otherwise the plugin trees sit next to the config revisions.
+                let (store, ha) = match &ha_handle {
+                    Some((handle, _, store)) => (store.clone(), Some(handle.clone())),
+                    None => (
+                        wayhouse_controller::plugins::PluginStore::open(state.store.db())?,
+                        None,
+                    ),
+                };
+                let runner = match &ha {
+                    Some(handle) => wayhouse_controller::plugins::runner::Runner::new_ha(
+                        store.clone(),
+                        pool.clone(),
+                        handle.clone(),
+                    ),
+                    None => wayhouse_controller::plugins::runner::Runner::new(
+                        store.clone(),
+                        pool.clone(),
+                    ),
+                };
                 // Detached on purpose: it runs for the life of the process.
                 drop(runner.clone().spawn());
                 wayhouse_controller::plugins::api::router(
@@ -565,13 +588,14 @@ async fn main() -> anyhow::Result<()> {
                         pool,
                         runner,
                         auth_token: admin_token.clone(),
+                        ha,
                     },
                 )
             }
             Err(reason) => wayhouse_controller::plugins::api::disabled_router(reason),
         },
     );
-    if let Some((handle, _)) = ha_handle {
+    if let Some((handle, _, _)) = ha_handle {
         app = app
             .merge(ha::members::router(handle.clone(), admin_token))
             .merge(ha::routes::router(handle));

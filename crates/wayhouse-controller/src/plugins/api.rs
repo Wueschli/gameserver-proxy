@@ -4,22 +4,33 @@
 //! what the module declares (the operator reads it); `POST /plugins` names a stored module
 //! and the capability set the operator approves, compiles it through the host's bounded
 //! pool, and only then records the install. Every route sits behind the admin bearer layer.
+//!
+//! Under HA ([`PluginsState::ha`]) the installs and state are the replicated ones. Reads
+//! (`GET /plugins`, `GET /plugins/{id}`) answer from this replica. Writes are proposed
+//! through Raft (a follower forwards them to the leader, like the other write routes),
+//! and a module upload and an install, which need the module bytes, and a status read,
+//! which needs the tick results, run on the leader: a follower forwards the whole request.
+//! Module blobs are not replicated yet, so an install works only against the leader that
+//! took the upload.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
-use wayhouse_plugin_host::{
-    inspect, Capabilities, CompilePool, ModuleError, PoolError, MAX_MODULE_BYTES,
-};
+use wayhouse_plugin_host::{inspect, Capabilities, CompilePool, PoolError, MAX_MODULE_BYTES};
 
 use super::runner::Runner;
 use super::{valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
+use crate::ha::client::{
+    forward_to_current_leader, propose_write, propose_write_as, ForwardHeaders,
+};
+use crate::ha::{HaHandle, PluginReject, WriteRequest, WriteResponse};
 
 #[derive(Clone)]
 pub struct PluginsState {
@@ -29,21 +40,49 @@ pub struct PluginsState {
     pub runner: Arc<Runner>,
     /// Bearer token every `/plugins*` request must present, or `None` to leave it open.
     pub auth_token: Option<Arc<str>>,
+    /// `Some` when the controller runs under HA: `store` is then the state machine's.
+    pub ha: Option<Arc<HaHandle>>,
 }
 
-type ApiError = (StatusCode, Json<serde_json::Value>);
+type ApiError = Response;
 
-fn err(status: StatusCode, msg: impl std::fmt::Display) -> ApiError {
+fn err(status: StatusCode, msg: impl std::fmt::Display) -> Response {
     (
         status,
         Json(serde_json::json!({ "error": msg.to_string() })),
     )
+        .into_response()
 }
 
 #[allow(clippy::needless_pass_by_value)] // `map_err` callback
 fn internal(e: PluginStoreError) -> ApiError {
     tracing::error!(error = %e, "plugin store failure");
     err(StatusCode::INTERNAL_SERVER_ERROR, "plugin store failure")
+}
+
+impl PluginsState {
+    /// Under HA, on a replica that is not the leader: the leader's answer to this request,
+    /// forwarded as it came. `None` when this node should handle it itself.
+    async fn to_leader(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Option<Response> {
+        let ha = self.ha.as_ref()?;
+        if ha.is_leader() {
+            return None;
+        }
+        let forward = ForwardHeaders::from_headers(headers);
+        if forward.forwarded {
+            return Some(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the leader changed while the request was forwarded; retry shortly",
+            ));
+        }
+        Some(forward_to_current_leader(ha, method, path, body, &forward).await)
+    }
 }
 
 pub fn router(state: PluginsState) -> Router {
@@ -82,11 +121,23 @@ struct UploadResponse {
 
 async fn upload_module(
     State(st): State<PluginsState>,
+    headers: HeaderMap,
     body: Bytes,
-) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
-    let info = inspect(&body).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    st.store.put_blob(&info.sha256, &body).map_err(internal)?;
-    Ok((
+) -> Response {
+    if let Some(forwarded) = st
+        .to_leader(Method::POST, "/plugins/modules", &headers, body.clone())
+        .await
+    {
+        return forwarded;
+    }
+    let info = match inspect(&body) {
+        Ok(i) => i,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    if let Err(e) = st.store.put_blob(&info.sha256, &body) {
+        return internal(e);
+    }
+    (
         StatusCode::CREATED,
         Json(UploadResponse {
             sha256: info.sha256,
@@ -94,7 +145,8 @@ async fn upload_module(
             abi: info.abi.to_string(),
             capabilities: info.caps,
         }),
-    ))
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -123,9 +175,6 @@ fn actor(headers: &HeaderMap) -> Option<String> {
 
 fn pool_error(e: PoolError) -> ApiError {
     match e {
-        PoolError::Module(m @ ModuleError::CapsNotApproved(_)) => {
-            err(StatusCode::UNPROCESSABLE_ENTITY, m)
-        }
         PoolError::Module(m) => err(StatusCode::UNPROCESSABLE_ENTITY, m),
         PoolError::Busy | PoolError::TimedOut => err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -134,11 +183,34 @@ fn pool_error(e: PoolError) -> ApiError {
     }
 }
 
-async fn install(
-    State(st): State<PluginsState>,
-    headers: HeaderMap,
-    Json(req): Json<InstallRequest>,
-) -> Result<(StatusCode, Json<InstallRecord>), ApiError> {
+async fn install(State(st): State<PluginsState>, headers: HeaderMap, body: Bytes) -> Response {
+    match install_inner(&st, &headers, body).await {
+        Ok(r) | Err(r) => r,
+    }
+}
+
+/// `Err` carries an error answer or a forwarded one; both are just the response.
+async fn install_inner(
+    st: &PluginsState,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Response, Response> {
+    if let Some(forwarded) = st
+        .to_leader(Method::POST, "/plugins", headers, body.clone())
+        .await
+    {
+        return Err(forwarded);
+    }
+    let req: InstallRequest = serde_json::from_slice(&body).map_err(|e| {
+        err(
+            if e.is_data() {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            e,
+        )
+    })?;
     if !valid_name(&req.name) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -184,8 +256,30 @@ async fn install(
         created_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
-        created_by: actor(&headers),
+        created_by: actor(headers),
     };
+    // Every replica checks this again when it applies the entry; checking here is what
+    // gives the operator the reason.
+    record
+        .validate()
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    if let Some(ha) = &st.ha {
+        let created = record.clone();
+        return Ok(propose_write(
+            ha,
+            WriteRequest::PluginInstall(record),
+            "/plugins",
+            String::from_utf8_lossy(&body).into_owned(),
+            &ForwardHeaders::from_headers(headers),
+            move |resp| match resp {
+                WriteResponse::PluginApplied(_) => {
+                    (StatusCode::CREATED, Json(created)).into_response()
+                }
+                other => unexpected(&other),
+            },
+        )
+        .await);
+    }
     st.store.create(&record).map_err(|e| match e {
         PluginStoreError::BlobMissing => err(
             StatusCode::CONFLICT,
@@ -193,7 +287,29 @@ async fn install(
         ),
         e => internal(e),
     })?;
-    Ok((StatusCode::CREATED, Json(record)))
+    Ok((StatusCode::CREATED, Json(record)).into_response())
+}
+
+/// The status and body of a plugin entry the state machine refused or answered oddly.
+fn unexpected(resp: &WriteResponse) -> Response {
+    match resp {
+        WriteResponse::PluginRejected(PluginReject::NoSuchInstall) => {
+            err(StatusCode::NOT_FOUND, "no such install")
+        }
+        WriteResponse::PluginRejected(PluginReject::Exists) => {
+            err(StatusCode::CONFLICT, "an install with that id exists")
+        }
+        WriteResponse::PluginRejected(PluginReject::Invalid) => {
+            err(StatusCode::BAD_REQUEST, "the plugin entry is malformed")
+        }
+        other => {
+            tracing::error!(?other, "unexpected raft response to a plugin write");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unexpected raft response to a plugin write",
+            )
+        }
+    }
 }
 
 async fn list(State(st): State<PluginsState>) -> Result<Json<Vec<InstallRecord>>, ApiError> {
@@ -211,51 +327,105 @@ async fn get_one(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such install"))
 }
 
-/// What the install's ticks have done (empty before the first one).
+/// What the install's ticks have done (empty before the first one). Under HA only the
+/// leader ticks, so a follower forwards the read.
 async fn status(
     State(st): State<PluginsState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<super::runner::PluginStatus>, ApiError> {
-    if st.store.get(&id).map_err(internal)?.is_none() {
-        return Err(err(StatusCode::NOT_FOUND, "no such install"));
+) -> Response {
+    let path = format!("/plugins/{id}/status");
+    if let Some(forwarded) = st
+        .to_leader(Method::GET, &path, &headers, Bytes::new())
+        .await
+    {
+        return forwarded;
     }
-    Ok(Json(st.runner.status(&id).unwrap_or_default()))
+    match st.store.get(&id) {
+        Err(e) => internal(e),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such install"),
+        Ok(Some(_)) => Json(st.runner.status(&id).unwrap_or_default()).into_response(),
+    }
 }
 
 async fn set_enabled(
     st: &PluginsState,
-    id: &str,
+    headers: &HeaderMap,
+    id: String,
     enabled: bool,
-) -> Result<Json<InstallRecord>, ApiError> {
-    st.store
-        .set_enabled(id, enabled)
-        .map_err(internal)?
-        .map(Json)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such install"))
+) -> Response {
+    if let Some(ha) = &st.ha {
+        let path = format!(
+            "/plugins/{id}/{}",
+            if enabled { "enable" } else { "disable" }
+        );
+        let (store, read_id) = (st.store.clone(), id.clone());
+        return propose_write_as(
+            ha,
+            WriteRequest::PluginSetEnabled { id, enabled },
+            Method::POST,
+            &path,
+            String::new(),
+            &ForwardHeaders::from_headers(headers),
+            move |resp| match resp {
+                WriteResponse::PluginApplied(_) => match store.get(&read_id) {
+                    Ok(Some(record)) => Json(record).into_response(),
+                    Ok(None) => err(StatusCode::NOT_FOUND, "no such install"),
+                    Err(e) => internal(e),
+                },
+                other => unexpected(&other),
+            },
+        )
+        .await;
+    }
+    match st.store.set_enabled(&id, enabled) {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such install"),
+        Err(e) => internal(e),
+    }
 }
 
 async fn enable(
     State(st): State<PluginsState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<InstallRecord>, ApiError> {
-    set_enabled(&st, &id, true).await
+) -> Response {
+    set_enabled(&st, &headers, id, true).await
 }
 
 async fn disable(
     State(st): State<PluginsState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<InstallRecord>, ApiError> {
-    set_enabled(&st, &id, false).await
+) -> Response {
+    set_enabled(&st, &headers, id, false).await
 }
 
 async fn remove(
     State(st): State<PluginsState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    if st.store.delete(&id).map_err(internal)? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(err(StatusCode::NOT_FOUND, "no such install"))
+) -> Response {
+    if let Some(ha) = &st.ha {
+        let path = format!("/plugins/{id}");
+        return propose_write_as(
+            ha,
+            WriteRequest::PluginDelete { id },
+            Method::DELETE,
+            &path,
+            String::new(),
+            &ForwardHeaders::from_headers(&headers),
+            |resp| match resp {
+                WriteResponse::PluginApplied(_) => StatusCode::NO_CONTENT.into_response(),
+                other => unexpected(&other),
+            },
+        )
+        .await;
+    }
+    match st.store.delete(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "no such install"),
+        Err(e) => internal(e),
     }
 }
 
@@ -298,6 +468,7 @@ mod tests {
                 store,
                 pool,
                 auth_token: token.map(Arc::from),
+                ha: None,
             },
             dir,
         )
@@ -488,6 +659,7 @@ mod tests {
             store,
             pool,
             auth_token: None,
+            ha: None,
         };
         let app = router(st);
         let sha = upload(&app, &module(CAPS)).await;
@@ -520,5 +692,93 @@ mod tests {
         assert_eq!(v["error"], "plugins are off");
         let (status, _) = call(&app, "POST", "/plugins/x/enable", vec![], None).await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    }
+
+    // ---- under HA (a single-node Raft group that leads itself) ----
+
+    async fn ha_state() -> (PluginsState, tempfile::TempDir) {
+        let (handle, _cluster, store, dir) =
+            crate::ha::test_support::single_node_with_plugins(1, "127.0.0.1:1").await;
+        let host = Arc::new(PluginHost::new(Limits::default()).unwrap());
+        let pool = Arc::new(CompilePool::new(host, 2, 4, Duration::from_secs(30)).unwrap());
+        (
+            PluginsState {
+                runner: Runner::new_ha(store.clone(), pool.clone(), handle.clone()),
+                store,
+                pool,
+                auth_token: None,
+                ha: Some(handle),
+            },
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn under_ha_install_toggle_and_delete_go_through_the_replicated_state() {
+        let (st, _d) = ha_state().await;
+        let app = router(st.clone());
+        let sha = upload(&app, &module(CAPS)).await;
+        let (status, rec) = call(&app, "POST", "/plugins", install_body(&sha, CAPS), None).await;
+        assert_eq!(status, StatusCode::CREATED, "{rec}");
+        let id = rec["id"].as_str().unwrap().to_string();
+        // The record is in the state machine's store, put there by an applied entry.
+        assert_eq!(st.store.get(&id).unwrap().unwrap().name, "demo");
+        assert!(st.store.applied_index().unwrap().is_some());
+
+        let (status, v) = call(
+            &app,
+            "POST",
+            &format!("/plugins/{id}/disable"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(
+            (status, &v["enabled"]),
+            (StatusCode::OK, &serde_json::json!(false))
+        );
+        let (_, v) = call(&app, "POST", &format!("/plugins/{id}/enable"), vec![], None).await;
+        assert_eq!(v["enabled"], true);
+
+        let (status, _) = call(&app, "DELETE", &format!("/plugins/{id}"), vec![], None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(st.store.get(&id).unwrap().is_none());
+        let (status, _) = call(&app, "DELETE", &format!("/plugins/{id}"), vec![], None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/plugins/00000000000000ff/enable",
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn under_ha_the_install_checks_still_run_on_the_leader() {
+        let (st, _d) = ha_state().await;
+        let app = router(st.clone());
+        let sha = upload(&app, &module(CAPS)).await;
+        let narrower = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30}"#;
+        let (status, _) = call(&app, "POST", "/plugins", install_body(&sha, narrower), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let missing = install_body(&"0".repeat(64), CAPS);
+        let (status, _) = call(&app, "POST", "/plugins", missing, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(&app, "POST", "/plugins", b"{".to_vec(), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(st.store.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_422_when_the_json_is_fine_and_400_when_it_is_not() {
+        let (st, _d) = state(None);
+        let app = router(st);
+        let (status, _) = call(&app, "POST", "/plugins", br#"{"nope":1}"#.to_vec(), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = call(&app, "POST", "/plugins", b"{".to_vec(), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

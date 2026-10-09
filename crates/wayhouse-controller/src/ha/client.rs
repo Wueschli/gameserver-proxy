@@ -50,7 +50,13 @@ pub struct ForwardHeaders {
     pub authorization: Option<String>,
     pub content_type: Option<String>,
     pub actor: Option<String>,
+    /// The request already is a forward from another replica: a replica that is not
+    /// the leader then must not forward it again.
+    pub forwarded: bool,
 }
+
+/// Marks a request one replica forwarded to the leader.
+pub const FORWARDED_HEADER: &str = "x-wayhouse-forwarded";
 
 impl ForwardHeaders {
     /// Picks the forwarded headers out of an incoming request's.
@@ -65,6 +71,7 @@ impl ForwardHeaders {
             authorization: get("Authorization"),
             content_type: get("Content-Type"),
             actor: get("X-Actor"),
+            forwarded: headers.contains_key(FORWARDED_HEADER),
         }
     }
 }
@@ -169,16 +176,48 @@ fn forward_target(
     leader_node.ok_or("no raft leader elected yet; retry shortly")
 }
 
+/// Forwards a request to the node that is leader now, for a route that has to run
+/// there rather than propose a write (it needs the leader's module blobs or its tick
+/// results). `503` when there is no leader to forward to, or this node just became it.
+pub async fn forward_to_current_leader(
+    ha: &HaHandle,
+    method: Method,
+    path: &str,
+    body: impl Into<reqwest::Body>,
+    headers: &ForwardHeaders,
+) -> Response {
+    let (leader_id, leader_node) = {
+        let metrics = ha.raft.metrics().borrow().clone();
+        let node = metrics.current_leader.and_then(|id| {
+            metrics
+                .membership_config
+                .membership()
+                .get_node(&id)
+                .cloned()
+        });
+        (metrics.current_leader, node)
+    };
+    match forward_target(leader_id, leader_node, ha.node_id) {
+        Ok(leader) => {
+            forward_to_leader(&ha.forward, &leader.addr, method, path, body, headers).await
+        }
+        Err(msg) => service_unavailable(msg),
+    }
+}
+
 async fn forward_to_leader(
     client: &reqwest::Client,
     leader_addr: &str,
     method: Method,
     path: &str,
-    body: String,
+    body: impl Into<reqwest::Body>,
     headers: &ForwardHeaders,
 ) -> Response {
     let url = super::peers::peer_url(leader_addr, path);
-    let mut req = client.request(method, &url).body(body);
+    let mut req = client
+        .request(method, &url)
+        .header(FORWARDED_HEADER, "1")
+        .body(body);
     for (name, value) in [
         ("Authorization", &headers.authorization),
         ("Content-Type", &headers.content_type),
@@ -273,7 +312,7 @@ mod tests {
                 &addr.to_string(),
                 Method::POST,
                 "/config",
-                "{}".into(),
+                "{}".to_string(),
                 &ForwardHeaders::default(),
             ),
         )
@@ -326,13 +365,14 @@ mod tests {
             authorization: Some("Bearer caller-token".into()),
             content_type: Some("application/json".into()),
             actor: Some("alice".into()),
+            ..Default::default()
         };
         let resp = forward_to_leader(
             &forward_client(Duration::from_secs(5)),
             &addr.to_string(),
             Method::POST,
             "/config",
-            "{}".into(),
+            "{}".to_string(),
             &headers,
         )
         .await;
@@ -345,5 +385,6 @@ mod tests {
         assert_eq!(got["authorization"], "Bearer caller-token");
         assert_eq!(got["content-type"], "application/json");
         assert_eq!(got["x-actor"], "alice");
+        assert_eq!(got["x-wayhouse-forwarded"], "1");
     }
 }

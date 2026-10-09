@@ -4574,6 +4574,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wat",
  "wayhouse-http",
 ]
 
