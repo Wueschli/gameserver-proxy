@@ -264,8 +264,8 @@ impl Runner {
             .map_err(|e| Fail::other(e.to_string()))?
             .ok_or_else(|| {
                 Fail::other(if self.ha.is_some() {
-                    // Blobs are not replicated yet: only the node that took the upload has them.
-                    "this node does not hold the module bytes (module replication is not built yet)"
+                    // The catch-up loop fetches it from a peer; the next tick finds it.
+                    "this node does not hold the module bytes yet; it is being fetched from a peer"
                 } else {
                     "the module is no longer stored"
                 })
@@ -638,12 +638,21 @@ mod tests {
         install(&store, "a", &counter());
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
         let pool = r.pool.clone();
-        let hold = std::thread::spawn(move || {
-            pool.call(move || {
+        let hold = std::thread::spawn(move || loop {
+            // A pool with no queue accepts a job only while a worker is parked waiting for
+            // one, which a loaded machine may not have reached yet: offer it again until
+            // the worker takes it (a rejected offer never ran, so it never signalled).
+            let (started_tx, release_rx) = (started_tx.clone(), release_rx.clone());
+            let held = pool.call(move || {
                 started_tx.send(()).unwrap();
-                let _ = release_rx.recv();
-            })
+                let _ = release_rx.lock().unwrap().recv();
+            });
+            match held {
+                Err(PoolError::Busy) => std::thread::yield_now(),
+                other => break other,
+            }
         });
         started_rx.recv().unwrap();
         let t0 = Instant::now();

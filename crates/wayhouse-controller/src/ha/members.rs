@@ -146,7 +146,7 @@ impl MemberError {
 }
 
 /// `GET <addr>/raft/whoami`.
-pub(super) async fn fetch_whoami(
+pub(crate) async fn fetch_whoami(
     client: &reqwest::Client,
     ha_token: Option<&str>,
     addr: &str,
@@ -520,6 +520,7 @@ mod tests {
                     node_id,
                     log_empty,
                     pre_ha: crate::ha::import::PreHaSummary::default(),
+                    plugin_support: 0,
                 })
             }),
         );

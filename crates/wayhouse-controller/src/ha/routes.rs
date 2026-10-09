@@ -58,13 +58,23 @@ pub struct Whoami {
     /// No Raft log entry yet (a node that has never been part of a cluster).
     pub log_empty: bool,
     pub pre_ha: super::import::PreHaSummary,
+    /// How far this build takes part in plugin replication ([`PLUGIN_SUPPORT`]); `0` for a
+    /// build that predates it (the field is absent in its answer).
+    #[serde(default)]
+    pub plugin_support: u32,
 }
+
+/// The plugin replication level this build speaks: `1` replicated installs and state, `2`
+/// adds module blob replication (`/raft/plugin-blob`). A leader proposes a new plugin
+/// install only when every member reports at least this.
+pub const PLUGIN_SUPPORT: u32 = 2;
 
 async fn whoami(State(ha): State<Arc<HaHandle>>) -> impl IntoResponse {
     Json(Whoami {
         node_id: ha.node_id,
         log_empty: ha.raft.metrics().borrow().last_log_index.is_none(),
         pre_ha: ha.pre_ha.summary,
+        plugin_support: PLUGIN_SUPPORT,
     })
 }
 

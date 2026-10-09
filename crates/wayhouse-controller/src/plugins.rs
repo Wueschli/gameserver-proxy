@@ -10,6 +10,7 @@
 //! crash-idempotent per Raft index. Slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod peer;
 pub mod runner;
 
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,11 @@ pub fn valid_id(id: &str) -> bool {
     is_lower_hex(id, 16)
 }
 
+/// Whether `s` has the shape of a module hash (64 lowercase hex characters).
+pub fn is_sha256(s: &str) -> bool {
+    is_lower_hex(s, 64)
+}
+
 fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -96,7 +102,7 @@ impl InstallRecord {
                 "name must be 1 to 64 characters of a-z, 0-9 and '-', not starting with '-'".into(),
             );
         }
-        if !is_lower_hex(&self.sha256, 64) {
+        if !is_sha256(&self.sha256) {
             return Err("sha256 must be 64 lowercase hex characters".into());
         }
         if self.size == 0 || self.size > MAX_MODULE_BYTES {
@@ -608,6 +614,38 @@ impl PluginStore {
         Ok(())
     }
 
+    /// Remove every module blob no install references: blobs of uploads that were never
+    /// installed, and of installs deleted while a crash interrupted the cleanup after
+    /// their transaction. Run at startup; returns how many were removed.
+    pub fn sweep_blobs(&self) -> Result<usize, PluginStoreError> {
+        let _guard = self.lock();
+        let referenced: std::collections::HashSet<String> =
+            self.list()?.into_iter().map(|r| r.sha256).collect();
+        let mut removed = 0;
+        for key in self.blobs.iter().keys() {
+            let key = key?;
+            let kept = std::str::from_utf8(&key).is_ok_and(|sha| referenced.contains(sha));
+            if !kept {
+                self.blobs.remove(&key)?;
+                removed += 1;
+            }
+        }
+        self.blobs.flush()?;
+        Ok(removed)
+    }
+
+    /// The modules some install references that this node does not hold (each once): what
+    /// a replica fetches from its peers. Replicated installs arrive before their module.
+    pub fn missing_blobs(&self) -> Result<Vec<String>, PluginStoreError> {
+        let mut missing = std::collections::BTreeSet::new();
+        for r in self.list()? {
+            if !self.blobs.contains_key(r.sha256.as_bytes())? {
+                missing.insert(r.sha256);
+            }
+        }
+        Ok(missing.into_iter().collect())
+    }
+
     /// Remove an install; its blob goes too when no other install references it.
     pub fn delete(&self, id: &str) -> Result<bool, PluginStoreError> {
         let _guard = self.lock();
@@ -697,6 +735,31 @@ mod tests {
         assert!(s.delete("b").unwrap());
         assert!(s.get_blob("sha1").unwrap().is_none());
         assert!(!s.delete("b").unwrap());
+    }
+
+    #[test]
+    fn a_sweep_removes_only_blobs_no_install_references() {
+        let (s, _d) = store();
+        s.put_blob("kept", b"abc").unwrap();
+        s.put_blob("orphan", b"def").unwrap();
+        s.create(&record("a", "kept", 1)).unwrap();
+        assert_eq!(s.sweep_blobs().unwrap(), 1);
+        assert!(s.get_blob("kept").unwrap().is_some());
+        assert!(s.get_blob("orphan").unwrap().is_none());
+        assert_eq!(s.sweep_blobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn missing_blobs_lists_each_referenced_module_this_node_lacks_once() {
+        let (s, _d) = store();
+        s.put_blob("here", b"abc").unwrap();
+        for (id, sha, at) in [("a", "gone", 1), ("b", "gone", 2), ("c", "here", 3)] {
+            // Replicated installs arrive without a blob, so bypass `create`'s check.
+            s.write_record(&record(id, sha, at)).unwrap();
+        }
+        assert_eq!(s.missing_blobs().unwrap(), ["gone"]);
+        s.put_blob("gone", b"xyz").unwrap();
+        assert!(s.missing_blobs().unwrap().is_empty());
     }
 
     #[test]

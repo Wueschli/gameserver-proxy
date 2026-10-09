@@ -10,8 +10,8 @@
 //! through Raft (a follower forwards them to the leader, like the other write routes),
 //! and a module upload and an install, which need the module bytes, and a status read,
 //! which needs the tick results, run on the leader: a follower forwards the whole request.
-//! Module blobs are not replicated yet, so an install works only against the leader that
-//! took the upload.
+//! An upload lands on the leader, which pushes the module to a quorum of members before it
+//! proposes the install ([`super::peer`]); the other replicas fetch what they miss.
 
 // The error side is an axum `Response`, which is what these handlers return either way.
 #![allow(clippy::result_large_err)]
@@ -30,9 +30,7 @@ use wayhouse_plugin_host::{inspect, Capabilities, CompilePool, PoolError, MAX_MO
 
 use super::runner::Runner;
 use super::{valid_id, valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
-use crate::ha::client::{
-    forward_to_current_leader, propose_write, propose_write_as, ForwardHeaders,
-};
+use crate::ha::client::{forward_to_current_leader, propose_write_as, ForwardHeaders};
 use crate::ha::{HaHandle, PluginReject, WriteRequest, WriteResponse};
 
 #[derive(Clone)]
@@ -242,6 +240,13 @@ async fn install_inner(
         ));
     };
     let size = bytes.len();
+    if let Some(ha) = &st.ha {
+        // Before the compile: a refusal costs the operator nothing.
+        super::peer::check_support(ha)
+            .await
+            .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    }
+    let for_peers = st.ha.is_some().then(|| Bytes::from(bytes.clone()));
     let pool = st.pool.clone();
     let approved_for_load = approved.clone();
     tokio::task::spawn_blocking(move || pool.load(bytes, approved_for_load))
@@ -266,22 +271,33 @@ async fn install_inner(
     record
         .validate()
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    if let Some(ha) = &st.ha {
-        let created = record.clone();
-        return Ok(propose_write(
-            ha,
-            WriteRequest::PluginInstall(record),
-            "/plugins",
-            String::from_utf8_lossy(&body).into_owned(),
-            &ForwardHeaders::from_headers(headers),
-            move |resp| match resp {
+    if let (Some(ha), Some(bytes)) = (&st.ha, for_peers) {
+        // The record is committed only once a quorum holds the module, so an install
+        // cannot be stranded on a node that dies right after the upload.
+        super::peer::replicate_to_quorum(ha, &record.sha256, bytes)
+            .await
+            .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?;
+        // Proposed here and not forwarded: this request already ran on the leader, and a
+        // second hop to a newer leader would not have the module checked or the upload.
+        return match ha
+            .raft
+            .client_write(WriteRequest::PluginInstall(record.clone()))
+            .await
+        {
+            Ok(done) => Ok(match done.data {
                 WriteResponse::PluginApplied(_) => {
-                    (StatusCode::CREATED, Json(created)).into_response()
+                    (StatusCode::CREATED, Json(record)).into_response()
                 }
                 other => unexpected(&other),
-            },
-        )
-        .await);
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not propose a plugin install");
+                Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "leadership changed while the install was running; retry shortly",
+                ))
+            }
+        };
     }
     st.store.create(&record).map_err(|e| match e {
         PluginStoreError::BlobMissing => err(

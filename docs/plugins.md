@@ -8,8 +8,8 @@ Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
 controller can store plugin installs behind an admin API and ticks the enabled ones
 (below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). An HA tier replicates installs and state through Raft, serves the same API on every replica
-and ticks on the leader only (see "High availability"). Not built yet: module bytes
-replication between controllers, secrets, `http`, `routes`, webhooks, events and `backends`.
+and ticks on the leader only, and the module bytes follow the installs to every replica (see
+"High availability"). Not built yet: secrets, `http`, `routes`, webhooks, events and `backends`.
 
 ## Module contract (ABI 0.1)
 
@@ -101,7 +101,7 @@ An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z
 to 64 characters), the approved capability set bound to the module sha256, and a non-secret
 `config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
 controller's `sled` database; a standalone controller keeps them there, an HA tier keeps them in
-the Raft state machine's database, replicated (the blobs are not, see "High availability").
+the Raft state machine's database, replicated (the blobs travel out of band, see "High availability").
 
 ## Ticks (standalone controller)
 
@@ -128,7 +128,7 @@ removes its state. This is the single-node form of the design's term-checked com
 ## High availability
 
 With `--ha-peers` every replica holds the same installs and the same per-install state, in the
-log and in snapshots (module blobs are in neither). The entries are an install, enable or
+log and in snapshots (module blobs are in neither; see "Module bytes"). The entries are an install, enable or
 disable, delete (state goes with it), and one state commit per plugin call. Applying is
 deterministic and a refusal is a normal answer, never a storage error: an install whose id
 exists, a malformed install (id, name, sha256, size, `created_by`, config size), a state commit
@@ -153,14 +153,29 @@ the state machine drops it and the status says so. A commit is refused before it
 when over the host's state limits (1 MiB, 256 keys). Status is in memory on the leader and starts
 empty after a failover.
 
-**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
+**Module bytes (slice 7).** The Raft log carries install records only; the module (up to 8 MiB)
+is a content-addressed blob each replica keeps in its own store and moves over the peer channel
+(`--ha-token`, the protocol gate):
 
-**Not built yet: module replication (slice 7).** A module's bytes live only on the node that took
-the upload. An install needs them on the leader that proposes it, and a leader elected later
-that does not hold them cannot run the plugin: its status says "this node does not hold the module
-bytes". Until module replication exists, treat a plugin as tied to the node that uploaded it. A
-cluster that uses plugins must run one build on all replicas; the rolling-upgrade gating of new
-entry types follows the component versioning work.
+- The leader pushes a module (`PUT /raft/plugin-blob/{sha256}`, verified against its hash on
+  arrival) to every member and records the install only once a quorum of voters holds it, so an
+  install cannot be stranded on a node that dies right after the upload. A quorum that cannot be
+  reached answers `503`.
+- Every replica fetches the modules its installs reference and it lacks (`GET
+/raft/plugin-blob/{sha256}`, leader first, then the others, verified before it is kept) every
+  few seconds: a replica that was down, joined late or restored a snapshot catches up this way.
+  Until it has the module a node runs nothing for that install; a leader that cannot find one
+  logs a repeated warning, since it would otherwise silently run nothing.
+- Rolling upgrades: a new install is refused with `503` unless every member answers
+  `/raft/whoami` with `plugin_support` of at least 2 (a build before module replication leaves it
+  out). Existing installs keep working through an upgrade. Upgrade every replica before the first
+  install; the gate does not cover a replica added later with an old build.
+- An install that lands on a leader that has meanwhile lost leadership answers `503 retry` and is
+  never forwarded for a second hop.
+- At startup a controller removes the module blobs no install references (uploads that were never
+  installed, and cleanups a crash interrupted), so upload and install belong in one sitting.
+
+**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
 
 **Snapshot restore.** A plugin snapshot is replaced in one transaction (installs, state and the
 cursor together). The other stores' `replace_stores` write one database at a time and are left as

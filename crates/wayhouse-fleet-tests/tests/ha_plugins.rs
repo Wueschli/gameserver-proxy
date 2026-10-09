@@ -1,5 +1,5 @@
 //! `--plugins` together with `--ha-peers`: a module uploaded and installed through a
-//! follower is forwarded to the leader and replicated to every replica, only the leader
+//! follower is forwarded to the leader and replicated (install and module) to every replica, only the leader
 //! runs the ticks (a follower's status read is forwarded to it), and when the leader dies
 //! the new leader takes over the schedule. Plain `cargo test`: no namespaces needed.
 
@@ -179,9 +179,8 @@ async fn plugins_replicate_through_a_follower_and_the_new_leader_keeps_ticking()
     .await?;
 
     // Kill the leader: a new one is elected and starts ticking the replicated install.
-    // Module blobs are not replicated yet (slice 7), so the new leader, which never took
-    // the upload, cannot run the module: its tick fails and says why. Slice 7 turns this
-    // into a successful tick.
+    // The module was pushed to a quorum before the install was recorded and the other
+    // replica fetches it, so whichever node wins runs it: the tick succeeds.
     procs[leader].take().context("leader proc")?.kill().await?;
     let survivor = follower;
     let other = 3 - leader - follower;
@@ -205,13 +204,10 @@ async fn plugins_replicate_through_a_follower_and_the_new_leader_keeps_ticking()
                 return Ok(false);
             }
             let v: Value = r.json().await?;
-            Ok(v["ticks"].as_u64().unwrap_or(0) >= 1
-                && v["last_error"]
-                    .as_str()
-                    .is_some_and(|e| e.contains("does not hold the module")))
+            Ok(v["ticks"].as_u64().unwrap_or(0) >= 1 && v["last_ok"] == true)
         },
         Duration::from_secs(60),
-        "the new leader takes over the schedule",
+        "the new leader runs the replicated module",
     )
     .await?;
 

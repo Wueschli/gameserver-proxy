@@ -581,17 +581,33 @@ async fn main() -> anyhow::Result<()> {
                         pool.clone(),
                     ),
                 };
-                // Detached on purpose: it runs for the life of the process.
+                match store.sweep_blobs() {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(removed = n, "removed plugin modules no install uses"),
+                    Err(e) => tracing::warn!(error = %e, "could not sweep orphaned plugin modules"),
+                }
+                // Detached on purpose: they run for the life of the process.
                 drop(runner.clone().spawn());
-                wayhouse_controller::plugins::api::router(
+                let mut plugin_routes = wayhouse_controller::plugins::api::router(
                     wayhouse_controller::plugins::api::PluginsState {
-                        store,
+                        store: store.clone(),
                         pool,
                         runner,
                         auth_token: admin_token.clone(),
-                        ha,
+                        ha: ha.clone(),
                     },
-                )
+                );
+                if let Some(handle) = &ha {
+                    // Replicas hand each other the module bytes the Raft log leaves out.
+                    plugin_routes = plugin_routes.merge(
+                        wayhouse_controller::plugins::peer::router(handle, store.clone()),
+                    );
+                    drop(wayhouse_controller::plugins::peer::spawn_sync(
+                        store,
+                        handle.clone(),
+                    ));
+                }
+                plugin_routes
             }
             Err(reason) => wayhouse_controller::plugins::api::disabled_router(reason),
         },
