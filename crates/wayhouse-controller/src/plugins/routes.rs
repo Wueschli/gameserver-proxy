@@ -170,6 +170,7 @@ mod tests {
             enabled,
             created_at: at,
             created_by: None,
+            webhook: None,
         }
     }
 

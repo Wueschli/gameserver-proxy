@@ -9,6 +9,7 @@ pub mod pool;
 pub mod routes;
 pub mod runtime;
 pub mod secret;
+pub mod webhook;
 
 pub use bounds::Bounds;
 pub use caps::{Capabilities, HttpCap, HttpHost, SecretSlot, StateCap, Triggers, MAX_STATE_BYTES};
@@ -20,3 +21,4 @@ pub use runtime::{
     CallError, Effects, Limits, LogLevel, LogLine, Plugin, PluginHost, StateSnapshot, MAX_KEY_BYTES,
 };
 pub use secret::{SecretSource, SecretValue};
+pub use webhook::{WebhookRequest, WebhookResponse};

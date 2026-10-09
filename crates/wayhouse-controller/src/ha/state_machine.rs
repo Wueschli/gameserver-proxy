@@ -698,6 +698,13 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                         WriteRequest::PluginDelete { id } => {
                             self.apply_plugin(index, PluginOp::Delete { id: &id })?
                         }
+                        WriteRequest::PluginSetWebhook { id, token_hash } => self.apply_plugin(
+                            index,
+                            PluginOp::SetWebhook {
+                                id: &id,
+                                token_hash: token_hash.as_deref(),
+                            },
+                        )?,
                         WriteRequest::PluginState {
                             id,
                             expected_rev,
@@ -1955,6 +1962,7 @@ mod tests {
             enabled: true,
             created_at: 1,
             created_by: None,
+            webhook: None,
         }
     }
 

@@ -68,9 +68,10 @@ pub struct Whoami {
 }
 
 /// The plugin replication level this build speaks: `1` replicated installs and state, `2`
-/// adds module blob replication (`/raft/plugin-blob`). A leader proposes a new plugin
-/// install only when every member reports at least this.
-pub const PLUGIN_SUPPORT: u32 = 2;
+/// adds module blob replication (`/raft/plugin-blob`), `3` adds webhooks
+/// (`PluginSetWebhook`, `/raft/plugin-hook`). A leader proposes a new plugin install, or a
+/// webhook change, only when every member reports at least this.
+pub const PLUGIN_SUPPORT: u32 = 3;
 
 async fn whoami(State(ha): State<Arc<HaHandle>>) -> impl IntoResponse {
     Json(Whoami {

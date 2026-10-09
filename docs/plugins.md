@@ -141,6 +141,49 @@ Rules:
 - A controller started without `--plugins` answers `501` and proxies keep their own config; a
   proxy without `--controller` ignores the overlay.
 
+## Webhooks
+
+A plugin that declares `"triggers": {"on_webhook": true}` (and `on_timer`, which stays required)
+can be called by an outside system. Webhooks are off until the operator starts the controller
+with a **separate listener**, never on the admin port:
+
+```text
+--plugin-webhook-listen 0.0.0.0:8444 --plugin-webhook-tls-cert hooks.pem --plugin-webhook-tls-key hooks.key
+```
+
+It needs `--plugins`. Plain HTTP on a non-loopback address is refused at start unless
+`--allow-insecure-secrets` is given (the token and body would cross the network in clear text).
+
+**Enabling.** `POST /plugins/{id}/webhook` (admin) creates a token for an install that was approved
+for `on_webhook` and answers `{"token": "whk_...", "path": "/plugins/{id}/hook"}`. The token is
+shown once; only its SHA-256 is stored and replicated. Calling it again rotates the token (the old
+one stops working at once); `DELETE /plugins/{id}/webhook` turns the webhook off. Under HA the
+call needs every member to run a build that supports it.
+
+**Calling.** `POST <listener>/plugins/{id}/hook[/suffix][?query]` with `Authorization: Bearer
+<token>`. In order:
+
+1. A per-source rate limit (IPv6 by /64) runs first, valid token or not: `429`.
+2. The token is checked in constant time, against a dummy hash when the install is unknown,
+   disabled or has no webhook. Every failure is the same `401`.
+3. A per-install rate limit: `429`.
+4. Only then the body is read, capped at 256 KiB: `413`.
+5. The call runs as one of the install's serialized calls (at most 4 hook calls wait per install;
+   the timer is never rejected). A full queue is `429` and is counted in the status
+   (`hooks_dropped`); a plugin that fails is `502`.
+
+The guest receives the method, suffix, query, headers (never `Authorization` or `Cookie`), the body
+(base64) and an idempotency key (the `Idempotency-Key` header, else a hash of the install and
+body). It answers with `webhook_respond` (status, headers, base64 body); only plain headers are
+passed on, and the response is never cached. The call's state writes are committed **before** the
+answer goes out, so a `2xx` means the state is durable; a commit that fails is `503` and the caller
+should retry (use the idempotency key to make that safe).
+
+**HA.** Any node may receive the request. A follower authenticates it itself and forwards it to
+the Raft leader over the peer channel (`/raft/plugin-hook/{id}`, peer token, protocol gate), but
+only over `https` peers: with plain-HTTP peers it answers `503` rather than send the body in clear
+text. Run the webhook listener on every node you want to take requests, or point the sender at one.
+
 ## Approval
 
 `PluginHost::load(bytes, approved)` takes the capabilities the operator approved for the

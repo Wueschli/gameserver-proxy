@@ -41,3 +41,12 @@ Decisions made while building (the spec left the entry shape and the merge open)
 - **Overlay, not a rewritten config.** The controller publishes the enabled installs' routes (`/plugin-routes`, SSE `/plugin-routes/subscribe`); a proxy merges them into the YAML before parsing (`wayhouse-config::plugin_routes::merge_text`), after the listener's own routes. History, diff and rollback of operator config are untouched.
 - **Validated three times**: in the host at `routes_set`, before proposing, and on apply on every replica against the install's approved `routes`.
 - **Deferred.** Keep-last-good with expiry and alert when a plugin disables or keeps failing (disable and delete withdraw at once); marking plugin routes in the web UI; UDP listeners.
+
+## Part 3b: webhooks (#237, first half)
+
+- **Separate listener.** `--plugin-webhook-listen` (+ `--plugin-webhook-tls-cert/-key`), off by default, requires `--plugins`; plain HTTP off loopback needs `--allow-insecure-secrets`. The admin port never serves hooks.
+- **Token.** One per install, 256 random bits, only the SHA-256 stored and replicated (`InstallRecord.webhook`, `PluginSetWebhook`), shown once by `POST /plugins/{id}/webhook`; rotate = call again; revoke = `DELETE`. Under HA a leader mints its own token when a follower's call is forwarded.
+- **Order of checks.** Source limit, constant-time token compare (dummy hash for unknown installs, one `401` for every failure), install limit, capped body read, run.
+- **Runs only on the leader.** A follower authenticates then forwards over `/raft/plugin-hook` and refuses (503) when the leader's address is plain `http`. `PLUGIN_SUPPORT` is now 3 so a webhook can only be enabled when every member knows the new entry.
+- **Answer after commit.** The guest's response is returned only once its state writes are committed; a commit failure is 503 retry.
+- **Deferred.** Webhook management in the web UI; per-install rate limit configuration.

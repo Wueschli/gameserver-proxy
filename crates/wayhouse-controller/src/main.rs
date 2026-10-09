@@ -174,6 +174,21 @@ struct Args {
     #[arg(long)]
     allow_insecure_secrets: bool,
 
+    /// Serve plugin webhooks (`POST /plugins/{id}/hook`) on this separate address. Off by
+    /// default; needs `--plugins`. Each install enables its own webhook with its own token
+    /// (`POST /plugins/{id}/webhook`). Serve TLS with `--plugin-webhook-tls-cert/-key`: on a
+    /// non-loopback address plain HTTP is refused unless `--allow-insecure-secrets`.
+    #[arg(long, requires = "plugins")]
+    plugin_webhook_listen: Option<SocketAddr>,
+
+    /// PEM certificate chain for `--plugin-webhook-listen`. Re-read when the file changes.
+    #[arg(long, requires_all = ["plugin_webhook_listen", "plugin_webhook_tls_key"])]
+    plugin_webhook_tls_cert: Option<PathBuf>,
+
+    /// PEM private key for `--plugin-webhook-tls-cert`.
+    #[arg(long, requires = "plugin_webhook_tls_cert")]
+    plugin_webhook_tls_key: Option<PathBuf>,
+
     #[command(flatten)]
     tls: wayhouse_http::tls::TlsArgs,
 }
@@ -250,6 +265,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(keys = ?keys.current().key_ids(), "plugin secret keyring loaded");
     }
     let plugin_keys = plugin_keys.unwrap_or_default();
+    let webhook_tls = match (&args.plugin_webhook_tls_cert, &args.plugin_webhook_tls_key) {
+        (Some(cert), Some(key)) => Some(wayhouse_http::tls::ReloadingCert::new(
+            wayhouse_http::tls::TlsFiles::new(cert.clone(), key.clone()),
+        )?),
+        _ => None,
+    };
+    if let Some(addr) = args.plugin_webhook_listen {
+        if webhook_tls.is_none() && !addr.ip().is_loopback() && !args.allow_insecure_secrets {
+            anyhow::bail!(
+                "--plugin-webhook-listen on a plain-HTTP, non-loopback address would send \
+                 webhook tokens in clear text: serve TLS (--plugin-webhook-tls-cert/-key), \
+                 listen on loopback behind a TLS terminator, or pass --allow-insecure-secrets"
+            );
+        }
+    }
     let ha_enabled = !args.ha_peers.is_empty() || args.ha_join;
     let import_policy = match args.ha_import_source.as_deref() {
         None => ha::init::ImportPolicy::Auto,
@@ -619,11 +649,34 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Detached on purpose: they run for the life of the process.
                 drop(runner.clone().spawn());
+                if let Some(addr) = args.plugin_webhook_listen {
+                    let hooks = wayhouse_controller::plugins::hooks::router(
+                        wayhouse_controller::plugins::hooks::HookState::new(
+                            store.clone(),
+                            runner.clone(),
+                            ha.clone(),
+                        ),
+                    );
+                    let (tls, limits) = (webhook_tls.clone(), args.tls.limits());
+                    drop(tokio::spawn(async move {
+                        if let Err(e) = wayhouse_http::tls::serve(
+                            addr,
+                            hooks,
+                            tls,
+                            limits,
+                            "wayhouse-controller plugin webhooks",
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, "the plugin webhook listener stopped");
+                        }
+                    }));
+                }
                 let mut plugin_routes = wayhouse_controller::plugins::api::router(
                     wayhouse_controller::plugins::api::PluginsState {
                         store: store.clone(),
                         pool,
-                        runner,
+                        runner: runner.clone(),
                         auth_token: admin_token.clone(),
                         ha: ha.clone(),
                         keyring: plugin_keys.clone(),
@@ -631,9 +684,15 @@ async fn main() -> anyhow::Result<()> {
                 );
                 if let Some(handle) = &ha {
                     // Replicas hand each other the module bytes the Raft log leaves out.
-                    plugin_routes = plugin_routes.merge(
-                        wayhouse_controller::plugins::peer::router(handle, store.clone()),
-                    );
+                    plugin_routes = plugin_routes
+                        .merge(wayhouse_controller::plugins::peer::router(
+                            handle,
+                            store.clone(),
+                        ))
+                        .merge(wayhouse_controller::plugins::hooks::peer_router(
+                            handle,
+                            runner.clone(),
+                        ));
                     drop(wayhouse_controller::plugins::peer::spawn_sync(
                         store,
                         handle.clone(),

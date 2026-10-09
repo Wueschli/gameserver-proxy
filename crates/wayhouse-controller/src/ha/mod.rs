@@ -188,6 +188,11 @@ pub enum WriteRequest {
     PluginDelete {
         id: String,
     },
+    /// Turns an install's webhook on with the hash of a new token, or off with `None`.
+    PluginSetWebhook {
+        id: String,
+        token_hash: Option<String>,
+    },
     /// One plugin call's `state_put`s, committed as one entry: applied only
     /// if the install's state revision is still `expected_rev` (the one the
     /// call read) and the entry was appended in `term` (the proposing

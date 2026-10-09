@@ -24,7 +24,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use wayhouse_plugin_host::{CallError, CompilePool, Effects, LogLevel, Plugin, PoolError};
+use wayhouse_plugin_host::{
+    CallError, CompilePool, Effects, LogLevel, Plugin, PoolError, StateSnapshot, WebhookRequest,
+    WebhookResponse,
+};
 
 use super::secrets::KeyringHandle;
 use super::{validate_puts, CommitError, InstallRecord, PluginStore};
@@ -54,7 +57,40 @@ pub struct PluginStatus {
     /// Why the plugin is not run on this node (a secret it needs cannot be read here), or
     /// `None`. A held plugin never ticks.
     pub held: Option<String>,
+    /// Webhook and event calls that ran (including ones that failed).
+    pub hook_calls: u64,
+    /// Of those, the ones that failed or whose commit was refused.
+    pub hook_failures: u64,
+    /// Hooks refused because the install's queue was full.
+    pub hooks_dropped: u64,
     pub logs: Vec<StatusLog>,
+}
+
+/// Webhook and event calls an install may have pending (running or waiting) at once. A
+/// timer tick is never counted: it waits for the install's lock, so the timer always has
+/// its slot.
+pub const HOOK_QUEUE: usize = 4;
+
+/// A trigger other than the timer.
+#[derive(Debug, Clone)]
+pub enum Hook {
+    Webhook(WebhookRequest),
+    Event { kind: String, payload: Vec<u8> },
+}
+
+/// Why a hook did not run to a committed answer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HookError {
+    /// No such install, it is disabled, or it did not declare this trigger.
+    NotFound,
+    /// This node is not the leader (or stopped being it while the call waited).
+    NotLeader,
+    /// The install's queue is full, or the worker pool has no room.
+    QueueFull,
+    /// Retry: the plugin is held, or its effects could not be committed.
+    Unavailable(String),
+    /// The plugin trapped or timed out.
+    Failed,
 }
 
 struct Loaded {
@@ -79,6 +115,33 @@ pub struct Runner {
     ha: Option<Arc<HaHandle>>,
     /// Opens the plugins' secrets; empty on a node without a key.
     keyring: KeyringHandle,
+    /// One call at a time per install: ticks, webhooks and events all take its lock, so a
+    /// call always reads the state the previous one committed.
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Hooks pending per install, bounded by [`HOOK_QUEUE`].
+    pending: Mutex<HashMap<String, usize>>,
+}
+
+/// Releases a place in an install's hook queue.
+struct Place<'a> {
+    runner: &'a Runner,
+    id: String,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        let mut all = self
+            .runner
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(n) = all.get_mut(&self.id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                all.remove(&self.id);
+            }
+        }
+    }
 }
 
 fn level_name(level: LogLevel) -> &'static str {
@@ -142,6 +205,8 @@ impl Runner {
             status: Mutex::new(HashMap::new()),
             ha,
             keyring,
+            locks: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
         })
     }
 
@@ -250,7 +315,35 @@ impl Runner {
         while tasks.join_next().await.is_some() {}
     }
 
+    async fn install_lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.to_string())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
+    }
+
+    fn enter_queue(&self, id: &str) -> Option<Place<'_>> {
+        let mut all = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let n = all.entry(id.to_string()).or_insert(0);
+        if *n >= HOOK_QUEUE {
+            return None;
+        }
+        *n += 1;
+        Some(Place {
+            runner: self,
+            id: id.to_string(),
+        })
+    }
+
     async fn tick(self: Arc<Self>, rec: InstallRecord, at: Instant, term: Option<u64>) {
+        let _turn = self.install_lock(&rec.id).await;
         let outcome = self.call(&rec, term).await;
         if matches!(outcome, Outcome::Busy) {
             // Retry at the next scan instead of waiting a whole interval, so the
@@ -266,6 +359,12 @@ impl Runner {
 
     /// Load (and `init`) if needed, then run `on_timer`, all on the pool.
     async fn call(&self, rec: &InstallRecord, term: Option<u64>) -> Outcome {
+        self.invoke(rec, term, Box::new(wayhouse_plugin_host::Plugin::on_timer))
+            .await
+    }
+
+    /// Load (and `init`) if needed, then run `f` against the plugin and its state.
+    async fn invoke(&self, rec: &InstallRecord, term: Option<u64>, f: CallFn) -> Outcome {
         if let Some(why) = self.held(rec) {
             return Outcome::Held(why);
         }
@@ -291,8 +390,7 @@ impl Runner {
         };
         let pool = self.pool.clone();
         let result =
-            tokio::task::spawn_blocking(move || pool.call(move || plugin.on_timer(&snapshot)))
-                .await;
+            tokio::task::spawn_blocking(move || pool.call(move || f(&plugin, &snapshot))).await;
         match flatten(result) {
             Ok(fx) => Outcome::Effects(rev, fx),
             Err(Fail::Busy) => Outcome::Busy,
@@ -420,6 +518,79 @@ impl Runner {
         }
     }
 
+    /// Runs a webhook or event call for `id` and commits its effects, so the answer a webhook
+    /// returns is for state that was committed. Only the leader runs hooks.
+    pub async fn run_hook(
+        &self,
+        id: &str,
+        hook: Hook,
+    ) -> Result<Option<WebhookResponse>, HookError> {
+        let Some(term) = self.lead() else {
+            return Err(HookError::NotLeader);
+        };
+        let eligible = |rec: &InstallRecord| {
+            rec.enabled
+                && match &hook {
+                    Hook::Webhook(_) => rec.approved.triggers.on_webhook && rec.webhook.is_some(),
+                    Hook::Event { kind, .. } => rec.approved.triggers.on_event.contains(kind),
+                }
+        };
+        match self.store.get(id) {
+            Ok(Some(rec)) if eligible(&rec) => {}
+            Ok(_) => return Err(HookError::NotFound),
+            Err(e) => return Err(HookError::Unavailable(e.to_string())),
+        }
+        let Some(_place) = self.enter_queue(id) else {
+            let mut all = self.lock_status();
+            all.entry(id.to_string()).or_default().hooks_dropped += 1;
+            return Err(HookError::QueueFull);
+        };
+        let _turn = self.install_lock(id).await;
+        // Leadership and the record may have changed while this call waited its turn.
+        if self.lead() != Some(term) {
+            return Err(HookError::NotLeader);
+        }
+        let rec = match self.store.get(id) {
+            Ok(Some(rec)) if eligible(&rec) => rec,
+            Ok(_) => return Err(HookError::NotFound),
+            Err(e) => return Err(HookError::Unavailable(e.to_string())),
+        };
+        let call: CallFn = match hook {
+            Hook::Webhook(req) => Box::new(move |p, s| p.on_webhook(s, &req)),
+            Hook::Event { kind, payload } => Box::new(move |p, s| p.on_event(s, &kind, &payload)),
+        };
+        let counted = |failed: bool| {
+            let mut all = self.lock_status();
+            let st = all.entry(id.to_string()).or_default();
+            st.hook_calls += 1;
+            st.hook_failures += u64::from(failed);
+        };
+        match self.invoke(&rec, term, call).await {
+            Outcome::Effects(rev, fx) => {
+                self.record_logs(id, &fx);
+                match self.commit(id, rev, &fx, term).await {
+                    Ok(()) => {
+                        counted(false);
+                        Ok(fx.webhook)
+                    }
+                    Err(why) => {
+                        counted(true);
+                        Err(HookError::Unavailable(why))
+                    }
+                }
+            }
+            Outcome::Busy => Err(HookError::QueueFull),
+            Outcome::Held(why) => Err(HookError::Unavailable(why)),
+            Outcome::Failed(why) => {
+                tracing::warn!(install = id, error = %why, "plugin hook failed");
+                counted(true);
+                let mut all = self.lock_status();
+                all.entry(id.to_string()).or_default().last_error = Some(why);
+                Err(HookError::Failed)
+            }
+        }
+    }
+
     fn record_logs(&self, id: &str, fx: &Effects) {
         let mut all = self.lock_status();
         let st = all.entry(id.to_string()).or_default();
@@ -471,6 +642,9 @@ impl Runner {
     }
 }
 
+type CallFn =
+    Box<dyn FnOnce(&Plugin, &StateSnapshot) -> Result<Effects, CallError> + Send + 'static>;
+
 /// Why a load or call did not produce effects.
 enum Fail {
     Busy,
@@ -516,6 +690,7 @@ mod tests {
   (import "wayhouse" "state_get" (func $get (param i32 i32 i32 i32) (result i32)))
   (import "wayhouse" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
   (import "wayhouse" "routes_set" (func $rs (param i32 i32) (result i32)))
+  (import "wayhouse" "webhook_respond" (func $respond (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "hello")
   (data (i32.const 16) "n")
@@ -568,6 +743,7 @@ mod tests {
                 enabled: true,
                 created_at: 1,
                 created_by: None,
+                webhook: None,
             })
             .unwrap();
     }
@@ -795,6 +971,7 @@ mod tests {
             enabled: true,
             created_at: 1,
             created_by: None,
+            webhook: None,
         };
         let done = handle
             .raft
@@ -937,6 +1114,108 @@ mod tests {
         );
     }
     const ROUTE_TIMER: &str = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"log":true,"routes":{"hosts":["*.mc.example.com"],"backends":["10.0.0.0/16"],"max_entries":4}}"#;
+
+    const HOOKED: &str = r#"{"triggers":{"on_timer":true,"on_webhook":true},"tick_interval_secs":30,"log":true,"state":{"max_bytes":64}}"#;
+
+    /// `on_webhook` bumps the byte under key `n` and answers 201 with an empty body.
+    fn hooked() -> Vec<u8> {
+        guest(
+            HOOKED,
+            r#"(data (i32.const 200) "{\"status\":201}")
+               (func (export "init") (param i32 i32))
+               (func (export "on_timer"))
+               (func (export "on_webhook") (param i32 i32)
+                 (drop (call $get (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1)))
+                 (i32.store8 (i32.const 100)
+                   (i32.add (i32.load8_u (i32.const 100)) (i32.const 1)))
+                 (drop (call $put (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1)))
+                 (drop (call $respond (i32.const 200) (i32.const 14))))"#,
+        )
+    }
+
+    const HID: &str = "00000000000000aa";
+
+    /// A webhook-enabled install (a valid id and sha, which `set_webhook` checks).
+    fn hooked_install(store: &PluginStore) {
+        let module = hooked();
+        let sha = "a".repeat(64);
+        store.put_blob(&sha, &module).unwrap();
+        store
+            .create(&InstallRecord {
+                id: HID.into(),
+                name: "demo".into(),
+                sha256: sha,
+                size: module.len(),
+                approved: inspect(&module).unwrap().caps,
+                config: serde_json::json!({}),
+                enabled: true,
+                created_at: 1,
+                created_by: None,
+                webhook: None,
+            })
+            .unwrap();
+        let done = store.set_webhook(HID, Some(&"0".repeat(64))).unwrap();
+        assert!(matches!(done, crate::plugins::Applied::Done(_)), "{done:?}");
+    }
+
+    fn request() -> wayhouse_plugin_host::WebhookRequest {
+        wayhouse_plugin_host::WebhookRequest {
+            method: "POST".into(),
+            suffix: String::new(),
+            query: String::new(),
+            headers: BTreeMap::new(),
+            body: vec![],
+            idempotency_key: "k".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_webhook_call_commits_its_state_before_it_answers() {
+        let (r, store, _d) = fixture(1, 4);
+        hooked_install(&store);
+        let reply = r.run_hook(HID, Hook::Webhook(request())).await.unwrap();
+        assert_eq!(reply.unwrap().status, 201);
+        assert_eq!(counter_value(&store, HID), Some(1));
+        // An install without a webhook (or a disabled one) is not found.
+        store.set_webhook(HID, None).unwrap();
+        assert!(matches!(
+            r.run_hook(HID, Hook::Webhook(request())).await,
+            Err(HookError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn hooks_beyond_the_queue_are_refused_and_counted() {
+        let (r, store, _d) = fixture(1, 8);
+        hooked_install(&store);
+        // Hold the install's turn so the hooks pile up behind it.
+        let turn = r.install_lock(HID).await;
+        let waiting: Vec<_> = (0..HOOK_QUEUE)
+            .map(|_| {
+                let r = r.clone();
+                tokio::spawn(async move { r.run_hook(HID, Hook::Webhook(request())).await })
+            })
+            .collect();
+        // Let them all take a place in the queue.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            r.run_hook(HID, Hook::Webhook(request())).await,
+            Err(HookError::QueueFull)
+        ));
+        assert_eq!(r.status(HID).unwrap().hooks_dropped, 1);
+        drop(turn);
+        for w in waiting {
+            assert!(w.await.unwrap().is_ok());
+        }
+        assert_eq!(
+            counter_value(&store, HID),
+            Some(u8::try_from(HOOK_QUEUE).unwrap())
+        );
+        // Places are free again afterwards.
+        assert!(r.run_hook(HID, Hook::Webhook(request())).await.is_ok());
+    }
 
     #[tokio::test]
     async fn a_plugin_that_declares_routes_has_them_committed_once() {

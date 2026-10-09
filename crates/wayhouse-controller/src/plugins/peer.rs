@@ -637,6 +637,7 @@ mod tests {
             enabled: true,
             created_at: 1,
             created_by: None,
+            webhook: None,
         }
     }
 

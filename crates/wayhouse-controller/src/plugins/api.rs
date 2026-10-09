@@ -106,6 +106,10 @@ pub fn router(state: PluginsState) -> Router {
         .route("/plugins", post(install).get(list))
         .route("/plugins/{id}", get(get_one).delete(remove))
         .route("/plugins/{id}/status", get(status))
+        .route(
+            "/plugins/{id}/webhook",
+            post(enable_webhook).delete(revoke_webhook),
+        )
         .route("/plugins/{id}/enable", post(enable))
         .route("/plugins/{id}/disable", post(disable))
         .route("/plugins/{id}/secrets", get(list_secrets))
@@ -288,6 +292,7 @@ async fn install_inner(
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
         created_by: actor(headers),
+        webhook: None,
     };
     // Every replica checks this again when it applies the entry; checking here is what
     // gives the operator the reason.
@@ -476,6 +481,128 @@ async fn remove(
     match st.store.delete(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, "no such install"),
+        Err(e) => internal(e),
+    }
+}
+
+// ---- webhooks ----
+
+/// Turns the install's webhook on with a fresh token (enable and rotate are the same call).
+/// The token is in this answer only; the store keeps its hash.
+async fn enable_webhook(
+    State(st): State<PluginsState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let record = match st.store.get(&id) {
+        Ok(Some(r)) if valid_id(&id) => r,
+        Ok(_) => return err(StatusCode::NOT_FOUND, "no such install"),
+        Err(e) => return internal(e),
+    };
+    if !record.approved.triggers.on_webhook {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "the install did not approve the on_webhook trigger",
+        );
+    }
+    let token = super::hooks::new_token();
+    let hash = Some(super::hooks::hash_token(&token));
+    let rejected = match &st.ha {
+        Some(ha) => {
+            if let Err(why) = super::peer::check_support(ha).await {
+                return err(StatusCode::CONFLICT, why);
+            }
+            let path = format!("/plugins/{id}/webhook");
+            let (shown, hook_path) = (token.clone(), format!("/plugins/{id}/hook"));
+            // A follower's proposal is forwarded and the leader mints its own token, so only
+            // the node that appends the entry ever shows a token that matches it.
+            return propose_write_as(
+                ha,
+                WriteRequest::PluginSetWebhook {
+                    id,
+                    token_hash: hash,
+                },
+                Method::POST,
+                &path,
+                String::new(),
+                &ForwardHeaders::from_headers(&headers),
+                move |resp| match resp {
+                    WriteResponse::PluginApplied(_) => {
+                        Json(serde_json::json!({ "token": shown, "path": hook_path }))
+                            .into_response()
+                    }
+                    WriteResponse::PluginRejected(PluginReject::NoSuchInstall) => {
+                        err(StatusCode::NOT_FOUND, "no such install")
+                    }
+                    WriteResponse::PluginRejected(PluginReject::Invalid) => err(
+                        StatusCode::BAD_REQUEST,
+                        "the install did not approve the on_webhook trigger",
+                    ),
+                    other => unexpected(&other),
+                },
+            )
+            .await;
+        }
+        None => st.store.set_webhook(&id, hash.as_deref()),
+    };
+    match rejected {
+        Ok(Applied::Done(_)) => {
+            tracing::info!(
+                target: "wayhouse_controller::plugins::audit",
+                what = "webhook enabled", install = %id, actor = actor(&headers).as_deref(),
+                "plugin webhook changed"
+            );
+            Json(serde_json::json!({ "token": token, "path": format!("/plugins/{id}/hook") }))
+                .into_response()
+        }
+        Ok(Applied::NoSuchInstall) => err(StatusCode::NOT_FOUND, "no such install"),
+        Ok(_) => err(StatusCode::BAD_REQUEST, "the webhook was refused"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Turns the install's webhook off; the old token stops working at once.
+async fn revoke_webhook(
+    State(st): State<PluginsState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !valid_id(&id) {
+        return err(StatusCode::NOT_FOUND, "no such install");
+    }
+    if let Some(ha) = &st.ha {
+        let path = format!("/plugins/{id}/webhook");
+        return propose_write_as(
+            ha,
+            WriteRequest::PluginSetWebhook {
+                id,
+                token_hash: None,
+            },
+            Method::DELETE,
+            &path,
+            String::new(),
+            &ForwardHeaders::from_headers(&headers),
+            |resp| match resp {
+                WriteResponse::PluginApplied(_) => StatusCode::NO_CONTENT.into_response(),
+                WriteResponse::PluginRejected(PluginReject::NoSuchInstall) => {
+                    err(StatusCode::NOT_FOUND, "no such install")
+                }
+                other => unexpected(&other),
+            },
+        )
+        .await;
+    }
+    match st.store.set_webhook(&id, None) {
+        Ok(Applied::Done(_)) => {
+            tracing::info!(
+                target: "wayhouse_controller::plugins::audit",
+                what = "webhook revoked", install = %id, actor = actor(&headers).as_deref(),
+                "plugin webhook changed"
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(Applied::NoSuchInstall) => err(StatusCode::NOT_FOUND, "no such install"),
+        Ok(_) => err(StatusCode::BAD_REQUEST, "the webhook was refused"),
         Err(e) => internal(e),
     }
 }
@@ -988,6 +1115,180 @@ mod tests {
         let body = format!(r#"{{"name":"Bad Name","sha256":"{sha}","approved":{CAPS}}}"#);
         let (status, _) = call(&app, "POST", "/plugins", body.into_bytes(), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    const HOOK_CAPS: &str =
+        r#"{"triggers":{"on_timer":true,"on_webhook":true},"tick_interval_secs":30,"log":true}"#;
+
+    /// `on_webhook` answers `202` with an `x-run` header and the body `ok`.
+    fn hook_module() -> Vec<u8> {
+        let caps = HOOK_CAPS.replace('"', "\\\"");
+        let resp = r#"{"status":202,"headers":{"X-Run":"1"},"body":"b2s="}"#;
+        let (len, resp) = (resp.len(), resp.replace('"', "\\\""));
+        wat::parse_str(format!(
+            r#"(module
+  (@custom "wayhouse.plugin-abi" "\00\00\01\00")
+  (@custom "wayhouse.plugin-caps" "{caps}")
+  (import "wayhouse" "log" (func $log (param i32 i32 i32)))
+  (import "wayhouse" "webhook_respond" (func $respond (param i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 60000) "{resp}")
+  (global $bump (mut i32) (i32.const 1024))
+  (func (export "alloc") (param i32) (result i32) (local $p i32)
+    (local.set $p (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get 0)))
+    (local.get $p))
+  (func (export "init") (param i32 i32))
+  (func (export "on_timer"))
+  (func (export "on_webhook") (param i32 i32)
+    (drop (call $respond (i32.const 60000) (i32.const {len})))))"#
+        ))
+        .unwrap()
+    }
+
+    async fn hit(
+        app: &Router,
+        uri: &str,
+        token: Option<&str>,
+        body: Vec<u8>,
+    ) -> (StatusCode, axum::http::HeaderMap) {
+        let mut req = Request::builder().method("POST").uri(uri);
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let mut req = req.body(Body::from(body)).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(wayhouse_http::tls::PeerAddr(
+                "203.0.113.9:4000".parse().unwrap(),
+            )));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        (resp.status(), resp.headers().clone())
+    }
+
+    #[tokio::test]
+    async fn a_webhook_is_enabled_with_a_token_shown_once_and_guarded_by_it() {
+        let (st, _d) = state(None);
+        let app = router(st.clone());
+        // An install that never approved on_webhook cannot enable one.
+        let sha = upload(&app, &module(CAPS)).await;
+        let (_, plain) = call(&app, "POST", "/plugins", install_body(&sha, CAPS), None).await;
+        let plain_id = plain["id"].as_str().unwrap();
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/plugins/{plain_id}/webhook"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let sha = upload(&app, &hook_module()).await;
+        let (_, rec) = call(
+            &app,
+            "POST",
+            "/plugins",
+            install_body(&sha, HOOK_CAPS),
+            None,
+        )
+        .await;
+        let id = rec["id"].as_str().unwrap().to_string();
+        let (status, shown) = call(
+            &app,
+            "POST",
+            &format!("/plugins/{id}/webhook"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{shown}");
+        let token = shown["token"].as_str().unwrap().to_string();
+        let path = shown["path"].as_str().unwrap().to_string();
+        assert_eq!(path, format!("/plugins/{id}/hook"));
+        // The record keeps the hash, never the token; the listing does not show it either.
+        let stored = serde_json::to_string(&st.store.get(&id).unwrap().unwrap()).unwrap();
+        assert!(!stored.contains(&token));
+        let (_, listed) = call(&app, "GET", "/plugins", vec![], None).await;
+        assert!(!listed.to_string().contains(&token));
+
+        let hooks = super::super::hooks::router(super::super::hooks::HookState::new(
+            st.store.clone(),
+            st.runner.clone(),
+            None,
+        ));
+        let (ok, headers) = hit(&hooks, &path, Some(&token), b"{}".to_vec()).await;
+        assert_eq!(ok, StatusCode::ACCEPTED);
+        assert_eq!(headers["x-run"], "1");
+        // Missing, wrong and unknown-install tokens all look the same.
+        for (uri, tok) in [
+            (path.as_str(), None),
+            (path.as_str(), Some("whk_wrong")),
+            ("/plugins/p-unknown/hook", Some(token.as_str())),
+        ] {
+            assert_eq!(
+                hit(&hooks, uri, tok, vec![]).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // Over the body cap: 413, before the guest runs.
+        let big = vec![0u8; wayhouse_plugin_host::webhook::MAX_WEBHOOK_BODY + 1];
+        assert_eq!(
+            hit(&hooks, &path, Some(&token), big).await.0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        // Rotating swaps the token; revoking turns the webhook off.
+        let (_, again) = call(
+            &app,
+            "POST",
+            &format!("/plugins/{id}/webhook"),
+            vec![],
+            None,
+        )
+        .await;
+        let rotated = again["token"].as_str().unwrap().to_string();
+        assert_ne!(rotated, token);
+        assert_eq!(
+            hit(&hooks, &path, Some(&token), vec![]).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            hit(&hooks, &path, Some(&rotated), vec![]).await.0,
+            StatusCode::ACCEPTED
+        );
+        let (status, _) = call(
+            &app,
+            "DELETE",
+            &format!("/plugins/{id}/webhook"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            hit(&hooks, &path, Some(&rotated), vec![]).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn one_source_is_rate_limited_before_any_token_is_compared() {
+        let (st, _d) = state(None);
+        let hooks = super::super::hooks::router(super::super::hooks::HookState::new(
+            st.store.clone(),
+            st.runner.clone(),
+            None,
+        ));
+        let mut seen = Vec::new();
+        for _ in 0..30 {
+            seen.push(
+                hit(&hooks, "/plugins/p-x/hook", Some("whk_guess"), vec![])
+                    .await
+                    .0,
+            );
+        }
+        assert_eq!(seen[0], StatusCode::UNAUTHORIZED);
+        assert!(seen.contains(&StatusCode::TOO_MANY_REQUESTS), "{seen:?}");
     }
 
     #[tokio::test]

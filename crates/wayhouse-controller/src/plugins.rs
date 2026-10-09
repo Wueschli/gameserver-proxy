@@ -10,6 +10,7 @@
 //! crash-idempotent per Raft index. Slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod hooks;
 pub mod net;
 pub mod peer;
 pub mod routes;
@@ -58,6 +59,17 @@ pub struct InstallRecord {
     pub enabled: bool,
     pub created_at: u64,
     pub created_by: Option<String>,
+    /// Set while the install's webhook is enabled: the hash of its bearer token. The token
+    /// itself is shown once, when it is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookAuth>,
+}
+
+/// How an install's webhook authenticates callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookAuth {
+    /// Lowercase hex SHA-256 of the bearer token.
+    pub token_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +130,16 @@ impl InstallRecord {
             .is_some_and(|a| a.chars().count() > 128)
         {
             return Err("created_by is over 128 characters".into());
+        }
+        if self
+            .webhook
+            .as_ref()
+            .is_some_and(|w| !is_sha256(&w.token_hash))
+        {
+            return Err("webhook token hash must be 64 lowercase hex characters".into());
+        }
+        if self.webhook.is_some() && !self.approved.triggers.on_webhook {
+            return Err("a webhook needs the approved on_webhook trigger".into());
         }
         if serde_json::to_vec(&self.config).map_or(true, |b| b.len() > MAX_CONFIG_BYTES) {
             return Err(format!("config is over {MAX_CONFIG_BYTES} bytes"));
@@ -262,6 +284,11 @@ pub enum PluginOp<'a> {
     },
     Delete {
         id: &'a str,
+    },
+    /// Enable (a token hash) or turn off (`None`) the install's webhook.
+    SetWebhook {
+        id: &'a str,
+        token_hash: Option<&'a str>,
     },
     State {
         id: &'a str,
@@ -471,6 +498,27 @@ impl PluginStore {
         Ok(all)
     }
 
+    /// Standalone: enable the webhook with `token_hash`, or turn it off with `None`.
+    /// `Applied::Invalid` when the install was not approved for `on_webhook`.
+    pub fn set_webhook(
+        &self,
+        id: &str,
+        token_hash: Option<&str>,
+    ) -> Result<Applied, PluginStoreError> {
+        let _guard = self.lock();
+        let Some(mut record) = self.get(id)? else {
+            return Ok(Applied::NoSuchInstall);
+        };
+        record.webhook = token_hash.map(|h| WebhookAuth {
+            token_hash: h.to_string(),
+        });
+        if let Err(why) = record.validate() {
+            return Ok(Applied::Invalid(why));
+        }
+        self.write_record(&record)?;
+        Ok(Applied::Done(None))
+    }
+
     pub fn set_enabled(
         &self,
         id: &str,
@@ -628,6 +676,20 @@ impl PluginStore {
                             return done(Applied::NoSuchInstall);
                         };
                         record.enabled = enabled;
+                        let bytes = serde_json::to_vec(&record).map_err(|e| abort(e.into()))?;
+                        inst.insert(id.as_bytes(), bytes)?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::SetWebhook { id, token_hash } => {
+                        let Some(mut record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        record.webhook = token_hash.map(|h| WebhookAuth {
+                            token_hash: h.to_string(),
+                        });
+                        if let Err(why) = record.validate() {
+                            return done(Applied::Invalid(why));
+                        }
                         let bytes = serde_json::to_vec(&record).map_err(|e| abort(e.into()))?;
                         inst.insert(id.as_bytes(), bytes)?;
                         done(Applied::Done(None))
@@ -1039,6 +1101,7 @@ mod tests {
             enabled: true,
             created_at: at,
             created_by: Some("leandro".into()),
+            webhook: None,
         }
     }
 
@@ -1287,6 +1350,56 @@ mod tests {
             .unwrap();
         assert_eq!(wrong, Applied::WrongTerm);
         assert_eq!(s.state(ID_A).unwrap().1, puts(&[("n", b"1")]));
+    }
+
+    #[test]
+    fn a_webhook_needs_an_approved_trigger_and_goes_with_the_install() {
+        let (s, _d) = store();
+        let mut r = valid(ID_A, 'a', 1);
+        s.apply_at(1, PluginOp::Install(&r)).unwrap();
+        let hash = "a".repeat(64);
+        let on = |h| PluginOp::SetWebhook {
+            id: ID_A,
+            token_hash: h,
+        };
+        // Not approved for on_webhook: refused, nothing stored.
+        assert!(matches!(
+            s.apply_at(2, on(Some(&hash))).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert!(s.get(ID_A).unwrap().unwrap().webhook.is_none());
+        assert!(matches!(
+            s.set_webhook(ID_A, Some(&hash)).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert_eq!(
+            s.apply_at(
+                3,
+                PluginOp::SetWebhook {
+                    id: ID_B,
+                    token_hash: None
+                }
+            )
+            .unwrap(),
+            Applied::NoSuchInstall
+        );
+        // Approved: stored, replaced by a rotation, cleared by a revoke.
+        r.id = ID_B.to_string();
+        r.approved.triggers.on_webhook = true;
+        s.apply_at(4, PluginOp::Install(&r)).unwrap();
+        let rotated = "b".repeat(64);
+        let on_b = |h| PluginOp::SetWebhook {
+            id: ID_B,
+            token_hash: h,
+        };
+        s.apply_at(5, on_b(Some(&hash))).unwrap();
+        s.apply_at(6, on_b(Some(&rotated))).unwrap();
+        assert_eq!(
+            s.get(ID_B).unwrap().unwrap().webhook.unwrap().token_hash,
+            rotated
+        );
+        s.apply_at(7, on_b(None)).unwrap();
+        assert!(s.get(ID_B).unwrap().unwrap().webhook.is_none());
     }
 
     #[test]

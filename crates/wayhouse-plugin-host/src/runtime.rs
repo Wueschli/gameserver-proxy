@@ -91,6 +91,8 @@ pub struct Effects {
     /// The route set the call declared with `routes_set` (the last call wins), or `None`
     /// when it did not declare one. `Some(vec![])` means "no routes".
     pub routes: Option<Vec<crate::routes::RouteEntry>>,
+    /// What the guest answered a webhook with (`webhook_respond`); `None` if it did not.
+    pub webhook: Option<crate::webhook::WebhookResponse>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +120,7 @@ struct CallState {
     used_state: bool,
     used_http: bool,
     routes: Option<Vec<crate::routes::RouteEntry>>,
+    webhook: Option<crate::webhook::WebhookResponse>,
     denied: Option<&'static str>,
     http: Option<Arc<HttpEngine>>,
     http_call: HttpCall,
@@ -187,7 +190,13 @@ impl PluginHost {
             let known = i.module() == "wayhouse"
                 && matches!(
                     i.name(),
-                    "log" | "state_get" | "state_put" | "http_request" | "http_read" | "routes_set"
+                    "log"
+                        | "state_get"
+                        | "state_put"
+                        | "http_request"
+                        | "http_read"
+                        | "routes_set"
+                        | "webhook_respond"
                 );
             if !known {
                 return Err(ModuleError::UnexpectedImport(format!(
@@ -224,6 +233,16 @@ impl PluginHost {
         want("init", &[ValType::I32, ValType::I32], &[])?;
         if info.caps.triggers.on_timer {
             want("on_timer", &[], &[])?;
+        }
+        if info.caps.triggers.on_webhook {
+            want("on_webhook", &[ValType::I32, ValType::I32], &[])?;
+        }
+        if !info.caps.triggers.on_event.is_empty() {
+            want(
+                "on_event",
+                &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+                &[],
+            )?;
         }
         let plugin = Plugin {
             engine: self.engine.clone(),
@@ -299,6 +318,41 @@ impl Plugin {
         })
     }
 
+    /// Call `on_webhook(request)`; the answer is [`Effects::webhook`]. A plugin that did
+    /// not declare the trigger is never called.
+    pub fn on_webhook(
+        &self,
+        state: &StateSnapshot,
+        request: &crate::webhook::WebhookRequest,
+    ) -> Result<Effects, CallError> {
+        if !self.info.caps.triggers.on_webhook {
+            return Err(CallError::CapabilityDenied("on_webhook"));
+        }
+        let doc = serde_json::to_vec(request).map_err(|e| CallError::Trap(e.to_string()))?;
+        self.run(state, |store, inst| {
+            let args = write_args(store, inst, &[&doc])?;
+            inst.get_typed_func::<(i32, i32), ()>(&mut *store, "on_webhook")?
+                .call(&mut *store, (args[0].0, args[0].1))
+        })
+    }
+
+    /// Call `on_event(kind, payload)` for an event the plugin declared.
+    pub fn on_event(
+        &self,
+        state: &StateSnapshot,
+        kind: &str,
+        payload: &[u8],
+    ) -> Result<Effects, CallError> {
+        if !self.info.caps.triggers.on_event.iter().any(|k| k == kind) {
+            return Err(CallError::CapabilityDenied("on_event"));
+        }
+        self.run(state, |store, inst| {
+            let args = write_args(store, inst, &[kind.as_bytes(), payload])?;
+            inst.get_typed_func::<(i32, i32, i32, i32), ()>(&mut *store, "on_event")?
+                .call(&mut *store, (args[0].0, args[0].1, args[1].0, args[1].1))
+        })
+    }
+
     fn store(&self, snapshot: Arc<StateSnapshot>) -> Store<CallState> {
         let state_bytes = snapshot.iter().map(|(k, v)| k.len() + v.len()).sum();
         let state = CallState {
@@ -322,6 +376,7 @@ impl Plugin {
             used_state: false,
             used_http: false,
             routes: None,
+            webhook: None,
             denied: None,
             http: self.http.clone(),
             http_call: HttpCall::default(),
@@ -368,8 +423,30 @@ impl Plugin {
             used_state: st.used_state,
             used_http: st.used_http,
             routes: st.routes,
+            webhook: st.webhook,
         })
     }
+}
+
+/// Copies each of `args` into guest memory through its `alloc` export; returns `(ptr, len)`.
+fn write_args(
+    store: &mut Store<CallState>,
+    inst: &Instance,
+    args: &[&[u8]],
+) -> wasmtime::Result<Vec<(i32, i32)>> {
+    let memory = guest_memory(store, inst)?;
+    let alloc = inst.get_typed_func::<i32, i32>(&mut *store, "alloc")?;
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        let len = i32::try_from(a.len())?;
+        let ptr = alloc.call(&mut *store, len)?;
+        if ptr == 0 {
+            wasmtime::bail!("alloc returned 0 for a {len} byte argument");
+        }
+        memory.write(&mut *store, ptr as u32 as usize, a)?;
+        out.push((ptr, len));
+    }
+    Ok(out)
 }
 
 fn guest_memory(store: &mut Store<CallState>, inst: &Instance) -> wasmtime::Result<Memory> {
@@ -543,6 +620,37 @@ fn linker(engine: &Engine) -> Linker<CallState> {
             },
         )
         .expect("defining wayhouse.routes_set");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "webhook_respond",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if !caller.data().caps.triggers.on_webhook {
+                    return Err(deny(&mut caller, "on_webhook"));
+                }
+                if usize::try_from(len).map_or(true, |l| l > crate::webhook::MAX_RESPONSE_DOC) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                match crate::webhook::parse_response(&raw) {
+                    Ok(r) => {
+                        st.webhook = Some(r);
+                        Ok(0)
+                    }
+                    Err(why) => {
+                        if st.logs.len() < st.run.max_log_lines {
+                            st.logs.push(LogLine {
+                                level: LogLevel::Warn,
+                                msg: format!("webhook_respond refused: {why}"),
+                            });
+                        }
+                        Ok(-1)
+                    }
+                }
+            },
+        )
+        .expect("defining wayhouse.webhook_respond");
     linker
         .func_wrap(
             "wayhouse",

@@ -114,11 +114,18 @@ fn valid_host(host: &str) -> bool {
 }
 
 /// The triggers a plugin declares.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Triggers {
     #[serde(default)]
     pub on_timer: bool,
+    /// May be called by `POST /plugins/<id>/hook` once the operator enables the webhook.
+    #[serde(default)]
+    pub on_webhook: bool,
+    /// Wayhouse events the plugin wants (`webhook::EVENT_KINDS`). Needs `on_timer`: an
+    /// event that is missed or fails to commit is caught up by the next timer call.
+    #[serde(default)]
+    pub on_event: Vec<String>,
 }
 
 /// Limits of the `state` capability.
@@ -137,6 +144,17 @@ impl Capabilities {
         let over = |what: &str| Err(ModuleError::CapsNotApproved(what.to_string()));
         if self.triggers.on_timer && !approved.triggers.on_timer {
             return over("trigger on_timer");
+        }
+        if self.triggers.on_webhook && !approved.triggers.on_webhook {
+            return over("trigger on_webhook");
+        }
+        if let Some(kind) = self
+            .triggers
+            .on_event
+            .iter()
+            .find(|k| !approved.triggers.on_event.contains(k))
+        {
+            return over(&format!("trigger on_event {kind}"));
         }
         if self.log && !approved.log {
             return over("log");
@@ -191,6 +209,26 @@ impl Capabilities {
             }
             if caps.tick_interval_secs < MIN_TICK_INTERVAL_SECS {
                 return Err(ModuleError::TickIntervalTooShort(caps.tick_interval_secs));
+            }
+        }
+        if !caps.triggers.on_event.is_empty() {
+            if !caps.triggers.on_timer {
+                return Err(ModuleError::CapsInvalid(
+                    "on_event needs on_timer, which catches up events that were missed".into(),
+                ));
+            }
+            for (i, k) in caps.triggers.on_event.iter().enumerate() {
+                if !crate::webhook::EVENT_KINDS.contains(&k.as_str()) {
+                    return Err(ModuleError::CapsInvalid(format!(
+                        "unknown event {k:?} (known: {})",
+                        crate::webhook::EVENT_KINDS.join(", ")
+                    )));
+                }
+                if caps.triggers.on_event[..i].contains(k) {
+                    return Err(ModuleError::CapsInvalid(format!(
+                        "event {k} is listed twice"
+                    )));
+                }
             }
         }
         if let Some(state) = caps.state {
