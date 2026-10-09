@@ -13,6 +13,9 @@
 //! Module blobs are not replicated yet, so an install works only against the leader that
 //! took the upload.
 
+// The error side is an axum `Response`, which is what these handlers return either way.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
