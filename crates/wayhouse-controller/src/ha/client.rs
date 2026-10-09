@@ -176,6 +176,19 @@ fn forward_target(
     leader_node.ok_or("no raft leader elected yet; retry shortly")
 }
 
+/// How long a follower waits for a request that runs work on the leader (compiling a
+/// plugin module: up to the 30 s pool timeout, then a Raft write), well over
+/// [`FORWARD_TIMEOUT`]. A shorter bound would answer `504` for an install the leader
+/// still creates, and a retry would create a second one.
+pub const LEADER_WORK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The client for [`forward_to_current_leader`]: built on first use (after `--ca-file`
+/// is loaded), one per process.
+fn leader_work_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| forward_client(LEADER_WORK_TIMEOUT))
+}
+
 /// Forwards a request to the node that is leader now, for a route that has to run
 /// there rather than propose a write (it needs the leader's module blobs or its tick
 /// results). `503` when there is no leader to forward to, or this node just became it.
@@ -199,7 +212,15 @@ pub async fn forward_to_current_leader(
     };
     match forward_target(leader_id, leader_node, ha.node_id) {
         Ok(leader) => {
-            forward_to_leader(&ha.forward, &leader.addr, method, path, body, headers).await
+            forward_to_leader(
+                leader_work_client(),
+                &leader.addr,
+                method,
+                path,
+                body,
+                headers,
+            )
+            .await
         }
         Err(msg) => service_unavailable(msg),
     }

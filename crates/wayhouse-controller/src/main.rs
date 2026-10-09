@@ -155,7 +155,8 @@ struct Args {
     /// installs (docs/plugins.md). Off by default. With `--role slave` the routes answer
     /// `501`. Installs are stored and enabled plugins that declared a timer are ticked;
     /// under `--ha-peers` installs and state are replicated and only the Raft leader
-    /// ticks. Module bytes are not replicated yet.
+    /// ticks. Module bytes are not replicated yet. Installs made on a standalone
+    /// controller are not carried over when `--ha-peers` is turned on: install again.
     #[arg(long)]
     plugins: bool,
 

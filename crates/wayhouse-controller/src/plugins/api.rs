@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use wayhouse_plugin_host::{inspect, Capabilities, CompilePool, PoolError, MAX_MODULE_BYTES};
 
 use super::runner::Runner;
-use super::{valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
+use super::{valid_id, valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
 use crate::ha::client::{
     forward_to_current_leader, propose_write, propose_write_as, ForwardHeaders,
 };
@@ -337,6 +337,9 @@ async fn status(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    if !valid_id(&id) {
+        return err(StatusCode::NOT_FOUND, "no such install");
+    }
     let path = format!("/plugins/{id}/status");
     if let Some(forwarded) = st
         .to_leader(Method::GET, &path, &headers, Bytes::new())
@@ -357,6 +360,9 @@ async fn set_enabled(
     id: String,
     enabled: bool,
 ) -> Response {
+    if !valid_id(&id) {
+        return err(StatusCode::NOT_FOUND, "no such install");
+    }
     if let Some(ha) = &st.ha {
         let path = format!(
             "/plugins/{id}/{}",
@@ -409,6 +415,9 @@ async fn remove(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    if !valid_id(&id) {
+        return err(StatusCode::NOT_FOUND, "no such install");
+    }
     if let Some(ha) = &st.ha {
         let path = format!("/plugins/{id}");
         return propose_write_as(
@@ -783,5 +792,18 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let (status, _) = call(&app, "POST", "/plugins", b"{".to_vec(), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_id_that_is_not_an_install_id_is_404_before_anything_is_forwarded() {
+        let (st, _d) = ha_state().await;
+        let app = router(st);
+        for id in ["..%2Fconfig", "nope", "00000000000000FF"] {
+            for (m, suffix) in [("GET", "/status"), ("POST", "/enable"), ("DELETE", "")] {
+                let (status, _) =
+                    call(&app, m, &format!("/plugins/{id}{suffix}"), vec![], None).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{m} {id}{suffix}");
+            }
+        }
     }
 }

@@ -153,6 +153,8 @@ the state machine drops it and the status says so. A commit is refused before it
 when over the host's state limits (1 MiB, 256 keys). Status is in memory on the leader and starts
 empty after a failover.
 
+**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
+
 **Not built yet: module replication (slice 7).** A module's bytes live only on the node that took
 the upload. An install needs them on the leader that proposes it, and a leader elected later
 that does not hold them cannot run the plugin: its status says "this node does not hold the module

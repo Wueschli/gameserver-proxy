@@ -74,6 +74,11 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Whether `id` has the shape of an install id (16 lowercase hex characters).
+pub fn valid_id(id: &str) -> bool {
+    is_lower_hex(id, 16)
+}
+
 fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -83,7 +88,7 @@ impl InstallRecord {
     /// applies one, so a malformed record from any proposer is refused the same way
     /// everywhere. (The approved capabilities are typed and validated on parse.)
     pub fn validate(&self) -> Result<(), String> {
-        if !is_lower_hex(&self.id, 16) {
+        if !valid_id(&self.id) {
             return Err("id must be 16 lowercase hex characters".into());
         }
         if !valid_name(&self.name) {
