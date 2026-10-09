@@ -248,7 +248,8 @@ Open follow-ups, known limitations and decisions still pending live in
 
 Issues and ideas are welcome. To build, test and open a pull request, read
 [`CONTRIBUTING.md`](CONTRIBUTING.md). How releases are cut is in
-[`RELEASING.md`](RELEASING.md).
+[`RELEASING.md`](RELEASING.md). Participation is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
