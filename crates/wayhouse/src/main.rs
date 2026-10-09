@@ -23,6 +23,7 @@ mod intent_client;
 mod live_interface;
 #[cfg(feature = "tunnel")]
 mod netlink_addr;
+mod plugin_overlay;
 mod procinfo;
 #[cfg(feature = "tunnel")]
 mod proxy_register;
@@ -228,7 +229,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         Some(url) => {
             let (revision, text) =
                 controller_client::fetch_current(url, args.controller_token.as_deref()).await?;
-            let cfg = wayhouse_config::parse_str(&text)
+            let cfg = wayhouse_config::parse_str(&plugin_overlay::merge(&text))
                 .map_err(|e| anyhow::anyhow!("controller {url} revision {revision}: {e}"))?;
             (
                 ConfigSource::Controller(url.clone(), args.controller_token.clone()),
@@ -522,6 +523,15 @@ async fn run(
     // mode, nothing otherwise rebuilds the snapshot after an admin-API or
     // intent-op backend overlay change (`reload::run`, which normally does,
     // only runs in file-config mode).
+    let plugin_overlay = if let ConfigSource::Controller(url, token) = &config_source {
+        Some(tokio::spawn(plugin_overlay::run(
+            url.clone(),
+            token.clone(),
+            handle.clone(),
+        )))
+    } else {
+        None
+    };
     let admin_reload_watch = if let ConfigSource::Controller(url, token) = &config_source {
         Some(tokio::spawn(controller_client::watch_admin_reloads(
             url.clone(),
@@ -564,6 +574,9 @@ async fn run(
     reload.abort();
     if let Some(intent) = intent {
         intent.abort();
+    }
+    if let Some(plugin_overlay) = plugin_overlay {
+        plugin_overlay.abort();
     }
     if let Some(admin_reload_watch) = admin_reload_watch {
         admin_reload_watch.abort();

@@ -1942,11 +1942,11 @@ listeners:
             StatusCode::OK
         );
         let (status, body) =
-            status_and_error(submit_text(&app, format!("schema_version: 2\n{VALID_CONFIG}")).await)
+            status_and_error(submit_text(&app, format!("schema_version: 3\n{VALID_CONFIG}")).await)
                 .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
-            body.contains("config schema_version 2 is newer than this build supports (max 1)"),
+            body.contains("config schema_version 3 is newer than this build supports (max 2)"),
             "{body}"
         );
         let resp = app

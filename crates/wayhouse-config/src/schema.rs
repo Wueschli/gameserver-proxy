@@ -430,6 +430,11 @@ pub(crate) struct RawListener {
     /// the session table. Needs at least one `first_bytes` route or a `sniffer`.
     #[serde(default)]
     pub(crate) first_packet_gate: bool,
+    /// TCP only: accept routes that enabled plugins declare (`docs/plugins.md` "Routes").
+    /// They are appended after this listener's own routes, matched by the hostname the
+    /// connection announces (`type: sni`, or `type: sniffer` with a `sniffer:` name).
+    #[serde(default)]
+    pub(crate) plugin_routes: Option<RawPluginRoutes>,
     /// GeoIP country filter on the client source IP, checked after the CIDR ACL.
     /// Needs `settings.geo_db`. `deny` wins; a non-empty `allow` is default-deny.
     #[serde(default)]
@@ -443,6 +448,18 @@ pub(crate) struct RawListener {
     /// routing. Excess is dropped silently (no reflection).
     #[serde(default)]
     pub(crate) rate_limit: Option<RawRateLimit>,
+}
+
+/// How a listener reads the hostname plugin routes match on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawPluginRoutes {
+    /// `sni` or `sniffer`.
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    /// `sniffer` only: the sniffer name.
+    #[serde(default)]
+    pub(crate) sniffer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

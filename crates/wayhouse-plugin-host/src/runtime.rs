@@ -16,6 +16,7 @@ use wasmtime::{
 };
 
 use crate::caps::Capabilities;
+use crate::http::{HttpCall, HttpEngine, MAX_REQUEST_BODY};
 use crate::module::{inspect, ModuleError, ModuleInfo};
 
 /// Epoch ticks a call may span before it traps. The ticker runs at
@@ -24,6 +25,9 @@ use crate::module::{inspect, ModuleError, ModuleInfo};
 const EPOCH_DEADLINE_TICKS: u64 = 2;
 /// Longest state key the host accepts.
 pub const MAX_KEY_BYTES: usize = 256;
+/// Largest `routes_set` document accepted (the entry cap bounds it further).
+const MAX_ROUTES_DOC: usize = 64 * 1024;
+
 /// Longest log line kept; longer ones are truncated.
 pub const MAX_LOG_LINE_BYTES: usize = 1024;
 
@@ -82,6 +86,13 @@ pub struct Effects {
     pub used_log: bool,
     /// The call used `state_get` or `state_put`.
     pub used_state: bool,
+    /// The call used `http_request`.
+    pub used_http: bool,
+    /// The route set the call declared with `routes_set` (the last call wins), or `None`
+    /// when it did not declare one. `Some(vec![])` means "no routes".
+    pub routes: Option<Vec<crate::routes::RouteEntry>>,
+    /// What the guest answered a webhook with (`webhook_respond`); `None` if it did not.
+    pub webhook: Option<crate::webhook::WebhookResponse>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,7 +118,14 @@ struct CallState {
     logs_dropped: usize,
     used_log: bool,
     used_state: bool,
+    used_http: bool,
+    routes: Option<Vec<crate::routes::RouteEntry>>,
+    webhook: Option<crate::webhook::WebhookResponse>,
     denied: Option<&'static str>,
+    http: Option<Arc<HttpEngine>>,
+    http_call: HttpCall,
+    /// The response document of the last `http_request`, for `http_read` to copy out.
+    http_doc: Vec<u8>,
 }
 
 impl CallState {
@@ -169,8 +187,17 @@ impl PluginHost {
         let module =
             Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
         for i in module.imports() {
-            let known =
-                i.module() == "wayhouse" && matches!(i.name(), "log" | "state_get" | "state_put");
+            let known = i.module() == "wayhouse"
+                && matches!(
+                    i.name(),
+                    "log"
+                        | "state_get"
+                        | "state_put"
+                        | "http_request"
+                        | "http_read"
+                        | "routes_set"
+                        | "webhook_respond"
+                );
             if !known {
                 return Err(ModuleError::UnexpectedImport(format!(
                     "{}::{}",
@@ -207,12 +234,23 @@ impl PluginHost {
         if info.caps.triggers.on_timer {
             want("on_timer", &[], &[])?;
         }
+        if info.caps.triggers.on_webhook {
+            want("on_webhook", &[ValType::I32, ValType::I32], &[])?;
+        }
+        if !info.caps.triggers.on_event.is_empty() {
+            want(
+                "on_event",
+                &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+                &[],
+            )?;
+        }
         let plugin = Plugin {
             engine: self.engine.clone(),
             module,
             linker: linker(&self.engine),
             info,
             limits: self.limits.clone(),
+            http: None,
             _alive: self.alive.clone(),
         };
         let mut store = plugin.store(Arc::default());
@@ -231,12 +269,21 @@ pub struct Plugin {
     linker: Linker<CallState>,
     info: ModuleInfo,
     limits: Limits,
+    http: Option<Arc<HttpEngine>>,
     _alive: Arc<()>,
 }
 
 impl Plugin {
     pub fn info(&self) -> &ModuleInfo {
         &self.info
+    }
+
+    /// Gives the plugin its network: the engine that enforces its approved `http` hosts and
+    /// secret bindings. Without one, `http_request` answers that no network is available.
+    #[must_use]
+    pub fn with_http(mut self, engine: Arc<HttpEngine>) -> Self {
+        self.http = Some(engine);
+        self
     }
 
     /// Call `init(config)`.
@@ -271,6 +318,41 @@ impl Plugin {
         })
     }
 
+    /// Call `on_webhook(request)`; the answer is [`Effects::webhook`]. A plugin that did
+    /// not declare the trigger is never called.
+    pub fn on_webhook(
+        &self,
+        state: &StateSnapshot,
+        request: &crate::webhook::WebhookRequest,
+    ) -> Result<Effects, CallError> {
+        if !self.info.caps.triggers.on_webhook {
+            return Err(CallError::CapabilityDenied("on_webhook"));
+        }
+        let doc = serde_json::to_vec(request).map_err(|e| CallError::Trap(e.to_string()))?;
+        self.run(state, |store, inst| {
+            let args = write_args(store, inst, &[&doc])?;
+            inst.get_typed_func::<(i32, i32), ()>(&mut *store, "on_webhook")?
+                .call(&mut *store, (args[0].0, args[0].1))
+        })
+    }
+
+    /// Call `on_event(kind, payload)` for an event the plugin declared.
+    pub fn on_event(
+        &self,
+        state: &StateSnapshot,
+        kind: &str,
+        payload: &[u8],
+    ) -> Result<Effects, CallError> {
+        if !self.info.caps.triggers.on_event.iter().any(|k| k == kind) {
+            return Err(CallError::CapabilityDenied("on_event"));
+        }
+        self.run(state, |store, inst| {
+            let args = write_args(store, inst, &[kind.as_bytes(), payload])?;
+            inst.get_typed_func::<(i32, i32, i32, i32), ()>(&mut *store, "on_event")?
+                .call(&mut *store, (args[0].0, args[0].1, args[1].0, args[1].1))
+        })
+    }
+
     fn store(&self, snapshot: Arc<StateSnapshot>) -> Store<CallState> {
         let state_bytes = snapshot.iter().map(|(k, v)| k.len() + v.len()).sum();
         let state = CallState {
@@ -292,7 +374,13 @@ impl Plugin {
             logs_dropped: 0,
             used_log: false,
             used_state: false,
+            used_http: false,
+            routes: None,
+            webhook: None,
             denied: None,
+            http: self.http.clone(),
+            http_call: HttpCall::default(),
+            http_doc: Vec::new(),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
@@ -320,14 +408,45 @@ impl Plugin {
             }
             return Err(CallError::Trap(format!("{e:#}")));
         }
+        // Log lines get the same scrub as responses: whatever secret the call expanded.
+        let mut logs = st.logs;
+        if !st.http_call.scrubber.is_empty() {
+            for line in &mut logs {
+                line.msg = st.http_call.scrubber.scrub_str(&line.msg);
+            }
+        }
         Ok(Effects {
             state_puts: st.puts,
-            logs: st.logs,
+            logs,
             logs_dropped: st.logs_dropped,
             used_log: st.used_log,
             used_state: st.used_state,
+            used_http: st.used_http,
+            routes: st.routes,
+            webhook: st.webhook,
         })
     }
+}
+
+/// Copies each of `args` into guest memory through its `alloc` export; returns `(ptr, len)`.
+fn write_args(
+    store: &mut Store<CallState>,
+    inst: &Instance,
+    args: &[&[u8]],
+) -> wasmtime::Result<Vec<(i32, i32)>> {
+    let memory = guest_memory(store, inst)?;
+    let alloc = inst.get_typed_func::<i32, i32>(&mut *store, "alloc")?;
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        let len = i32::try_from(a.len())?;
+        let ptr = alloc.call(&mut *store, len)?;
+        if ptr == 0 {
+            wasmtime::bail!("alloc returned 0 for a {len} byte argument");
+        }
+        memory.write(&mut *store, ptr as u32 as usize, a)?;
+        out.push((ptr, len));
+    }
+    Ok(out)
 }
 
 fn guest_memory(store: &mut Store<CallState>, inst: &Instance) -> wasmtime::Result<Memory> {
@@ -466,5 +585,119 @@ fn linker(engine: &Engine) -> Linker<CallState> {
             },
         )
         .expect("defining wayhouse.state_put");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "routes_set",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if caller.data().caps.routes.is_none() {
+                    return Err(deny(&mut caller, "routes"));
+                }
+                if usize::try_from(len).map_or(true, |l| l > MAX_ROUTES_DOC) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                let cap = st.caps.routes.clone().expect("checked above");
+                let parsed: Result<Vec<crate::routes::RouteEntry>, String> =
+                    serde_json::from_slice(&raw).map_err(|e| format!("not a route list: {e}"));
+                match parsed.and_then(|set| cap.check_set(&set).map(|()| set)) {
+                    Ok(mut set) => {
+                        set.sort();
+                        st.routes = Some(set);
+                        Ok(0)
+                    }
+                    Err(why) => {
+                        if st.logs.len() < st.run.max_log_lines {
+                            st.logs.push(LogLine {
+                                level: LogLevel::Warn,
+                                msg: format!("routes_set refused: {why}"),
+                            });
+                        }
+                        Ok(-1)
+                    }
+                }
+            },
+        )
+        .expect("defining wayhouse.routes_set");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "webhook_respond",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if !caller.data().caps.triggers.on_webhook {
+                    return Err(deny(&mut caller, "on_webhook"));
+                }
+                if usize::try_from(len).map_or(true, |l| l > crate::webhook::MAX_RESPONSE_DOC) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                match crate::webhook::parse_response(&raw) {
+                    Ok(r) => {
+                        st.webhook = Some(r);
+                        Ok(0)
+                    }
+                    Err(why) => {
+                        if st.logs.len() < st.run.max_log_lines {
+                            st.logs.push(LogLine {
+                                level: LogLevel::Warn,
+                                msg: format!("webhook_respond refused: {why}"),
+                            });
+                        }
+                        Ok(-1)
+                    }
+                }
+            },
+        )
+        .expect("defining wayhouse.webhook_respond");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "http_request",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if caller.data().caps.http.is_none() {
+                    return Err(deny(&mut caller, "http"));
+                }
+                caller.data_mut().used_http = true;
+                if usize::try_from(len).map_or(true, |l| l > MAX_REQUEST_BODY * 2) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                let doc = match st.http.clone() {
+                    Some(engine) => engine.call(&mut st.http_call, &raw),
+                    None => br#"{"error":"no network is available to this plugin here"}"#.to_vec(),
+                };
+                let n = i32::try_from(doc.len())?;
+                st.http_doc = doc;
+                Ok(n)
+            },
+        )
+        .expect("defining wayhouse.http_request");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "http_read",
+            |mut caller: Caller<'_, CallState>,
+             out_ptr: i32,
+             out_cap: i32|
+             -> wasmtime::Result<i32> {
+                if caller.data().caps.http.is_none() {
+                    return Err(deny(&mut caller, "http"));
+                }
+                let doc = std::mem::take(&mut caller.data_mut().http_doc);
+                let len = i32::try_from(doc.len())?;
+                if len > out_cap {
+                    // Keep it: the guest may retry with room.
+                    caller.data_mut().http_doc = doc;
+                    return Ok(-1);
+                }
+                let memory = caller_memory(&mut caller)?;
+                memory.write(&mut caller, out_ptr as u32 as usize, &doc)?;
+                Ok(len)
+            },
+        )
+        .expect("defining wayhouse.http_read");
     linker
 }

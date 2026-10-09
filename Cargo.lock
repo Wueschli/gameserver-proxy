@@ -376,6 +376,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -388,6 +389,7 @@ dependencies = [
  "chacha20",
  "cipher 0.5.2",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -4506,6 +4508,7 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_norway",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -4517,12 +4520,14 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "chacha20poly1305",
  "clap",
  "openraft",
  "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "sled",
  "tempfile",
@@ -4532,10 +4537,12 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wat",
  "wayhouse-config",
  "wayhouse-http",
  "wayhouse-plugin-host",
+ "zeroize",
 ]
 
 [[package]]
@@ -4606,14 +4613,18 @@ name = "wayhouse-plugin-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "url",
  "wasmparser 0.254.2",
  "wasmtime",
  "wat",
  "wayhouse-plugin-abi",
+ "zeroize",
 ]
 
 [[package]]

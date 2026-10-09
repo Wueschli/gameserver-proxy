@@ -152,6 +152,16 @@ pub struct StateMachineStore {
     snapshots: sled::Tree,
 }
 
+/// The audit line of a plugin secret change: install, slot, key id and actor, never the
+/// value (the entry holds ciphertext only).
+fn audit(what: &str, install: &str, slot: &str, key_id: Option<&str>, actor: Option<&str>) {
+    tracing::info!(
+        target: "wayhouse_controller::plugins::audit",
+        what, install, slot, key_id, actor,
+        "plugin secret changed"
+    );
+}
+
 impl StateMachineStore {
     pub fn open(
         db: &sled::Db,
@@ -342,6 +352,7 @@ impl StateMachineStore {
                 tracing::warn!(index, %why, "refused a malformed plugin entry");
                 WriteResponse::PluginRejected(PluginReject::Invalid)
             }
+            Applied::Rewrapped(skipped) => WriteResponse::PluginRewrapped(skipped),
         })
     }
 
@@ -687,11 +698,19 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                         WriteRequest::PluginDelete { id } => {
                             self.apply_plugin(index, PluginOp::Delete { id: &id })?
                         }
+                        WriteRequest::PluginSetWebhook { id, token_hash } => self.apply_plugin(
+                            index,
+                            PluginOp::SetWebhook {
+                                id: &id,
+                                token_hash: token_hash.as_deref(),
+                            },
+                        )?,
                         WriteRequest::PluginState {
                             id,
                             expected_rev,
                             term,
                             puts,
+                            routes,
                         } => self.apply_plugin(
                             index,
                             PluginOp::State {
@@ -700,8 +719,67 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                                 tagged_term: term,
                                 entry_term,
                                 puts: &puts,
+                                routes: routes.as_deref(),
                             },
                         )?,
+                        WriteRequest::PluginSecretSet {
+                            id,
+                            slot,
+                            sealed,
+                            updated_at,
+                            actor,
+                        } => {
+                            let r = self.apply_plugin(
+                                index,
+                                PluginOp::SecretSet {
+                                    id: &id,
+                                    slot: &slot,
+                                    sealed: &sealed,
+                                    updated_at,
+                                },
+                            )?;
+                            if matches!(r, WriteResponse::PluginApplied(_)) {
+                                audit("set", &id, &slot, Some(&sealed.key_id), actor.as_deref());
+                            }
+                            r
+                        }
+                        WriteRequest::PluginSecretDelete { id, slot, actor } => {
+                            let r = self.apply_plugin(
+                                index,
+                                PluginOp::SecretDelete {
+                                    id: &id,
+                                    slot: &slot,
+                                },
+                            )?;
+                            if matches!(r, WriteResponse::PluginApplied(_)) {
+                                audit("delete", &id, &slot, None, actor.as_deref());
+                            }
+                            r
+                        }
+                        WriteRequest::PluginSecretRewrap { items, updated_at } => {
+                            let r = self.apply_plugin(
+                                index,
+                                PluginOp::SecretRewrap {
+                                    items: &items,
+                                    updated_at,
+                                },
+                            )?;
+                            if let WriteResponse::PluginRewrapped(skipped) = &r {
+                                for item in items
+                                    .iter()
+                                    .filter(|i| !skipped.contains(&format!("{}/{}", i.id, i.slot)))
+                                {
+                                    audit(
+                                        "rewrap",
+                                        &item.id,
+                                        &item.slot,
+                                        Some(&item.sealed.key_id),
+                                        None,
+                                    );
+                                }
+                            }
+                            r
+                        }
                         WriteRequest::Import(content) => {
                             let response = import::apply_import(
                                 &self.peers,
@@ -1884,6 +1962,7 @@ mod tests {
             enabled: true,
             created_at: 1,
             created_by: None,
+            webhook: None,
         }
     }
 
@@ -1901,6 +1980,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), v.to_vec()))
                 .collect(),
+            routes: None,
         }
     }
 

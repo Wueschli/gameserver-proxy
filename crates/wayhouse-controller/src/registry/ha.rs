@@ -477,6 +477,7 @@ mod tests {
                 ha_token: None,
                 forward: client::forward_client(client::FORWARD_TIMEOUT),
                 pre_ha: crate::ha::import::LocalPreHa::default(),
+                secret_keys: crate::plugins::secrets::KeyringHandle::default(),
             }),
             cluster,
             local_network: local.map(|n| Network::parse(n).unwrap()),

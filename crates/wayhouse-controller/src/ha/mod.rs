@@ -188,6 +188,11 @@ pub enum WriteRequest {
     PluginDelete {
         id: String,
     },
+    /// Turns an install's webhook on with the hash of a new token, or off with `None`.
+    PluginSetWebhook {
+        id: String,
+        token_hash: Option<String>,
+    },
     /// One plugin call's `state_put`s, committed as one entry: applied only
     /// if the install's state revision is still `expected_rev` (the one the
     /// call read) and the entry was appended in `term` (the proposing
@@ -198,6 +203,30 @@ pub enum WriteRequest {
         term: u64,
         #[serde(with = "crate::plugins::b64_entries")]
         puts: std::collections::BTreeMap<String, Vec<u8>>,
+        /// The plugin's whole route set when the call declared one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routes: Option<Vec<wayhouse_plugin_host::RouteEntry>>,
+    },
+    /// Stores or replaces one plugin secret. The value is already encrypted by the node
+    /// that received the API call: plaintext never reaches the log or the peer link.
+    PluginSecretSet {
+        id: String,
+        slot: String,
+        sealed: crate::plugins::secrets::Sealed,
+        updated_at: u64,
+        /// The caller's `X-Actor`, for the audit line every replica writes.
+        actor: Option<String>,
+    },
+    PluginSecretDelete {
+        id: String,
+        slot: String,
+        actor: Option<String>,
+    },
+    /// Re-encrypts secrets under a new key (key rotation); each item applies only if its
+    /// slot still holds the ciphertext it was derived from.
+    PluginSecretRewrap {
+        items: Vec<crate::plugins::RewrapItem>,
+        updated_at: u64,
     },
 }
 
@@ -252,6 +281,9 @@ pub enum WriteResponse {
     /// A plugin entry was applied; a state commit carries the install's new
     /// state revision.
     PluginApplied(Option<u64>),
+    /// A secret rewrap was applied; the `install/slot` of each item skipped because the
+    /// slot changed since the leader read it.
+    PluginRewrapped(Vec<String>),
     /// A plugin entry changed nothing, deterministically.
     PluginRejected(PluginReject),
 }
@@ -339,6 +371,9 @@ pub struct HaHandle {
     /// This node's own set-aside pre-HA data, which `/raft/whoami` reports
     /// and `/raft/pre-ha` serves ([`import`]).
     pub pre_ha: import::LocalPreHa,
+    /// This node's plugin secret keyring (empty without a key); `/raft/whoami` reports its
+    /// key ids so a rotation can check every node holds the active key.
+    pub secret_keys: crate::plugins::secrets::KeyringHandle,
 }
 
 impl HaHandle {

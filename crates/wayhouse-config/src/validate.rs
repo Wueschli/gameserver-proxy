@@ -624,6 +624,25 @@ pub(crate) fn validate(
                 }
             }
         }
+        if let Some(pr) = &l.plugin_routes {
+            if l.protocol != Protocol::Tcp {
+                return Err(Invalid(format!(
+                    "listener {}: `plugin_routes` applies only to tcp listeners",
+                    l.name
+                )));
+            }
+            match (pr.kind.as_str(), pr.sniffer.as_deref()) {
+                ("sni", None) => {}
+                ("sniffer", Some(n)) if !n.trim().is_empty() => {}
+                _ => {
+                    return Err(Invalid(format!(
+                        "listener {}: `plugin_routes` is `{{type: sni}}` or \
+                         `{{type: sniffer, sniffer: <name>}}`",
+                        l.name
+                    )))
+                }
+            }
+        }
         if l.first_packet_gate {
             if l.protocol != Protocol::Udp {
                 return Err(Invalid(format!(

@@ -8,8 +8,8 @@ Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
 controller can store plugin installs behind an admin API and ticks the enabled ones
 (below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). An HA tier replicates installs and state through Raft, serves the same API on every replica
-and ticks on the leader only (see "High availability"). Not built yet: module bytes
-replication between controllers, secrets, `http`, `routes`, webhooks, events and `backends`.
+and ticks on the leader only, and the module bytes follow the installs to every replica (see
+"High availability"). Not built yet: secrets, `http`, `routes`, webhooks, events and `backends`.
 
 ## Module contract (ABI 0.1)
 
@@ -25,7 +25,14 @@ without running the module and approvals are recorded against the module's sha25
     "triggers": { "on_timer": true },
     "tick_interval_secs": 30,
     "log": true,
-    "state": { "max_bytes": 65536 }
+    "state": { "max_bytes": 65536 },
+    "http": {
+        "hosts": [
+            { "host": "panel.example", "port": 8443 },
+            { "host": "10.0.0.5", "allow_private": true }
+        ]
+    },
+    "secrets": [{ "name": "PANEL_TOKEN", "hosts": ["panel.example"] }]
 }
 ```
 
@@ -41,8 +48,158 @@ declared. The only imports allowed are these, in the `wayhouse` namespace:
 | `state_get(kptr, klen, out_ptr, out_cap) -> i32` | `state`    | value length, or -1 when absent; nothing is written when the value is longer than `out_cap`                                      |
 | `state_put(kptr, klen, vptr, vlen) -> i32`       | `state`    | 0, or -1 when over `state.max_bytes`, the key is over 256 bytes or not UTF-8, or the per-call write limit is hit                 |
 
+| `routes_set(ptr, len) -> i32` | `routes` | declares the plugin's whole route set as a JSON array of `{"host", "backend"}`; 0, or -1 when refused (the reason is a `warn` line in the plugin's log) |
+| `http_request(ptr, len) -> i32` | `http` | sends the JSON request at `ptr`; returns the length of the response document, or -1 when the request is over the size limit |
+| `http_read(out_ptr, out_cap) -> i32` | `http` | copies the pending response document out; -1 (and keeps it) when `out_cap` is too small |
+
 A call that uses a capability it did not declare traps that call (`CallError::CapabilityDenied`)
 and leaves the host running.
+
+## Secrets and the `http` capability
+
+`secrets` declares slots by name (an upper-case letter then `A-Z`, digits, `_`; up to 64 characters), each bound to hosts that the module also
+lists under `http.hosts`; the operator approves the set with the module's sha256 like any
+other capability. `http.hosts` entries are exact lower-case host names or IP literals, with an
+optional `port` (default 443); `allow_private` must be approved per host to reach private,
+loopback or link-local addresses.
+
+**The request.** `http_request` takes UTF-8 JSON, `{"method", "url", "headers", "body"}`
+(`body` base64, optional), and `http_read` returns `{"status", "headers", "body"}` (`body`
+base64), or `{"error": "..."}` for a refused or failed call. The host enforces: `https` only; a
+host and port the module declared; no proxy; no redirect to anywhere but another approved
+host (up to 3 hops, each re-checked); at most 8 calls, 256 KiB of request and 1 MiB of response
+body per call, 10 s per request and 20 s per guest call; a fixed header denylist (`Host`,
+`Content-Length`, ...). Connecting resolves the name once and checks every resolved address, so a
+DNS answer that changes cannot reach a private address that was not approved; an IP literal is
+checked the same way.
+
+**Secrets never reach the guest.** A header value may contain `${secret:NAME}`. The host expands
+it, only in header values (not in the URL or the body) and only when the request goes to a host
+the slot is bound to, and re-checks that for each redirect hop. The response (headers, body, error
+text) and every log line are scrubbed of the secret's raw, base64 and percent-encoded forms
+before the guest or the status sees them.
+
+**Storage.** Operators set a slot with `PUT /plugins/{id}/secrets/{slot}` and `{"value": "..."}`
+(16 to 4096 bytes), clear it with `DELETE` and list the slots with `GET /plugins/{id}/secrets`
+(set or not, the key id, `ok` or `held: ...`; never a value). Only approved slots are accepted.
+A value is encrypted on the controller that received it with XChaCha20-Poly1305 under a cluster
+keyring, bound to install, slot and key id, and only the ciphertext goes into the sled database,
+the Raft log and snapshots. A follower seals the value itself and sends the ciphertext entry to
+the leader (`POST /raft/plugin-secret`); it never forwards the plaintext request. Deleting an
+install deletes its secrets. Changes are audit-logged (install, slot, key id, actor; never the
+value) at target `wayhouse_controller::plugins::audit`, and a delete or rewrap asks every node to
+purge the log, so old ciphertext does not outlive it for long.
+
+**Keys.** `--plugin-secret-key-file` (or `WAYHOUSE_PLUGIN_SECRET_KEY`) names a keyring: one
+base64 key of 32 random bytes per line (`openssl rand -base64 32`), the last line active, the
+file readable by its owner only. Every controller of a tier needs the same keyring, and the file
+is re-read when it changes. Without a key the secrets API answers `409` and a plugin that uses
+secret slots is **held**: it is not run, `GET /plugins/{id}/status` shows `held: ...` (no key,
+secret unset, key missing, or not authenticating), and other plugins keep running. Plaintext
+HTTP on a non-loopback `--listen` refuses to start with `--plugins` and a key unless
+`--allow-insecure-secrets` is given.
+
+**Rotating a key.** (1) Append the new key to the keyring file on every controller. (2) `POST
+/admin/plugins/secrets/rewrap` on any controller: it refuses until every member reports the
+active key (`GET /admin/plugins/secrets/keys` lists the key ids each holds), then re-encrypts
+every secret under it; a slot an operator rewrote meanwhile is skipped and reported. (3) Remove
+the old key from the file. Removing it before step 2 holds the plugins that still use it
+(`held: key <id> missing`) until it is put back.
+
+## Routes
+
+The `routes` capability lets a plugin publish hostname routes:
+
+```json
+"routes": { "hosts": ["*.mc.example.com", "play.example.com"], "backends": ["10.0.0.0/16"], "max_entries": 64 }
+```
+
+`hosts` are the names (exact or `*.suffix`) the plugin may claim, `backends` the networks its
+backend addresses must be in, `max_entries` (1 to 256) the size of one set. A module cannot ask
+for more of any of these than was approved. `routes_set` replaces the plugin's whole set; the host
+refuses a set with an entry outside the approval, a duplicate hostname or too many entries, and a
+tick that does not call it leaves the set as it was. The set is committed in the same entry as the
+tick's state writes (term and revision checked, validated again on every replica), and only when it
+changed.
+
+**Materialisation (#236).** The controller does not rewrite the operator's config. It publishes the
+routes of every _enabled_ install as an overlay (`GET /plugin-routes`, and a stream at
+`GET /plugin-routes/subscribe` that proxies follow), and a proxy started with `--controller`
+appends them to each TCP listener that opted in with `plugin_routes:` (config schema 2, see
+`docs/05-configuration.md`). The listener says how the hostname is read (`sni`, or a `sniffer`).
+Rules:
+
+- Plugin routes go **after** the listener's own routes, so operator routes always win, including an
+  `always` fallback.
+- Each distinct backend address becomes a one-target pool named `plugin-<hash>`.
+- Two installs claiming the same hostname: the earlier install wins; the later claim is not applied
+  and is listed under `conflicts` in `GET /plugin-routes`, with `owner` (`plugin:<install id>`) and
+  plugin name on every route.
+- Exact names match before `*.suffix` patterns, longer suffixes first.
+- Disabling or deleting an install withdraws its routes at once. A plugin whose ticks fail keeps its
+  last committed set. (The spec's grace period with an alert is not built; see the follow-up issue.)
+- A controller started without `--plugins` answers `501` and proxies keep their own config; a
+  proxy without `--controller` ignores the overlay.
+
+## Webhooks
+
+A plugin that declares `"triggers": {"on_webhook": true}` (and `on_timer`, which stays required)
+can be called by an outside system. Webhooks are off until the operator starts the controller
+with a **separate listener**, never on the admin port:
+
+```text
+--plugin-webhook-listen 0.0.0.0:8444 --plugin-webhook-tls-cert hooks.pem --plugin-webhook-tls-key hooks.key
+```
+
+It needs `--plugins`. Plain HTTP on a non-loopback address is refused at start unless
+`--allow-insecure-secrets` is given (the token and body would cross the network in clear text).
+
+**Enabling.** `POST /plugins/{id}/webhook` (admin) creates a token for an install that was approved
+for `on_webhook` and answers `{"token": "whk_...", "path": "/plugins/{id}/hook"}`. The token is
+shown once; only its SHA-256 is stored and replicated. Calling it again rotates the token (the old
+one stops working at once); `DELETE /plugins/{id}/webhook` turns the webhook off. Under HA the
+call needs every member to run a build that supports it.
+
+**Calling.** `POST <listener>/plugins/{id}/hook[/suffix][?query]` with `Authorization: Bearer
+<token>`. In order:
+
+1. A per-source rate limit (IPv6 by /64) runs first, valid token or not: `429`.
+2. The token is checked in constant time, against a dummy hash when the install is unknown,
+   disabled or has no webhook. Every failure is the same `401`.
+3. A per-install rate limit: `429`.
+4. Only then the body is read, capped at 256 KiB: `413`.
+5. The call runs as one of the install's serialized calls (at most 4 hook calls wait per install;
+   the timer is never rejected). A full queue is `429` and is counted in the status
+   (`hooks_dropped`); a plugin that fails is `502`.
+
+The guest receives the method, suffix, query, headers (never `Authorization` or `Cookie`), the body
+(base64) and an idempotency key (the `Idempotency-Key` header, else a hash of the install and
+body). It answers with `webhook_respond` (status, headers, base64 body); only plain headers are
+passed on, and the response is never cached. The call's state writes are committed **before** the
+answer goes out, so a `2xx` means the state is durable; a commit that fails is `503` and the caller
+should retry (use the idempotency key to make that safe).
+
+**HA.** Any node may receive the request. A follower authenticates it itself and forwards it to
+the Raft leader over the peer channel (`/raft/plugin-hook/{id}`, peer token, protocol gate), but
+only over `https` peers: with plain-HTTP peers it answers `503` rather than send the body in clear
+text. Run the webhook listener on every node you want to take requests, or point the sender at one.
+
+## Events
+
+A plugin that declares `"triggers": {"on_event": ["config_revision", "plugin_changed"]}` (and
+`on_timer`, which stays required) gets `on_event(kind, payload)` calls:
+
+| Kind              | Payload                                                                        | When                                          |
+| ----------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `config_revision` | `{"revision": N}`                                                              | the controller accepted a new config revision |
+| `plugin_changed`  | `{"id": "...", "change": "installed" \| "enabled" \| "disabled" \| "deleted"}` | an install was added, toggled or removed      |
+
+Events are **hints, not a log.** They use the same bounded hook queue as webhooks (at most 4
+waiting per install), so a slow plugin loses events instead of building a backlog; the loss is
+counted as `hooks_dropped` in the status. A restart, a failover (only the Raft leader delivers) or
+a lagging feed also loses some. The list of kinds only grows. A plugin that must not miss a change
+reconciles from the controller's state on its timer and treats an event as a reason to do it
+sooner. A backend-health event is not built yet.
 
 ## Approval
 
@@ -101,7 +258,7 @@ An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z
 to 64 characters), the approved capability set bound to the module sha256, and a non-secret
 `config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
 controller's `sled` database; a standalone controller keeps them there, an HA tier keeps them in
-the Raft state machine's database, replicated (the blobs are not, see "High availability").
+the Raft state machine's database, replicated (the blobs travel out of band, see "High availability").
 
 ## Ticks (standalone controller)
 
@@ -128,7 +285,7 @@ removes its state. This is the single-node form of the design's term-checked com
 ## High availability
 
 With `--ha-peers` every replica holds the same installs and the same per-install state, in the
-log and in snapshots (module blobs are in neither). The entries are an install, enable or
+log and in snapshots (module blobs are in neither; see "Module bytes"). The entries are an install, enable or
 disable, delete (state goes with it), and one state commit per plugin call. Applying is
 deterministic and a refusal is a normal answer, never a storage error: an install whose id
 exists, a malformed install (id, name, sha256, size, `created_by`, config size), a state commit
@@ -153,14 +310,29 @@ the state machine drops it and the status says so. A commit is refused before it
 when over the host's state limits (1 MiB, 256 keys). Status is in memory on the leader and starts
 empty after a failover.
 
-**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
+**Module bytes (slice 7).** The Raft log carries install records only; the module (up to 8 MiB)
+is a content-addressed blob each replica keeps in its own store and moves over the peer channel
+(`--ha-token`, the protocol gate):
 
-**Not built yet: module replication (slice 7).** A module's bytes live only on the node that took
-the upload. An install needs them on the leader that proposes it, and a leader elected later
-that does not hold them cannot run the plugin: its status says "this node does not hold the module
-bytes". Until module replication exists, treat a plugin as tied to the node that uploaded it. A
-cluster that uses plugins must run one build on all replicas; the rolling-upgrade gating of new
-entry types follows the component versioning work.
+- The leader pushes a module (`PUT /raft/plugin-blob/{sha256}`, verified against its hash on
+  arrival) to every member and records the install only once a quorum of voters holds it, so an
+  install cannot be stranded on a node that dies right after the upload. A quorum that cannot be
+  reached answers `503`.
+- Every replica fetches the modules its installs reference and it lacks (`GET
+/raft/plugin-blob/{sha256}`, leader first, then the others, verified before it is kept) every
+  few seconds: a replica that was down, joined late or restored a snapshot catches up this way.
+  Until it has the module a node runs nothing for that install; a leader that cannot find one
+  logs a repeated warning, since it would otherwise silently run nothing.
+- Rolling upgrades: a new install is refused with `503` unless every member answers
+  `/raft/whoami` with `plugin_support` of at least 2 (a build before module replication leaves it
+  out). Existing installs keep working through an upgrade. Upgrade every replica before the first
+  install; the gate does not cover a replica added later with an old build.
+- An install that lands on a leader that has meanwhile lost leadership answers `503 retry` and is
+  never forwarded for a second hop.
+- At startup a controller removes the module blobs no install references (uploads that were never
+  installed, and cleanups a crash interrupted), so upload and install belong in one sitting.
+
+**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
 
 **Snapshot restore.** A plugin snapshot is replaced in one transaction (installs, state and the
 cursor together). The other stores' `replace_stores` write one database at a time and are left as

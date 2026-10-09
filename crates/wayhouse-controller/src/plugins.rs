@@ -10,15 +10,22 @@
 //! crash-idempotent per Raft index. Slave controllers do not serve the plugin API.
 
 pub mod api;
+pub mod events;
+pub mod hooks;
+pub mod net;
+pub mod peer;
+pub mod routes;
 pub mod runner;
+pub mod secrets;
 
 use serde::{Deserialize, Serialize};
 use sled::transaction::{ConflictableTransactionError, TransactionError};
 use sled::Transactional;
 use std::collections::BTreeMap;
 
+use secrets::Sealed;
 use wayhouse_plugin_host::{
-    Capabilities, StateSnapshot, MAX_KEY_BYTES, MAX_MODULE_BYTES, MAX_STATE_BYTES,
+    Capabilities, RouteEntry, StateSnapshot, MAX_KEY_BYTES, MAX_MODULE_BYTES, MAX_STATE_BYTES,
 };
 
 /// Largest `config` an install may carry, serialized.
@@ -53,6 +60,17 @@ pub struct InstallRecord {
     pub enabled: bool,
     pub created_at: u64,
     pub created_by: Option<String>,
+    /// Set while the install's webhook is enabled: the hash of its bearer token. The token
+    /// itself is shown once, when it is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookAuth>,
+}
+
+/// How an install's webhook authenticates callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookAuth {
+    /// Lowercase hex SHA-256 of the bearer token.
+    pub token_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +97,11 @@ pub fn valid_id(id: &str) -> bool {
     is_lower_hex(id, 16)
 }
 
+/// Whether `s` has the shape of a module hash (64 lowercase hex characters).
+pub fn is_sha256(s: &str) -> bool {
+    is_lower_hex(s, 64)
+}
+
 fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -96,7 +119,7 @@ impl InstallRecord {
                 "name must be 1 to 64 characters of a-z, 0-9 and '-', not starting with '-'".into(),
             );
         }
-        if !is_lower_hex(&self.sha256, 64) {
+        if !is_sha256(&self.sha256) {
             return Err("sha256 must be 64 lowercase hex characters".into());
         }
         if self.size == 0 || self.size > MAX_MODULE_BYTES {
@@ -108,6 +131,16 @@ impl InstallRecord {
             .is_some_and(|a| a.chars().count() > 128)
         {
             return Err("created_by is over 128 characters".into());
+        }
+        if self
+            .webhook
+            .as_ref()
+            .is_some_and(|w| !is_sha256(&w.token_hash))
+        {
+            return Err("webhook token hash must be 64 lowercase hex characters".into());
+        }
+        if self.webhook.is_some() && !self.approved.triggers.on_webhook {
+            return Err("a webhook needs the approved on_webhook trigger".into());
         }
         if serde_json::to_vec(&self.config).map_or(true, |b| b.len() > MAX_CONFIG_BYTES) {
             return Err(format!("config is over {MAX_CONFIG_BYTES} bytes"));
@@ -173,6 +206,58 @@ pub struct StateSnap {
     pub rev: u64,
     #[serde(with = "b64_entries")]
     pub entries: BTreeMap<String, Vec<u8>>,
+    /// The route set the plugin last committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteEntry>,
+}
+
+/// A stored secret: ciphertext only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSecret {
+    pub sealed: Sealed,
+    pub updated_at: u64,
+}
+
+/// One secret in a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretSnap {
+    pub id: String,
+    pub slot: String,
+    #[serde(flatten)]
+    pub stored: StoredSecret,
+}
+
+/// One secret to re-encrypt in a rewrap: applied only if the slot still holds the
+/// ciphertext (`from_nonce`) the new one was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewrapItem {
+    pub id: String,
+    pub slot: String,
+    pub from_nonce: String,
+    pub sealed: Sealed,
+}
+
+/// Checks a sealed secret's shape, so a malformed one from any proposer is refused alike
+/// on every replica.
+pub fn validate_sealed(sealed: &Sealed) -> Result<(), String> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    if !is_lower_hex(&sealed.key_id, 16) {
+        return Err("key_id must be 16 lowercase hex characters".into());
+    }
+    if STANDARD.decode(&sealed.nonce).map(|n| n.len()) != Ok(24) {
+        return Err("nonce must be 24 bytes of base64".into());
+    }
+    match STANDARD.decode(&sealed.ciphertext) {
+        Ok(c) if (16..=secrets::MAX_SECRET_BYTES + 16).contains(&c.len()) => Ok(()),
+        _ => Err("ciphertext has an invalid size".into()),
+    }
+}
+
+fn secret_key(id: &str, slot: &str) -> Vec<u8> {
+    let mut k = state_prefix(id);
+    k.extend_from_slice(slot.as_bytes());
+    k
 }
 
 /// Everything replicated about plugins, for an HA snapshot. Module blobs are not part
@@ -185,6 +270,9 @@ pub struct PluginSnapshot {
     /// replays after a snapshot install or a crash and change nothing.
     #[serde(default)]
     pub applied_index: Option<u64>,
+    /// Secrets, as ciphertext.
+    #[serde(default)]
+    pub secrets: Vec<SecretSnap>,
 }
 
 /// A replicated plugin write, applied by [`PluginStore::apply_at`].
@@ -198,6 +286,11 @@ pub enum PluginOp<'a> {
     Delete {
         id: &'a str,
     },
+    /// Enable (a token hash) or turn off (`None`) the install's webhook.
+    SetWebhook {
+        id: &'a str,
+        token_hash: Option<&'a str>,
+    },
     State {
         id: &'a str,
         expected_rev: u64,
@@ -206,6 +299,22 @@ pub enum PluginOp<'a> {
         /// The term the entry was appended in.
         entry_term: u64,
         puts: &'a BTreeMap<String, Vec<u8>>,
+        /// The plugin's whole route set, when the call declared one.
+        routes: Option<&'a [RouteEntry]>,
+    },
+    SecretSet {
+        id: &'a str,
+        slot: &'a str,
+        sealed: &'a Sealed,
+        updated_at: u64,
+    },
+    SecretDelete {
+        id: &'a str,
+        slot: &'a str,
+    },
+    SecretRewrap {
+        items: &'a [RewrapItem],
+        updated_at: u64,
     },
 }
 
@@ -225,6 +334,9 @@ pub enum Applied {
     WrongTerm,
     /// The record or writes are malformed; the reason is for the log only.
     Invalid(String),
+    /// A rewrap was applied; the `install/slot` of every item that was skipped because
+    /// the slot changed since the ciphertext was read.
+    Rewrapped(Vec<String>),
 }
 
 /// Why a plugin's state could not be committed.
@@ -234,8 +346,20 @@ pub enum CommitError {
     Stale,
     #[error("no such install")]
     NoSuchInstall,
+    /// The commit breaks a bound the operator approved (for instance a route outside
+    /// the approved hostnames).
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Store(#[from] PluginStoreError),
+}
+
+/// Checks a route set against the capability an install was approved for.
+fn check_routes(record: &InstallRecord, set: &[RouteEntry]) -> Result<(), String> {
+    match &record.approved.routes {
+        Some(cap) => cap.check_set(set),
+        None => Err("the install was not approved for routes".into()),
+    }
 }
 
 impl From<sled::Error> for CommitError {
@@ -258,6 +382,12 @@ fn state_key(id: &str, key: &str) -> Vec<u8> {
     k
 }
 
+fn routes_key(id: &str) -> Vec<u8> {
+    let mut k = state_prefix(id);
+    k.extend_from_slice(b"routes");
+    k
+}
+
 fn rev_key(id: &str) -> Vec<u8> {
     let mut k = state_prefix(id);
     k.extend_from_slice(b"rev");
@@ -276,9 +406,13 @@ pub struct PluginStore {
     /// `applied`: the highest Raft index applied (big-endian `u64`), written in the same
     /// transaction as the entry it covers.
     meta: sled::Tree,
+    /// `<install id>\0<slot>` to a [`StoredSecret`] (JSON): ciphertext only.
+    secrets: sled::Tree,
     /// Serialises create, set_enabled and delete, so a blob cannot be
     /// garbage-collected between an install's blob check and its write.
     write: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Bumped by every write, so a watcher (the route overlay) recomputes.
+    changed: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl PluginStore {
@@ -289,8 +423,27 @@ impl PluginStore {
             blobs: db.open_tree("plugin_blobs")?,
             state: db.open_tree("plugin_state")?,
             meta: db.open_tree("plugin_meta")?,
+            secrets: db.open_tree("plugin_secrets")?,
             write: std::sync::Arc::default(),
+            changed: std::sync::Arc::new(tokio::sync::watch::channel(0).0),
         })
+    }
+
+    /// A receiver that wakes after every write to the plugin trees.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    fn bump(&self) {
+        self.changed.send_modify(|n| *n += 1);
+    }
+
+    /// The route set an install last committed (empty when none).
+    pub fn routes(&self, id: &str) -> Result<Vec<RouteEntry>, PluginStoreError> {
+        match self.state.get(routes_key(id))? {
+            Some(v) => Ok(serde_json::from_slice(&v)?),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Keep `bytes` under its `sha256` (idempotent).
@@ -314,6 +467,7 @@ impl PluginStore {
         self.installs
             .insert(record.id.as_bytes(), serde_json::to_vec(record)?)?;
         self.installs.flush()?;
+        self.bump();
         Ok(())
     }
 
@@ -343,6 +497,27 @@ impl PluginStore {
         }
         all.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         Ok(all)
+    }
+
+    /// Standalone: enable the webhook with `token_hash`, or turn it off with `None`.
+    /// `Applied::Invalid` when the install was not approved for `on_webhook`.
+    pub fn set_webhook(
+        &self,
+        id: &str,
+        token_hash: Option<&str>,
+    ) -> Result<Applied, PluginStoreError> {
+        let _guard = self.lock();
+        let Some(mut record) = self.get(id)? else {
+            return Ok(Applied::NoSuchInstall);
+        };
+        record.webhook = token_hash.map(|h| WebhookAuth {
+            token_hash: h.to_string(),
+        });
+        if let Err(why) = record.validate() {
+            return Ok(Applied::Invalid(why));
+        }
+        self.write_record(&record)?;
+        Ok(Applied::Done(None))
     }
 
     pub fn set_enabled(
@@ -390,9 +565,24 @@ impl PluginStore {
         expected_rev: u64,
         puts: &BTreeMap<String, Vec<u8>>,
     ) -> Result<u64, CommitError> {
+        self.commit_state_routes(id, expected_rev, puts, None)
+    }
+
+    /// [`Self::commit_state`] with the plugin's route set, replaced as a whole in the same
+    /// batch. A set outside the install's approved `routes` is refused.
+    pub fn commit_state_routes(
+        &self,
+        id: &str,
+        expected_rev: u64,
+        puts: &BTreeMap<String, Vec<u8>>,
+        routes: Option<&[RouteEntry]>,
+    ) -> Result<u64, CommitError> {
         let _guard = self.lock();
-        if self.get(id)?.is_none() {
+        let Some(record) = self.get(id)? else {
             return Err(CommitError::NoSuchInstall);
+        };
+        if let Some(set) = routes {
+            check_routes(&record, set).map_err(CommitError::Invalid)?;
         }
         if self.read_rev(id)? != expected_rev {
             return Err(CommitError::Stale);
@@ -402,9 +592,16 @@ impl PluginStore {
         for (k, v) in puts {
             batch.insert(state_key(id, k), v.as_slice());
         }
+        if let Some(set) = routes {
+            batch.insert(
+                routes_key(id),
+                serde_json::to_vec(set).map_err(PluginStoreError::from)?,
+            );
+        }
         batch.insert(rev_key(id), &next.to_le_bytes());
         self.state.apply_batch(batch)?;
         self.state.flush()?;
+        self.bump();
         Ok(next)
     }
 
@@ -429,97 +626,187 @@ impl PluginStore {
         let _guard = self.lock();
         // Keys to wipe with a deleted install: the transaction cannot scan, and the lock
         // keeps the set from changing under it.
-        let wipe: Vec<sled::IVec> = match op {
-            PluginOp::Delete { id } => self
-                .state
-                .scan_prefix(state_prefix(id))
-                .keys()
-                .collect::<Result<_, _>>()?,
-            _ => Vec::new(),
+        let (wipe, wipe_secrets): (Vec<sled::IVec>, Vec<sled::IVec>) = match op {
+            PluginOp::Delete { id } => (
+                self.state
+                    .scan_prefix(state_prefix(id))
+                    .keys()
+                    .collect::<Result<_, _>>()?,
+                self.secrets
+                    .scan_prefix(state_prefix(id))
+                    .keys()
+                    .collect::<Result<_, _>>()?,
+            ),
+            _ => (Vec::new(), Vec::new()),
         };
         let abort = |e: PluginStoreError| ConflictableTransactionError::Abort(e);
-        let outcome = (&self.installs, &self.state, &self.meta).transaction(|(inst, st, meta)| {
-            let covered = meta
-                .get(APPLIED_KEY)?
-                .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
-                .map(u64::from_be_bytes);
-            if covered.is_some_and(|c| c >= index) {
-                return Ok((Applied::Replayed, None));
-            }
-            meta.insert(APPLIED_KEY, &index.to_be_bytes())?;
-            let read =
-                |id: &str| -> Result<Option<InstallRecord>, ConflictableTransactionError<_>> {
-                    match inst.get(id.as_bytes())? {
-                        Some(v) => Ok(Some(
-                            serde_json::from_slice(&v).map_err(|e| abort(e.into()))?,
-                        )),
-                        None => Ok(None),
-                    }
-                };
-            let done = |a| Ok((a, None));
-            match op {
-                PluginOp::Install(record) => {
-                    if let Err(why) = record.validate() {
-                        return done(Applied::Invalid(why));
-                    }
-                    if read(&record.id)?.is_some() {
-                        return done(Applied::Exists);
-                    }
-                    let bytes = serde_json::to_vec(record).map_err(|e| abort(e.into()))?;
-                    inst.insert(record.id.as_bytes(), bytes)?;
-                    done(Applied::Done(None))
+        let outcome = (&self.installs, &self.state, &self.meta, &self.secrets).transaction(
+            |(inst, st, meta, sec)| {
+                let covered = meta
+                    .get(APPLIED_KEY)?
+                    .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
+                    .map(u64::from_be_bytes);
+                if covered.is_some_and(|c| c >= index) {
+                    return Ok((Applied::Replayed, None));
                 }
-                PluginOp::SetEnabled { id, enabled } => {
-                    let Some(mut record) = read(id)? else {
-                        return done(Applied::NoSuchInstall);
+                meta.insert(APPLIED_KEY, &index.to_be_bytes())?;
+                let read =
+                    |id: &str| -> Result<Option<InstallRecord>, ConflictableTransactionError<_>> {
+                        match inst.get(id.as_bytes())? {
+                            Some(v) => Ok(Some(
+                                serde_json::from_slice(&v).map_err(|e| abort(e.into()))?,
+                            )),
+                            None => Ok(None),
+                        }
                     };
-                    record.enabled = enabled;
-                    let bytes = serde_json::to_vec(&record).map_err(|e| abort(e.into()))?;
-                    inst.insert(id.as_bytes(), bytes)?;
-                    done(Applied::Done(None))
+                let done = |a| Ok((a, None));
+                match op {
+                    PluginOp::Install(record) => {
+                        if let Err(why) = record.validate() {
+                            return done(Applied::Invalid(why));
+                        }
+                        if read(&record.id)?.is_some() {
+                            return done(Applied::Exists);
+                        }
+                        let bytes = serde_json::to_vec(record).map_err(|e| abort(e.into()))?;
+                        inst.insert(record.id.as_bytes(), bytes)?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::SetEnabled { id, enabled } => {
+                        let Some(mut record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        record.enabled = enabled;
+                        let bytes = serde_json::to_vec(&record).map_err(|e| abort(e.into()))?;
+                        inst.insert(id.as_bytes(), bytes)?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::SetWebhook { id, token_hash } => {
+                        let Some(mut record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        record.webhook = token_hash.map(|h| WebhookAuth {
+                            token_hash: h.to_string(),
+                        });
+                        if let Err(why) = record.validate() {
+                            return done(Applied::Invalid(why));
+                        }
+                        let bytes = serde_json::to_vec(&record).map_err(|e| abort(e.into()))?;
+                        inst.insert(id.as_bytes(), bytes)?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::Delete { id } => {
+                        let Some(record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        inst.remove(id.as_bytes())?;
+                        for key in &wipe {
+                            st.remove(key.clone())?;
+                        }
+                        for key in &wipe_secrets {
+                            sec.remove(key.clone())?;
+                        }
+                        Ok((Applied::Done(None), Some(record.sha256)))
+                    }
+                    PluginOp::State {
+                        id,
+                        expected_rev,
+                        tagged_term,
+                        entry_term,
+                        puts,
+                        routes,
+                    } => {
+                        if tagged_term != entry_term {
+                            return done(Applied::WrongTerm);
+                        }
+                        if let Err(why) = validate_puts(puts) {
+                            return done(Applied::Invalid(why));
+                        }
+                        let Some(record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        if let Some(set) = routes {
+                            if let Err(why) = check_routes(&record, set) {
+                                return done(Applied::Invalid(why));
+                            }
+                        }
+                        let current = st
+                            .get(rev_key(id))?
+                            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
+                            .map_or(0, u64::from_le_bytes);
+                        if current != expected_rev {
+                            return done(Applied::Stale);
+                        }
+                        let next = current + 1;
+                        for (k, v) in puts {
+                            st.insert(state_key(id, k), v.as_slice())?;
+                        }
+                        if let Some(set) = routes {
+                            let bytes = serde_json::to_vec(set).map_err(|e| abort(e.into()))?;
+                            st.insert(routes_key(id), bytes)?;
+                        }
+                        st.insert(rev_key(id), &next.to_le_bytes())?;
+                        done(Applied::Done(Some(next)))
+                    }
+                    PluginOp::SecretSet {
+                        id,
+                        slot,
+                        sealed,
+                        updated_at,
+                    } => {
+                        let Some(record) = read(id)? else {
+                            return done(Applied::NoSuchInstall);
+                        };
+                        if !record.approved.secrets.iter().any(|s| s.name == slot) {
+                            return done(Applied::Invalid(format!("slot {slot} is not approved")));
+                        }
+                        if let Err(why) = validate_sealed(sealed) {
+                            return done(Applied::Invalid(why));
+                        }
+                        let stored = StoredSecret {
+                            sealed: sealed.clone(),
+                            updated_at,
+                        };
+                        let bytes = serde_json::to_vec(&stored).map_err(|e| abort(e.into()))?;
+                        sec.insert(secret_key(id, slot), bytes)?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::SecretDelete { id, slot } => {
+                        if read(id)?.is_none() {
+                            return done(Applied::NoSuchInstall);
+                        }
+                        sec.remove(secret_key(id, slot))?;
+                        done(Applied::Done(None))
+                    }
+                    PluginOp::SecretRewrap { items, updated_at } => {
+                        let mut skipped = Vec::new();
+                        for item in items {
+                            let key = secret_key(&item.id, &item.slot);
+                            let current: Option<StoredSecret> = match sec.get(&key)? {
+                                Some(v) => {
+                                    Some(serde_json::from_slice(&v).map_err(|e| abort(e.into()))?)
+                                }
+                                None => None,
+                            };
+                            let unchanged = current
+                                .as_ref()
+                                .is_some_and(|c| c.sealed.nonce == item.from_nonce);
+                            if !unchanged || validate_sealed(&item.sealed).is_err() {
+                                skipped.push(format!("{}/{}", item.id, item.slot));
+                                continue;
+                            }
+                            let stored = StoredSecret {
+                                sealed: item.sealed.clone(),
+                                updated_at,
+                            };
+                            let bytes = serde_json::to_vec(&stored).map_err(|e| abort(e.into()))?;
+                            sec.insert(key, bytes)?;
+                        }
+                        done(Applied::Rewrapped(skipped))
+                    }
                 }
-                PluginOp::Delete { id } => {
-                    let Some(record) = read(id)? else {
-                        return done(Applied::NoSuchInstall);
-                    };
-                    inst.remove(id.as_bytes())?;
-                    for key in &wipe {
-                        st.remove(key.clone())?;
-                    }
-                    Ok((Applied::Done(None), Some(record.sha256)))
-                }
-                PluginOp::State {
-                    id,
-                    expected_rev,
-                    tagged_term,
-                    entry_term,
-                    puts,
-                } => {
-                    if tagged_term != entry_term {
-                        return done(Applied::WrongTerm);
-                    }
-                    if let Err(why) = validate_puts(puts) {
-                        return done(Applied::Invalid(why));
-                    }
-                    if read(id)?.is_none() {
-                        return done(Applied::NoSuchInstall);
-                    }
-                    let current = st
-                        .get(rev_key(id))?
-                        .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
-                        .map_or(0, u64::from_le_bytes);
-                    if current != expected_rev {
-                        return done(Applied::Stale);
-                    }
-                    let next = current + 1;
-                    for (k, v) in puts {
-                        st.insert(state_key(id, k), v.as_slice())?;
-                    }
-                    st.insert(rev_key(id), &next.to_le_bytes())?;
-                    done(Applied::Done(Some(next)))
-                }
-            }
-        });
+            },
+        );
         let (applied, freed) = outcome.map_err(|e| match e {
             TransactionError::Abort(e) => e,
             TransactionError::Storage(e) => e.into(),
@@ -527,6 +814,8 @@ impl PluginStore {
         self.installs.flush()?;
         self.state.flush()?;
         self.meta.flush()?;
+        self.secrets.flush()?;
+        self.bump();
         if let Some(sha) = freed {
             if !self.list()?.iter().any(|r| r.sha256 == sha) {
                 self.blobs.remove(sha.as_bytes())?;
@@ -545,11 +834,13 @@ impl PluginStore {
         let mut state = Vec::new();
         for r in &installs {
             let (rev, entries) = self.state(&r.id)?;
-            if rev > 0 || !entries.is_empty() {
+            let routes = self.routes(&r.id)?;
+            if rev > 0 || !entries.is_empty() || !routes.is_empty() {
                 state.push(StateSnap {
                     id: r.id.clone(),
                     rev,
                     entries,
+                    routes,
                 });
             }
         }
@@ -557,6 +848,7 @@ impl PluginStore {
             installs,
             state,
             applied_index: self.applied_index()?,
+            secrets: self.all_secrets()?,
         })
     }
 
@@ -567,6 +859,14 @@ impl PluginStore {
         let old_installs: Vec<sled::IVec> =
             self.installs.iter().keys().collect::<Result<_, _>>()?;
         let old_state: Vec<sled::IVec> = self.state.iter().keys().collect::<Result<_, _>>()?;
+        let old_secrets: Vec<sled::IVec> = self.secrets.iter().keys().collect::<Result<_, _>>()?;
+        let mut new_secrets = Vec::new();
+        for sec in &snap.secrets {
+            new_secrets.push((
+                secret_key(&sec.id, &sec.slot),
+                serde_json::to_vec(&sec.stored)?,
+            ));
+        }
         let mut new_installs = Vec::new();
         for r in &snap.installs {
             new_installs.push((r.id.as_bytes().to_vec(), serde_json::to_vec(r)?));
@@ -577,9 +877,18 @@ impl PluginStore {
                 new_state.push((state_key(&st.id, k), v.clone()));
             }
             new_state.push((rev_key(&st.id), st.rev.to_le_bytes().to_vec()));
+            if !st.routes.is_empty() {
+                new_state.push((routes_key(&st.id), serde_json::to_vec(&st.routes)?));
+            }
         }
-        (&self.installs, &self.state, &self.meta)
-            .transaction(|(inst, st, meta)| {
+        (&self.installs, &self.state, &self.meta, &self.secrets)
+            .transaction(|(inst, st, meta, sec)| {
+                for k in &old_secrets {
+                    sec.remove(k.clone())?;
+                }
+                for (k, v) in &new_secrets {
+                    sec.insert(k.as_slice(), v.as_slice())?;
+                }
                 for k in &old_installs {
                     inst.remove(k.clone())?;
                 }
@@ -605,7 +914,142 @@ impl PluginStore {
         self.installs.flush()?;
         self.state.flush()?;
         self.meta.flush()?;
+        self.secrets.flush()?;
+        self.bump();
         Ok(())
+    }
+
+    /// Stores a sealed secret on a standalone controller (under HA the state machine
+    /// applies `SecretSet`). The install must exist and have approved the slot.
+    pub fn put_secret(
+        &self,
+        id: &str,
+        slot: &str,
+        sealed: &Sealed,
+        updated_at: u64,
+    ) -> Result<Applied, PluginStoreError> {
+        let _guard = self.lock();
+        let Some(record) = self.get(id)? else {
+            return Ok(Applied::NoSuchInstall);
+        };
+        if !record.approved.secrets.iter().any(|s| s.name == slot) {
+            return Ok(Applied::Invalid(format!("slot {slot} is not approved")));
+        }
+        if let Err(why) = validate_sealed(sealed) {
+            return Ok(Applied::Invalid(why));
+        }
+        let stored = StoredSecret {
+            sealed: sealed.clone(),
+            updated_at,
+        };
+        self.secrets
+            .insert(secret_key(id, slot), serde_json::to_vec(&stored)?)?;
+        self.secrets.flush()?;
+        Ok(Applied::Done(None))
+    }
+
+    /// Standalone rewrap: re-encrypts each item whose slot still holds the ciphertext it
+    /// was derived from; returns the `install/slot` of those skipped.
+    pub fn rewrap(
+        &self,
+        items: &[RewrapItem],
+        updated_at: u64,
+    ) -> Result<Vec<String>, PluginStoreError> {
+        let _guard = self.lock();
+        let mut skipped = Vec::new();
+        for item in items {
+            let key = secret_key(&item.id, &item.slot);
+            let current = self.get_secret(&item.id, &item.slot)?;
+            let unchanged = current.is_some_and(|c| c.sealed.nonce == item.from_nonce);
+            if !unchanged || validate_sealed(&item.sealed).is_err() {
+                skipped.push(format!("{}/{}", item.id, item.slot));
+                continue;
+            }
+            let stored = StoredSecret {
+                sealed: item.sealed.clone(),
+                updated_at,
+            };
+            self.secrets.insert(key, serde_json::to_vec(&stored)?)?;
+        }
+        self.secrets.flush()?;
+        Ok(skipped)
+    }
+
+    /// Standalone `DELETE` of a secret; `false` when the install does not exist.
+    pub fn delete_secret(&self, id: &str, slot: &str) -> Result<bool, PluginStoreError> {
+        let _guard = self.lock();
+        if self.get(id)?.is_none() {
+            return Ok(false);
+        }
+        self.secrets.remove(secret_key(id, slot))?;
+        self.secrets.flush()?;
+        Ok(true)
+    }
+
+    pub fn get_secret(
+        &self,
+        id: &str,
+        slot: &str,
+    ) -> Result<Option<StoredSecret>, PluginStoreError> {
+        match self.secrets.get(secret_key(id, slot))? {
+            Some(v) => Ok(Some(serde_json::from_slice(&v)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every stored secret, ordered by install and slot.
+    pub fn all_secrets(&self) -> Result<Vec<SecretSnap>, PluginStoreError> {
+        let mut out = Vec::new();
+        for item in self.secrets.iter() {
+            let (k, v) = item?;
+            let Some(at) = k.iter().position(|b| *b == 0) else {
+                continue;
+            };
+            let (Ok(id), Ok(slot)) = (
+                std::str::from_utf8(&k[..at]),
+                std::str::from_utf8(&k[at + 1..]),
+            ) else {
+                continue;
+            };
+            out.push(SecretSnap {
+                id: id.into(),
+                slot: slot.into(),
+                stored: serde_json::from_slice(&v)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Remove every module blob no install references: blobs of uploads that were never
+    /// installed, and of installs deleted while a crash interrupted the cleanup after
+    /// their transaction. Run at startup; returns how many were removed.
+    pub fn sweep_blobs(&self) -> Result<usize, PluginStoreError> {
+        let _guard = self.lock();
+        let referenced: std::collections::HashSet<String> =
+            self.list()?.into_iter().map(|r| r.sha256).collect();
+        let mut removed = 0;
+        for key in self.blobs.iter().keys() {
+            let key = key?;
+            let kept = std::str::from_utf8(&key).is_ok_and(|sha| referenced.contains(sha));
+            if !kept {
+                self.blobs.remove(&key)?;
+                removed += 1;
+            }
+        }
+        self.blobs.flush()?;
+        Ok(removed)
+    }
+
+    /// The modules some install references that this node does not hold (each once): what
+    /// a replica fetches from its peers. Replicated installs arrive before their module.
+    pub fn missing_blobs(&self) -> Result<Vec<String>, PluginStoreError> {
+        let mut missing = std::collections::BTreeSet::new();
+        for r in self.list()? {
+            if !self.blobs.contains_key(r.sha256.as_bytes())? {
+                missing.insert(r.sha256);
+            }
+        }
+        Ok(missing.into_iter().collect())
     }
 
     /// Remove an install; its blob goes too when no other install references it.
@@ -621,11 +1065,18 @@ impl PluginStore {
         }
         self.state.apply_batch(wipe)?;
         self.state.flush()?;
+        let mut wipe_secrets = sled::Batch::default();
+        for item in self.secrets.scan_prefix(state_prefix(id)) {
+            wipe_secrets.remove(item?.0);
+        }
+        self.secrets.apply_batch(wipe_secrets)?;
+        self.secrets.flush()?;
         if !self.list()?.iter().any(|r| r.sha256 == record.sha256) {
             self.blobs.remove(record.sha256.as_bytes())?;
         }
         self.installs.flush()?;
         self.blobs.flush()?;
+        self.bump();
         Ok(true)
     }
 }
@@ -651,6 +1102,7 @@ mod tests {
             enabled: true,
             created_at: at,
             created_by: Some("leandro".into()),
+            webhook: None,
         }
     }
 
@@ -697,6 +1149,31 @@ mod tests {
         assert!(s.delete("b").unwrap());
         assert!(s.get_blob("sha1").unwrap().is_none());
         assert!(!s.delete("b").unwrap());
+    }
+
+    #[test]
+    fn a_sweep_removes_only_blobs_no_install_references() {
+        let (s, _d) = store();
+        s.put_blob("kept", b"abc").unwrap();
+        s.put_blob("orphan", b"def").unwrap();
+        s.create(&record("a", "kept", 1)).unwrap();
+        assert_eq!(s.sweep_blobs().unwrap(), 1);
+        assert!(s.get_blob("kept").unwrap().is_some());
+        assert!(s.get_blob("orphan").unwrap().is_none());
+        assert_eq!(s.sweep_blobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn missing_blobs_lists_each_referenced_module_this_node_lacks_once() {
+        let (s, _d) = store();
+        s.put_blob("here", b"abc").unwrap();
+        for (id, sha, at) in [("a", "gone", 1), ("b", "gone", 2), ("c", "here", 3)] {
+            // Replicated installs arrive without a blob, so bypass `create`'s check.
+            s.write_record(&record(id, sha, at)).unwrap();
+        }
+        assert_eq!(s.missing_blobs().unwrap(), ["gone"]);
+        s.put_blob("gone", b"xyz").unwrap();
+        assert!(s.missing_blobs().unwrap().is_empty());
     }
 
     #[test]
@@ -800,6 +1277,7 @@ mod tests {
                 tagged_term: 3,
                 entry_term: 3,
                 puts: &puts(&[(k, v)]),
+                routes: None,
             },
         )
         .unwrap()
@@ -867,11 +1345,62 @@ mod tests {
                     tagged_term: 2,
                     entry_term: 3,
                     puts: &puts(&[("n", b"9")]),
+                    routes: None,
                 },
             )
             .unwrap();
         assert_eq!(wrong, Applied::WrongTerm);
         assert_eq!(s.state(ID_A).unwrap().1, puts(&[("n", b"1")]));
+    }
+
+    #[test]
+    fn a_webhook_needs_an_approved_trigger_and_goes_with_the_install() {
+        let (s, _d) = store();
+        let mut r = valid(ID_A, 'a', 1);
+        s.apply_at(1, PluginOp::Install(&r)).unwrap();
+        let hash = "a".repeat(64);
+        let on = |h| PluginOp::SetWebhook {
+            id: ID_A,
+            token_hash: h,
+        };
+        // Not approved for on_webhook: refused, nothing stored.
+        assert!(matches!(
+            s.apply_at(2, on(Some(&hash))).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert!(s.get(ID_A).unwrap().unwrap().webhook.is_none());
+        assert!(matches!(
+            s.set_webhook(ID_A, Some(&hash)).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert_eq!(
+            s.apply_at(
+                3,
+                PluginOp::SetWebhook {
+                    id: ID_B,
+                    token_hash: None
+                }
+            )
+            .unwrap(),
+            Applied::NoSuchInstall
+        );
+        // Approved: stored, replaced by a rotation, cleared by a revoke.
+        r.id = ID_B.to_string();
+        r.approved.triggers.on_webhook = true;
+        s.apply_at(4, PluginOp::Install(&r)).unwrap();
+        let rotated = "b".repeat(64);
+        let on_b = |h| PluginOp::SetWebhook {
+            id: ID_B,
+            token_hash: h,
+        };
+        s.apply_at(5, on_b(Some(&hash))).unwrap();
+        s.apply_at(6, on_b(Some(&rotated))).unwrap();
+        assert_eq!(
+            s.get(ID_B).unwrap().unwrap().webhook.unwrap().token_hash,
+            rotated
+        );
+        s.apply_at(7, on_b(None)).unwrap();
+        assert!(s.get(ID_B).unwrap().unwrap().webhook.is_none());
     }
 
     #[test]
@@ -1009,8 +1538,10 @@ mod tests {
             state: vec![StateSnap {
                 id: ID_A.into(),
                 rev: 1,
+                routes: vec![],
                 entries: puts(&[("n", &[0, 1, 2, 255])]),
             }],
+            secrets: vec![],
             applied_index: Some(1),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -1024,5 +1555,200 @@ mod tests {
         s.put_blob("sha1", b"abc").unwrap();
         s.replace(&PluginSnapshot::default()).unwrap();
         assert_eq!(s.get_blob("sha1").unwrap().unwrap(), b"abc");
+    }
+    fn secret_record(id: &str) -> InstallRecord {
+        let mut r = record(id, "sha1", 1);
+        r.approved = Capabilities::parse(
+            br#"{"log":true,"http":{"hosts":[{"host":"panel.example"}]},"secrets":[{"name":"PANEL_TOKEN","hosts":["panel.example"]}]}"#,
+        )
+        .unwrap();
+        r
+    }
+
+    fn sealed(nonce_byte: u8) -> Sealed {
+        use base64::Engine;
+        let b = base64::engine::general_purpose::STANDARD;
+        Sealed {
+            key_id: "0123456789abcdef".into(),
+            nonce: b.encode([nonce_byte; 24]),
+            ciphertext: b.encode([9u8; 40]),
+        }
+    }
+
+    #[test]
+    fn a_rewrap_skips_a_slot_whose_ciphertext_changed_since_it_was_read() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&secret_record(ID_A)).unwrap();
+        let old = sealed(1);
+        assert_eq!(
+            s.put_secret(ID_A, "PANEL_TOKEN", &old, 1).unwrap(),
+            Applied::Done(None)
+        );
+        let item = |from: &Sealed, to: Sealed| RewrapItem {
+            id: ID_A.into(),
+            slot: "PANEL_TOKEN".into(),
+            from_nonce: from.nonce.clone(),
+            sealed: to,
+        };
+        // An operator write lands between the rewrap's read and its apply.
+        let newer = sealed(2);
+        s.put_secret(ID_A, "PANEL_TOKEN", &newer, 2).unwrap();
+        let skipped = s.rewrap(&[item(&old, sealed(3))], 3).unwrap();
+        assert_eq!(skipped, vec![format!("{ID_A}/PANEL_TOKEN")]);
+        assert_eq!(
+            s.get_secret(ID_A, "PANEL_TOKEN").unwrap().unwrap().sealed,
+            newer
+        );
+        // An unchanged slot is rewrapped.
+        let fresh = sealed(4);
+        assert!(s
+            .rewrap(&[item(&newer, fresh.clone())], 4)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            s.get_secret(ID_A, "PANEL_TOKEN").unwrap().unwrap().sealed,
+            fresh
+        );
+    }
+
+    #[test]
+    fn secrets_need_an_approved_slot_and_survive_a_snapshot_round_trip() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&secret_record(ID_A)).unwrap();
+        assert!(matches!(
+            s.put_secret(ID_A, "OTHER", &sealed(1), 1).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert_eq!(
+            s.put_secret("00000000000000bb", "PANEL_TOKEN", &sealed(1), 1)
+                .unwrap(),
+            Applied::NoSuchInstall
+        );
+        s.put_secret(ID_A, "PANEL_TOKEN", &sealed(1), 1).unwrap();
+        let snap = s.snapshot().unwrap();
+        assert_eq!(snap.secrets.len(), 1);
+        let (t, _d2) = store();
+        t.replace(&snap).unwrap();
+        assert_eq!(
+            t.get_secret(ID_A, "PANEL_TOKEN").unwrap().unwrap().sealed,
+            sealed(1)
+        );
+        // Replacing from a snapshot without it clears the secret.
+        t.replace(&PluginSnapshot::default()).unwrap();
+        assert!(t.all_secrets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_an_install_wipes_its_secrets() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&secret_record(ID_A)).unwrap();
+        s.put_secret(ID_A, "PANEL_TOKEN", &sealed(1), 1).unwrap();
+        s.delete(ID_A).unwrap();
+        assert!(s.all_secrets().unwrap().is_empty());
+    }
+    fn route_record(id: &str) -> InstallRecord {
+        let mut r = record(id, "sha1", 1);
+        r.approved = Capabilities::parse(
+            br#"{"log":true,"routes":{"hosts":["*.mc.example.com"],"backends":["10.0.0.0/16"],"max_entries":2}}"#,
+        )
+        .unwrap();
+        r
+    }
+
+    fn route(host: &str, backend: &str) -> RouteEntry {
+        RouteEntry {
+            host: host.into(),
+            backend: backend.into(),
+        }
+    }
+
+    #[test]
+    fn a_route_set_commits_with_the_state_and_is_checked_against_the_approval() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&route_record(ID_A)).unwrap();
+        let seen = s.watch();
+        let ok = [route("a.mc.example.com", "10.0.1.1:25565")];
+        assert_eq!(
+            s.commit_state_routes(ID_A, 0, &BTreeMap::new(), Some(&ok))
+                .unwrap(),
+            1
+        );
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        assert!(seen.has_changed().unwrap());
+        // Outside the approved hosts, networks or count: refused, nothing changes.
+        for bad in [
+            vec![route("a.other.com", "10.0.1.1:1")],
+            vec![route("a.mc.example.com", "192.168.0.1:1")],
+            vec![
+                route("a.mc.example.com", "10.0.0.1:1"),
+                route("b.mc.example.com", "10.0.0.1:1"),
+                route("c.mc.example.com", "10.0.0.1:1"),
+            ],
+        ] {
+            assert!(matches!(
+                s.commit_state_routes(ID_A, 1, &BTreeMap::new(), Some(&bad)),
+                Err(CommitError::Invalid(_))
+            ));
+        }
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        // None leaves the set alone; an empty set clears it.
+        s.commit_state_routes(ID_A, 1, &BTreeMap::new(), None)
+            .unwrap();
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        s.commit_state_routes(ID_A, 2, &BTreeMap::new(), Some(&[]))
+            .unwrap();
+        assert!(s.routes(ID_A).unwrap().is_empty());
+    }
+
+    #[test]
+    fn routes_survive_a_snapshot_and_go_with_the_install() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&route_record(ID_A)).unwrap();
+        let set = [route("a.mc.example.com", "10.0.1.1:25565")];
+        s.commit_state_routes(ID_A, 0, &BTreeMap::new(), Some(&set))
+            .unwrap();
+        let snap = s.snapshot().unwrap();
+        let (t, _d2) = store();
+        t.replace(&snap).unwrap();
+        assert_eq!(t.routes(ID_A).unwrap(), set);
+        s.delete(ID_A).unwrap();
+        assert!(s.routes(ID_A).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_replicated_route_commit_is_validated_on_apply_like_any_replica_would() {
+        let (s, _d) = store();
+        let mut rec = route_record(ID_A);
+        rec.sha256 = "a".repeat(64);
+        assert_eq!(
+            s.apply_at(1, PluginOp::Install(&rec)).unwrap(),
+            Applied::Done(None)
+        );
+        let puts = BTreeMap::new();
+        let bad = [route("a.other.com", "10.0.1.1:1")];
+        let op = |routes| PluginOp::State {
+            id: ID_A,
+            expected_rev: 0,
+            tagged_term: 1,
+            entry_term: 1,
+            puts: &puts,
+            routes,
+        };
+        assert!(matches!(
+            s.apply_at(2, op(Some(&bad))).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert!(s.routes(ID_A).unwrap().is_empty());
+        let good = [route("a.mc.example.com", "10.0.1.1:1")];
+        assert_eq!(
+            s.apply_at(3, op(Some(&good))).unwrap(),
+            Applied::Done(Some(1))
+        );
+        assert_eq!(s.routes(ID_A).unwrap(), good);
     }
 }

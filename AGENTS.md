@@ -112,7 +112,7 @@ crates/
     ha/cluster_state.rs     the cluster's recorded tunnel network + `initialized` marker (replicated; registry entries apply against it, never a node's flag)
     ha/apply_registry.rs    applying `Register*`/`Release`/`Touch` entries into the registries and the address book, crash-idempotent per database
     ha/init.rs              leader-side initialization: asks every voter what pre-HA data it holds (`choose_source`), proposes `SetTunnelNetwork` or `Import`; `--ha-import-source`
-    ha/state_machine.rs     also applies the replicated plugin entries (`PluginInstall`/`PluginSetEnabled`/`PluginDelete`/`PluginState`, the last compare-and-set on state revision and entry term) into `plugins::PluginStore`; snapshots carry installs and state, not module blobs
+    ha/state_machine.rs     also applies the replicated plugin entries (`PluginInstall`/`PluginSetEnabled`/`PluginDelete`/`PluginState`, the last compare-and-set on state revision and entry term) into `plugins::PluginStore`; snapshots carry installs, state and sealed secrets, not module blobs (`plugins/peer.rs` replicates those)
     ha/import.rs            pre-HA data on upgrade: set-aside (`*.pre-ha`), `ImportContent`, `GET /raft/pre-ha`, the once-only `Import` apply
     ha/members.rs           `/admin/ha/members` (list, add, remove, re-address) with the `/raft/whoami` identity check; `--ha-join` nodes are added here
   wayhouse-aggregator/            binary — fleet read/operational-verb path (phase 10+11, docs/10 "The aggregator"); no wayhouse-core/wayhouse-config dependency, stays decoupled from the data-plane crates
@@ -148,7 +148,7 @@ crates/
                               `tests/tunnel.rs` is `#[ignore]`d and runs via `make tunnel-e2e`
   wayhouse-sniffer-abi/       wayhouse-sniffer-abi: the guest-side ABI crate the official sniffers (github.com/wayhouse-proxy/sniffers) link; the sniffers themselves are not in this repo
   wayhouse-plugin-abi/        wayhouse-plugin-abi: the guest-side ABI crate plugins link (version section, `alloc`); see `docs/plugins.md`
-  wayhouse-plugin-host/       wayhouse-plugin-host: loads and runs WASM plugins (module/capability inspection, `PluginHost`, `Plugin::init`/`on_timer`, `log`/`state` imports, `bounds`, `CompilePool`, the `wayhouse-plugin-check` conformance binary). The controller serves install records over `/plugins` (opt-in `--plugins`, standalone or HA, `crates/wayhouse-controller/src/plugins*`); the `plugins/runner.rs` tick runner calls enabled plugins that declared `on_timer` (on the Raft leader only under HA) and commits their state with a revision check, as a term-tagged Raft entry under HA
+  wayhouse-plugin-host/       wayhouse-plugin-host: loads and runs WASM plugins (module/capability inspection, `PluginHost`, `Plugin::init`/`on_timer`, `log`/`state` imports, `bounds`, `CompilePool`, the `wayhouse-plugin-check` conformance binary). The controller serves install records over `/plugins` (opt-in `--plugins`, standalone or HA, `crates/wayhouse-controller/src/plugins*`); the `plugins/peer.rs` moves module blobs between HA replicas (quorum push, catch-up fetch, the rolling-upgrade gate), the `plugins/secrets.rs` keyring seals plugin secrets (XChaCha20-Poly1305; only ciphertext is stored, logged and replicated), the `plugins/net.rs` reqwest transport backs the `http` capability (`wayhouse-plugin-host` `http.rs`/`secret.rs`: policy engine, `${secret:NAME}` expansion, scrubber), the `plugins/hooks.rs` serves the optional webhook listener (token auth, limits, leader forwarding) and `/raft/plugin-hook`, the `plugins/events.rs` feeds `config_revision`/`plugin_changed` events to `on_event` plugins, the `plugins/routes.rs` materialises plugin route sets into the overlay proxies follow (`wayhouse-config` `plugin_routes.rs` merges it into listeners that opted in; `wayhouse` `plugin_overlay.rs` subscribes), the `plugins/runner.rs` tick runner calls enabled plugins that declared `on_timer` (on the Raft leader only under HA) and commits their state with a revision check, as a term-tagged Raft entry under HA
 ```
 
 Dependency direction: `wayhouse` → `wayhouse-core` → `wayhouse-config` (`wayhouse-bench` → `wayhouse-core`
@@ -225,7 +225,7 @@ client from `crates/wayhouse/proto/resolver.proto`.
    and get documented in [`docs/06-operations-observability.md`](docs/06-operations-observability.md).
    Never inline a metric-name string literal at a call site.
 7. **Crate boundaries:** `wayhouse-config` depends only on `serde` + `serde_norway` +
-   `thiserror` + `base64` (WireGuard key validation).
+   `thiserror` + `base64` (WireGuard key validation) + `sha2` (plugin route pool names).
    `wayhouse-core` has no HTTP / CLI / `axum` / `reqwest` dependency — that belongs to
    `wayhouse`. External resolvers follow the same seam as sniffers: the `Resolver`
    trait lives in `wayhouse-core`, the HTTP/gRPC clients in `wayhouse`.

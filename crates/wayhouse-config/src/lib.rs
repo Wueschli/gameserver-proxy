@@ -14,6 +14,7 @@ mod cidr;
 mod keys;
 mod matcher;
 mod parse;
+pub mod plugin_routes;
 mod resolved;
 mod schema;
 mod validate;

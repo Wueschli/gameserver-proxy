@@ -39,6 +39,10 @@ openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 async-trait.workspace = true
 rand.workspace = true
 base64 = "0.22"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+sha2.workspace = true
+zeroize = "1"
+url = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

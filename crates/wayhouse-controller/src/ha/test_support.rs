@@ -88,6 +88,7 @@ pub(crate) async fn single_node_with_plugins(
         ha_token: None,
         forward: client::forward_client(client::FORWARD_TIMEOUT),
         pre_ha: crate::ha::import::LocalPreHa::default(),
+        secret_keys: crate::plugins::secrets::KeyringHandle::default(),
     });
     (handle, cluster, plugins, dir)
 }
