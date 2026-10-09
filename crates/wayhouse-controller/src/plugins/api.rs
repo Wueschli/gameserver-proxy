@@ -19,10 +19,7 @@ use wayhouse_plugin_host::{
 };
 
 use super::runner::Runner;
-use super::{InstallRecord, PluginStore, PluginStoreError};
-
-/// Largest `config` an install may carry, serialized.
-const MAX_CONFIG_BYTES: usize = 64 * 1024;
+use super::{valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
 
 #[derive(Clone)]
 pub struct PluginsState {
@@ -115,14 +112,6 @@ struct InstallRequest {
 
 fn yes() -> bool {
     true
-}
-
-fn valid_name(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && !name.starts_with('-')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn actor(headers: &HeaderMap) -> Option<String> {

@@ -543,11 +543,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(wayhouse_controller::addresses::api::router(addresses_state))
         .merge(wayhouse_controller::adopt::router(adopt_state));
     app = app.merge(
-        match wayhouse_controller::plugins::availability(
-            args.plugins,
-            ha_enabled,
-            args.role == Role::Slave,
-        ) {
+        match wayhouse_controller::plugins::availability(args.plugins, args.role == Role::Slave) {
             Ok(()) => {
                 let host = Arc::new(wayhouse_plugin_host::PluginHost::new(
                     wayhouse_plugin_host::Limits::default(),

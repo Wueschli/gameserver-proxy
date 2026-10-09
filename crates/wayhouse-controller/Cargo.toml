@@ -38,6 +38,7 @@ reqwest.workspace = true
 openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 async-trait.workspace = true
 rand.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile.workspace = true
