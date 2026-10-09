@@ -196,6 +196,7 @@ pub enum WriteRequest {
         id: String,
         expected_rev: u64,
         term: u64,
+        #[serde(with = "crate::plugins::b64_entries")]
         puts: std::collections::BTreeMap<String, Vec<u8>>,
     },
 }
@@ -211,6 +212,8 @@ pub enum PluginReject {
     Stale,
     /// The entry was not appended in the term the call was proposed in.
     WrongTerm,
+    /// The record or writes are malformed (a proposer that skipped validation).
+    Invalid,
 }
 
 /// What applying one entry did — the HTTP layer maps it back to the status
@@ -246,8 +249,9 @@ pub enum WriteResponse {
     /// `SetTunnelNetwork` was applied: the network is recorded (now, or by
     /// an earlier entry — it is recorded once).
     Recorded,
-    /// A plugin entry was applied.
-    PluginApplied,
+    /// A plugin entry was applied; a state commit carries the install's new
+    /// state revision.
+    PluginApplied(Option<u64>),
     /// A plugin entry changed nothing, deterministically.
     PluginRejected(PluginReject),
 }

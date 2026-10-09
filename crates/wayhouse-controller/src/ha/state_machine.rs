@@ -44,7 +44,7 @@ use crate::addresses::{AddressBook, BookSnapshot, Network, Rejection, Role};
 use crate::api::{AppState, Stage};
 use crate::intent::api::IntentState;
 use crate::peers::api::PeersState;
-use crate::plugins::{ApplyOutcome, CommitError, PluginSnapshot, PluginStore};
+use crate::plugins::{Applied, PluginOp, PluginSnapshot, PluginStore};
 use crate::proxy_peers::api::ProxyPeersState;
 use crate::registry::RegistrySnapshot;
 use crate::store::SiblingWrite;
@@ -315,6 +315,33 @@ impl StateMachineStore {
                     .map_err(|e| StorageIOError::read_state_machine(&e))?,
             },
             meta: self.read_meta()?,
+        })
+    }
+
+    /// A plugin entry at `index`. A refusal is a normal response, never a storage
+    /// error, so one bad entry cannot wedge the state machine; a replay answers
+    /// `Revision(None)` like the other stores' (nobody awaits it).
+    #[allow(clippy::result_large_err)] // same as `read_meta` above
+    fn apply_plugin(
+        &self,
+        index: u64,
+        op: PluginOp<'_>,
+    ) -> Result<WriteResponse, StorageError<NodeId>> {
+        let applied = self
+            .plugins
+            .apply_at(index, op)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        Ok(match applied {
+            Applied::Replayed => WriteResponse::Revision(None),
+            Applied::Done(revision) => WriteResponse::PluginApplied(revision),
+            Applied::Exists => WriteResponse::PluginRejected(PluginReject::Exists),
+            Applied::NoSuchInstall => WriteResponse::PluginRejected(PluginReject::NoSuchInstall),
+            Applied::Stale => WriteResponse::PluginRejected(PluginReject::Stale),
+            Applied::WrongTerm => WriteResponse::PluginRejected(PluginReject::WrongTerm),
+            Applied::Invalid(why) => {
+                tracing::warn!(index, %why, "refused a malformed plugin entry");
+                WriteResponse::PluginRejected(PluginReject::Invalid)
+            }
         })
     }
 
@@ -652,61 +679,29 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                             self.set_tunnel_network(network, index)?
                         }
                         WriteRequest::PluginInstall(record) => {
-                            match self
-                                .plugins
-                                .apply_install(&record)
-                                .map_err(|e| StorageIOError::write_state_machine(&e))?
-                            {
-                                ApplyOutcome::Applied => WriteResponse::PluginApplied,
-                                ApplyOutcome::Exists => {
-                                    WriteResponse::PluginRejected(PluginReject::Exists)
-                                }
-                            }
+                            self.apply_plugin(index, PluginOp::Install(&record))?
                         }
                         WriteRequest::PluginSetEnabled { id, enabled } => {
-                            match self
-                                .plugins
-                                .set_enabled(&id, enabled)
-                                .map_err(|e| StorageIOError::write_state_machine(&e))?
-                            {
-                                Some(_) => WriteResponse::PluginApplied,
-                                None => WriteResponse::PluginRejected(PluginReject::NoSuchInstall),
-                            }
+                            self.apply_plugin(index, PluginOp::SetEnabled { id: &id, enabled })?
                         }
                         WriteRequest::PluginDelete { id } => {
-                            if self
-                                .plugins
-                                .delete(&id)
-                                .map_err(|e| StorageIOError::write_state_machine(&e))?
-                            {
-                                WriteResponse::PluginApplied
-                            } else {
-                                WriteResponse::PluginRejected(PluginReject::NoSuchInstall)
-                            }
+                            self.apply_plugin(index, PluginOp::Delete { id: &id })?
                         }
                         WriteRequest::PluginState {
                             id,
                             expected_rev,
                             term,
                             puts,
-                        } => {
-                            if entry_term != term {
-                                WriteResponse::PluginRejected(PluginReject::WrongTerm)
-                            } else {
-                                match self.plugins.commit_state(&id, expected_rev, &puts) {
-                                    Ok(_) => WriteResponse::PluginApplied,
-                                    Err(CommitError::Stale) => {
-                                        WriteResponse::PluginRejected(PluginReject::Stale)
-                                    }
-                                    Err(CommitError::NoSuchInstall) => {
-                                        WriteResponse::PluginRejected(PluginReject::NoSuchInstall)
-                                    }
-                                    Err(CommitError::Store(e)) => {
-                                        return Err(StorageIOError::write_state_machine(&e).into())
-                                    }
-                                }
-                            }
-                        }
+                        } => self.apply_plugin(
+                            index,
+                            PluginOp::State {
+                                id: &id,
+                                expected_rev,
+                                tagged_term: term,
+                                entry_term,
+                                puts: &puts,
+                            },
+                        )?,
                         WriteRequest::Import(content) => {
                             let response = import::apply_import(
                                 &self.peers,
@@ -1882,7 +1877,7 @@ mod tests {
         crate::plugins::InstallRecord {
             id: id.into(),
             name: "demo".into(),
-            sha256: "sha1".into(),
+            sha256: "a".repeat(64),
             size: 3,
             approved: wayhouse_plugin_host::Capabilities::parse(br#"{"log":true}"#).unwrap(),
             config: serde_json::json!({}),
@@ -1909,47 +1904,54 @@ mod tests {
         }
     }
 
+    const ID_A: &str = "00000000000000aa";
+    const ID_X: &str = "00000000000000ab";
+    const ID_Y: &str = "00000000000000ac";
+    const ID_OLD: &str = "00000000000000ad";
+    const ID_NOPE: &str = "00000000000000ae";
+
     /// Entries are appended by the leader of term 1 in these tests.
     const TERM: u64 = 1;
 
     #[tokio::test]
     async fn plugin_entries_install_commit_state_toggle_and_delete() {
         let (mut sm, _d) = test_sm();
-        let applied = WriteResponse::PluginApplied;
+        let applied = WriteResponse::PluginApplied(None);
         assert_eq!(
-            apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record("a"))).await,
+            apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record(ID_A))).await,
             applied
         );
         assert_eq!(
-            apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await,
-            applied
+            apply_one(&mut sm, 2, plugin_state(ID_A, 0, TERM, &[("n", b"1")])).await,
+            WriteResponse::PluginApplied(Some(1)),
+            "a state commit answers with the new revision"
         );
         assert_eq!(
-            apply_one(&mut sm, 3, plugin_state("a", 1, TERM, &[("n", b"2")])).await,
-            applied
+            apply_one(&mut sm, 3, plugin_state(ID_A, 1, TERM, &[("n", b"2")])).await,
+            WriteResponse::PluginApplied(Some(2))
         );
-        let (rev, state) = sm.plugins().state("a").unwrap();
+        let (rev, state) = sm.plugins().state(ID_A).unwrap();
         assert_eq!((rev, state["n"].clone()), (2, b"2".to_vec()));
         assert_eq!(
             apply_one(
                 &mut sm,
                 4,
                 WriteRequest::PluginSetEnabled {
-                    id: "a".into(),
+                    id: ID_A.into(),
                     enabled: false
                 }
             )
             .await,
             applied
         );
-        assert!(!sm.plugins().get("a").unwrap().unwrap().enabled);
+        assert!(!sm.plugins().get(ID_A).unwrap().unwrap().enabled);
         assert_eq!(
-            apply_one(&mut sm, 5, WriteRequest::PluginDelete { id: "a".into() }).await,
+            apply_one(&mut sm, 5, WriteRequest::PluginDelete { id: ID_A.into() }).await,
             applied
         );
-        assert!(sm.plugins().get("a").unwrap().is_none());
+        assert!(sm.plugins().get(ID_A).unwrap().is_none());
         assert_eq!(
-            sm.plugins().state("a").unwrap().0,
+            sm.plugins().state(ID_A).unwrap().0,
             0,
             "delete removes state"
         );
@@ -1959,33 +1961,33 @@ mod tests {
     async fn plugin_entries_that_cannot_apply_are_rejections_not_errors() {
         let (mut sm, _d) = test_sm();
         let rejected = |r| WriteResponse::PluginRejected(r);
-        apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record("a"))).await;
+        apply_one(&mut sm, 1, WriteRequest::PluginInstall(plugin_record(ID_A))).await;
         // Same id again.
         assert_eq!(
             apply_one(&mut sm, 2, {
-                let mut other = plugin_record("a");
+                let mut other = plugin_record(ID_A);
                 other.name = "other".into();
                 WriteRequest::PluginInstall(other)
             })
             .await,
             rejected(PluginReject::Exists)
         );
-        assert_eq!(sm.plugins().get("a").unwrap().unwrap().name, "demo");
+        assert_eq!(sm.plugins().get(ID_A).unwrap().unwrap().name, "demo");
         // Stale revision.
-        apply_one(&mut sm, 3, plugin_state("a", 0, TERM, &[("n", b"1")])).await;
+        apply_one(&mut sm, 3, plugin_state(ID_A, 0, TERM, &[("n", b"1")])).await;
         assert_eq!(
-            apply_one(&mut sm, 4, plugin_state("a", 0, TERM, &[("n", b"9")])).await,
+            apply_one(&mut sm, 4, plugin_state(ID_A, 0, TERM, &[("n", b"9")])).await,
             rejected(PluginReject::Stale)
         );
         // Tagged with another term than the one the entry was appended in.
         assert_eq!(
-            apply_one(&mut sm, 5, plugin_state("a", 1, TERM + 1, &[("n", b"9")])).await,
+            apply_one(&mut sm, 5, plugin_state(ID_A, 1, TERM + 1, &[("n", b"9")])).await,
             rejected(PluginReject::WrongTerm)
         );
-        assert_eq!(sm.plugins().state("a").unwrap().1["n"], b"1");
+        assert_eq!(sm.plugins().state(ID_A).unwrap().1["n"], b"1");
         // Unknown installs.
         assert_eq!(
-            apply_one(&mut sm, 6, plugin_state("nope", 0, TERM, &[("n", b"1")])).await,
+            apply_one(&mut sm, 6, plugin_state(ID_NOPE, 0, TERM, &[("n", b"1")])).await,
             rejected(PluginReject::NoSuchInstall)
         );
         assert_eq!(
@@ -1993,7 +1995,7 @@ mod tests {
                 &mut sm,
                 7,
                 WriteRequest::PluginSetEnabled {
-                    id: "nope".into(),
+                    id: ID_NOPE.into(),
                     enabled: true
                 }
             )
@@ -2001,28 +2003,52 @@ mod tests {
             rejected(PluginReject::NoSuchInstall)
         );
         assert_eq!(
-            apply_one(&mut sm, 8, WriteRequest::PluginDelete { id: "nope".into() }).await,
+            apply_one(
+                &mut sm,
+                8,
+                WriteRequest::PluginDelete { id: ID_NOPE.into() }
+            )
+            .await,
             rejected(PluginReject::NoSuchInstall)
         );
     }
 
     #[tokio::test]
-    async fn a_replayed_plugin_entry_after_a_crash_changes_nothing() {
+    async fn a_replayed_plugin_entry_after_a_crash_changes_nothing_and_is_not_stale() {
         let (mut sm, _d) = test_sm();
-        let install = || WriteRequest::PluginInstall(plugin_record("a"));
+        let install = || WriteRequest::PluginInstall(plugin_record(ID_A));
         apply_one(&mut sm, 1, install()).await;
-        apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await;
-        // openraft re-delivers entries the lost `last_applied_log` did not cover.
+        apply_one(&mut sm, 2, plugin_state(ID_A, 0, TERM, &[("n", b"1")])).await;
+        // openraft re-delivers entries the lost `last_applied_log` did not cover; the
+        // plugin cursor, not the response of the (now stale) entry, absorbs them.
+        let replay = WriteResponse::Revision(None);
+        assert_eq!(apply_one(&mut sm, 1, install()).await, replay);
         assert_eq!(
-            apply_one(&mut sm, 1, install()).await,
-            WriteResponse::PluginApplied
+            apply_one(&mut sm, 2, plugin_state(ID_A, 0, TERM, &[("n", b"9")])).await,
+            replay
         );
-        assert_eq!(
-            apply_one(&mut sm, 2, plugin_state("a", 0, TERM, &[("n", b"1")])).await,
-            WriteResponse::PluginRejected(PluginReject::Stale)
-        );
-        let (rev, state) = sm.plugins().state("a").unwrap();
+        let (rev, state) = sm.plugins().state(ID_A).unwrap();
         assert_eq!((rev, state["n"].clone()), (1, b"1".to_vec()));
+        assert_eq!(sm.plugins().applied_index().unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_install_or_oversized_state_is_refused_not_applied() {
+        let (mut sm, _d) = test_sm();
+        let mut bad = plugin_record(ID_A);
+        bad.id = "../etc".into();
+        assert_eq!(
+            apply_one(&mut sm, 1, WriteRequest::PluginInstall(bad)).await,
+            WriteResponse::PluginRejected(PluginReject::Invalid)
+        );
+        assert!(sm.plugins().list().unwrap().is_empty());
+        apply_one(&mut sm, 2, WriteRequest::PluginInstall(plugin_record(ID_A))).await;
+        let big = vec![0u8; wayhouse_plugin_host::MAX_STATE_BYTES + 1];
+        assert_eq!(
+            apply_one(&mut sm, 3, plugin_state(ID_A, 0, TERM, &[("n", &big)])).await,
+            WriteResponse::PluginRejected(PluginReject::Invalid)
+        );
+        assert_eq!(sm.plugins().state(ID_A).unwrap().0, 0);
     }
 
     #[tokio::test]
@@ -2030,16 +2056,16 @@ mod tests {
         let (mut a, _a) = test_sm();
         let (mut b, _b) = test_sm();
         let log = [
-            WriteRequest::PluginInstall(plugin_record("x")),
-            WriteRequest::PluginInstall(plugin_record("y")),
-            plugin_state("x", 0, TERM, &[("n", b"1")]),
-            plugin_state("x", 1, TERM, &[("n", b"2"), ("m", b"3")]),
-            plugin_state("x", 0, TERM, &[("n", b"stale")]),
+            WriteRequest::PluginInstall(plugin_record(ID_X)),
+            WriteRequest::PluginInstall(plugin_record(ID_Y)),
+            plugin_state(ID_X, 0, TERM, &[("n", b"1")]),
+            plugin_state(ID_X, 1, TERM, &[("n", b"2"), ("m", b"3")]),
+            plugin_state(ID_X, 0, TERM, &[("n", b"stale")]),
             WriteRequest::PluginSetEnabled {
-                id: "y".into(),
+                id: ID_Y.into(),
                 enabled: false,
             },
-            WriteRequest::PluginDelete { id: "nope".into() },
+            WriteRequest::PluginDelete { id: ID_NOPE.into() },
         ];
         for (i, req) in log.iter().enumerate() {
             let index = i as u64 + 1;
@@ -2060,7 +2086,12 @@ mod tests {
             .await
             .unwrap();
         let (mut c, _c) = test_sm();
-        apply_one(&mut c, 1, WriteRequest::PluginInstall(plugin_record("old"))).await;
+        apply_one(
+            &mut c,
+            1,
+            WriteRequest::PluginInstall(plugin_record(ID_OLD)),
+        )
+        .await;
         c.install_snapshot(&snapshot.meta, snapshot.snapshot)
             .await
             .unwrap();
@@ -2068,8 +2099,8 @@ mod tests {
             c.plugins().snapshot().unwrap(),
             a.plugins().snapshot().unwrap()
         );
-        assert!(c.plugins().get("old").unwrap().is_none());
-        assert_eq!(c.plugins().state("x").unwrap().0, 2);
+        assert!(c.plugins().get(ID_OLD).unwrap().is_none());
+        assert_eq!(c.plugins().state(ID_X).unwrap().0, 2);
     }
 
     #[test]

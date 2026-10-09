@@ -7,8 +7,9 @@ Plugins are not [sniffers](sniffers.md): sniffers run on the proxy data path.
 
 **Status.** The host runtime is built (`crates/wayhouse-plugin-host`) and a standalone
 controller can store plugin installs behind an admin API and ticks the enabled ones
-(below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). Not built yet: the HA leader tick with a term-checked commit and replicated
-install state, secrets, `http`, `routes`, webhooks, events and `backends`.
+(below); the web UI has a Plugins page on top of the install API (see "The Plugins page"). An HA tier replicates installs and state through Raft, serves the same API on every replica
+and ticks on the leader only (see "High availability"). Not built yet: module bytes
+replication between controllers, secrets, `http`, `routes`, webhooks, events and `backends`.
 
 ## Module contract (ABI 0.1)
 
@@ -83,7 +84,7 @@ declare. Plugin repo CI is meant to run it on every build.
 
 ## Installing a plugin (controller API)
 
-Start a standalone controller with `--plugins` (off by default). With `--ha-peers`, with
+Start a controller with `--plugins` (off by default; standalone or with `--ha-peers`). With
 `--role slave`, or without the flag, `/plugins` answers `501` with the reason. The routes sit
 behind the same admin bearer token as `/config`; `X-Actor` is recorded as `created_by`.
 
@@ -99,7 +100,8 @@ behind the same admin bearer token as `/config`; `X-Actor` is recorded as `creat
 An install has a random id (route ownership will be `plugin:<id>`), a name (`a-z`, `0-9`, `-`, up
 to 64 characters), the approved capability set bound to the module sha256, and a non-secret
 `config` (up to 64 KiB) that will be handed to `init`. Installs and blobs live in the
-controller's `sled` database; they are not replicated.
+controller's `sled` database; a standalone controller keeps them there, an HA tier keeps them in
+the Raft state machine's database, replicated (the blobs are not, see "High availability").
 
 ## Ticks (standalone controller)
 
@@ -117,22 +119,50 @@ A call returns its state writes; the controller applies them as one batch only i
 install's state revision is still the one the call read (compare-and-set), then bumps the
 revision. A call that failed (trap, timeout, over a limit) commits nothing, is recorded in
 the status, and the plugin is called again at its next interval. Deleting an install
-removes its state. This is the single-node form of the design's term-checked commit; HA
-controllers answer `501` until the replicated slice.
+removes its state. This is the single-node form of the design's term-checked commit; the HA form is below.
 
 ## The Plugins page (web UI)
 
-`wayhouse-ui` proxies the controller's `/plugins` API (`/api/plugins*`, needs `--controller-url`). Listing is viewer-level; upload, install, enable, disable and delete need the admin role. The page lists installs with their approved capabilities in plain words. "Upload plugin" sends the module (up to 8 MiB) to the controller, shows what it declares and installs it only after the operator ticks the approval box; the UI approves exactly the declared set, never an edited one. A controller that does not serve plugins (off, HA, slave) shows its reason instead of a list. Not in the page yet: registry install, secrets, config editing.
+`wayhouse-ui` proxies the controller's `/plugins` API (`/api/plugins*`, needs `--controller-url`). Listing is viewer-level; upload, install, enable, disable and delete need the admin role. The page lists installs with their approved capabilities in plain words. "Upload plugin" sends the module (up to 8 MiB) to the controller, shows what it declares and installs it only after the operator ticks the approval box; the UI approves exactly the declared set, never an edited one. A controller that does not serve plugins (off, slave) shows its reason instead of a list. Not in the page yet: registry install, secrets, config editing.
 
-## High availability (in progress)
+## High availability
 
-The HA state machine already applies plugin entries, so every replica of a tier holds the
-same installs and the same per-install state, in the log and in snapshots (module blobs
-are not in either). The entries are an install (refused if the id exists), enable or
-disable, delete (state goes with it), and one state commit per plugin call, which applies
-only if the install's state revision is still the one the call read and the entry was
-appended in the term the leader proposed it in. Nothing reaches this yet: an HA
-controller answers `501` on `/plugins` until the next slices serve the API through the
-leader, run the tick runner on the leader only, and replicate module bytes between
-controllers. A cluster that uses plugins must run one build on all replicas; the
-rolling-upgrade gating of new entry types follows the component versioning work.
+With `--ha-peers` every replica holds the same installs and the same per-install state, in the
+log and in snapshots (module blobs are in neither). The entries are an install, enable or
+disable, delete (state goes with it), and one state commit per plugin call. Applying is
+deterministic and a refusal is a normal answer, never a storage error: an install whose id
+exists, a malformed install (id, name, sha256, size, `created_by`, config size), a state commit
+over the host's bounds, a stale revision, or a commit tagged with another term than the one the
+entry was appended in changes nothing, on every replica alike. The plugin trees record the
+highest Raft index applied, in the same transaction as the entry and restored from a snapshot, so
+a replay after a crash or a snapshot install changes nothing.
+
+**The API.** `GET /plugins` and `GET /plugins/{id}` answer from the replica that got the request.
+Enable, disable and delete are proposed through Raft, and a follower forwards them to the leader
+like the other write routes. An upload, an install and a status read run on the leader (a
+follower forwards the whole request): the leader needs the module bytes to compile and check the
+approval before it proposes the install, and only the leader has tick results. The leader checks
+the record before proposing and every replica checks it again when applying.
+
+**The tick.** Only the Raft leader ticks. A node that is not the leader drops its schedule,
+its loaded plugins and its statuses; when it wins an election every install starts over with a
+full interval of grace, so a new leader has applied the earlier terms' entries before it runs a
+plugin. A tick's state writes are one `PluginState` entry tagged with the term the leader read the
+state in and the state revision the call read: if leadership moved or another commit got in first,
+the state machine drops it and the status says so. A commit is refused before it reaches the log
+when over the host's state limits (1 MiB, 256 keys). Status is in memory on the leader and starts
+empty after a failover.
+
+**Turning HA on.** Installs, state and modules of a controller that ran standalone are not carried into an HA tier (the tier keeps its own in the Raft state machine's database, and there is no pre-HA import for plugins): install them again.
+
+**Not built yet: module replication (slice 7).** A module's bytes live only on the node that took
+the upload. An install needs them on the leader that proposes it, and a leader elected later
+that does not hold them cannot run the plugin: its status says "this node does not hold the module
+bytes". Until module replication exists, treat a plugin as tied to the node that uploaded it. A
+cluster that uses plugins must run one build on all replicas; the rolling-upgrade gating of new
+entry types follows the component versioning work.
+
+**Snapshot restore.** A plugin snapshot is replaced in one transaction (installs, state and the
+cursor together). The other stores' `replace_stores` write one database at a time and are left as
+they are: a crash in between leaves the node's last applied index unchanged, so openraft
+installs the snapshot again, and installing is a full replace.

@@ -4516,6 +4516,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "openraft",
  "rand 0.8.8",
@@ -4573,6 +4574,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wat",
  "wayhouse-http",
 ]
 

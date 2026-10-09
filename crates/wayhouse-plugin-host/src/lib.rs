@@ -8,9 +8,9 @@ pub mod pool;
 pub mod runtime;
 
 pub use bounds::Bounds;
-pub use caps::{Capabilities, StateCap, Triggers};
+pub use caps::{Capabilities, StateCap, Triggers, MAX_STATE_BYTES};
 pub use module::{inspect, AbiVersion, ModuleError, ModuleInfo, HOST_ABI, MAX_MODULE_BYTES};
 pub use pool::{CompilePool, PoolError};
 pub use runtime::{
-    CallError, Effects, Limits, LogLevel, LogLine, Plugin, PluginHost, StateSnapshot,
+    CallError, Effects, Limits, LogLevel, LogLine, Plugin, PluginHost, StateSnapshot, MAX_KEY_BYTES,
 };

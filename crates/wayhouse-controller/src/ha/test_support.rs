@@ -21,6 +21,20 @@ pub(crate) async fn single_node(
     node_id: u64,
     addr: &str,
 ) -> (Arc<HaHandle>, Arc<ClusterState>, tempfile::TempDir) {
+    let (handle, cluster, _plugins, dir) = single_node_with_plugins(node_id, addr).await;
+    (handle, cluster, dir)
+}
+
+/// [`single_node`], also handing out the state machine's plugin store.
+pub(crate) async fn single_node_with_plugins(
+    node_id: u64,
+    addr: &str,
+) -> (
+    Arc<HaHandle>,
+    Arc<ClusterState>,
+    crate::plugins::PluginStore,
+    tempfile::TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = |sub: &str| Arc::new(Store::open(&dir.path().join(sub)).unwrap());
     let config = Arc::new(AppState::new(
@@ -51,6 +65,7 @@ pub(crate) async fn single_node(
         .unwrap(),
     );
     let cluster = sm.cluster().clone();
+    let plugins = sm.plugins().clone();
     let raft: Raft = openraft::Raft::new(
         node_id,
         Arc::new(raft_config(SNAPSHOT_AFTER).validate().unwrap()),
@@ -74,5 +89,5 @@ pub(crate) async fn single_node(
         forward: client::forward_client(client::FORWARD_TIMEOUT),
         pre_ha: crate::ha::import::LocalPreHa::default(),
     });
-    (handle, cluster, dir)
+    (handle, cluster, plugins, dir)
 }
