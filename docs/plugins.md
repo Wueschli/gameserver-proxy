@@ -25,7 +25,14 @@ without running the module and approvals are recorded against the module's sha25
     "triggers": { "on_timer": true },
     "tick_interval_secs": 30,
     "log": true,
-    "state": { "max_bytes": 65536 }
+    "state": { "max_bytes": 65536 },
+    "http": {
+        "hosts": [
+            { "host": "panel.example", "port": 8443 },
+            { "host": "10.0.0.5", "allow_private": true }
+        ]
+    },
+    "secrets": [{ "name": "PANEL_TOKEN", "hosts": ["panel.example"] }]
 }
 ```
 
@@ -41,8 +48,62 @@ declared. The only imports allowed are these, in the `wayhouse` namespace:
 | `state_get(kptr, klen, out_ptr, out_cap) -> i32` | `state`    | value length, or -1 when absent; nothing is written when the value is longer than `out_cap`                                      |
 | `state_put(kptr, klen, vptr, vlen) -> i32`       | `state`    | 0, or -1 when over `state.max_bytes`, the key is over 256 bytes or not UTF-8, or the per-call write limit is hit                 |
 
+| `http_request(ptr, len) -> i32` | `http` | sends the JSON request at `ptr`; returns the length of the response document, or -1 when the request is over the size limit |
+| `http_read(out_ptr, out_cap) -> i32` | `http` | copies the pending response document out; -1 (and keeps it) when `out_cap` is too small |
+
 A call that uses a capability it did not declare traps that call (`CallError::CapabilityDenied`)
 and leaves the host running.
+
+## Secrets and the `http` capability
+
+`secrets` declares slots by name (an upper-case letter then `A-Z`, digits, `_`; up to 64 characters), each bound to hosts that the module also
+lists under `http.hosts`; the operator approves the set with the module's sha256 like any
+other capability. `http.hosts` entries are exact lower-case host names or IP literals, with an
+optional `port` (default 443); `allow_private` must be approved per host to reach private,
+loopback or link-local addresses.
+
+**The request.** `http_request` takes UTF-8 JSON, `{"method", "url", "headers", "body"}`
+(`body` base64, optional), and `http_read` returns `{"status", "headers", "body"}` (`body`
+base64), or `{"error": "..."}` for a refused or failed call. The host enforces: `https` only; a
+host and port the module declared; no proxy; no redirect to anywhere but another approved
+host (up to 3 hops, each re-checked); at most 8 calls, 256 KiB of request and 1 MiB of response
+body per call, 10 s per request and 20 s per guest call; a fixed header denylist (`Host`,
+`Content-Length`, ...). Connecting resolves the name once and checks every resolved address, so a
+DNS answer that changes cannot reach a private address that was not approved; an IP literal is
+checked the same way.
+
+**Secrets never reach the guest.** A header value may contain `${secret:NAME}`. The host expands
+it, only in header values (not in the URL or the body) and only when the request goes to a host
+the slot is bound to, and re-checks that for each redirect hop. The response (headers, body, error
+text) and every log line are scrubbed of the secret's raw, base64 and percent-encoded forms
+before the guest or the status sees them.
+
+**Storage.** Operators set a slot with `PUT /plugins/{id}/secrets/{slot}` and `{"value": "..."}`
+(16 to 4096 bytes), clear it with `DELETE` and list the slots with `GET /plugins/{id}/secrets`
+(set or not, the key id, `ok` or `held: ...`; never a value). Only approved slots are accepted.
+A value is encrypted on the controller that received it with XChaCha20-Poly1305 under a cluster
+keyring, bound to install, slot and key id, and only the ciphertext goes into the sled database,
+the Raft log and snapshots. A follower seals the value itself and sends the ciphertext entry to
+the leader (`POST /raft/plugin-secret`); it never forwards the plaintext request. Deleting an
+install deletes its secrets. Changes are audit-logged (install, slot, key id, actor; never the
+value) at target `wayhouse_controller::plugins::audit`, and a delete or rewrap asks every node to
+purge the log, so old ciphertext does not outlive it for long.
+
+**Keys.** `--plugin-secret-key-file` (or `WAYHOUSE_PLUGIN_SECRET_KEY`) names a keyring: one
+base64 key of 32 random bytes per line (`openssl rand -base64 32`), the last line active, the
+file readable by its owner only. Every controller of a tier needs the same keyring, and the file
+is re-read when it changes. Without a key the secrets API answers `409` and a plugin that uses
+secret slots is **held**: it is not run, `GET /plugins/{id}/status` shows `held: ...` (no key,
+secret unset, key missing, or not authenticating), and other plugins keep running. Plaintext
+HTTP on a non-loopback `--listen` refuses to start with `--plugins` and a key unless
+`--allow-insecure-secrets` is given.
+
+**Rotating a key.** (1) Append the new key to the keyring file on every controller. (2) `POST
+/admin/plugins/secrets/rewrap` on any controller: it refuses until every member reports the
+active key (`GET /admin/plugins/secrets/keys` lists the key ids each holds), then re-encrypts
+every secret under it; a slot an operator rewrote meanwhile is skipped and reported. (3) Remove
+the old key from the file. Removing it before step 2 holds the plugins that still use it
+(`held: key <id> missing`) until it is put back.
 
 ## Approval
 

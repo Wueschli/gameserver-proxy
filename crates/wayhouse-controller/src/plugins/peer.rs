@@ -27,6 +27,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use wayhouse_plugin_host::{inspect, MAX_MODULE_BYTES};
 
@@ -34,7 +35,7 @@ use super::{PluginStore, PluginStoreError};
 use crate::ha::members::fetch_whoami;
 use crate::ha::peers::peer_url;
 use crate::ha::routes::{Whoami, PLUGIN_SUPPORT};
-use crate::ha::{HaHandle, NodeId};
+use crate::ha::{HaHandle, NodeId, WriteRequest, WriteResponse};
 
 /// How often the catch-up loop looks for modules this node lacks.
 const SYNC_EVERY: Duration = Duration::from_secs(3);
@@ -46,11 +47,12 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 struct PeerState {
     store: PluginStore,
+    ha: Arc<HaHandle>,
 }
 
 /// `GET` and `PUT /raft/plugin-blob/{sha256}`, behind the same peer token and protocol
 /// gate as the other `/raft/*` routes.
-pub fn router(ha: &HaHandle, store: PluginStore) -> Router {
+pub fn router(ha: &Arc<HaHandle>, store: PluginStore) -> Router {
     let routes = Router::new()
         .route(
             "/raft/plugin-blob/{sha256}",
@@ -58,11 +60,18 @@ pub fn router(ha: &HaHandle, store: PluginStore) -> Router {
                 .put(put_blob)
                 .layer(DefaultBodyLimit::max(MAX_MODULE_BYTES)),
         )
+        .route(
+            "/raft/plugin-secret",
+            axum::routing::post(propose_secret).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(ha.ha_token.as_deref()),
             wayhouse_http::server::require_bearer,
         ));
-    wayhouse_http::protocol::gate(routes, "raft").with_state(PeerState { store })
+    wayhouse_http::protocol::gate(routes, "raft").with_state(PeerState {
+        store,
+        ha: ha.clone(),
+    })
 }
 
 fn internal(e: &PluginStoreError) -> Response {
@@ -104,6 +113,139 @@ async fn put_blob(
             .into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
+}
+
+/// A follower's secret entry, already encrypted, proposed on the leader. Only the three
+/// secret entry types are accepted here; the peer token gates the route.
+async fn propose_secret(State(st): State<PeerState>, Json(entry): Json<WriteRequest>) -> Response {
+    let secret_entry = matches!(
+        entry,
+        WriteRequest::PluginSecretSet { .. }
+            | WriteRequest::PluginSecretDelete { .. }
+            | WriteRequest::PluginSecretRewrap { .. }
+    );
+    if !secret_entry {
+        return (StatusCode::BAD_REQUEST, "not a plugin secret entry").into_response();
+    }
+    if !st.ha.is_leader() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this node is not the leader",
+        )
+            .into_response();
+    }
+    match st.ha.raft.client_write(entry).await {
+        Ok(done) => Json(done.data).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not propose; retry shortly",
+        )
+            .into_response(),
+    }
+}
+
+/// Proposes an already-encrypted secret entry: here when this node leads, otherwise on the
+/// leader over the peer channel, so plaintext never crosses it (the HTTP request that
+/// carried the value is not forwarded). `Err` is a message for a `503`.
+pub async fn propose_ciphertext(
+    ha: &HaHandle,
+    entry: WriteRequest,
+) -> Result<WriteResponse, String> {
+    use openraft::error::{ClientWriteError, RaftError};
+    let retry = |why: &str| format!("{why}; retry shortly");
+    let node = match ha.raft.client_write(entry.clone()).await {
+        Ok(done) => return Ok(done.data),
+        Err(RaftError::APIError(ClientWriteError::ForwardToLeader(fwd))) => {
+            if fwd.leader_id == Some(ha.node_id) {
+                return Err(retry("this replica just lost leadership"));
+            }
+            fwd.leader_node
+                .ok_or_else(|| retry("no raft leader elected yet"))?
+        }
+        Err(_) => return Err(retry("raft could not take the write")),
+    };
+    let mut req = ha
+        .forward
+        .post(peer_url(&node.addr, "/raft/plugin-secret"))
+        .json(&entry);
+    if let Some(token) = &ha.ha_token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| retry(&wayhouse_http::error_chain(&e)))?;
+    if !resp.status().is_success() {
+        return Err(retry(&format!("the leader answered {}", resp.status())));
+    }
+    resp.json()
+        .await
+        .map_err(|_| retry("the leader's answer was not understood"))
+}
+
+/// After a secret is deleted or rewrapped, asks Raft for a snapshot and a log purge up to
+/// the entry, so the superseded ciphertext does not linger in the log. Best effort: the
+/// outcome only shows in the log, and followers purge on their own snapshot policy.
+pub fn request_purge(ha: &Arc<HaHandle>) {
+    let ha = ha.clone();
+    tokio::spawn(async move {
+        let Some(upto) = ha.raft.metrics().borrow().last_applied.map(|l| l.index) else {
+            return;
+        };
+        if ha.raft.trigger().snapshot().await.is_err() {
+            return;
+        }
+        let covered = ha
+            .raft
+            .wait(Some(Duration::from_secs(10)))
+            .metrics(
+                move |m| m.snapshot.is_some_and(|s| s.index >= upto),
+                "a snapshot covering the secret change",
+            )
+            .await;
+        if covered.is_ok() {
+            match ha.raft.trigger().purge_log(upto).await {
+                Ok(()) => tracing::info!(upto, "purged the raft log after a plugin secret change"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not purge the raft log after a plugin secret change")
+                }
+            }
+        }
+    });
+}
+
+/// `Ok` when every other member holds the key `active`; otherwise names who does not.
+pub async fn check_active_key(ha: &HaHandle, active: &str) -> Result<(), String> {
+    let mut missing = Vec::new();
+    for (id, who) in whoami_all(ha).await {
+        match who {
+            Ok(w) if w.secret_key_ids.iter().any(|k| k == active) => {}
+            Ok(_) => missing.push(format!("node {id} lacks key {active}")),
+            Err(why) => missing.push(format!("node {id} did not answer ({why})")),
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing.join("; "))
+    }
+}
+
+/// `/raft/whoami` from every other member, by id.
+pub async fn whoami_all(ha: &HaHandle) -> Vec<(NodeId, Result<Whoami, String>)> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (id, addr) in others(ha) {
+        let (client, token) = (ha.forward.clone(), ha.ha_token.clone());
+        tasks.spawn(async move { (id, fetch_whoami(&client, token.as_deref(), &addr).await) });
+    }
+    let mut answers = Vec::new();
+    while let Some(done) = tasks.join_next().await {
+        if let Ok(answer) = done {
+            answers.push(answer);
+        }
+    }
+    answers.sort_by_key(|(id, _)| *id);
+    answers
 }
 
 /// The other members of the cluster (voters and learners): id and address.
@@ -209,19 +351,7 @@ pub fn check_support_answers(answers: &[(NodeId, Result<Whoami, String>)]) -> Re
 /// (they exist only because the gate passed); this stops a new one reaching a replica that
 /// cannot decode the entry or hold the module.
 pub async fn check_support(ha: &HaHandle) -> Result<(), String> {
-    let mut tasks = tokio::task::JoinSet::new();
-    for (id, addr) in others(ha) {
-        let (client, token) = (ha.forward.clone(), ha.ha_token.clone());
-        tasks.spawn(async move { (id, fetch_whoami(&client, token.as_deref(), &addr).await) });
-    }
-    let mut answers = Vec::new();
-    while let Some(done) = tasks.join_next().await {
-        if let Ok(answer) = done {
-            answers.push(answer);
-        }
-    }
-    answers.sort_by_key(|(id, _)| *id);
-    check_support_answers(&answers)
+    check_support_answers(&whoami_all(ha).await)
 }
 
 /// Fetches `sha256` from the first of `addrs` that has it; `None` when none does.
@@ -328,6 +458,7 @@ mod tests {
             log_empty: false,
             pre_ha: crate::ha::import::PreHaSummary::default(),
             plugin_support,
+            secret_key_ids: Vec::new(),
         }
     }
 
@@ -463,14 +594,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_blob_routes_need_the_peer_token_and_a_compatible_protocol() {
-        let (mut_ha, _c, _plugins, _d) = single_node_with_plugins(1, "127.0.0.1:1").await;
-        let ha = HaHandle {
+        let (base, _c, _plugins, _d) = single_node_with_plugins(1, "127.0.0.1:1").await;
+        let ha = Arc::new(HaHandle {
             ha_token: Some(Arc::from("peer-token-of-sixteen")),
-            raft: mut_ha.raft.clone(),
+            raft: base.raft.clone(),
             node_id: 1,
-            forward: mut_ha.forward.clone(),
+            forward: base.forward.clone(),
             pre_ha: crate::ha::import::LocalPreHa::default(),
-        };
+            secret_keys: crate::plugins::secrets::KeyringHandle::default(),
+        });
         let (store, _s) = store();
         let app = router(&ha, store);
         let path = format!("/raft/plugin-blob/{}", "0".repeat(64));

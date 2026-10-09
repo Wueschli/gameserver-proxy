@@ -199,6 +199,27 @@ pub enum WriteRequest {
         #[serde(with = "crate::plugins::b64_entries")]
         puts: std::collections::BTreeMap<String, Vec<u8>>,
     },
+    /// Stores or replaces one plugin secret. The value is already encrypted by the node
+    /// that received the API call: plaintext never reaches the log or the peer link.
+    PluginSecretSet {
+        id: String,
+        slot: String,
+        sealed: crate::plugins::secrets::Sealed,
+        updated_at: u64,
+        /// The caller's `X-Actor`, for the audit line every replica writes.
+        actor: Option<String>,
+    },
+    PluginSecretDelete {
+        id: String,
+        slot: String,
+        actor: Option<String>,
+    },
+    /// Re-encrypts secrets under a new key (key rotation); each item applies only if its
+    /// slot still holds the ciphertext it was derived from.
+    PluginSecretRewrap {
+        items: Vec<crate::plugins::RewrapItem>,
+        updated_at: u64,
+    },
 }
 
 /// Why a plugin entry changed nothing. Deterministic: every replica gives the
@@ -252,6 +273,9 @@ pub enum WriteResponse {
     /// A plugin entry was applied; a state commit carries the install's new
     /// state revision.
     PluginApplied(Option<u64>),
+    /// A secret rewrap was applied; the `install/slot` of each item skipped because the
+    /// slot changed since the leader read it.
+    PluginRewrapped(Vec<String>),
     /// A plugin entry changed nothing, deterministically.
     PluginRejected(PluginReject),
 }
@@ -339,6 +363,9 @@ pub struct HaHandle {
     /// This node's own set-aside pre-HA data, which `/raft/whoami` reports
     /// and `/raft/pre-ha` serves ([`import`]).
     pub pre_ha: import::LocalPreHa,
+    /// This node's plugin secret keyring (empty without a key); `/raft/whoami` reports its
+    /// key ids so a rotation can check every node holds the active key.
+    pub secret_keys: crate::plugins::secrets::KeyringHandle,
 }
 
 impl HaHandle {

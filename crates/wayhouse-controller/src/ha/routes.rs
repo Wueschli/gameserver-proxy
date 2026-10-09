@@ -62,6 +62,9 @@ pub struct Whoami {
     /// build that predates it (the field is absent in its answer).
     #[serde(default)]
     pub plugin_support: u32,
+    /// Ids of the plugin secret keys this node holds (never key material).
+    #[serde(default)]
+    pub secret_key_ids: Vec<String>,
 }
 
 /// The plugin replication level this build speaks: `1` replicated installs and state, `2`
@@ -75,6 +78,7 @@ async fn whoami(State(ha): State<Arc<HaHandle>>) -> impl IntoResponse {
         log_empty: ha.raft.metrics().borrow().last_log_index.is_none(),
         pre_ha: ha.pre_ha.summary,
         plugin_support: PLUGIN_SUPPORT,
+        secret_key_ids: ha.secret_keys.current().key_ids(),
     })
 }
 

@@ -16,6 +16,7 @@ use wasmtime::{
 };
 
 use crate::caps::Capabilities;
+use crate::http::{HttpCall, HttpEngine, MAX_REQUEST_BODY};
 use crate::module::{inspect, ModuleError, ModuleInfo};
 
 /// Epoch ticks a call may span before it traps. The ticker runs at
@@ -82,6 +83,8 @@ pub struct Effects {
     pub used_log: bool,
     /// The call used `state_get` or `state_put`.
     pub used_state: bool,
+    /// The call used `http_request`.
+    pub used_http: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,7 +110,12 @@ struct CallState {
     logs_dropped: usize,
     used_log: bool,
     used_state: bool,
+    used_http: bool,
     denied: Option<&'static str>,
+    http: Option<Arc<HttpEngine>>,
+    http_call: HttpCall,
+    /// The response document of the last `http_request`, for `http_read` to copy out.
+    http_doc: Vec<u8>,
 }
 
 impl CallState {
@@ -169,8 +177,11 @@ impl PluginHost {
         let module =
             Module::new(&self.engine, bytes).map_err(|e| ModuleError::Compile(e.to_string()))?;
         for i in module.imports() {
-            let known =
-                i.module() == "wayhouse" && matches!(i.name(), "log" | "state_get" | "state_put");
+            let known = i.module() == "wayhouse"
+                && matches!(
+                    i.name(),
+                    "log" | "state_get" | "state_put" | "http_request" | "http_read"
+                );
             if !known {
                 return Err(ModuleError::UnexpectedImport(format!(
                     "{}::{}",
@@ -213,6 +224,7 @@ impl PluginHost {
             linker: linker(&self.engine),
             info,
             limits: self.limits.clone(),
+            http: None,
             _alive: self.alive.clone(),
         };
         let mut store = plugin.store(Arc::default());
@@ -231,12 +243,21 @@ pub struct Plugin {
     linker: Linker<CallState>,
     info: ModuleInfo,
     limits: Limits,
+    http: Option<Arc<HttpEngine>>,
     _alive: Arc<()>,
 }
 
 impl Plugin {
     pub fn info(&self) -> &ModuleInfo {
         &self.info
+    }
+
+    /// Gives the plugin its network: the engine that enforces its approved `http` hosts and
+    /// secret bindings. Without one, `http_request` answers that no network is available.
+    #[must_use]
+    pub fn with_http(mut self, engine: Arc<HttpEngine>) -> Self {
+        self.http = Some(engine);
+        self
     }
 
     /// Call `init(config)`.
@@ -292,7 +313,11 @@ impl Plugin {
             logs_dropped: 0,
             used_log: false,
             used_state: false,
+            used_http: false,
             denied: None,
+            http: self.http.clone(),
+            http_call: HttpCall::default(),
+            http_doc: Vec::new(),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
@@ -320,12 +345,20 @@ impl Plugin {
             }
             return Err(CallError::Trap(format!("{e:#}")));
         }
+        // Log lines get the same scrub as responses: whatever secret the call expanded.
+        let mut logs = st.logs;
+        if !st.http_call.scrubber.is_empty() {
+            for line in &mut logs {
+                line.msg = st.http_call.scrubber.scrub_str(&line.msg);
+            }
+        }
         Ok(Effects {
             state_puts: st.puts,
-            logs: st.logs,
+            logs,
             logs_dropped: st.logs_dropped,
             used_log: st.used_log,
             used_state: st.used_state,
+            used_http: st.used_http,
         })
     }
 }
@@ -466,5 +499,53 @@ fn linker(engine: &Engine) -> Linker<CallState> {
             },
         )
         .expect("defining wayhouse.state_put");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "http_request",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if caller.data().caps.http.is_none() {
+                    return Err(deny(&mut caller, "http"));
+                }
+                caller.data_mut().used_http = true;
+                if usize::try_from(len).map_or(true, |l| l > MAX_REQUEST_BODY * 2) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                let doc = match st.http.clone() {
+                    Some(engine) => engine.call(&mut st.http_call, &raw),
+                    None => br#"{"error":"no network is available to this plugin here"}"#.to_vec(),
+                };
+                let n = i32::try_from(doc.len())?;
+                st.http_doc = doc;
+                Ok(n)
+            },
+        )
+        .expect("defining wayhouse.http_request");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "http_read",
+            |mut caller: Caller<'_, CallState>,
+             out_ptr: i32,
+             out_cap: i32|
+             -> wasmtime::Result<i32> {
+                if caller.data().caps.http.is_none() {
+                    return Err(deny(&mut caller, "http"));
+                }
+                let doc = std::mem::take(&mut caller.data_mut().http_doc);
+                let len = i32::try_from(doc.len())?;
+                if len > out_cap {
+                    // Keep it: the guest may retry with room.
+                    caller.data_mut().http_doc = doc;
+                    return Ok(-1);
+                }
+                let memory = caller_memory(&mut caller)?;
+                memory.write(&mut caller, out_ptr as u32 as usize, &doc)?;
+                Ok(len)
+            },
+        )
+        .expect("defining wayhouse.http_read");
     linker
 }

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use wayhouse_plugin_host::{CallError, CompilePool, Effects, LogLevel, Plugin, PoolError};
 
+use super::secrets::KeyringHandle;
 use super::{validate_puts, CommitError, InstallRecord, PluginStore};
 use crate::ha::{HaHandle, PluginReject, WriteRequest, WriteResponse};
 
@@ -50,6 +51,9 @@ pub struct PluginStatus {
     pub last_ok: Option<bool>,
     pub last_error: Option<String>,
     pub consecutive_failures: u32,
+    /// Why the plugin is not run on this node (a secret it needs cannot be read here), or
+    /// `None`. A held plugin never ticks.
+    pub held: Option<String>,
     pub logs: Vec<StatusLog>,
 }
 
@@ -73,6 +77,8 @@ pub struct Runner {
     status: Mutex<HashMap<String, PluginStatus>>,
     /// `Some` under HA: ticks run only while this node leads, and state commits go through Raft.
     ha: Option<Arc<HaHandle>>,
+    /// Opens the plugins' secrets; empty on a node without a key.
+    keyring: KeyringHandle,
 }
 
 fn level_name(level: LogLevel) -> &'static str {
@@ -96,28 +102,66 @@ enum Outcome {
     /// The pool had no room: nothing ran, and the tick is retried at the next scan.
     Busy,
     Failed(String),
+    /// A secret the plugin needs cannot be read on this node: nothing ran.
+    Held(String),
 }
 
 const BUSY: &str = "the plugin worker pool is busy; tick skipped and retried";
 
 impl Runner {
     pub fn new(store: PluginStore, pool: Arc<CompilePool>) -> Arc<Self> {
-        Self::build(store, pool, None)
+        Self::build(store, pool, None, KeyringHandle::default())
     }
 
     /// A runner for an HA controller: `store` is the state machine's.
     pub fn new_ha(store: PluginStore, pool: Arc<CompilePool>, ha: Arc<HaHandle>) -> Arc<Self> {
-        Self::build(store, pool, Some(ha))
+        Self::build(store, pool, Some(ha), KeyringHandle::default())
     }
 
-    fn build(store: PluginStore, pool: Arc<CompilePool>, ha: Option<Arc<HaHandle>>) -> Arc<Self> {
+    /// [`Runner::new`] or [`Runner::new_ha`] with the node's secret keyring, which
+    /// plugins that use secret slots are run against.
+    pub fn with_keyring(
+        store: PluginStore,
+        pool: Arc<CompilePool>,
+        ha: Option<Arc<HaHandle>>,
+        keyring: KeyringHandle,
+    ) -> Arc<Self> {
+        Self::build(store, pool, ha, keyring)
+    }
+
+    fn build(
+        store: PluginStore,
+        pool: Arc<CompilePool>,
+        ha: Option<Arc<HaHandle>>,
+        keyring: KeyringHandle,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             pool,
             schedule: tokio::sync::Mutex::new(Schedule::default()),
             status: Mutex::new(HashMap::new()),
             ha,
+            keyring,
         })
+    }
+
+    /// Why `rec` must not run on this node, or `None`: every secret slot it approved needs
+    /// a value this node can open. A plugin without secret slots is never held.
+    pub fn held(&self, rec: &InstallRecord) -> Option<String> {
+        for slot in &rec.approved.secrets {
+            match self.store.get_secret(&rec.id, &slot.name) {
+                Err(e) => return Some(format!("held: {e}")),
+                Ok(None) => return Some(format!("held: secret {} unset", slot.name)),
+                Ok(Some(stored)) => {
+                    if let Some(why) =
+                        super::api::unreadable(&self.keyring, &rec.id, &slot.name, &stored.sealed)
+                    {
+                        return Some(why);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Where this node ticks. Standalone: `Some(None)`. HA leader: `Some(Some(term))`.
@@ -222,6 +266,9 @@ impl Runner {
 
     /// Load (and `init`) if needed, then run `on_timer`, all on the pool.
     async fn call(&self, rec: &InstallRecord, term: Option<u64>) -> Outcome {
+        if let Some(why) = self.held(rec) {
+            return Outcome::Held(why);
+        }
         let cached = {
             let sched = self.schedule.lock().await;
             sched
@@ -275,10 +322,21 @@ impl Runner {
         let loaded = tokio::task::spawn_blocking(move || pool.load(bytes, approved))
             .await
             .map_err(|e| Fail::other(e.to_string()))?;
-        let plugin = Arc::new(loaded.map_err(|e| match e {
+        let mut plugin = loaded.map_err(|e| match e {
             PoolError::Busy => Fail::Busy,
             e => Fail::other(e.to_string()),
-        })?);
+        })?;
+        if let Some(engine) = super::net::engine_for(
+            rec,
+            &self.store,
+            &self.keyring,
+            tokio::runtime::Handle::current(),
+        )
+        .map_err(Fail::other)?
+        {
+            plugin = plugin.with_http(engine);
+        }
+        let plugin = Arc::new(plugin);
         let (rev, snapshot) = self
             .store
             .state(&rec.id)
@@ -371,9 +429,19 @@ impl Runner {
             }
             Outcome::Busy => Err(BUSY.to_string()),
             Outcome::Failed(why) => Err(why),
+            Outcome::Held(why) => {
+                // Nothing ran: not a tick, so the count and the failure streak stay.
+                tracing::warn!(install = id, %why, "plugin held, not run");
+                let mut all = self.lock_status();
+                let st = all.entry(id.to_string()).or_default();
+                st.held = Some(why.clone());
+                st.last_error = Some(why);
+                return;
+            }
         };
         let mut all = self.lock_status();
         let st = all.entry(id.to_string()).or_default();
+        st.held = None;
         st.ticks += 1;
         st.last_tick_unix = Some(unix_now());
         match result {
@@ -797,5 +865,63 @@ mod tests {
             .unwrap()
             .contains("over"));
         assert_eq!(handle.raft.metrics().borrow().last_log_index, before);
+    }
+    const SECRET_TIMER: &str = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"log":true,"state":{"max_bytes":64},"http":{"hosts":[{"host":"panel.example"}]},"secrets":[{"name":"PANEL_TOKEN","hosts":["panel.example"]}]}"#;
+    const KEY_A: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const KEY_B: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+
+    fn counter_with_secret() -> Vec<u8> {
+        guest(
+            SECRET_TIMER,
+            r#"(func (export "init") (param i32 i32))
+               (func (export "on_timer")
+                 (drop (call $get (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1)))
+                 (i32.store8 (i32.const 100)
+                   (i32.add (i32.load8_u (i32.const 100)) (i32.const 1)))
+                 (drop (call $put (i32.const 16) (i32.const 1) (i32.const 100) (i32.const 1))))"#,
+        )
+    }
+
+    fn runner_with(store: &PluginStore, keys: &str) -> Arc<Runner> {
+        let host = Arc::new(PluginHost::new(Limits::default()).unwrap());
+        let pool = Arc::new(CompilePool::new(host, 1, 4, Duration::from_secs(10)).unwrap());
+        let ring = super::super::secrets::Keyring::parse(keys).unwrap();
+        Runner::with_keyring(store.clone(), pool, None, KeyringHandle::new(ring))
+    }
+
+    #[tokio::test]
+    async fn a_plugin_whose_secret_this_node_cannot_use_is_held_while_others_run() {
+        let (_r, store, _d) = fixture(1, 4);
+        install(&store, "a", &counter());
+        install(&store, "b", &counter_with_secret());
+        let ring_a = super::super::secrets::Keyring::parse(KEY_A).unwrap();
+        let sealed = ring_a
+            .seal("b", "PANEL_TOKEN", b"sixteen-byte-secret!")
+            .unwrap();
+        // Unset secret: held, the other plugin runs.
+        let r = runner_with(&store, KEY_A);
+        let t0 = Instant::now();
+        r.run_due(t0).await;
+        r.run_due(secs(t0, 30)).await;
+        assert_eq!(counter_value(&store, "a"), Some(1));
+        assert_eq!(counter_value(&store, "b"), None);
+        let st = r.status("b").unwrap();
+        assert_eq!(st.held.as_deref(), Some("held: secret PANEL_TOKEN unset"));
+        assert_eq!(st.ticks, 0);
+        // Set, and the node has the key: runs.
+        store.put_secret("b", "PANEL_TOKEN", &sealed, 1).unwrap();
+        r.run_due(secs(t0, 60)).await;
+        r.run_due(secs(t0, 90)).await;
+        assert!(counter_value(&store, "b").is_some());
+        assert!(r.status("b").unwrap().held.is_none());
+        // A node whose keyring lacks that key holds it.
+        let other = runner_with(&store, KEY_B);
+        other.run_due(t0).await;
+        other.run_due(secs(t0, 30)).await;
+        let why = other.status("b").unwrap().held.unwrap();
+        assert!(
+            why.starts_with("held: key ") && why.ends_with(" missing"),
+            "{why}"
+        );
     }
 }

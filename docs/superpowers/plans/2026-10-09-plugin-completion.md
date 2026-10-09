@@ -21,3 +21,14 @@
 3. API install path; `main.rs` wiring; runner message.
 4. Fleet test `ha_plugins`: the new leader keeps ticking after failover.
 5. Docs, HANDOVER, AGENTS.
+
+## Part 2: secret storage and the `http` capability (#235)
+
+Built as in the [secret storage design](../specs/2026-10-08-plugin-secret-storage-design.md); decisions made while building:
+
+- **Seal on the receiving node.** A follower that gets a `PUT` never forwards the plaintext request: it seals the value with its keyring and sends the ciphertext entry to the leader (`POST /raft/plugin-secret`, peer token). Raft entries, snapshots and sled hold ciphertext only.
+- **Rewrap safety.** A rewrap item carries the nonce it was derived from and is skipped on apply when the slot changed meanwhile; the response lists skipped slots. It refuses while a member lacks the active key (`/raft/whoami` reports key ids).
+- **Held, not failed.** A plugin whose secret slot is unset, or whose key is missing or does not authenticate on this node, is not run there; status shows `held: ...`.
+- **Network split in two.** `HttpEngine` (policy, expansion, scrubbing, budgets) is pure and tested with a fake transport; `ReqwestTransport` adds the connect-time address check through a custom resolver, no proxy, no redirects, https only.
+- **Protocol minor not bumped.** The new Raft entries ride the unreleased 1.1; the support gate for secrets is the key-id report in `/raft/whoami`.
+- **Deferred.** Secret slot management in the web UI; a members view of key ids beyond `/admin/plugins/secrets/keys`.

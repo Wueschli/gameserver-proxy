@@ -155,10 +155,24 @@ struct Args {
     /// installs (docs/plugins.md). Off by default. With `--role slave` the routes answer
     /// `501`. Installs are stored and enabled plugins that declared a timer are ticked;
     /// under `--ha-peers` installs and state are replicated and only the Raft leader
-    /// ticks. Module bytes are not replicated yet. Installs made on a standalone
-    /// controller are not carried over when `--ha-peers` is turned on: install again.
+    /// ticks. Module bytes follow the installs to every replica. Installs made on a
+    /// standalone controller are not carried over when `--ha-peers` is turned on:
+    /// install again.
     #[arg(long)]
     plugins: bool,
+
+    /// Keyring for plugin secrets: one base64 key of 32 random bytes per line (generate
+    /// each with `openssl rand -base64 32`), the last line active, readable by the owner
+    /// only. Every controller of a tier needs the same file; the file is re-read when it
+    /// changes. Without it (and without `WAYHOUSE_PLUGIN_SECRET_KEY`) the secrets API
+    /// answers `409` and plugins that use secret slots are held, not run.
+    #[arg(long)]
+    plugin_secret_key_file: Option<PathBuf>,
+
+    /// Allow `--plugins` with a secret key on a plain-HTTP, non-loopback listener, where
+    /// secret values would cross the network in clear text. Off by default.
+    #[arg(long)]
+    allow_insecure_secrets: bool,
 
     #[command(flatten)]
     tls: wayhouse_http::tls::TlsArgs,
@@ -215,6 +229,27 @@ async fn main() -> anyhow::Result<()> {
     }
     // Load (and validate) the serving certificate before anything else starts.
     let tls_cert = args.tls.load()?;
+    let plugin_keys =
+        wayhouse_controller::plugins::secrets::load(args.plugin_secret_key_file.as_deref())
+            .map_err(|e| anyhow::anyhow!("plugin secret key: {e}"))?;
+    if let Some(keys) = &plugin_keys {
+        let plain_remote = tls_cert.is_none() && !args.listen.ip().is_loopback();
+        if args.plugins && plain_remote && !args.allow_insecure_secrets {
+            anyhow::bail!(
+                "--plugins with a plugin secret key on a plain-HTTP, non-loopback --listen would \
+                 send secret values in clear text: serve TLS (--tls-cert/--tls-key), listen on \
+                 loopback behind a TLS terminator, or pass --allow-insecure-secrets"
+            );
+        }
+        if let Some(path) = &args.plugin_secret_key_file {
+            drop(wayhouse_controller::plugins::secrets::spawn_reload(
+                keys.clone(),
+                path.clone(),
+            ));
+        }
+        tracing::info!(keys = ?keys.current().key_ids(), "plugin secret keyring loaded");
+    }
+    let plugin_keys = plugin_keys.unwrap_or_default();
     let ha_enabled = !args.ha_peers.is_empty() || args.ha_join;
     let import_policy = match args.ha_import_source.as_deref() {
         None => ha::init::ImportPolicy::Auto,
@@ -428,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
             ha_token,
             forward: ha::client::forward_client(ha::client::FORWARD_TIMEOUT),
             pre_ha,
+            secret_keys: plugin_keys.clone(),
         });
         config_state = config_state.with_ha(Some(handle.clone()));
         intent_state_val = intent_state_val.with_ha(Some(handle.clone()));
@@ -570,17 +606,12 @@ async fn main() -> anyhow::Result<()> {
                         None,
                     ),
                 };
-                let runner = match &ha {
-                    Some(handle) => wayhouse_controller::plugins::runner::Runner::new_ha(
-                        store.clone(),
-                        pool.clone(),
-                        handle.clone(),
-                    ),
-                    None => wayhouse_controller::plugins::runner::Runner::new(
-                        store.clone(),
-                        pool.clone(),
-                    ),
-                };
+                let runner = wayhouse_controller::plugins::runner::Runner::with_keyring(
+                    store.clone(),
+                    pool.clone(),
+                    ha.clone(),
+                    plugin_keys.clone(),
+                );
                 match store.sweep_blobs() {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(removed = n, "removed plugin modules no install uses"),
@@ -595,6 +626,7 @@ async fn main() -> anyhow::Result<()> {
                         runner,
                         auth_token: admin_token.clone(),
                         ha: ha.clone(),
+                        keyring: plugin_keys.clone(),
                     },
                 );
                 if let Some(handle) = &ha {

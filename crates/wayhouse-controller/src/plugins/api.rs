@@ -23,13 +23,16 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use wayhouse_plugin_host::{inspect, Capabilities, CompilePool, PoolError, MAX_MODULE_BYTES};
 
 use super::runner::Runner;
-use super::{valid_id, valid_name, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES};
+use super::secrets::{KeyringHandle, OpenError, SealError, Sealed};
+use super::{
+    valid_id, valid_name, Applied, InstallRecord, PluginStore, PluginStoreError, MAX_CONFIG_BYTES,
+};
 use crate::ha::client::{forward_to_current_leader, propose_write_as, ForwardHeaders};
 use crate::ha::{HaHandle, PluginReject, WriteRequest, WriteResponse};
 
@@ -43,6 +46,8 @@ pub struct PluginsState {
     pub auth_token: Option<Arc<str>>,
     /// `Some` when the controller runs under HA: `store` is then the state machine's.
     pub ha: Option<Arc<HaHandle>>,
+    /// The node's secret keyring (empty without a key).
+    pub keyring: KeyringHandle,
 }
 
 type ApiError = Response;
@@ -97,6 +102,15 @@ pub fn router(state: PluginsState) -> Router {
         .route("/plugins/{id}/status", get(status))
         .route("/plugins/{id}/enable", post(enable))
         .route("/plugins/{id}/disable", post(disable))
+        .route("/plugins/{id}/secrets", get(list_secrets))
+        .route(
+            "/plugins/{id}/secrets/{slot}",
+            put(put_secret)
+                .delete(delete_secret)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/admin/plugins/secrets/rewrap", post(rewrap_secrets))
+        .route("/admin/plugins/secrets/keys", get(secret_keys))
         .route_layer(middleware::from_fn_with_state(
             wayhouse_http::server::BearerAuth::new(state.auth_token.as_deref()),
             wayhouse_http::server::require_bearer,
@@ -457,6 +471,340 @@ async fn remove(
     }
 }
 
+// ---- secrets (design: 2026-10-08-plugin-secret-storage-design.md) ----
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The install and its approved slot, or the `404` that says which is missing.
+fn approved_slot(st: &PluginsState, id: &str, slot: &str) -> Result<InstallRecord, ApiError> {
+    if !valid_id(id) || !wayhouse_plugin_host::caps::valid_slot_name(slot) {
+        return Err(err(StatusCode::NOT_FOUND, "no such install or secret slot"));
+    }
+    let record = st
+        .store
+        .get(id)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such install"))?;
+    if !record.approved.secrets.iter().any(|s| s.name == slot) {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "the install did not approve that secret slot",
+        ));
+    }
+    Ok(record)
+}
+
+/// `{"value": "..."}`. Deliberately no `Debug`, and a parse failure never echoes the body.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretBody {
+    value: String,
+}
+
+/// Maps a secret write's Raft answer to a response.
+fn secret_answer(resp: &WriteResponse) -> Result<(), ApiError> {
+    match resp {
+        WriteResponse::PluginApplied(_) => Ok(()),
+        WriteResponse::PluginRejected(PluginReject::NoSuchInstall) => {
+            Err(err(StatusCode::NOT_FOUND, "no such install"))
+        }
+        WriteResponse::PluginRejected(PluginReject::Invalid) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "the secret was refused (slot not approved or malformed)",
+        )),
+        other => Err(unexpected(other)),
+    }
+}
+
+async fn put_secret(
+    State(st): State<PluginsState>,
+    headers: HeaderMap,
+    Path((id, slot)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = approved_slot(&st, &id, &slot) {
+        return r;
+    }
+    let Ok(parsed) = serde_json::from_slice::<SecretBody>(&body) else {
+        // Never the parser's message: it can quote the submitted text.
+        return err(
+            StatusCode::BAD_REQUEST,
+            "the body must be {\"value\": \"...\"}",
+        );
+    };
+    let value = zeroize::Zeroizing::new(parsed.value.into_bytes());
+    let sealed = match st.keyring.current().seal(&id, &slot, &value) {
+        Ok(s) => s,
+        Err(SealError::NoKey) => {
+            return err(
+                StatusCode::CONFLICT,
+                "no secret key configured on this controller (--plugin-secret-key-file)",
+            )
+        }
+        Err(SealError::Size) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a secret must be {} to {} bytes",
+                    wayhouse_plugin_host::secret::MIN_SECRET_BYTES,
+                    super::secrets::MAX_SECRET_BYTES
+                ),
+            )
+        }
+    };
+    drop(value);
+    let (updated_at, actor) = (now(), actor(&headers));
+    let result = match &st.ha {
+        Some(ha) => {
+            let entry = WriteRequest::PluginSecretSet {
+                id: id.clone(),
+                slot: slot.clone(),
+                sealed: sealed.clone(),
+                updated_at,
+                actor,
+            };
+            match super::peer::propose_ciphertext(ha, entry).await {
+                Ok(resp) => secret_answer(&resp),
+                Err(why) => Err(err(StatusCode::SERVICE_UNAVAILABLE, why)),
+            }
+        }
+        None => match st.store.put_secret(&id, &slot, &sealed, updated_at) {
+            Ok(Applied::Done(_)) => {
+                tracing::info!(
+                    target: "wayhouse_controller::plugins::audit",
+                    what = "set", install = %id, slot = %slot, key_id = %sealed.key_id,
+                    actor = actor.as_deref(), "plugin secret changed"
+                );
+                Ok(())
+            }
+            Ok(Applied::NoSuchInstall) => Err(err(StatusCode::NOT_FOUND, "no such install")),
+            Ok(_) => Err(err(StatusCode::BAD_REQUEST, "the secret was refused")),
+            Err(e) => Err(internal(e)),
+        },
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({
+            "slot": slot, "set": true, "key_id": sealed.key_id, "updated_at": updated_at
+        }))
+        .into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn delete_secret(
+    State(st): State<PluginsState>,
+    headers: HeaderMap,
+    Path((id, slot)): Path<(String, String)>,
+) -> Response {
+    if let Err(r) = approved_slot(&st, &id, &slot) {
+        return r;
+    }
+    if let Some(ha) = &st.ha {
+        let path = format!("/plugins/{id}/secrets/{slot}");
+        let ha_for_purge = ha.clone();
+        return propose_write_as(
+            ha,
+            WriteRequest::PluginSecretDelete {
+                id,
+                slot,
+                actor: actor(&headers),
+            },
+            Method::DELETE,
+            &path,
+            String::new(),
+            &ForwardHeaders::from_headers(&headers),
+            move |resp| match secret_answer(&resp) {
+                Ok(()) => {
+                    // This runs where the entry was proposed: the leader.
+                    super::peer::request_purge(&ha_for_purge);
+                    StatusCode::NO_CONTENT.into_response()
+                }
+                Err(r) => r,
+            },
+        )
+        .await;
+    }
+    match st.store.delete_secret(&id, &slot) {
+        Ok(true) => {
+            tracing::info!(
+                target: "wayhouse_controller::plugins::audit",
+                what = "delete", install = %id, slot = %slot, actor = actor(&headers).as_deref(),
+                "plugin secret changed"
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => err(StatusCode::NOT_FOUND, "no such install"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Why a secret that is set cannot be used on this node, or `None` when it can.
+pub(crate) fn unreadable(
+    keyring: &KeyringHandle,
+    id: &str,
+    slot: &str,
+    sealed: &Sealed,
+) -> Option<String> {
+    let ring = keyring.current();
+    if ring.is_empty() {
+        return Some("held: no secret key".into());
+    }
+    match ring.open(id, slot, sealed) {
+        Ok(_) => None,
+        Err(OpenError::KeyMissing(k)) => Some(format!("held: key {k} missing")),
+        Err(_) => Some("held: the stored secret does not authenticate".into()),
+    }
+}
+
+/// Per approved slot: whether it is set, under which key, and whether this node can use it.
+/// Never a value.
+async fn list_secrets(
+    State(st): State<PluginsState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !valid_id(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "no such install"));
+    }
+    let record = st
+        .store
+        .get(&id)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such install"))?;
+    let mut slots = Vec::new();
+    for slot in &record.approved.secrets {
+        let stored = st.store.get_secret(&id, &slot.name).map_err(internal)?;
+        let status = match &stored {
+            None => "unset".to_string(),
+            Some(s) => {
+                unreadable(&st.keyring, &id, &slot.name, &s.sealed).unwrap_or_else(|| "ok".into())
+            }
+        };
+        slots.push(serde_json::json!({
+            "slot": slot.name,
+            "description": slot.description,
+            "bound_hosts": slot.hosts,
+            "set": stored.is_some(),
+            "key_id": stored.as_ref().map(|s| s.sealed.key_id.clone()),
+            "updated_at": stored.as_ref().map(|s| s.updated_at),
+            "status": status,
+        }));
+    }
+    Ok(Json(serde_json::json!({ "secrets": slots })))
+}
+
+/// Re-encrypts every secret under the active key (step 2 of a rotation). Runs on the
+/// leader; refuses while a member lacks the active key.
+async fn rewrap_secrets(State(st): State<PluginsState>, headers: HeaderMap) -> Response {
+    if let Some(forwarded) = st
+        .to_leader(
+            Method::POST,
+            "/admin/plugins/secrets/rewrap",
+            &headers,
+            Bytes::new(),
+        )
+        .await
+    {
+        return forwarded;
+    }
+    let ring = st.keyring.current();
+    let Some(active) = ring.active_id().map(str::to_string) else {
+        return err(
+            StatusCode::CONFLICT,
+            "no secret key configured on this controller",
+        );
+    };
+    if let Some(ha) = &st.ha {
+        if let Err(why) = super::peer::check_active_key(ha, &active).await {
+            return err(
+                StatusCode::CONFLICT,
+                format!("every node needs the active key {active} first: {why}"),
+            );
+        }
+    }
+    let stored = match st.store.all_secrets() {
+        Ok(a) => a,
+        Err(e) => return internal(e),
+    };
+    let (mut items, mut unreadable) = (Vec::new(), Vec::new());
+    for s in stored
+        .into_iter()
+        .filter(|s| s.stored.sealed.key_id != active)
+    {
+        let label = format!("{}/{}", s.id, s.slot);
+        match ring.open(&s.id, &s.slot, &s.stored.sealed) {
+            Ok(value) => match ring.seal(&s.id, &s.slot, value.expose()) {
+                Ok(sealed) => items.push(super::RewrapItem {
+                    id: s.id,
+                    slot: s.slot,
+                    from_nonce: s.stored.sealed.nonce,
+                    sealed,
+                }),
+                Err(_) => unreadable.push(label),
+            },
+            Err(_) => unreadable.push(label),
+        }
+    }
+    let total = items.len();
+    let skipped = if items.is_empty() {
+        Vec::new()
+    } else {
+        let updated_at = now();
+        match &st.ha {
+            Some(ha) => {
+                let entry = WriteRequest::PluginSecretRewrap { items, updated_at };
+                match super::peer::propose_ciphertext(ha, entry).await {
+                    Ok(WriteResponse::PluginRewrapped(skipped)) => {
+                        super::peer::request_purge(ha);
+                        skipped
+                    }
+                    Ok(other) => return unexpected(&other),
+                    Err(why) => return err(StatusCode::SERVICE_UNAVAILABLE, why),
+                }
+            }
+            None => match st.store.rewrap(&items, updated_at) {
+                Ok(skipped) => skipped,
+                Err(e) => return internal(e),
+            },
+        }
+    };
+    Json(serde_json::json!({
+        "rewrapped": total - skipped.len(),
+        "skipped": skipped,
+        "unreadable": unreadable,
+        "active_key_id": active,
+    }))
+    .into_response()
+}
+
+/// The key ids this node holds and, under HA, each member's (never key material).
+async fn secret_keys(State(st): State<PluginsState>) -> Json<serde_json::Value> {
+    let mut nodes = serde_json::Map::new();
+    if let Some(ha) = &st.ha {
+        nodes.insert(
+            ha.node_id.to_string(),
+            serde_json::json!(st.keyring.current().key_ids()),
+        );
+        for (id, who) in super::peer::whoami_all(ha).await {
+            nodes.insert(
+                id.to_string(),
+                match who {
+                    Ok(w) => serde_json::json!(w.secret_key_ids),
+                    Err(why) => serde_json::json!({ "error": why }),
+                },
+            );
+        }
+    }
+    Json(serde_json::json!({
+        "key_ids": st.keyring.current().key_ids(),
+        "active": st.keyring.current().active_id(),
+        "nodes": nodes,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +845,7 @@ mod tests {
                 pool,
                 auth_token: token.map(Arc::from),
                 ha: None,
+                keyring: KeyringHandle::default(),
             },
             dir,
         )
@@ -688,6 +1037,7 @@ mod tests {
             pool,
             auth_token: None,
             ha: None,
+            keyring: KeyringHandle::default(),
         };
         let app = router(st);
         let sha = upload(&app, &module(CAPS)).await;
@@ -736,6 +1086,7 @@ mod tests {
                 pool,
                 auth_token: None,
                 ha: Some(handle),
+                keyring: KeyringHandle::default(),
             },
             dir,
         )
@@ -821,5 +1172,316 @@ mod tests {
                 assert_eq!(status, StatusCode::NOT_FOUND, "{m} {id}{suffix}");
             }
         }
+    }
+    const SECRET_CAPS: &str = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"log":true,"http":{"hosts":[{"host":"panel.example","port":8443}]},"secrets":[{"name":"PANEL_TOKEN","hosts":["panel.example"]}]}"#;
+    const KEY_A: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const SENTINEL: &str = "sentinel-secret-value-9f3a1c77";
+
+    fn with_key(st: &mut PluginsState, text: &str) {
+        st.keyring = KeyringHandle::new(super::super::secrets::Keyring::parse(text).unwrap());
+    }
+
+    async fn installed(app: &Router) -> String {
+        let sha = upload(app, &module(SECRET_CAPS)).await;
+        let (status, rec) = call(
+            app,
+            "POST",
+            "/plugins",
+            install_body(&sha, SECRET_CAPS),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{rec}");
+        rec["id"].as_str().unwrap().to_string()
+    }
+
+    fn put(v: &str) -> Vec<u8> {
+        serde_json::json!({ "value": v }).to_string().into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_secret_needs_a_key_an_approved_slot_and_a_sane_size() {
+        let (mut st, _d) = state(None);
+        let store = st.store.clone();
+        let app = router(st.clone());
+        let id = installed(&app).await;
+        let uri = format!("/plugins/{id}/secrets/PANEL_TOKEN");
+        // No key on the node: 409.
+        let (status, v) = call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        with_key(&mut st, KEY_A);
+        let app = router(st);
+        // Unapproved slot: 404.
+        let (status, _) = call(
+            &app,
+            "PUT",
+            &format!("/plugins/{id}/secrets/OTHER"),
+            put(SENTINEL),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Too short: 400, and the answer never echoes the value.
+        let (status, v) = call(&app, "PUT", &uri, put("short"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!v.to_string().contains("short\""), "{v}");
+        // A body that is not the expected shape: 400 without quoting it.
+        let (status, v) = call(
+            &app,
+            "PUT",
+            &uri,
+            format!(r#"{{"value":"{SENTINEL}","x":1}}"#).into_bytes(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!v.to_string().contains(SENTINEL), "{v}");
+        assert!(store.get_secret(&id, "PANEL_TOKEN").unwrap().is_none());
+        // Good write.
+        let (status, v) = call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert!(!v.to_string().contains(SENTINEL));
+        assert!(store.get_secret(&id, "PANEL_TOKEN").unwrap().is_some());
+        // The listing carries state, never a value.
+        let (status, v) = call(&app, "GET", &format!("/plugins/{id}/secrets"), vec![], None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["secrets"][0]["set"], true);
+        assert_eq!(v["secrets"][0]["status"], "ok");
+        assert!(!v.to_string().contains(SENTINEL));
+        // Delete.
+        let (status, _) = call(&app, "DELETE", &uri, vec![], None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(store.get_secret(&id, "PANEL_TOKEN").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_install_removes_its_secrets() {
+        let (mut st, _d) = state(None);
+        with_key(&mut st, KEY_A);
+        let store = st.store.clone();
+        let app = router(st);
+        let id = installed(&app).await;
+        let uri = format!("/plugins/{id}/secrets/PANEL_TOKEN");
+        let (status, _) = call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(&app, "DELETE", &format!("/plugins/{id}"), vec![], None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(store.get_secret(&id, "PANEL_TOKEN").unwrap().is_none());
+        assert!(store.all_secrets().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_never_reaches_the_database_files() {
+        use base64::Engine;
+        let (mut st, dir) = state(None);
+        with_key(&mut st, KEY_A);
+        let app = router(st);
+        let id = installed(&app).await;
+        let (status, _) = call(
+            &app,
+            "PUT",
+            &format!("/plugins/{id}/secrets/PANEL_TOKEN"),
+            put(SENTINEL),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SENTINEL);
+        let mut files = 0;
+        for entry in walk(dir.path()) {
+            let bytes = std::fs::read(&entry).unwrap_or_default();
+            files += 1;
+            for needle in [SENTINEL.as_bytes(), b64.as_bytes()] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle),
+                    "plaintext found in {}",
+                    entry.display()
+                );
+            }
+        }
+        assert!(files > 0);
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_key_missing_here_shows_as_held_in_the_listing() {
+        let (mut st, _d) = state(None);
+        with_key(&mut st, KEY_A);
+        let keyring = st.keyring.clone();
+        let app = router(st.clone());
+        let id = installed(&app).await;
+        let (status, _) = call(
+            &app,
+            "PUT",
+            &format!("/plugins/{id}/secrets/PANEL_TOKEN"),
+            put(SENTINEL),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        drop(keyring);
+        // A node whose keyring lacks the key the secret was sealed under.
+        let mut other = st.clone();
+        with_key(&mut other, "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+        let app2 = router(other);
+        let (_, v) = call(
+            &app2,
+            "GET",
+            &format!("/plugins/{id}/secrets"),
+            vec![],
+            None,
+        )
+        .await;
+        let status = v["secrets"][0]["status"].as_str().unwrap();
+        assert!(status.starts_with("held: key "), "{status}");
+        // And one with no key at all.
+        let mut bare = st;
+        bare.keyring = KeyringHandle::default();
+        let (_, v) = call(
+            &router(bare),
+            "GET",
+            &format!("/plugins/{id}/secrets"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(v["secrets"][0]["status"], "held: no secret key");
+    }
+    #[tokio::test]
+    async fn rotation_rewraps_under_the_new_key_and_retiring_early_holds() {
+        let (mut st, _d) = state(None);
+        with_key(&mut st, KEY_A);
+        let app = router(st.clone());
+        let id = installed(&app).await;
+        let uri = format!("/plugins/{id}/secrets/PANEL_TOKEN");
+        call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        let (_, v) = call(&app, "GET", &format!("/plugins/{id}/secrets"), vec![], None).await;
+        let old_id = v["secrets"][0]["key_id"].as_str().unwrap().to_string();
+        // Step 1: add the new key at the end (it becomes active), keep the old.
+        let key_b = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        with_key(&mut st, &format!("{KEY_A}\n{key_b}"));
+        let app = router(st.clone());
+        // Step 2: rewrap.
+        let (status, r) = call(&app, "POST", "/admin/plugins/secrets/rewrap", vec![], None).await;
+        assert_eq!(status, StatusCode::OK, "{r}");
+        assert_eq!(r["rewrapped"], 1);
+        let (_, v) = call(&app, "GET", &format!("/plugins/{id}/secrets"), vec![], None).await;
+        let new_id = v["secrets"][0]["key_id"].as_str().unwrap().to_string();
+        assert_ne!(old_id, new_id);
+        assert_eq!(v["secrets"][0]["status"], "ok");
+        // Rewrapping again is a no-op.
+        let (_, r) = call(&app, "POST", "/admin/plugins/secrets/rewrap", vec![], None).await;
+        assert_eq!(r["rewrapped"], 0);
+        // Step 3 done too early on a node that never rewrapped: only the old key left.
+        let mut early = st.clone();
+        with_key(&mut early, KEY_A);
+        let (_, v) = call(
+            &router(early),
+            "GET",
+            &format!("/plugins/{id}/secrets"),
+            vec![],
+            None,
+        )
+        .await;
+        assert_eq!(
+            v["secrets"][0]["status"],
+            format!("held: key {new_id} missing")
+        );
+        // The key listing shows ids only.
+        let (_, k) = call(&app, "GET", "/admin/plugins/secrets/keys", vec![], None).await;
+        assert!(!k.to_string().contains(key_b));
+    }
+
+    #[tokio::test]
+    async fn under_ha_a_secret_is_replicated_as_ciphertext_only() {
+        use base64::Engine;
+        let (mut st, dir) = ha_state().await;
+        with_key(&mut st, KEY_A);
+        let app = router(st.clone());
+        let id = installed(&app).await;
+        let uri = format!("/plugins/{id}/secrets/PANEL_TOKEN");
+        let (status, v) = call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let stored = st.store.get_secret(&id, "PANEL_TOKEN").unwrap().unwrap();
+        assert!(!stored.sealed.ciphertext.contains(SENTINEL));
+        // A snapshot built from the state machine holds ciphertext only.
+        let snap = serde_json::to_string(&st.store.snapshot().unwrap()).unwrap();
+        assert!(!snap.contains(SENTINEL));
+        // Neither the sled files nor the Raft log hold the value or its base64.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SENTINEL);
+        for file in walk(dir.path()) {
+            let bytes = std::fs::read(&file).unwrap_or_default();
+            for needle in [SENTINEL.as_bytes(), b64.as_bytes()] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle),
+                    "plaintext found in {}",
+                    file.display()
+                );
+            }
+        }
+        // Delete goes through the log too.
+        let (status, _) = call(&app, "DELETE", &uri, vec![], None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(st.store.get_secret(&id, "PANEL_TOKEN").unwrap().is_none());
+    }
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn trace_level_logs_never_carry_the_secret_but_audit_the_change() {
+        let cap = Capture::default();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(cap.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        let (mut st, _d) = state(None);
+        with_key(&mut st, KEY_A);
+        let app = router(st);
+        let id = installed(&app).await;
+        let uri = format!("/plugins/{id}/secrets/PANEL_TOKEN");
+        call(&app, "PUT", &uri, put(SENTINEL), None).await;
+        call(
+            &app,
+            "PUT",
+            &uri,
+            format!(r#"{{"value":"{SENTINEL}","bad":1}}"#).into_bytes(),
+            None,
+        )
+        .await;
+        call(&app, "DELETE", &uri, vec![], None).await;
+        let logs = String::from_utf8(cap.0.lock().unwrap().clone()).unwrap();
+        assert!(!logs.contains(SENTINEL), "{logs}");
+        assert!(logs.contains("plugin secret changed"), "{logs}");
     }
 }
