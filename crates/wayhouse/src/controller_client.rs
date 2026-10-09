@@ -247,23 +247,25 @@ pub async fn watch_admin_reloads(
         let _ = tokio::time::timeout(Duration::ZERO, admin.notified()).await;
 
         match fetch_current(&base_url, token.as_deref()).await {
-            Ok((_revision, text)) => match wayhouse_config::parse_str(&text) {
-                Ok(cfg) => {
-                    crate::reload::apply_config(
-                        cfg,
-                        &handle,
-                        &resolvers,
-                        sniffer_loader.as_deref(),
-                        &sniffers,
-                        "admin-triggered overlay change",
-                    )
-                    .await;
+            Ok((_revision, text)) => {
+                match wayhouse_config::parse_str(&crate::plugin_overlay::merge(&text)) {
+                    Ok(cfg) => {
+                        crate::reload::apply_config(
+                            cfg,
+                            &handle,
+                            &resolvers,
+                            sniffer_loader.as_deref(),
+                            &sniffers,
+                            "admin-triggered overlay change",
+                        )
+                        .await;
+                    }
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "re-fetched controller config failed to parse after an admin-triggered reload"
+                    ),
                 }
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "re-fetched controller config failed to parse after an admin-triggered reload"
-                ),
-            },
+            }
             Err(e) => tracing::warn!(
                 error = %e, controller = %base_url,
                 "could not re-fetch controller config after an admin-triggered reload"
@@ -281,7 +283,7 @@ async fn apply_sse_event(
 ) -> Option<u64> {
     let SseRevision { revision, config } = parse_sse_event(event)?;
 
-    match wayhouse_config::parse_str(&config) {
+    match wayhouse_config::parse_str(&crate::plugin_overlay::merge(&config)) {
         Ok(cfg) => {
             crate::reload::apply_config(
                 cfg,

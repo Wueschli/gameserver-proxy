@@ -45,7 +45,7 @@ its row. Use `unreleased` for the product column until the release is tagged.
 
 | Release    | Protocol | Config schema | Store format | Sniffer ABI |
 | ---------- | -------- | ------------- | ------------ | ----------- |
-| unreleased | 1.1      | 1             | 1            | 0.1         |
+| unreleased | 1.1      | 2             | 1            | 0.1         |
 | 0.1.0      | 1.0      | 1             | 1            | 0.1         |
 
 ## Order of operations

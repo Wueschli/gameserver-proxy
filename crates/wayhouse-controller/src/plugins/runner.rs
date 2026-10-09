@@ -374,12 +374,22 @@ impl Runner {
         fx: &Effects,
         term: Option<u64>,
     ) -> Result<(), String> {
-        if fx.state_puts.is_empty() {
+        // A route set equal to the stored one is not worth a log entry.
+        let routes = match &fx.routes {
+            Some(set) if self.store.routes(id).map_err(|e| e.to_string())? != *set => {
+                Some(set.clone())
+            }
+            _ => None,
+        };
+        if fx.state_puts.is_empty() && routes.is_none() {
             return Ok(());
         }
         let stale = || "the state changed during the call; its writes were dropped".to_string();
         let (Some(ha), Some(term)) = (&self.ha, term) else {
-            return match self.store.commit_state(id, rev, &fx.state_puts) {
+            return match self
+                .store
+                .commit_state_routes(id, rev, &fx.state_puts, routes.as_deref())
+            {
                 Ok(_) => Ok(()),
                 Err(CommitError::Stale) => Err(stale()),
                 Err(e) => Err(e.to_string()),
@@ -391,6 +401,7 @@ impl Runner {
             expected_rev: rev,
             term,
             puts: fx.state_puts.clone(),
+            routes,
         };
         match ha.raft.client_write(entry).await {
             Ok(done) => match done.data {
@@ -504,6 +515,7 @@ mod tests {
   (import "wayhouse" "log" (func $log (param i32 i32 i32)))
   (import "wayhouse" "state_get" (func $get (param i32 i32 i32 i32) (result i32)))
   (import "wayhouse" "state_put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (import "wayhouse" "routes_set" (func $rs (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "hello")
   (data (i32.const 16) "n")
@@ -923,5 +935,35 @@ mod tests {
             why.starts_with("held: key ") && why.ends_with(" missing"),
             "{why}"
         );
+    }
+    const ROUTE_TIMER: &str = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"log":true,"routes":{"hosts":["*.mc.example.com"],"backends":["10.0.0.0/16"],"max_entries":4}}"#;
+
+    #[tokio::test]
+    async fn a_plugin_that_declares_routes_has_them_committed_once() {
+        let (r, store, _d) = fixture(1, 4);
+        // Declares one route on every tick.
+        let doc = r#"[{"host":"a.mc.example.com","backend":"10.0.1.2:25565"}]"#;
+        let escaped = doc.replace('"', "\\\"");
+        let m = guest(
+            ROUTE_TIMER,
+            &format!(
+                r#"(data (i32.const 300) "{escaped}")
+                   (func (export "init") (param i32 i32))
+                   (func (export "on_timer")
+                     (drop (call $rs (i32.const 300) (i32.const {}))))"#,
+                doc.len()
+            ),
+        );
+        install(&store, "a", &m);
+        let t0 = Instant::now();
+        r.run_due(t0).await;
+        r.run_due(secs(t0, 30)).await;
+        let routes = store.routes("a").unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].host, "a.mc.example.com");
+        assert_eq!(store.overlay().unwrap().routes.len(), 1);
+        // Disabling the install withdraws its routes from the overlay.
+        store.set_enabled("a", false).unwrap();
+        assert!(store.overlay().unwrap().routes.is_empty());
     }
 }

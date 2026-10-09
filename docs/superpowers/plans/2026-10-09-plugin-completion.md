@@ -32,3 +32,12 @@ Built as in the [secret storage design](../specs/2026-10-08-plugin-secret-storag
 - **Network split in two.** `HttpEngine` (policy, expansion, scrubbing, budgets) is pure and tested with a fake transport; `ReqwestTransport` adds the connect-time address check through a custom resolver, no proxy, no redirects, https only.
 - **Protocol minor not bumped.** The new Raft entries ride the unreleased 1.1; the support gate for secrets is the key-id report in `/raft/whoami`.
 - **Deferred.** Secret slot management in the web UI; a members view of key ids beyond `/admin/plugins/secrets/keys`.
+
+## Part 3a: routes (#236)
+
+Decisions made while building (the spec left the entry shape and the merge open):
+
+- **Entry shape stays `{host, backend}`.** Which listener and how the hostname is read is the *operator's* choice, not the plugin's: a TCP listener opts in with `plugin_routes: {type: sni}` (or `{type: sniffer, sniffer: <name>}`), config schema 2. The plugin ABI does not depend on the core route model.
+- **Overlay, not a rewritten config.** The controller publishes the enabled installs' routes (`/plugin-routes`, SSE `/plugin-routes/subscribe`); a proxy merges them into the YAML before parsing (`wayhouse-config::plugin_routes::merge_text`), after the listener's own routes. History, diff and rollback of operator config are untouched.
+- **Validated three times**: in the host at `routes_set`, before proposing, and on apply on every replica against the install's approved `routes`.
+- **Deferred.** Keep-last-good with expiry and alert when a plugin disables or keeps failing (disable and delete withdraw at once); marking plugin routes in the web UI; UDP listeners.

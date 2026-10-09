@@ -198,6 +198,9 @@ pub enum WriteRequest {
         term: u64,
         #[serde(with = "crate::plugins::b64_entries")]
         puts: std::collections::BTreeMap<String, Vec<u8>>,
+        /// The plugin's whole route set when the call declared one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routes: Option<Vec<wayhouse_plugin_host::RouteEntry>>,
     },
     /// Stores or replaces one plugin secret. The value is already encrypted by the node
     /// that received the API call: plaintext never reaches the log or the peer link.

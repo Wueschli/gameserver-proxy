@@ -18,12 +18,12 @@ use serde_norway::Value;
 use crate::ConfigError;
 
 /// The newest config schema this build understands.
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
 
 /// `(dotted path, schema version that introduced it)`. Paths walk mappings by key
 /// and pass through sequences transparently (`listeners.foo` matches `foo` in
-/// every listener). Empty while the schema is still version 1.
-pub const FIELD_SINCE: &[(&str, u32)] = &[];
+/// every listener).
+pub const FIELD_SINCE: &[(&str, u32)] = &[("listeners.plugin_routes", 2)];
 
 /// The effective declared version of a document: `raw` is its `schema_version`
 /// value, if any. Refuses non-integers, `0`, and anything above
@@ -114,20 +114,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_2_is_rejected_with_message() {
-        let e = parse_str(&doc("schema_version: 2\n")).unwrap_err();
-        assert!(matches!(e, ConfigError::SchemaTooNew { found: 2, max: 1 }));
+    fn schema_version_3_is_rejected_with_message() {
+        let e = parse_str(&doc("schema_version: 3\n")).unwrap_err();
+        assert!(matches!(e, ConfigError::SchemaTooNew { found: 3, max: 2 }));
         assert_eq!(
             e.to_string(),
-            "config schema_version 2 is newer than this build supports (max 1)"
+            "config schema_version 3 is newer than this build supports (max 2)"
         );
     }
 
     #[test]
     fn a_newer_document_with_a_field_this_build_lacks_reports_the_version() {
-        let e = parse_str(&doc("schema_version: 2\nbrand_new_setting: true\n")).unwrap_err();
+        let e = parse_str(&doc("schema_version: 3\nbrand_new_setting: true\n")).unwrap_err();
         assert!(
-            matches!(e, ConfigError::SchemaTooNew { found: 2, max: 1 }),
+            matches!(e, ConfigError::SchemaTooNew { found: 3, max: 2 }),
             "{e}"
         );
     }
@@ -213,7 +213,7 @@ mod tests {
     fn field_since_table_covers_every_raw_field_added_after_v1() {
         // Every path must name a real field, so the table cannot rot: put the
         // path into a document and require that the schema does not call it
-        // unknown. (Empty while the schema is at version 1.)
+        // unknown.
         for (path, since) in FIELD_SINCE {
             assert!(*since >= 2, "{path}: version 1 needs no entry");
             assert!(

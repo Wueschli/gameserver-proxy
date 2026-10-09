@@ -202,6 +202,14 @@
 > `wayhouse_filter_blocked_total{filter="max_conn"|"max_udp"|"max_new_rate"}`.
 > Startup-only, like `settings.workers`.
 >
+> **Plugin routes (schema 2):** `plugin_routes: { type: sni }` (or `{ type: sniffer,
+> sniffer: <name> }`) on a TCP listener lets enabled controller plugins add routes to it
+> (`docs/plugins.md` "Routes"). They are matched by the hostname the connection
+> announces, appended after the listener's own routes (so any operator route, including
+> an `always` fallback, wins), and each backend gets a one-target pool named
+> `plugin-<hash of the address>`. Only meaningful with `--controller`; the field needs
+> `schema_version: 2`.
+>
 > **UDP first-packet gate:** `first_packet_gate: true` on a UDP listener makes it
 > create a session only when the first datagram is positively recognised — a
 > `sniffer` hint that is not `reject`, or a `first_bytes` route on the listener
@@ -550,7 +558,7 @@ rolling update of many pods costs one fetch, not one per event.
 
 `schema_version` (top level, optional) is the **minimum config schema the document
 needs**; absent means `1`. A build supports up to the schema in
-`wayhouse_config::version::CONFIG_SCHEMA_VERSION` (currently `1`). A document that
+`wayhouse_config::version::CONFIG_SCHEMA_VERSION` (currently `2`). A document that
 asks for more is refused with `config schema_version N is newer than this build
 supports (max M)`, on startup, on a file reload (the running config stays active)
 and on a controller-delivered revision. A string, `0` or a fractional value is

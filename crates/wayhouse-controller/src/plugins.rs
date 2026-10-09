@@ -12,6 +12,7 @@
 pub mod api;
 pub mod net;
 pub mod peer;
+pub mod routes;
 pub mod runner;
 pub mod secrets;
 
@@ -22,7 +23,7 @@ use std::collections::BTreeMap;
 
 use secrets::Sealed;
 use wayhouse_plugin_host::{
-    Capabilities, StateSnapshot, MAX_KEY_BYTES, MAX_MODULE_BYTES, MAX_STATE_BYTES,
+    Capabilities, RouteEntry, StateSnapshot, MAX_KEY_BYTES, MAX_MODULE_BYTES, MAX_STATE_BYTES,
 };
 
 /// Largest `config` an install may carry, serialized.
@@ -182,6 +183,9 @@ pub struct StateSnap {
     pub rev: u64,
     #[serde(with = "b64_entries")]
     pub entries: BTreeMap<String, Vec<u8>>,
+    /// The route set the plugin last committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteEntry>,
 }
 
 /// A stored secret: ciphertext only.
@@ -267,6 +271,8 @@ pub enum PluginOp<'a> {
         /// The term the entry was appended in.
         entry_term: u64,
         puts: &'a BTreeMap<String, Vec<u8>>,
+        /// The plugin's whole route set, when the call declared one.
+        routes: Option<&'a [RouteEntry]>,
     },
     SecretSet {
         id: &'a str,
@@ -312,8 +318,20 @@ pub enum CommitError {
     Stale,
     #[error("no such install")]
     NoSuchInstall,
+    /// The commit breaks a bound the operator approved (for instance a route outside
+    /// the approved hostnames).
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Store(#[from] PluginStoreError),
+}
+
+/// Checks a route set against the capability an install was approved for.
+fn check_routes(record: &InstallRecord, set: &[RouteEntry]) -> Result<(), String> {
+    match &record.approved.routes {
+        Some(cap) => cap.check_set(set),
+        None => Err("the install was not approved for routes".into()),
+    }
 }
 
 impl From<sled::Error> for CommitError {
@@ -333,6 +351,12 @@ fn state_key(id: &str, key: &str) -> Vec<u8> {
     let mut k = state_prefix(id);
     k.extend_from_slice(b"k:");
     k.extend_from_slice(key.as_bytes());
+    k
+}
+
+fn routes_key(id: &str) -> Vec<u8> {
+    let mut k = state_prefix(id);
+    k.extend_from_slice(b"routes");
     k
 }
 
@@ -359,6 +383,8 @@ pub struct PluginStore {
     /// Serialises create, set_enabled and delete, so a blob cannot be
     /// garbage-collected between an install's blob check and its write.
     write: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Bumped by every write, so a watcher (the route overlay) recomputes.
+    changed: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl PluginStore {
@@ -371,7 +397,25 @@ impl PluginStore {
             meta: db.open_tree("plugin_meta")?,
             secrets: db.open_tree("plugin_secrets")?,
             write: std::sync::Arc::default(),
+            changed: std::sync::Arc::new(tokio::sync::watch::channel(0).0),
         })
+    }
+
+    /// A receiver that wakes after every write to the plugin trees.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    fn bump(&self) {
+        self.changed.send_modify(|n| *n += 1);
+    }
+
+    /// The route set an install last committed (empty when none).
+    pub fn routes(&self, id: &str) -> Result<Vec<RouteEntry>, PluginStoreError> {
+        match self.state.get(routes_key(id))? {
+            Some(v) => Ok(serde_json::from_slice(&v)?),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Keep `bytes` under its `sha256` (idempotent).
@@ -395,6 +439,7 @@ impl PluginStore {
         self.installs
             .insert(record.id.as_bytes(), serde_json::to_vec(record)?)?;
         self.installs.flush()?;
+        self.bump();
         Ok(())
     }
 
@@ -471,9 +516,24 @@ impl PluginStore {
         expected_rev: u64,
         puts: &BTreeMap<String, Vec<u8>>,
     ) -> Result<u64, CommitError> {
+        self.commit_state_routes(id, expected_rev, puts, None)
+    }
+
+    /// [`Self::commit_state`] with the plugin's route set, replaced as a whole in the same
+    /// batch. A set outside the install's approved `routes` is refused.
+    pub fn commit_state_routes(
+        &self,
+        id: &str,
+        expected_rev: u64,
+        puts: &BTreeMap<String, Vec<u8>>,
+        routes: Option<&[RouteEntry]>,
+    ) -> Result<u64, CommitError> {
         let _guard = self.lock();
-        if self.get(id)?.is_none() {
+        let Some(record) = self.get(id)? else {
             return Err(CommitError::NoSuchInstall);
+        };
+        if let Some(set) = routes {
+            check_routes(&record, set).map_err(CommitError::Invalid)?;
         }
         if self.read_rev(id)? != expected_rev {
             return Err(CommitError::Stale);
@@ -483,9 +543,16 @@ impl PluginStore {
         for (k, v) in puts {
             batch.insert(state_key(id, k), v.as_slice());
         }
+        if let Some(set) = routes {
+            batch.insert(
+                routes_key(id),
+                serde_json::to_vec(set).map_err(PluginStoreError::from)?,
+            );
+        }
         batch.insert(rev_key(id), &next.to_le_bytes());
         self.state.apply_batch(batch)?;
         self.state.flush()?;
+        self.bump();
         Ok(next)
     }
 
@@ -584,6 +651,7 @@ impl PluginStore {
                         tagged_term,
                         entry_term,
                         puts,
+                        routes,
                     } => {
                         if tagged_term != entry_term {
                             return done(Applied::WrongTerm);
@@ -591,8 +659,13 @@ impl PluginStore {
                         if let Err(why) = validate_puts(puts) {
                             return done(Applied::Invalid(why));
                         }
-                        if read(id)?.is_none() {
+                        let Some(record) = read(id)? else {
                             return done(Applied::NoSuchInstall);
+                        };
+                        if let Some(set) = routes {
+                            if let Err(why) = check_routes(&record, set) {
+                                return done(Applied::Invalid(why));
+                            }
                         }
                         let current = st
                             .get(rev_key(id))?
@@ -604,6 +677,10 @@ impl PluginStore {
                         let next = current + 1;
                         for (k, v) in puts {
                             st.insert(state_key(id, k), v.as_slice())?;
+                        }
+                        if let Some(set) = routes {
+                            let bytes = serde_json::to_vec(set).map_err(|e| abort(e.into()))?;
+                            st.insert(routes_key(id), bytes)?;
                         }
                         st.insert(rev_key(id), &next.to_le_bytes())?;
                         done(Applied::Done(Some(next)))
@@ -675,6 +752,7 @@ impl PluginStore {
         self.state.flush()?;
         self.meta.flush()?;
         self.secrets.flush()?;
+        self.bump();
         if let Some(sha) = freed {
             if !self.list()?.iter().any(|r| r.sha256 == sha) {
                 self.blobs.remove(sha.as_bytes())?;
@@ -693,11 +771,13 @@ impl PluginStore {
         let mut state = Vec::new();
         for r in &installs {
             let (rev, entries) = self.state(&r.id)?;
-            if rev > 0 || !entries.is_empty() {
+            let routes = self.routes(&r.id)?;
+            if rev > 0 || !entries.is_empty() || !routes.is_empty() {
                 state.push(StateSnap {
                     id: r.id.clone(),
                     rev,
                     entries,
+                    routes,
                 });
             }
         }
@@ -734,6 +814,9 @@ impl PluginStore {
                 new_state.push((state_key(&st.id, k), v.clone()));
             }
             new_state.push((rev_key(&st.id), st.rev.to_le_bytes().to_vec()));
+            if !st.routes.is_empty() {
+                new_state.push((routes_key(&st.id), serde_json::to_vec(&st.routes)?));
+            }
         }
         (&self.installs, &self.state, &self.meta, &self.secrets)
             .transaction(|(inst, st, meta, sec)| {
@@ -769,6 +852,7 @@ impl PluginStore {
         self.state.flush()?;
         self.meta.flush()?;
         self.secrets.flush()?;
+        self.bump();
         Ok(())
     }
 
@@ -929,6 +1013,7 @@ impl PluginStore {
         }
         self.installs.flush()?;
         self.blobs.flush()?;
+        self.bump();
         Ok(true)
     }
 }
@@ -1128,6 +1213,7 @@ mod tests {
                 tagged_term: 3,
                 entry_term: 3,
                 puts: &puts(&[(k, v)]),
+                routes: None,
             },
         )
         .unwrap()
@@ -1195,6 +1281,7 @@ mod tests {
                     tagged_term: 2,
                     entry_term: 3,
                     puts: &puts(&[("n", b"9")]),
+                    routes: None,
                 },
             )
             .unwrap();
@@ -1337,6 +1424,7 @@ mod tests {
             state: vec![StateSnap {
                 id: ID_A.into(),
                 rev: 1,
+                routes: vec![],
                 entries: puts(&[("n", &[0, 1, 2, 255])]),
             }],
             secrets: vec![],
@@ -1446,5 +1534,107 @@ mod tests {
         s.put_secret(ID_A, "PANEL_TOKEN", &sealed(1), 1).unwrap();
         s.delete(ID_A).unwrap();
         assert!(s.all_secrets().unwrap().is_empty());
+    }
+    fn route_record(id: &str) -> InstallRecord {
+        let mut r = record(id, "sha1", 1);
+        r.approved = Capabilities::parse(
+            br#"{"log":true,"routes":{"hosts":["*.mc.example.com"],"backends":["10.0.0.0/16"],"max_entries":2}}"#,
+        )
+        .unwrap();
+        r
+    }
+
+    fn route(host: &str, backend: &str) -> RouteEntry {
+        RouteEntry {
+            host: host.into(),
+            backend: backend.into(),
+        }
+    }
+
+    #[test]
+    fn a_route_set_commits_with_the_state_and_is_checked_against_the_approval() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&route_record(ID_A)).unwrap();
+        let seen = s.watch();
+        let ok = [route("a.mc.example.com", "10.0.1.1:25565")];
+        assert_eq!(
+            s.commit_state_routes(ID_A, 0, &BTreeMap::new(), Some(&ok))
+                .unwrap(),
+            1
+        );
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        assert!(seen.has_changed().unwrap());
+        // Outside the approved hosts, networks or count: refused, nothing changes.
+        for bad in [
+            vec![route("a.other.com", "10.0.1.1:1")],
+            vec![route("a.mc.example.com", "192.168.0.1:1")],
+            vec![
+                route("a.mc.example.com", "10.0.0.1:1"),
+                route("b.mc.example.com", "10.0.0.1:1"),
+                route("c.mc.example.com", "10.0.0.1:1"),
+            ],
+        ] {
+            assert!(matches!(
+                s.commit_state_routes(ID_A, 1, &BTreeMap::new(), Some(&bad)),
+                Err(CommitError::Invalid(_))
+            ));
+        }
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        // None leaves the set alone; an empty set clears it.
+        s.commit_state_routes(ID_A, 1, &BTreeMap::new(), None)
+            .unwrap();
+        assert_eq!(s.routes(ID_A).unwrap(), ok);
+        s.commit_state_routes(ID_A, 2, &BTreeMap::new(), Some(&[]))
+            .unwrap();
+        assert!(s.routes(ID_A).unwrap().is_empty());
+    }
+
+    #[test]
+    fn routes_survive_a_snapshot_and_go_with_the_install() {
+        let (s, _d) = store();
+        s.put_blob("sha1", b"abc").unwrap();
+        s.create(&route_record(ID_A)).unwrap();
+        let set = [route("a.mc.example.com", "10.0.1.1:25565")];
+        s.commit_state_routes(ID_A, 0, &BTreeMap::new(), Some(&set))
+            .unwrap();
+        let snap = s.snapshot().unwrap();
+        let (t, _d2) = store();
+        t.replace(&snap).unwrap();
+        assert_eq!(t.routes(ID_A).unwrap(), set);
+        s.delete(ID_A).unwrap();
+        assert!(s.routes(ID_A).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_replicated_route_commit_is_validated_on_apply_like_any_replica_would() {
+        let (s, _d) = store();
+        let mut rec = route_record(ID_A);
+        rec.sha256 = "a".repeat(64);
+        assert_eq!(
+            s.apply_at(1, PluginOp::Install(&rec)).unwrap(),
+            Applied::Done(None)
+        );
+        let puts = BTreeMap::new();
+        let bad = [route("a.other.com", "10.0.1.1:1")];
+        let op = |routes| PluginOp::State {
+            id: ID_A,
+            expected_rev: 0,
+            tagged_term: 1,
+            entry_term: 1,
+            puts: &puts,
+            routes,
+        };
+        assert!(matches!(
+            s.apply_at(2, op(Some(&bad))).unwrap(),
+            Applied::Invalid(_)
+        ));
+        assert!(s.routes(ID_A).unwrap().is_empty());
+        let good = [route("a.mc.example.com", "10.0.1.1:1")];
+        assert_eq!(
+            s.apply_at(3, op(Some(&good))).unwrap(),
+            Applied::Done(Some(1))
+        );
+        assert_eq!(s.routes(ID_A).unwrap(), good);
     }
 }

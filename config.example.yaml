@@ -225,6 +225,10 @@ listeners:
     # anything it does not list. Blocked = silent drop + wayhouse_filter_blocked_total.
     allow: ["10.0.0.0/8", "192.168.0.0/16"]
     deny: ["10.6.6.6/32"]
+    # Let enabled controller plugins add hostname routes here (needs
+    # `schema_version: 2` and `--controller`; docs/plugins.md "Routes"). They go
+    # after this listener's own routes, so yours always win:
+    # plugin_routes: { type: sni }
     # Token-bucket rate limit on new connections / UDP sessions, keyed by source
     # IP and by /24 (v4) / /64 (v6). `rate` = permits/sec, `burst` = bucket cap
     # (defaults to `rate`). Excess is dropped silently + wayhouse_filter_blocked_total

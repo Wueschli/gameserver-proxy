@@ -61,7 +61,7 @@ fn err(status: StatusCode, msg: impl std::fmt::Display) -> Response {
 }
 
 #[allow(clippy::needless_pass_by_value)] // `map_err` callback
-fn internal(e: PluginStoreError) -> ApiError {
+pub(crate) fn internal(e: PluginStoreError) -> ApiError {
     tracing::error!(error = %e, "plugin store failure");
     err(StatusCode::INTERNAL_SERVER_ERROR, "plugin store failure")
 }
@@ -92,7 +92,13 @@ impl PluginsState {
 }
 
 pub fn router(state: PluginsState) -> Router {
+    // Component-facing: the proxies' stream of plugin routes.
+    let component = wayhouse_http::protocol::gate(
+        Router::new().route("/plugin-routes/subscribe", get(super::routes::subscribe)),
+        "controller",
+    );
     Router::new()
+        .merge(component)
         .route(
             "/plugins/modules",
             post(upload_module).layer(DefaultBodyLimit::max(MAX_MODULE_BYTES)),
@@ -109,6 +115,7 @@ pub fn router(state: PluginsState) -> Router {
                 .delete(delete_secret)
                 .layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route("/plugin-routes", get(super::routes::show))
         .route("/admin/plugins/secrets/rewrap", post(rewrap_secrets))
         .route("/admin/plugins/secrets/keys", get(secret_keys))
         .route_layer(middleware::from_fn_with_state(
@@ -122,6 +129,8 @@ pub fn router(state: PluginsState) -> Router {
 pub fn disabled_router(reason: &'static str) -> Router {
     let refuse = move || async move { err(StatusCode::NOT_IMPLEMENTED, reason) };
     Router::new()
+        .route("/plugin-routes", axum::routing::any(refuse))
+        .route("/plugin-routes/subscribe", axum::routing::any(refuse))
         .route("/plugins", axum::routing::any(refuse))
         .route("/plugins/{*rest}", axum::routing::any(refuse))
 }
@@ -1483,5 +1492,38 @@ mod tests {
         let logs = String::from_utf8(cap.0.lock().unwrap().clone()).unwrap();
         assert!(!logs.contains(SENTINEL), "{logs}");
         assert!(logs.contains("plugin secret changed"), "{logs}");
+    }
+    #[tokio::test]
+    async fn the_route_overlay_lists_enabled_installs_routes_with_their_owner() {
+        let caps = r#"{"triggers":{"on_timer":true},"tick_interval_secs":30,"log":true,"routes":{"hosts":["*.mc.example.com"],"backends":["10.0.0.0/16"],"max_entries":4}}"#;
+        let (st, _d) = state(None);
+        let store = st.store.clone();
+        let app = router(st);
+        let sha = upload(&app, &module(caps)).await;
+        let (status, rec) = call(&app, "POST", "/plugins", install_body(&sha, caps), None).await;
+        assert_eq!(status, StatusCode::CREATED, "{rec}");
+        let id = rec["id"].as_str().unwrap().to_string();
+        let set = [wayhouse_plugin_host::RouteEntry {
+            host: "a.mc.example.com".into(),
+            backend: "10.0.1.1:25565".into(),
+        }];
+        store
+            .commit_state_routes(&id, 0, &std::collections::BTreeMap::new(), Some(&set))
+            .unwrap();
+        let (status, v) = call(&app, "GET", "/plugin-routes", vec![], None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["routes"][0]["host"], "a.mc.example.com");
+        assert_eq!(v["routes"][0]["owner"], format!("plugin:{id}"));
+        assert_eq!(v["routes"][0]["plugin"], "demo");
+        call(
+            &app,
+            "POST",
+            &format!("/plugins/{id}/disable"),
+            vec![],
+            None,
+        )
+        .await;
+        let (_, v) = call(&app, "GET", "/plugin-routes", vec![], None).await;
+        assert!(v["routes"].as_array().unwrap().is_empty());
     }
 }

@@ -25,6 +25,9 @@ use crate::module::{inspect, ModuleError, ModuleInfo};
 const EPOCH_DEADLINE_TICKS: u64 = 2;
 /// Longest state key the host accepts.
 pub const MAX_KEY_BYTES: usize = 256;
+/// Largest `routes_set` document accepted (the entry cap bounds it further).
+const MAX_ROUTES_DOC: usize = 64 * 1024;
+
 /// Longest log line kept; longer ones are truncated.
 pub const MAX_LOG_LINE_BYTES: usize = 1024;
 
@@ -85,6 +88,9 @@ pub struct Effects {
     pub used_state: bool,
     /// The call used `http_request`.
     pub used_http: bool,
+    /// The route set the call declared with `routes_set` (the last call wins), or `None`
+    /// when it did not declare one. `Some(vec![])` means "no routes".
+    pub routes: Option<Vec<crate::routes::RouteEntry>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +117,7 @@ struct CallState {
     used_log: bool,
     used_state: bool,
     used_http: bool,
+    routes: Option<Vec<crate::routes::RouteEntry>>,
     denied: Option<&'static str>,
     http: Option<Arc<HttpEngine>>,
     http_call: HttpCall,
@@ -180,7 +187,7 @@ impl PluginHost {
             let known = i.module() == "wayhouse"
                 && matches!(
                     i.name(),
-                    "log" | "state_get" | "state_put" | "http_request" | "http_read"
+                    "log" | "state_get" | "state_put" | "http_request" | "http_read" | "routes_set"
                 );
             if !known {
                 return Err(ModuleError::UnexpectedImport(format!(
@@ -314,6 +321,7 @@ impl Plugin {
             used_log: false,
             used_state: false,
             used_http: false,
+            routes: None,
             denied: None,
             http: self.http.clone(),
             http_call: HttpCall::default(),
@@ -359,6 +367,7 @@ impl Plugin {
             used_log: st.used_log,
             used_state: st.used_state,
             used_http: st.used_http,
+            routes: st.routes,
         })
     }
 }
@@ -499,6 +508,41 @@ fn linker(engine: &Engine) -> Linker<CallState> {
             },
         )
         .expect("defining wayhouse.state_put");
+    linker
+        .func_wrap(
+            "wayhouse",
+            "routes_set",
+            |mut caller: Caller<'_, CallState>, ptr: i32, len: i32| -> wasmtime::Result<i32> {
+                if caller.data().caps.routes.is_none() {
+                    return Err(deny(&mut caller, "routes"));
+                }
+                if usize::try_from(len).map_or(true, |l| l > MAX_ROUTES_DOC) {
+                    return Ok(-1);
+                }
+                let raw = read_guest(&mut caller, ptr, len)?;
+                let st = caller.data_mut();
+                let cap = st.caps.routes.clone().expect("checked above");
+                let parsed: Result<Vec<crate::routes::RouteEntry>, String> =
+                    serde_json::from_slice(&raw).map_err(|e| format!("not a route list: {e}"));
+                match parsed.and_then(|set| cap.check_set(&set).map(|()| set)) {
+                    Ok(mut set) => {
+                        set.sort();
+                        st.routes = Some(set);
+                        Ok(0)
+                    }
+                    Err(why) => {
+                        if st.logs.len() < st.run.max_log_lines {
+                            st.logs.push(LogLine {
+                                level: LogLevel::Warn,
+                                msg: format!("routes_set refused: {why}"),
+                            });
+                        }
+                        Ok(-1)
+                    }
+                }
+            },
+        )
+        .expect("defining wayhouse.routes_set");
     linker
         .func_wrap(
             "wayhouse",

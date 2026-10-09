@@ -38,6 +38,9 @@ pub struct Capabilities {
     /// bound to hosts of the `http` list and approved with them.
     #[serde(default)]
     pub secrets: Vec<SecretSlot>,
+    /// May call `routes_set`: which hostnames it may claim and where they may point.
+    #[serde(default)]
+    pub routes: Option<crate::routes::RouteCap>,
 }
 
 /// Most hosts an `http` declaration may list.
@@ -162,6 +165,11 @@ impl Capabilities {
                 return over(&format!("secret slot {}", slot.name));
             }
         }
+        if let Some(want) = &self.routes {
+            if !approved.routes.as_ref().is_some_and(|a| want.within(a)) {
+                return over("routes (a hostname, network or count beyond the approval)");
+            }
+        }
         match (self.state, approved.state) {
             (None, _) => {}
             (Some(_), None) => return over("state"),
@@ -194,6 +202,9 @@ impl Capabilities {
             }
         }
         caps.validate_network()?;
+        if let Some(routes) = &caps.routes {
+            routes.validate().map_err(ModuleError::CapsInvalid)?;
+        }
         Ok(caps)
     }
 

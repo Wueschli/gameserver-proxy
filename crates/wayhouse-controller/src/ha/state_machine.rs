@@ -703,6 +703,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                             expected_rev,
                             term,
                             puts,
+                            routes,
                         } => self.apply_plugin(
                             index,
                             PluginOp::State {
@@ -711,6 +712,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
                                 tagged_term: term,
                                 entry_term,
                                 puts: &puts,
+                                routes: routes.as_deref(),
                             },
                         )?,
                         WriteRequest::PluginSecretSet {
@@ -1970,6 +1972,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), v.to_vec()))
                 .collect(),
+            routes: None,
         }
     }
 

@@ -48,6 +48,7 @@ declared. The only imports allowed are these, in the `wayhouse` namespace:
 | `state_get(kptr, klen, out_ptr, out_cap) -> i32` | `state`    | value length, or -1 when absent; nothing is written when the value is longer than `out_cap`                                      |
 | `state_put(kptr, klen, vptr, vlen) -> i32`       | `state`    | 0, or -1 when over `state.max_bytes`, the key is over 256 bytes or not UTF-8, or the per-call write limit is hit                 |
 
+| `routes_set(ptr, len) -> i32` | `routes` | declares the plugin's whole route set as a JSON array of `{"host", "backend"}`; 0, or -1 when refused (the reason is a `warn` line in the plugin's log) |
 | `http_request(ptr, len) -> i32` | `http` | sends the JSON request at `ptr`; returns the length of the response document, or -1 when the request is over the size limit |
 | `http_read(out_ptr, out_cap) -> i32` | `http` | copies the pending response document out; -1 (and keeps it) when `out_cap` is too small |
 
@@ -104,6 +105,41 @@ active key (`GET /admin/plugins/secrets/keys` lists the key ids each holds), the
 every secret under it; a slot an operator rewrote meanwhile is skipped and reported. (3) Remove
 the old key from the file. Removing it before step 2 holds the plugins that still use it
 (`held: key <id> missing`) until it is put back.
+
+## Routes
+
+The `routes` capability lets a plugin publish hostname routes:
+
+```json
+"routes": { "hosts": ["*.mc.example.com", "play.example.com"], "backends": ["10.0.0.0/16"], "max_entries": 64 }
+```
+
+`hosts` are the names (exact or `*.suffix`) the plugin may claim, `backends` the networks its
+backend addresses must be in, `max_entries` (1 to 256) the size of one set. A module cannot ask
+for more of any of these than was approved. `routes_set` replaces the plugin's whole set; the host
+refuses a set with an entry outside the approval, a duplicate hostname or too many entries, and a
+tick that does not call it leaves the set as it was. The set is committed in the same entry as the
+tick's state writes (term and revision checked, validated again on every replica), and only when it
+changed.
+
+**Materialisation (#236).** The controller does not rewrite the operator's config. It publishes the
+routes of every _enabled_ install as an overlay (`GET /plugin-routes`, and a stream at
+`GET /plugin-routes/subscribe` that proxies follow), and a proxy started with `--controller`
+appends them to each TCP listener that opted in with `plugin_routes:` (config schema 2, see
+`docs/05-configuration.md`). The listener says how the hostname is read (`sni`, or a `sniffer`).
+Rules:
+
+- Plugin routes go **after** the listener's own routes, so operator routes always win, including an
+  `always` fallback.
+- Each distinct backend address becomes a one-target pool named `plugin-<hash>`.
+- Two installs claiming the same hostname: the earlier install wins; the later claim is not applied
+  and is listed under `conflicts` in `GET /plugin-routes`, with `owner` (`plugin:<install id>`) and
+  plugin name on every route.
+- Exact names match before `*.suffix` patterns, longer suffixes first.
+- Disabling or deleting an install withdraws its routes at once. A plugin whose ticks fail keeps its
+  last committed set. (The spec's grace period with an alert is not built; see the follow-up issue.)
+- A controller started without `--plugins` answers `501` and proxies keep their own config; a
+  proxy without `--controller` ignores the overlay.
 
 ## Approval
 
